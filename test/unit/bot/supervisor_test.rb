@@ -949,7 +949,13 @@ class HiveBotSupervisorTest < Minitest::Test
                  @dispatch_request_writer.writes[1][:argv]
   end
 
-  def test_dispatch_command_sequence_resets_alert_after_queue_writes
+  # AC-05 (PR #241 ce-code-review): the all-queue-routable path must NOT
+  # reset the alert at enqueue time. The daemon hasn't run `markers clear`
+  # yet, so removing the fingerprint here would let the next status tick
+  # re-fire the same alert (entry.nil? -> re-send in process_current).
+  # State-driven recovery removes the alert once the daemon clears the
+  # marker; leaving the fingerprint keeps the persistent dedupe intact.
+  def test_dispatch_command_sequence_does_not_reset_alert_on_queue_path
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [ [ "hive", "review", "task", "--json" ] ],
@@ -960,8 +966,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
-                 @notification_dispatcher.reset_tasks
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "queue path must not reset the alert before the daemon clears the marker (AC-05)"
     assert_equal 1, @dispatch_request_writer.writes.size
     assert_equal [ "hive", "review", "task", "--json" ],
                  @dispatch_request_writer.writes.first[:argv]
@@ -1029,7 +1035,11 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_includes @telegram.messages.last.fetch(:text), "Stopped because the previous command failed"
   end
 
-  def test_dispatch_command_sequence_resets_alert_once_for_two_command_queue_sequence
+  # AC-05: a two-command all-queue sequence (`markers clear` + retry)
+  # must not reset the alert either — same race. The fingerprint stays
+  # until the daemon actually clears the marker and a later status tick
+  # drives recovery.
+  def test_dispatch_command_sequence_does_not_reset_alert_for_two_command_queue_sequence
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [
@@ -1043,13 +1053,10 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    # The reset must fire exactly once for the whole sequence — the
-    # daemon's per-slug gate serialises execution and the bot has no
-    # PID to wait on, so the prior "reset between commands" semantics
-    # collapses into "reset after the sequence is queued".
-    assert_equal 1, @notification_dispatcher.reset_tasks.size
-    assert_equal({ project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil },
-                 @notification_dispatcher.reset_tasks.first)
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "two-command queue sequence must not reset the alert at enqueue time (AC-05)"
+    assert_equal 2, @dispatch_request_writer.writes.size,
+                 "both `markers clear` and the retry verb must still be enqueued"
   end
 
   def test_dispatch_command_sequence_skips_alert_reset_in_dry_run
@@ -1066,6 +1073,43 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_empty @notification_dispatcher.reset_tasks,
                  "dry_run must not call reset_task even when alert_reset is present"
+  end
+
+  # ── ADV-1: drain daemon failure notices to Telegram ───────────────────
+
+  def test_drain_dispatch_results_relays_failure_to_chat_and_removes
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, update_id: 7, project: "hive", slug: "stuck-task",
+        request_id: "rq000001", exit_code: 4,
+        command: "hive markers clear stuck-task", state_home: home
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_equal 1, @telegram.messages.size, "failure notice must reach the originating chat"
+      msg = @telegram.messages.first
+      assert_equal 42, msg[:chat_id]
+      assert_includes msg[:text], "stuck-task"
+      assert_includes msg[:text], "exit 4"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a relayed notice must be removed so it isn't sent twice"
+    end
+  end
+
+  def test_drain_dispatch_results_removes_malformed_notice
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      dir = Hive::Daemon::DispatchResultQueue.directory(state_home: home)
+      bad = File.join(dir, "20260528-bad.json")
+      File.write(bad, "{not json")
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages, "a malformed notice has no chat to reply to"
+      refute File.exist?(bad), "malformed notice must be removed so it can't wedge the drain"
+    end
   end
 
   def test_clear_inline_keyboard_swallows_telegram_errors
@@ -1464,6 +1508,18 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:status_loop)
 
     assert pushed, "status_loop must invoke push_update_nudge each iteration"
+  end
+
+  def test_reaper_loop_drains_dispatch_results_each_iteration
+    supervisor = @supervisor
+    @supervisor.define_singleton_method(:reap_children) { supervisor.request_shutdown! }
+    drained = false
+    @supervisor.define_singleton_method(:drain_dispatch_results) { drained = true }
+    @supervisor.define_singleton_method(:sleep) { |_seconds| }
+
+    @supervisor.send(:reaper_loop)
+
+    assert drained, "reaper_loop must drain the daemon's dispatch-result notice channel (ADV-1)"
   end
 
   def test_reaper_loop_logs_reap_failures

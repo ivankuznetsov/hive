@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-dispatch-result.v1.json",
+  "title": "hive dispatch result notice (v1)",
+  "description": "One JSON file under <state_home>/dispatch_results/, atomic-written by the daemon when a bot-originated, daemon-spawned run exits non-zero, and consumed by the Telegram bot to relay the failure back to the originating chat (ADV-1). Runs the opposite direction of hive-dispatch-request. The bot removes each notice after relaying it. Strict-version-matched — any schema_version != 1 is rejected and the file removed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "result_id",
+    "created_at",
+    "chat_id",
+    "project",
+    "slug",
+    "request_id",
+    "exit_code",
+    "command"
+  ],
+  "properties": {
+    "schema": { "const": "hive-dispatch-result" },
+    "schema_version": { "const": 1 },
+    "result_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{8,32}$",
+      "description": "Hex id of the notice. Daemon uses SecureRandom.hex(8)."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp the notice was written."
+    },
+    "chat_id": {
+      "type": "integer",
+      "description": "Telegram chat to relay the failure to — copied from the originating dispatch request. Always present (the daemon only writes a notice when it has a chat to reply to)."
+    },
+    "update_id": {
+      "type": ["integer", "null"],
+      "description": "Telegram update id of the originating action, for correlation. Optional."
+    },
+    "project": { "type": "string" },
+    "slug": { "type": "string" },
+    "request_id": {
+      "type": "string",
+      "description": "request_id of the dispatch request whose child failed."
+    },
+    "exit_code": {
+      "type": ["integer", "null"],
+      "description": "Non-zero exit status of the failed child."
+    },
+    "command": {
+      "type": "string",
+      "description": "The command string the daemon spawned (for surfacing the failing verb)."
+    }
+  }
+}

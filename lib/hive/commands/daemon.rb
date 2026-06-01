@@ -12,6 +12,7 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/logger"
+require "hive/daemon/dispatch_request_queue"
 require "hive/invoked_binary"
 require "hive/update_check/state"
 
@@ -31,7 +32,11 @@ module Hive
     class Daemon
       include Hive::Schemas::EnvelopeEmitter
 
-      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install].freeze
+      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install queue].freeze
+
+      # Actions for `hive daemon queue ACTION` (AN-1/2/3). `list` is the
+      # default when no action is given.
+      VALID_QUEUE_ACTIONS = %w[list show prune].freeze
 
       # USAGE-class error specific to enable/disable. Carries an
       # error_kind drawn from Hive::Schemas::EnrollErrorKind so the
@@ -49,6 +54,7 @@ module Hive
 
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, force: false,
+                     queue_args: [],
                      hive_home: Hive::Paths.state_home)
         @subcommand = subcommand
         @target = target
@@ -57,6 +63,7 @@ module Hive
         @all = all
         @json = json
         @force = force
+        @queue_args = Array(queue_args)
         @hive_home = hive_home
       end
 
@@ -74,6 +81,7 @@ module Hive
         when "reload"           then reload_daemon
         when "tail"             then tail_daemon
         when "install"          then install_daemon
+        when "queue"            then queue_command
         when "enable", "disable" then call_with_envelope { do_call }
         end
       end
@@ -156,7 +164,14 @@ module Hive
           # `:daemon_dispatch_baselines_*` typed events via its own logger.
           dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
         )
-        supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
+        supervisor = Hive::Daemon::ChildSupervisor.new(
+          dry_run: @dry_run,
+          default_timeout_sec: daemon_cfg.fetch("child_timeout_sec", 0),
+          verb_timeouts: daemon_cfg.fetch("child_verb_timeouts", {}),
+          kill_grace_sec: daemon_cfg.fetch(
+            "child_kill_grace_sec", Hive::Daemon::ChildSupervisor::DEFAULT_KILL_GRACE_SEC
+          )
+        )
         status_consumer = Hive::Daemon::StatusConsumer.new
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
@@ -455,6 +470,163 @@ module Hive
         end
       rescue Interrupt
         # Ctrl-C → exit cleanly
+      end
+
+      # `hive daemon queue [list|show <id>|prune]` (AN-1/2/3) — read-only
+      # operator/agent inspection of the file-backed dispatch-request
+      # queue the bot writes and the daemon consumes. Runs in the CLI
+      # process (no daemon contact); reads the same `<state_home>/
+      # dispatch_requests/` directory the daemon scans each tick.
+      #
+      #   list   default — every pending request with age, verb, and
+      #          whether it is expired / still allowlisted.
+      #   show   <id> — full payload for one request_id.
+      #   prune  remove expired + malformed request files (the daemon
+      #          does this lazily on its own tick; this lets an operator
+      #          force it without waiting).
+      def queue_command
+        action = @queue_args[0] || "list"
+        unless VALID_QUEUE_ACTIONS.include?(action)
+          raise Hive::InvalidTaskPath,
+                "hive daemon queue: unknown action #{action.inspect} " \
+                "(expected: #{VALID_QUEUE_ACTIONS.join(', ')})"
+        end
+
+        case action
+        when "list"  then queue_list
+        when "show"  then queue_show(@queue_args[1])
+        when "prune" then queue_prune
+        end
+      end
+
+      def queue_list
+        requests, malformed = load_queue_requests
+        if @json
+          puts JSON.generate(queue_envelope(
+                               action: "list",
+                               requests: requests.map { |req| queue_request_hash(req) },
+                               malformed: malformed
+                             ))
+        else
+          print_queue_list(requests, malformed)
+        end
+      end
+
+      def queue_show(request_id)
+        if request_id.to_s.empty?
+          raise Hive::InvalidTaskPath,
+                "hive daemon queue show: missing REQUEST_ID (try `hive daemon queue list` first)"
+        end
+
+        requests, = load_queue_requests
+        req = requests.find { |r| r.request_id == request_id }
+        unless req
+          if @json
+            puts JSON.generate(queue_envelope(action: "show", ok: false, request: nil,
+                                              request_id: request_id))
+          else
+            warn "hive daemon queue: no pending request with id #{request_id}"
+          end
+          raise Hive::Error, "request #{request_id} not found"
+        end
+
+        if @json
+          puts JSON.generate(queue_envelope(action: "show", request: queue_request_hash(req)))
+        else
+          print_queue_show(req)
+        end
+      end
+
+      def queue_prune
+        requests, malformed = load_queue_requests
+        expired = requests.select { |req| Hive::Daemon::DispatchRequestQueue.expired?(req) }
+        expired.each do |req|
+          Hive::Daemon::DispatchRequestQueue.remove(req.request_id, state_home: @hive_home)
+        end
+        malformed.each { |bad| FileUtils.rm_f(bad[:path]) }
+
+        pruned = expired.length + malformed.length
+        if @json
+          puts JSON.generate(queue_envelope(
+                               action: "prune",
+                               pruned_count: pruned,
+                               requests: expired.map { |req| queue_request_hash(req) },
+                               malformed: malformed
+                             ))
+        else
+          puts "hive daemon queue: pruned #{pruned} request(s) " \
+               "(#{expired.length} expired, #{malformed.length} malformed)"
+        end
+      end
+
+      # Read + parse every pending request file, collecting malformed
+      # entries separately so a single corrupt file never hides the rest.
+      def load_queue_requests
+        malformed = []
+        requests = Hive::Daemon::DispatchRequestQueue.pending(
+          state_home: @hive_home,
+          bad_handler: ->(path:, reason:) { malformed << { path: path, reason: reason } }
+        )
+        [ requests, malformed ]
+      end
+
+      def queue_request_hash(req)
+        {
+          "request_id" => req.request_id,
+          "created_at" => req.created_at.utc.iso8601,
+          "age_sec" => (Time.now - req.created_at).to_i,
+          "project" => req.project,
+          "slug" => req.slug,
+          "verb" => req.argv[1],
+          "argv" => req.argv,
+          "trigger" => req.trigger,
+          "requestor" => req.requestor,
+          "chat_id" => req.chat_id,
+          "update_id" => req.update_id,
+          "expired" => Hive::Daemon::DispatchRequestQueue.expired?(req),
+          "allowlisted" => Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
+        }
+      end
+
+      def queue_envelope(action:, ok: true, **extra)
+        {
+          "schema" => "hive-daemon-queue",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-queue"),
+          "ok" => ok,
+          "action" => action
+        }.merge(extra.transform_keys(&:to_s))
+      end
+
+      def print_queue_list(requests, malformed)
+        if requests.empty? && malformed.empty?
+          puts "hive daemon queue: empty (no pending dispatch requests)"
+          return
+        end
+
+        requests.each do |req|
+          flags = []
+          flags << "EXPIRED" if Hive::Daemon::DispatchRequestQueue.expired?(req)
+          flags << "NOT-ALLOWLISTED" unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
+          suffix = flags.empty? ? "" : " [#{flags.join(' ')}]"
+          puts "#{req.request_id}  #{(Time.now - req.created_at).to_i}s  " \
+               "#{req.project}/#{req.slug}  #{req.argv[1]}#{suffix}"
+        end
+        malformed.each { |bad| puts "(malformed) #{bad[:path]}  reason=#{bad[:reason]}" }
+        puts "#{requests.length} pending, #{malformed.length} malformed"
+      end
+
+      def print_queue_show(req)
+        puts "request_id: #{req.request_id}"
+        puts "created_at: #{req.created_at.utc.iso8601} (#{(Time.now - req.created_at).to_i}s ago)"
+        puts "project:    #{req.project}"
+        puts "slug:       #{req.slug}"
+        puts "argv:       #{req.argv.inspect}"
+        puts "trigger:    #{req.trigger}"
+        puts "requestor:  #{req.requestor}"
+        puts "chat_id:    #{req.chat_id.inspect}"
+        puts "update_id:  #{req.update_id.inspect}"
+        puts "expired:    #{Hive::Daemon::DispatchRequestQueue.expired?(req)}"
+        puts "allowlisted:#{Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)}"
       end
 
       # `hive daemon install [--force]` — (re)write the platform-native

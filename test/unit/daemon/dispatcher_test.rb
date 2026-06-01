@@ -67,6 +67,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def terminate_all(grace_sec: 600)
     end
 
+    def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+      @timeouts = { default_timeout_sec: default_timeout_sec,
+                    verb_timeouts: verb_timeouts, kill_grace_sec: kill_grace_sec }
+    end
+
     def in_flight_count
       @spawned.size
     end
@@ -1265,6 +1270,183 @@ end
     end
   end
 
+  # C3: a dispatched request is claimed (renamed to .claimed) so a second
+  # tick never re-observes or re-dispatches it (at-most-once).
+  def test_dispatch_request_claimed_after_dispatch_and_not_redispatched
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      json_path = write_request_file(state_home, slug: "s1", request_id: "R1")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+        assert_equal 1, sup.spawned.size
+        refute File.exist?(json_path), "request file must be claimed (renamed) after dispatch"
+        assert File.exist?("#{json_path}#{Q::CLAIMED_SUFFIX}"), "a .claimed file must exist"
+        assert_empty Q.pending(state_home: state_home),
+                     "claimed request must be invisible to pending"
+
+        # A second tick must NOT spawn again.
+        dispatcher.tick(now: T0 + 60)
+        assert_equal 1, sup.spawned.size, "claimed request must not be re-dispatched"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  # ADV-1: a non-zero, request-driven completion writes a failure notice
+  # carrying the originating chat_id for the bot to relay.
+  def test_reap_writes_dispatch_result_notice_on_request_failure
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "RF1")
+      exited = ChildExit.new(
+        pid: 555, exit_code: 4, project: "p1", slug: "s1", stage: nil,
+        command: "hive markers clear s1", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "RF1"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      dispatcher.send(:reap_completed, now: T0 + 1)
+
+      notices = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+      assert_equal 1, notices.size
+      assert_equal 42, notices.first.chat_id, "chat_id is recovered from the request file"
+      assert_equal 4, notices.first.exit_code
+      assert(logger.events.any? { |(n, _)| n == :dispatch_result_written })
+    end
+  end
+
+  def test_reap_writes_no_notice_on_zero_exit
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "OK1")
+      exited = ChildExit.new(
+        pid: 556, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+        command: "hive review s1", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "OK1"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      dispatcher.send(:reap_completed, now: T0 + 1)
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home),
+                   "a clean exit must not write a failure notice"
+    end
+  end
+
+  def test_process_alive_predicate_branches
+    dispatcher, = make_dispatcher
+    assert dispatcher.send(:process_alive?, Process.pid), "our own pid is alive"
+    refute dispatcher.send(:process_alive?, 2**30), "an unused pid is not alive"
+    with_replaced_singleton_method(Process, :kill, ->(_sig, _pid) { raise Errno::EPERM, "no perm" }) do
+      assert dispatcher.send(:process_alive?, 1),
+             "EPERM means the process exists but we may not signal it → alive"
+    end
+  end
+
+  def test_recover_dispatch_claims_alive_lambda_paths
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, = make_dispatcher(rows: [], dispatch_request_state_home: state_home)
+      live = Hive::Lock.process_start_time(Process.pid)
+
+      # Owner alive + start_time matches → kept.
+      write_request_file(state_home, slug: "s1", request_id: "keepme01")
+      Q.claim("keepme01", pid: Process.pid, process_start_time: live, now: T0, state_home: state_home)
+      # Owner alive + start_time recorded nil → unverifiable → kept.
+      write_request_file(state_home, slug: "s2", request_id: "nilstart")
+      Q.claim("nilstart", pid: Process.pid, process_start_time: nil, now: T0, state_home: state_home)
+      # Owner alive + start_time mismatch → PID reused → removed.
+      write_request_file(state_home, slug: "s3", request_id: "killme01")
+      Q.claim("killme01", pid: Process.pid, process_start_time: "#{live}-different",
+              now: T0, state_home: state_home)
+
+      dispatcher.send(:recover_dispatch_claims, now: T0 + 5)
+
+      remaining = Dir.glob(File.join(state_home, "dispatch_requests", "*#{Q::CLAIMED_SUFFIX}"))
+                     .map { |p| File.read(p) }.join
+      assert_includes remaining, "keepme01", "matching start_time claim is kept"
+      assert_includes remaining, "nilstart", "nil-start-time claim is kept (unverifiable)"
+      if live
+        refute_includes remaining, "killme01", "mismatched start_time (PID reused) claim is removed"
+      end
+    end
+  end
+
+  def test_recover_dispatch_claims_swallows_errors
+    dispatcher, = make_dispatcher
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :recover_claims,
+      ->(**_kw) { raise "boom" }
+    ) do
+      dispatcher.send(:recover_dispatch_claims, now: T0)
+    end
+    # Asserted by not raising; the rescue logs :fatal.
+  end
+
+  def test_claim_dispatch_request_swallows_errors
+    dispatcher, = make_dispatcher
+    req = Hive::Daemon::DispatchRequestQueue::Request.new(
+      request_id: "X", created_at: T0, project: "p1", slug: "s1",
+      argv: [ "hive", "run", "s1" ], requestor: "bot", chat_id: nil,
+      update_id: nil, trigger: "", path: nil
+    )
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :claim, ->(*_a, **_kw) { raise "boom" }
+    ) do
+      dispatcher.send(:claim_dispatch_request, req, pid: 5, now: T0)
+    end
+  end
+
+  def test_enforce_child_timeouts_swallows_errors
+    dispatcher, sup, _ctrl, logger = make_dispatcher
+    sup.define_singleton_method(:enforce_timeouts) { |now:| raise "boom" }
+    dispatcher.send(:enforce_child_timeouts, now: T0)
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("enforce_child_timeouts") })
+  end
+
+  def test_notify_dispatch_failure_swallows_write_errors
+    dispatcher, _sup, _ctrl, logger = make_dispatcher
+    entry = ChildExit.new(
+      pid: 1, exit_code: 4, project: "p1", slug: "s1", stage: nil,
+      command: "hive review s1", state_file_path: nil, started_at: T0,
+      finished_at: T0, json_envelope: nil, request_id: "R1"
+    )
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchResultQueue, :write!, ->(**_kw) { raise "disk full" }
+    ) do
+      dispatcher.send(:notify_dispatch_failure, entry, { chat_id: 42 }, now: T0)
+    end
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("notify_dispatch_failure") })
+  end
+
+  # C3: startup recovery removes a claim whose owning process is gone,
+  # without re-dispatching (logs :dispatch_request_recovered).
+  def test_recover_dispatch_claims_cleans_dead_owner_claim
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "R9")
+      # Claim with a PID that is virtually guaranteed dead.
+      Q.claim("R9", pid: 2**30, process_start_time: "123",
+              now: T0, state_home: state_home)
+
+      dispatcher.send(:recover_dispatch_claims, now: T0 + 5)
+
+      recovered = logger.events.find { |(n, _)| n == :dispatch_request_recovered }
+      refute_nil recovered, "a removed claim must log :dispatch_request_recovered"
+      assert_equal "owner_gone", recovered[1][:reason]
+      assert_empty Q.pending(state_home: state_home)
+      assert_empty Dir.glob(File.join(state_home, "dispatch_requests", "*"))
+    end
+  end
+
   def test_dispatch_request_rejected_when_argv_not_allowlisted
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
@@ -1687,6 +1869,35 @@ end
     refute dispatcher.send(:brainstorm_answers_pending?,
                            row(action: "needs_input", stage: "2-brainstorm",
                                state_file: zeroq, folder: folder))
+  end
+
+  # ── R-02: child-timeout enforcement + logging ─────────────────────────
+
+  def test_enforce_child_timeouts_logs_one_event_per_action
+    dispatcher, supervisor, _controller, logger = make_dispatcher
+    action = Hive::Daemon::ChildSupervisor::TimeoutAction.new(
+      pid: 4321, project: "p1", slug: "s1", stage: "6-review",
+      command: "hive review s1", action: :term, elapsed_sec: 7300, timeout_sec: 7200
+    )
+    supervisor.define_singleton_method(:enforce_timeouts) { |now:| [ action ] }
+
+    dispatcher.send(:enforce_child_timeouts, now: T0)
+
+    timeouts = logger.events.select { |(name, _)| name == :child_timeout }
+    assert_equal 1, timeouts.size
+    attrs = timeouts.first.last
+    assert_equal 4321, attrs[:pid]
+    assert_equal "term", attrs[:action]
+    assert_equal 7300, attrs[:elapsed_sec]
+    assert_equal 7200, attrs[:timeout_sec]
+  end
+
+  def test_enforce_child_timeouts_noop_when_supervisor_lacks_method
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    # FakeSupervisor does not define enforce_timeouts — the guard must
+    # keep this a silent no-op rather than raising.
+    dispatcher.send(:enforce_child_timeouts, now: T0)
+    refute events_include?(logger, :child_timeout)
   end
 
   private

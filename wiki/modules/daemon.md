@@ -256,6 +256,8 @@ so `reap_completed` can unlink the file and log the lifecycle:
 :dispatch_request_completed  pid=… exit_code=… elapsed_sec=…
 :dispatch_request_rejected   reason=invalid_argv|unknown_project|…
 :dispatch_request_expired    created_at=…
+:dispatch_request_recovered  reason=owner_gone|claim_expired|malformed_claim  (startup claim sweep, C3)
+:dispatch_result_written     exit_code=… chat_id=…  (non-zero exit → bot relay, ADV-1)
 ```
 
 Lifecycle gates inside `process_dispatch_requests`:
@@ -277,6 +279,63 @@ the same code that observes the mtime is the only producer of the
 spawn.
 
 See [[architecture]] §"Dispatch flow" for the cross-layer picture.
+
+### At-most-once dispatch via atomic claim (C3)
+
+A pending request file used to stay as `<id>.json` from spawn until
+reap. A daemon crash in that window re-dispatched the request on
+restart — re-running work that may already have completed. The fix
+(`DispatchRequestQueue.claim`) renames the file to
+`<id>.json.claimed` the instant the daemon spawns the child, stamping
+the child's `pid` + `process_start_time` under a `claim` key. Claimed
+files are invisible to `pending` (the glob matches `*.json`, not
+`*.json.claimed`), so a later tick never re-observes them — **each
+queued request is dispatched at most once, ever**. The claimed file is
+unlinked on reap (`remove` matches both pending and claimed files).
+
+At startup, `Dispatcher#recover_dispatch_claims` sweeps claim files
+left by a prior process via `DispatchRequestQueue.recover_claims`:
+
+- **owner still alive** (pid alive AND, when both `process_start_time`s
+  are present, they match) → the file is left alone; the daemon cannot
+  reap a process it did not spawn, so a later restart cleans it once the
+  orphan dies.
+- **owner gone / PID reused** → removed WITHOUT re-dispatch; if the run
+  died mid-flight the task's own marker drives recovery through the
+  normal status→alert path.
+- **claim aged past `EXPIRY_SEC`** → removed regardless, so a wedged
+  alive child can't pin a claim forever.
+
+Each removal logs `:dispatch_request_recovered request_id=… reason=owner_gone|claim_expired|malformed_claim`.
+
+### Per-child wall-clock timeout (R-02)
+
+`ChildSupervisor` enforces a per-child timeout so a wedged `hive run`
+can't hold a concurrency slot until daemon shutdown. The timeout is
+resolved AT SPAWN from the verb (`daemon.child_verb_timeouts[verb]`
+falling back to `daemon.child_timeout_sec`, default 7200s; `0`
+disables) and frozen on the running entry so a mid-run reload never
+retroactively kills a live child. Each tick, `Dispatcher#enforce_child_timeouts`
+calls `ChildSupervisor#enforce_timeouts`: a child past its deadline gets
+SIGTERM, then SIGKILL after `daemon.child_kill_grace_sec` (default 30s),
+each logged as `:child_timeout action=term|kill elapsed_sec=… timeout_sec=…`.
+The killed child surfaces as a normal `ChildExit` on a later reap. See
+[[config]] for the knobs.
+
+### Failure feedback to Telegram (ADV-1)
+
+Because the daemon (not the bot) now spawns request-driven children and
+has no Telegram handle, a non-zero exit of a bot-initiated run used to
+be silent for the operator who tapped the button. On a non-zero,
+request-driven completion `reap_completed` reads the request's
+`chat_id`/`update_id` (from the still-present claimed file, before
+unlink) and writes a notice via `Hive::Daemon::DispatchResultQueue`
+into `<state_home>/dispatch_results/*.json` (logged `:dispatch_result_written`).
+The bot drains that directory each `reaper_loop` iteration
+(`Supervisor#drain_dispatch_results`) and relays a `⚠️ <slug>: hive <verb>
+failed (exit N)` message to the originating chat, then unlinks the
+notice. This is the reverse-direction sibling of the dispatch-request
+queue; schema `hive-dispatch-result` v1.
 
 ## Self-reexec on source drift (ADR-031)
 

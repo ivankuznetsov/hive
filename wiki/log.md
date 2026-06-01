@@ -58,6 +58,22 @@ Surface-agnostic (Telegram-incremental or one editor save), and the published `h
 **Pages refreshed:**
 - [[commands/init]] — documents sanitized nested Codex/QMD calls in generated llm-wiki scripts.
 
+## [2026-06-01T00:00:00Z] feat — PR #241 deferred follow-ups (AC-05, R-02, AN-1/2/3, ADV-1, C3)
+
+**Action:** Implemented the six deferred follow-ups from the PR #241 ce-code-review on branch `feat/queue-dispatcher-followups`:
+
+1. **AC-05 — Queue-path alert-reset race**: `Bot::Supervisor#enqueue_command_sequence` no longer resets the alert optimistically at enqueue time. The daemon hasn't run `markers clear` yet, so removing the alert-store fingerprint let the next status tick re-fire the same alert (`process_current` sees `entry.nil?`). State-driven recovery + dedupe now remove the alert once the daemon acts.
+2. **R-02 — Per-verb child timeout**: `ChildSupervisor` resolves a per-verb wall-clock timeout at spawn (`daemon.child_verb_timeouts[verb]` → `daemon.child_timeout_sec`, default 7200, 0 disables) and `Dispatcher#enforce_child_timeouts` SIGTERMs then SIGKILLs (after `daemon.child_kill_grace_sec`, default 30) over-deadline children each tick, logging `:child_timeout`. Knobs validated in `Config`.
+3. **AN-1/2/3 — Queue inspection CLI**: `hive daemon queue [list|show <id>|prune]` (+`--json`, schema `hive-daemon-queue.v1`) wraps `DispatchRequestQueue` read primitives.
+4. **ADV-1 — Failure feedback to Telegram**: new `Hive::Daemon::DispatchResultQueue` (`<state_home>/dispatch_results/`, schema `hive-dispatch-result.v1`). The daemon writes a notice on a non-zero request-driven exit (reading `chat_id` from the claimed file before unlink); the bot drains it each `reaper_loop` and relays a `⚠️` message to the originating chat.
+5. **C3 — Atomic-claim restart recovery**: `DispatchRequestQueue.claim` renames `<id>.json` → `<id>.json.claimed` at spawn (stamping pid + process_start_time), making the request invisible to `pending` (at-most-once dispatch). `Dispatcher#recover_dispatch_claims` sweeps stale claims at startup — owner-gone/aged claims removed without re-dispatch, owner-alive left alone — logging `:dispatch_request_recovered`.
+
+New daemon events: `:child_timeout`, `:dispatch_request_recovered`, `:dispatch_result_written`. AC-02 (`:dispatch_request_written` naming) was assessed as a won't-fix nit (`via=queue` on `:dispatched_command` already disambiguates).
+
+**Tests:** full suite 4223 runs / 0 failures, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/daemon]] (claim lifecycle, timeouts, result channel + events), [[commands/daemon]] (`queue` subcommand + timeout caps).
+
 ## [2026-05-28T23:30:00Z] fix — PR #241 ce-code-review fixups: schema file, argv+slug validation, security hardening, reliability
 
 **Action:** Addressed 14 findings from `/ce-code-review` on PR #241 across 10 reviewers (correctness, testing, maintainability, project-standards, agent-native, learnings, reliability, security, adversarial, api-contract, cli-readiness):

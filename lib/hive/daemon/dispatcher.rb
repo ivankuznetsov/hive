@@ -12,7 +12,9 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
+require "hive/lock"
 require "hive/paths"
 require "hive/update_check"
 require "hive/update_check/state"
@@ -161,6 +163,14 @@ module Hive
         # 1b. Reap dry-run pseudo-children if dry-run mode
         reap_dry_run(now: now) if @dry_run
 
+        # 1c. Enforce per-child wall-clock timeouts (R-02). A wedged
+        # `hive run` would otherwise hold a concurrency slot until daemon
+        # shutdown; this SIGTERMs (then SIGKILLs after a grace) any
+        # over-deadline child and logs the action. The killed child
+        # surfaces as a normal ChildExit on a later reap, which then
+        # frees the slot via the controller.
+        enforce_child_timeouts(now: now)
+
         # 2. Fetch status
         result = @status_consumer.fetch
         unless result.ok
@@ -255,6 +265,11 @@ module Hive
         @logger.event(:dispatcher_started, version: Hive::VERSION,
                                            dry_run: @dry_run, pid: Process.pid,
                                            code_fingerprint: @code_fingerprint)
+
+        # C3: clean up dispatch-request claims left by a prior process
+        # before the first tick, so a crash-restart neither re-dispatches
+        # an already-run request nor leaks claim files for dead owners.
+        recover_dispatch_claims(now: Time.now)
 
         until @shutdown
           if version_drift_detected?
@@ -374,6 +389,29 @@ module Hive
         current != @code_fingerprint
       end
 
+      # R-02: drive the supervisor's per-child timeout enforcement and
+      # log one `:child_timeout` event per signal sent. Guarded by
+      # `respond_to?` so older/test supervisor doubles that predate
+      # `enforce_timeouts` stay compatible (no-op). Wrapped so a kill
+      # error never crashes a tick.
+      def enforce_child_timeouts(now:)
+        return unless @supervisor.respond_to?(:enforce_timeouts)
+
+        @supervisor.enforce_timeouts(now: now).each do |action|
+          @logger.event(:child_timeout,
+                        pid: action.pid, project: action.project,
+                        slug: action.slug, stage: action.stage,
+                        action: action.action.to_s,
+                        elapsed_sec: action.elapsed_sec,
+                        timeout_sec: action.timeout_sec,
+                        command: action.command)
+        end
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "enforce_child_timeouts raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+      end
+
       def reap_completed(now:)
         @supervisor.reap_all(now: now).each do |entry|
           @controller.record_completion(
@@ -401,6 +439,12 @@ module Hive
           # Struct), so `respond_to?` is dead code per M-02 from
           # PR #241 ce-code-review. Just check the value.
           if entry.request_id
+            # ADV-1: read the request's Telegram routing metadata BEFORE
+            # remove() unlinks the file, so a non-zero exit can be surfaced
+            # back to the originating chat.
+            meta = Hive::Daemon::DispatchRequestQueue.metadata(
+              entry.request_id, state_home: dispatch_request_state_home
+            )
             Hive::Daemon::DispatchRequestQueue.remove(
               entry.request_id, state_home: dispatch_request_state_home
             )
@@ -411,6 +455,7 @@ module Hive
                           elapsed_sec: (now - entry.started_at).to_i,
                           envelope_marker: entry.json_envelope&.dig("marker"),
                           envelope_ok: entry.json_envelope&.dig("ok"))
+            notify_dispatch_failure(entry, meta, now: now) unless entry.exit_code.to_i.zero?
           end
           @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
           if entry.exit_code == Hive::ExitCodes::CONFIG
@@ -884,9 +929,14 @@ module Hive
 
       # Build a command string from the validated argv and spawn it
       # through the same `dispatch_command` path auto-advance uses.
-      # The on-disk request file is left in place until the child reaps
-      # (see `reap_completed`); that gives an operator a single source
-      # of truth for "what's in flight" when tailing the queue dir.
+      #
+      # C3: immediately after the spawn we CLAIM the request file —
+      # rename `<id>.json` → `<id>.json.claimed` and stamp the child's
+      # pid + process_start_time. The claimed file is invisible to
+      # `pending`, so a later tick never re-observes (or re-dispatches)
+      # it, and a daemon crash before reap leaves a claim that
+      # `recover_dispatch_claims` cleans up at next start instead of
+      # re-running the work. The claimed file is unlinked on reap.
       def dispatch_request!(req, now:)
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
@@ -904,11 +954,97 @@ module Hive
           trigger: req.trigger.to_s.empty? ? "dispatch_request" : req.trigger,
           request_id: req.request_id
         )
+        claim_dispatch_request(req, pid: pid, now: now)
         @logger.event(:dispatch_request_dispatched,
                       request_id: req.request_id, pid: pid,
                       project: req.project, slug: req.slug,
                       command: command, trigger: req.trigger,
                       chat_id: req.chat_id, update_id: req.update_id)
+      end
+
+      # C3: claim the just-spawned request file. Dry-run pids are
+      # non-positive (no real process to record a start time for), so we
+      # still claim but with a nil start_time. A claim failure is
+      # non-fatal — the worst case is the historical behaviour (file
+      # lingers as `.json` and the per-slug in-flight gate prevents a
+      # same-tick double-dispatch).
+      def claim_dispatch_request(req, pid:, now:)
+        start_time = pid.is_a?(Integer) && pid.positive? ? Hive::Lock.process_start_time(pid) : nil
+        Hive::Daemon::DispatchRequestQueue.claim(
+          req.request_id, pid: pid, process_start_time: start_time,
+          now: now, state_home: dispatch_request_state_home
+        )
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "claim_dispatch_request raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+      end
+
+      # C3: sweep claim files from a prior daemon process. Owner-still-
+      # alive claims are left alone (we cannot reap a process we did not
+      # spawn); owner-gone and aged-out claims are removed WITHOUT
+      # re-dispatch (at-most-once). Each removal is logged so an operator
+      # can see what the restart cleaned up.
+      def recover_dispatch_claims(now:)
+        alive = lambda do |pid, recorded_start_time|
+          next false unless pid.is_a?(Integer) && pid.positive?
+          next false unless process_alive?(pid)
+          # If both start times are present and differ, the PID was
+          # reused — the original child is gone. A nil on either side is
+          # unverifiable; treat as alive so we never drop a claim for a
+          # genuinely running orphan.
+          live_start = Hive::Lock.process_start_time(pid)
+          recorded = recorded_start_time
+          next true if recorded.nil? || live_start.nil?
+
+          recorded.to_s == live_start.to_s
+        end
+
+        Hive::Daemon::DispatchRequestQueue.recover_claims(
+          state_home: dispatch_request_state_home, now: now, alive: alive,
+          handler: ->(request_id:, reason:, path:) {
+            @logger.event(:dispatch_request_recovered,
+                          request_id: request_id, reason: reason, path: path)
+          }
+        )
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "recover_dispatch_claims raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+      end
+
+      def process_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+
+      # ADV-1: write a failure-notice file the bot will drain + relay to
+      # the originating Telegram chat. No-op when the completed run did
+      # not carry a chat_id (auto-advance runs, or metadata already gone)
+      # — there's no one to reply to. Best-effort: a write failure must
+      # never crash a tick, so it's logged and swallowed.
+      def notify_dispatch_failure(entry, meta, now:)
+        chat_id = meta && meta[:chat_id]
+        return if chat_id.nil?
+
+        Hive::Daemon::DispatchResultQueue.write!(
+          chat_id: chat_id, update_id: meta[:update_id],
+          project: entry.project, slug: entry.slug,
+          request_id: entry.request_id, exit_code: entry.exit_code,
+          command: entry.command, now: now,
+          state_home: dispatch_request_state_home
+        )
+        @logger.event(:dispatch_result_written,
+                      request_id: entry.request_id, project: entry.project,
+                      slug: entry.slug, exit_code: entry.exit_code, chat_id: chat_id)
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "notify_dispatch_failure raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
       end
 
       def reject_request(req, reason:)
@@ -1073,6 +1209,18 @@ module Hive
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
+        # R-02: push reloaded child-timeout knobs into the supervisor so
+        # an operator tuning daemon.child_timeout_sec / verb overrides via
+        # SIGHUP takes effect for children spawned after the reload.
+        if @supervisor.respond_to?(:update_timeouts)
+          @supervisor.update_timeouts(
+            default_timeout_sec: @daemon_cfg.fetch("child_timeout_sec", 0),
+            verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
+            kill_grace_sec: @daemon_cfg.fetch(
+              "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC
+            )
+          )
+        end
         # Rebuild the healer so an operator tuning
         # daemon.agent_marker_grace_sec via SIGHUP takes effect within
         # one tick. Without this rebuild the healer keeps the grace it

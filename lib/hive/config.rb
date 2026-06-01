@@ -260,6 +260,18 @@ module Hive
         "max_runs_per_day_per_project" => 50,
         "transient_retry_backoff_sec" => 60,
         "shutdown_grace_sec" => 600,
+        # R-02: per-child wall-clock timeout for daemon-spawned `hive`
+        # children. `child_timeout_sec` is the default cap (0 disables —
+        # children run unbounded, the historical behaviour). The default
+        # is generous (2h) so the 5-review autonomous loop — which can
+        # hold its task lock for ~90 min — is never killed mid-pass; it
+        # exists to reap a genuinely wedged child, not to bound normal
+        # runs. `child_verb_timeouts` overrides the default per hive verb
+        # (e.g. {"review" => 10800}). `child_kill_grace_sec` is the
+        # SIGTERM→SIGKILL escalation window.
+        "child_timeout_sec" => 7200,
+        "child_kill_grace_sec" => 30,
+        "child_verb_timeouts" => {},
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -1372,6 +1384,10 @@ module Hive
       [ "max_runs_per_day_per_project", 1 ],
       [ "transient_retry_backoff_sec", 1 ],
       [ "shutdown_grace_sec", 0 ],
+      # child_timeout_sec >= 0  — 0 disables the per-child wall-clock cap
+      # child_kill_grace_sec >= 0 — 0 means "SIGKILL immediately after TERM"
+      [ "child_timeout_sec", 0 ],
+      [ "child_kill_grace_sec", 0 ],
       [ "log_max_bytes", 1024 ],
       [ "log_max_files", 1 ]
     ].freeze
@@ -1402,6 +1418,31 @@ module Hive
           raise ConfigError,
                 "daemon.#{key} in #{describe_source(source_path)} must be an integer " \
                 ">= #{min}; got #{value.inspect} (#{value.class})"
+        end
+      end
+
+      validate_daemon_verb_timeouts!(daemon, source_path)
+    end
+
+    # R-02: `daemon.child_verb_timeouts` is an optional map of hive verb
+    # (String) → timeout seconds (Integer >= 0). 0 disables the cap for
+    # that verb. Reject anything else loudly so a typo'd YAML knob fails
+    # at load instead of silently never timing out.
+    def validate_daemon_verb_timeouts!(daemon, source_path)
+      overrides = daemon["child_verb_timeouts"]
+      return if overrides.nil?
+
+      unless overrides.is_a?(Hash)
+        raise ConfigError,
+              "daemon.child_verb_timeouts in #{describe_source(source_path)} must be a Hash " \
+              "of verb => seconds; got #{overrides.class}"
+      end
+
+      overrides.each do |verb, secs|
+        unless secs.is_a?(Integer) && secs >= 0
+          raise ConfigError,
+                "daemon.child_verb_timeouts[#{verb.inspect}] in #{describe_source(source_path)} " \
+                "must be an integer >= 0; got #{secs.inspect} (#{secs.class})"
         end
       end
     end

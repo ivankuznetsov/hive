@@ -12,6 +12,8 @@ require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/dispatch_result_queue"
+require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/title_formatter"
@@ -36,9 +38,12 @@ module Hive
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
-                     dispatch_request_writer: nil)
+                     dispatch_request_writer: nil, dispatch_result_state_home: nil)
         @config = config
         @dry_run = dry_run
+        # ADV-1: where the daemon drops dispatch-result failure notices.
+        # Tests inject a sandbox; production resolves Hive::Paths.state_home.
+        @dispatch_result_state_home = dispatch_result_state_home
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
         @update_state = update_state || Hive::UpdateCheck::State.new
@@ -248,12 +253,45 @@ module Hive
         until @shutdown
           begin
             reap_children
+            drain_dispatch_results
           rescue StandardError => e
             @logger.event(:fatal, source: "reaper_loop", error_class: e.class.name,
                                    message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
           end
           sleep 1
         end
+      end
+
+      # ADV-1: drain the daemon's failure-notice channel and relay each
+      # notice to the chat that initiated the run, then unlink it. The
+      # daemon is the single dispatcher and has no Telegram handle, so this
+      # is the only surface that turns a non-zero daemon-spawned exit into
+      # operator-visible feedback (beyond the marker-driven status alert).
+      # Malformed notices are removed quietly. Public so tests can drive
+      # one drain deterministically.
+      def drain_dispatch_results
+        notices = Hive::Daemon::DispatchResultQueue.pending(
+          state_home: dispatch_result_state_home,
+          # A malformed notice has no chat to reply to — remove it quietly
+          # so it can't wedge the drain.
+          bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
+        )
+        notices.each do |notice|
+          safe_send_message(chat_id: notice.chat_id, text: dispatch_failure_text(notice))
+          Hive::Daemon::DispatchResultQueue.remove(
+            notice.result_id, state_home: dispatch_result_state_home
+          )
+        end
+      end
+
+      def dispatch_failure_text(notice)
+        verb = Array(notice.command.to_s.split).fetch(1, "run")
+        "⚠️ #{notice.slug}: `hive #{verb}` failed (exit #{notice.exit_code}). " \
+          "Check the task or retry — open it on a laptop if it keeps failing."
+      end
+
+      def dispatch_result_state_home
+        @dispatch_result_state_home || Hive::Paths.state_home
       end
 
       def safe_send_message(chat_id:, text:, reply_markup: nil)
@@ -301,7 +339,7 @@ module Hive
         # succeed before dispatching the next" semantics is replaced
         # by the daemon's per-slug serialisation. Plan 2026-05-28-002.
         if commands.all? { |argv| queue_routable?(argv) }
-          return enqueue_command_sequence(commands, result, update, reset_pending: reset_pending)
+          return enqueue_command_sequence(commands, result, update)
         end
 
         failed = false
@@ -344,10 +382,27 @@ module Hive
       end
 
       # Queue path for `dispatch_command_sequence`: write each request
-      # in arrival order, reset the alert if a reset was queued, and
-      # return. If any write raises, `enqueue_dispatch_request` has
-      # already surfaced a corrective Telegram reply and logged.
-      def enqueue_command_sequence(commands, result, update, reset_pending:)
+      # in arrival order and return. If any write raises,
+      # `enqueue_dispatch_request` has already surfaced a corrective
+      # Telegram reply and logged.
+      #
+      # AC-05 (PR #241 ce-code-review): this path deliberately does NOT
+      # reset the alert. Unlike the spawn path — which waits for
+      # `markers clear` to succeed and only then resets, so the marker
+      # is already gone when the fingerprint is removed — the queue path
+      # has no completion signal to wait on. Resetting at enqueue time
+      # removes the alert-store fingerprint while the error marker is
+      # still on disk (the daemon hasn't run `markers clear` yet), so
+      # the next status tick sees `entry.nil?` in
+      # NotificationDispatcher#process_current and RE-FIRES the same
+      # alert — a duplicate ⚠ within seconds of the Autofix tap. Leaving
+      # the fingerprint in place keeps the persistent dedupe intact;
+      # state-driven recovery (`process_recoveries`) removes the alert
+      # naturally once the daemon clears the marker (or the row goes
+      # live-running and leaves the alerting set). The inline keyboard is
+      # already cleared on tap via `clear_inline_keyboard`, so the
+      # operator still sees immediate acknowledgement of their action.
+      def enqueue_command_sequence(commands, result, update)
         commands.each do |argv|
           per_command = @router.class::Result.new(
             action: :dispatch_then_reply,
@@ -357,7 +412,6 @@ module Hive
           )
           enqueue_dispatch_request(per_command, update)
         end
-        reset_alert_for_result(result) if reset_pending
         nil
       end
 

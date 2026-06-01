@@ -1763,6 +1763,62 @@ class ConfigTest < Minitest::Test
       assert_equal 50,    cfg.dig("daemon", "max_runs_per_day_per_project")
       assert_equal 60,    cfg.dig("daemon", "transient_retry_backoff_sec")
       assert_equal 600,   cfg.dig("daemon", "shutdown_grace_sec")
+      # R-02 per-child timeout knobs.
+      assert_equal 7200,  cfg.dig("daemon", "child_timeout_sec")
+      assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
+      assert_equal({},    cfg.dig("daemon", "child_verb_timeouts"))
+    end
+  end
+
+  def test_load_rejects_negative_daemon_child_timeout_sec
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_timeout_sec: -1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.child_timeout_sec.*>= 0/, err.message)
+    end
+  end
+
+  def test_load_honors_daemon_child_verb_timeouts_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_verb_timeouts:
+            review: 10800
+            develop: 5400
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal 10800, cfg.dig("daemon", "child_verb_timeouts", "review")
+      assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
+    end
+  end
+
+  def test_load_rejects_non_integer_daemon_child_verb_timeout
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_verb_timeouts:
+            review: forever
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.child_verb_timeouts\["review"\].*integer >= 0/, err.message)
+    end
+  end
+
+  def test_load_rejects_non_hash_daemon_child_verb_timeouts
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_verb_timeouts: 600
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.child_verb_timeouts.*must be a Hash/, err.message)
     end
   end
 

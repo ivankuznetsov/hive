@@ -169,8 +169,12 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
     assert_equal 1, @supervisor.spawned.size, "daemon must pick up the request and spawn exactly once"
     assert_equal request_id, @supervisor.spawned.first[:request_id],
                  "the spawn must carry the request_id for reap-time unlink"
-    refute_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*.json")),
-                 "request file stays on disk until the child reaps"
+    # C3: the file stays on disk until reap, but is CLAIMED (renamed to
+    # *.json.claimed) so a later tick never re-observes it.
+    assert_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*.json")),
+                 "the pending .json must be renamed away once dispatched (claimed)"
+    refute_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*.json.claimed")),
+                 "the claimed request file stays on disk until the child reaps"
 
     # 3. The child writes a fresh marker; brainstorm.md mtime bumps.
     new_mtime = T0 + 30
@@ -201,8 +205,8 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
     #   - unlinked the request file
     #   - logged :dispatch_request_completed
     #   - refreshed the controller's baseline to the new mtime
-    assert_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*.json")),
-                 "request file must be unlinked on reap"
+    assert_empty Dir.glob(File.join(@state_home, "dispatch_requests", "*")),
+                 "the claimed request file must be unlinked on reap (no pending or claimed left)"
     completed = @logger.events.find { |(n, _)| n == :dispatch_request_completed }
     refute_nil completed
     baseline = @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @slug)

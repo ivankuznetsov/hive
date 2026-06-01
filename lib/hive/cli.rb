@@ -584,7 +584,7 @@ module Hive
       ).call
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -610,6 +610,14 @@ module Hive
                                           --all = every registered project;
                                           --json emits hive-daemon-enroll.v1.
         disable PROJECT|--all [--json]    Set daemon.enabled: false there.
+        queue [list|show <id>|prune]      Inspect the dispatch-request queue
+                                          the bot writes and the daemon
+                                          consumes. `list` (default) shows
+                                          pending requests with age + verb;
+                                          `show <id>` dumps one request;
+                                          `prune` removes expired/malformed
+                                          files. --json emits
+                                          hive-daemon-queue.v1.
 
       The daemon polls `hive status --json` periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
@@ -655,11 +663,21 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
         )
       end
-      if targets.length > 1
+      # `queue` takes up to two positionals (ACTION + optional REQUEST_ID,
+      # e.g. `queue show <id>`); every other subcommand takes at most one
+      # (PROJECT or --all).
+      max_targets = subcommand == "queue" ? 2 : 1
+      if targets.length > max_targets
+        message = if subcommand == "queue"
+          "hive daemon queue: too many positional arguments #{targets.inspect}; " \
+            "expected `queue [list|show <id>|prune]`"
+        else
+          "hive daemon #{subcommand}: too many positional arguments " \
+            "#{targets.inspect}; expected exactly one PROJECT (or --all)"
+        end
         emit_daemon_argv_error(
           subcommand: subcommand,
-          message: "hive daemon #{subcommand}: too many positional arguments " \
-                   "#{targets.inspect}; expected exactly one PROJECT (or --all)",
+          message: message,
           error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
         )
       end
@@ -677,7 +695,8 @@ module Hive
         dry_run: options[:dry_run],
         all: options[:all],
         json: options[:json],
-        force: options[:force]
+        force: options[:force],
+        queue_args: targets
       ).call
     end
 

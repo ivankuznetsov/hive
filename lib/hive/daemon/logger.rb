@@ -32,6 +32,7 @@ module Hive
         blocked
         child_exited
         child_terminated
+        child_timeout
         config_reloaded
         project_dropped
         transient_retry
@@ -61,6 +62,8 @@ module Hive
         dispatch_request_rejected
         dispatch_request_blocked
         dispatch_request_expired
+        dispatch_request_recovered
+        dispatch_result_written
         fatal
       ].freeze
 

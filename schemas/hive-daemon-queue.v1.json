@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-daemon-queue.v1.json",
+  "title": "hive daemon queue output (v1)",
+  "description": "Stable contract emitted by `hive daemon queue [list|show|prune] --json`. Read-only inspection of the file-backed dispatch-request queue the bot writes and the daemon consumes. `list` returns all pending requests; `show <id>` returns one; `prune` removes expired/malformed files and reports the count. ok=false (exit 1) when `show` cannot find the requested id.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "created_at",
+        "age_sec",
+        "project",
+        "slug",
+        "verb",
+        "argv",
+        "trigger",
+        "requestor",
+        "chat_id",
+        "update_id",
+        "expired",
+        "allowlisted"
+      ],
+      "properties": {
+        "request_id": { "type": "string" },
+        "created_at": { "type": "string", "description": "ISO-8601 UTC timestamp the request was written." },
+        "age_sec": { "type": "integer", "description": "Seconds since created_at, at command-run time." },
+        "project": { "type": "string" },
+        "slug": { "type": "string" },
+        "verb": { "type": ["string", "null"], "description": "argv[1] — the hive verb the daemon would spawn." },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "trigger": { "type": "string" },
+        "requestor": { "type": "string" },
+        "chat_id": { "type": ["integer", "null"] },
+        "update_id": { "type": ["integer", "null"] },
+        "expired": { "type": "boolean", "description": "True when created_at is older than the queue expiry window." },
+        "allowlisted": { "type": "boolean", "description": "True when argv passes the daemon's verb allowlist + slug guard." }
+      }
+    },
+    "Malformed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": { "type": "string" },
+        "reason": { "type": "string", "description": "Parse-failure reason (e.g. malformed_json, wrong_schema, invalid_slug)." }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-queue" },
+        "schema_version": { "const": 1 },
+        "ok": {
+          "type": "boolean",
+          "description": "True for list/prune always; for show, false when the request_id was not found."
+        },
+        "action": { "type": "string", "enum": ["list", "show", "prune"] },
+        "requests": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Request" },
+          "description": "Pending requests (list), the pruned-expired set (prune). Absent on show."
+        },
+        "request": {
+          "oneOf": [
+            { "$ref": "#/$defs/Request" },
+            { "type": "null" }
+          ],
+          "description": "The single request (show). Null when ok=false."
+        },
+        "request_id": {
+          "type": "string",
+          "description": "Echo of the requested id when show fails to find it."
+        },
+        "malformed": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Malformed" },
+          "description": "Unparseable request files encountered (list/prune)."
+        },
+        "pruned_count": {
+          "type": "integer",
+          "description": "Number of files removed (prune)."
+        }
+      }
+    }
+  }
+}

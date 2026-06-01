@@ -1340,6 +1340,65 @@ end
     end
   end
 
+  # #4: a signal-killed child (R-02 timeout) has a nil exit_code; the reap
+  # guard must treat nil as a failure and still write an ADV-1 notice.
+  def test_reap_writes_notice_on_nil_exit_signal_kill
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "KILL1")
+      exited = ChildExit.new(
+        pid: 557, exit_code: nil, project: "p1", slug: "s1", stage: nil,
+        command: "hive review s1", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "KILL1"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      dispatcher.send(:reap_completed, now: T0 + 1)
+      notices = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+      assert_equal 1, notices.size, "a timeout/signal kill (nil exit) must still notify"
+      assert_nil notices.first.exit_code
+    end
+  end
+
+  # #5: claim expiry is sized to the run budget, not the 600s request window.
+  def test_claim_expiry_sec_sizes_to_child_timeout_budget
+    dispatcher, = make_dispatcher
+    # No child_timeout_sec in config → falls back to the queue's generous default.
+    assert_equal Hive::Daemon::DispatchRequestQueue::CLAIM_EXPIRY_SEC,
+                 dispatcher.send(:claim_expiry_sec)
+
+    dispatcher.instance_variable_set(:@daemon_cfg,
+                                     { "child_timeout_sec" => 100, "child_kill_grace_sec" => 30 })
+    dispatcher.instance_variable_set(:@poll_interval_sec, 30)
+    # 100 (timeout) + 30 (grace) + 60 (2 poll intervals) + 600 (margin)
+    assert_equal 790, dispatcher.send(:claim_expiry_sec)
+  end
+
+  # #6: the daemon prunes stale dispatch-result notices each tick.
+  def test_prune_dispatch_results_removes_stale
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, = make_dispatcher(rows: [], dispatch_request_state_home: state_home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 1, project: "p1", slug: "old", request_id: "r", exit_code: 1,
+        command: "hive review old", state_home: state_home, now: T0 - 7200
+      )
+      dispatcher.send(:prune_dispatch_results, now: T0)
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+    end
+  end
+
+  def test_prune_dispatch_results_swallows_errors
+    dispatcher, _sup, _ctrl, logger = make_dispatcher
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchResultQueue, :prune_expired, ->(**_kw) { raise "boom" }
+    ) do
+      dispatcher.send(:prune_dispatch_results, now: T0)
+    end
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("prune_dispatch_results") })
+  end
+
   def test_process_alive_predicate_branches
     dispatcher, = make_dispatcher
     assert dispatcher.send(:process_alive?, Process.pid), "our own pid is alive"

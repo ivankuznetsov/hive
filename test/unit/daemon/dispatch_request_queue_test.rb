@@ -446,4 +446,68 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       refute File.exist?(bad)
     end
   end
+
+  # #3: claim-window crash leaves both <id>.json and <id>.json.claimed.
+  # pending must hide the orphan .json so it is never re-dispatched.
+  def test_pending_hides_json_when_a_claimed_sibling_exists
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 5, 28, 18, 0, 0)
+      write_request(dir, request_id: "orph0001", created_at: at, slug: "slug-x")
+      Q.claim("orph0001", pid: 1, state_home: dir) # removes the original .json
+      # Simulate the crash leftover: the original .json is back on disk
+      # alongside the .claimed.
+      write_request(dir, request_id: "orph0001", created_at: at, slug: "slug-x")
+
+      assert_empty Q.pending(state_home: dir),
+                   "an orphan .json must be hidden while its .claimed sibling exists (C3)"
+    end
+  end
+
+  # #3: recover_claims removes the orphan .json sibling too, so it can't be
+  # re-dispatched once the claim is gone.
+  def test_recover_claims_removes_orphan_json_sibling
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 5, 28, 18, 0, 0)
+      write_request(dir, request_id: "orph0002", created_at: at, slug: "slug-x")
+      Q.claim("orph0002", pid: 4321, process_start_time: "111", now: at, state_home: dir)
+      write_request(dir, request_id: "orph0002", created_at: at, slug: "slug-x") # crash leftover
+
+      Q.recover_claims(state_home: dir, now: at, alive: ->(_p, _s) { false })
+
+      assert_empty Dir.glob(File.join(dir, "dispatch_requests", "*")),
+                   "both the .claimed and the orphan .json must be removed (C3)"
+    end
+  end
+
+  # remove_pending_sibling tolerates a malformed `.json` whose name
+  # matches the request_id (parse fails → skip, file left intact).
+  def test_recover_claims_tolerates_malformed_pending_sibling
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 5, 28, 18, 0, 0)
+      write_request(dir, request_id: "sib00001", created_at: at, slug: "slug-x")
+      Q.claim("sib00001", pid: 4321, process_start_time: "111", now: at, state_home: dir)
+      claim_dir = Q.directory(state_home: dir)
+      junk = File.join(claim_dir, "20260528-sib00001-junk.json")
+      File.write(junk, "{not json")
+
+      Q.recover_claims(state_home: dir, now: at, alive: ->(_p, _s) { false })
+
+      assert File.exist?(junk), "a malformed sibling is skipped, not unlinked"
+    end
+  end
+
+  # claimed_request_ids ignores a malformed .claimed file rather than
+  # letting it block pending.
+  def test_pending_tolerates_malformed_claimed_file
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "good0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+                    slug: "keep-me")
+      claim_dir = Q.directory(state_home: dir)
+      File.write(File.join(claim_dir, "20260528-junk.json#{Q::CLAIMED_SUFFIX}"), "{not json")
+
+      pending = Q.pending(state_home: dir)
+      assert_equal %w[keep-me], pending.map(&:slug),
+                   "a malformed .claimed file must not hide or block pending requests"
+    end
+  end
 end

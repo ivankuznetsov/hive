@@ -262,31 +262,78 @@ module Hive
         end
       end
 
+      # Max individual failure messages relayed per drain. A larger
+      # backlog (e.g. the bot was down while many runs failed) is
+      # collapsed into one summary line so a reconnect can't flood the
+      # chat or trip Telegram's per-chat rate limit (ADV-1 / #6).
+      DISPATCH_RESULT_SEND_CAP = 10
+
       # ADV-1: drain the daemon's failure-notice channel and relay each
-      # notice to the chat that initiated the run, then unlink it. The
-      # daemon is the single dispatcher and has no Telegram handle, so this
-      # is the only surface that turns a non-zero daemon-spawned exit into
+      # notice to the chat that initiated the run. The daemon is the
+      # single dispatcher and has no Telegram handle, so this is the only
+      # surface that turns a non-zero daemon-spawned exit into
       # operator-visible feedback (beyond the marker-driven status alert).
-      # Malformed notices are removed quietly. Public so tests can drive
-      # one drain deterministically.
-      def drain_dispatch_results
+      #
+      # Reliability contract:
+      #   - A notice is removed ONLY after the relay is confirmed sent. If
+      #     Telegram is down, `safe_send_message` returns nil and the
+      #     notice stays on disk to retry on the next reaper tick (#1) —
+      #     never a silent drop.
+      #   - Stale notices (older than EXPIRY_SEC) are removed WITHOUT
+      #     sending: an hour-old "failed" ping is noise, and this bounds
+      #     directory growth alongside the daemon's prune (#6).
+      #   - Malformed notices are removed quietly so they can't wedge the
+      #     drain.
+      # Public + `now:`-injectable so tests can drive one drain
+      # deterministically.
+      def drain_dispatch_results(now: Time.now)
         notices = Hive::Daemon::DispatchResultQueue.pending(
           state_home: dispatch_result_state_home,
-          # A malformed notice has no chat to reply to — remove it quietly
-          # so it can't wedge the drain.
           bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
         )
-        notices.each do |notice|
-          safe_send_message(chat_id: notice.chat_id, text: dispatch_failure_text(notice))
-          Hive::Daemon::DispatchResultQueue.remove(
-            notice.result_id, state_home: dispatch_result_state_home
-          )
+        fresh = notices.reject do |notice|
+          next false unless Hive::Daemon::DispatchResultQueue.expired?(notice, now: now)
+
+          remove_dispatch_result(notice) # stale: drop without relaying
+          true
         end
+
+        fresh.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
+          sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_failure_text(notice))
+          remove_dispatch_result(notice) if sent
+        end
+
+        relay_dispatch_result_overflow(fresh.drop(DISPATCH_RESULT_SEND_CAP))
+      end
+
+      # Collapse a too-large backlog tail into a single summary message
+      # per chat, removing those notices only if the summary actually
+      # sent (same no-silent-drop contract as the individual path).
+      def relay_dispatch_result_overflow(overflow)
+        return if overflow.empty?
+
+        overflow.group_by(&:chat_id).each do |chat_id, group|
+          sent = safe_send_message(
+            chat_id: chat_id,
+            text: "⚠️ +#{group.size} more dispatch failures suppressed (see daemon.log)."
+          )
+          group.each { |notice| remove_dispatch_result(notice) } if sent
+        end
+      end
+
+      def remove_dispatch_result(notice)
+        Hive::Daemon::DispatchResultQueue.remove(
+          notice.result_id, state_home: dispatch_result_state_home
+        )
       end
 
       def dispatch_failure_text(notice)
         verb = Array(notice.command.to_s.split).fetch(1, "run")
-        "⚠️ #{notice.slug}: `hive #{verb}` failed (exit #{notice.exit_code}). " \
+        # A timeout/signal-killed child has a nil exit_code (Process::Status
+        # #exitstatus is nil when terminated by a signal) — render it as a
+        # kill rather than "exit ".
+        status = notice.exit_code.nil? ? "killed (signal/timeout)" : "exit #{notice.exit_code}"
+        "⚠️ #{notice.slug}: `hive #{verb}` failed (#{status}). " \
           "Check the task or retry — open it on a laptop if it keeps failing."
       end
 

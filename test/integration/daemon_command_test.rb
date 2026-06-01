@@ -1564,4 +1564,44 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_includes out, "pruned 1 request"
     end
   end
+
+  # #2: --json error paths must emit a parseable hive-daemon-queue
+  # envelope, not a bare stack trace, so an agent can branch on it.
+  def test_queue_unknown_action_json_emits_error_envelope
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "bogus", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-queue", doc["schema"]
+      assert_equal false, doc["ok"]
+      assert_equal "unknown_action", doc["error_kind"]
+      assert_equal "bogus", doc["action"]
+    end
+  end
+
+  def test_queue_show_missing_id_json_emits_error_envelope
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "missing_request_id", doc["error_kind"]
+      assert_equal "show", doc["action"]
+    end
+  end
+
+  def test_queue_internal_error_json_emits_envelope
+    with_isolated_hive_home do |home, env|
+      # A file where the queue dir should be makes mkdir_p raise → the
+      # internal-error rescue must still emit a structured envelope.
+      File.write(File.join(home, "dispatch_requests"), "not a directory")
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "list", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal false, doc["ok"]
+      assert_equal "internal", doc["error_kind"]
+    end
+  end
 end

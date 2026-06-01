@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-05-25
+updated: 2026-06-01
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -28,7 +28,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots, half-migrated projects, and rows with `live_task_lock: true`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by external callers (today: the Telegram bot via `Hive::Bot::DispatchRequestWriter`) and consumed by the dispatcher's tick loop. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: the bot writes, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
-| `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail`). Owns the PID file + signal-based stop/reload. |
+| `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. |
 
 ## Wiring
 
@@ -293,6 +293,13 @@ files are invisible to `pending` (the glob matches `*.json`, not
 queued request is dispatched at most once, ever**. The claimed file is
 unlinked on reap (`remove` matches both pending and claimed files).
 
+`claim` renames the claimed file into place, then unlinks the original
+`<id>.json` as a *separate* step — a crash in that window leaves both
+files. Two guards close the resulting double-dispatch hole: `pending`
+skips any `<id>.json` whose request_id already has a `.claimed` sibling
+(so a lingering original is never re-observed), and `recover_claims`
+removes the orphan `<id>.json` alongside the `.claimed` it sweeps.
+
 At startup, `Dispatcher#recover_dispatch_claims` sweeps claim files
 left by a prior process via `DispatchRequestQueue.recover_claims`:
 
@@ -303,8 +310,12 @@ left by a prior process via `DispatchRequestQueue.recover_claims`:
 - **owner gone / PID reused** → removed WITHOUT re-dispatch; if the run
   died mid-flight the task's own marker drives recovery through the
   normal status→alert path.
-- **claim aged past `EXPIRY_SEC`** → removed regardless, so a wedged
-  alive child can't pin a claim forever.
+- **claim aged past the claim-expiry window** → removed regardless, so a
+  wedged alive child can't pin a claim forever. The window is `CLAIM_EXPIRY_SEC`
+  (a generous default), overridden per-restart by the dispatcher to
+  `child_timeout_sec + child_kill_grace_sec + 2·poll + margin` — sized to
+  the run budget, NOT the 600s `EXPIRY_SEC` unclaimed-request window
+  (which would age out a live ~90-min run 10 minutes into a restart).
 
 Each removal logs `:dispatch_request_recovered request_id=… reason=owner_gone|claim_expired|malformed_claim`.
 
@@ -327,15 +338,26 @@ The killed child surfaces as a normal `ChildExit` on a later reap. See
 Because the daemon (not the bot) now spawns request-driven children and
 has no Telegram handle, a non-zero exit of a bot-initiated run used to
 be silent for the operator who tapped the button. On a non-zero,
-request-driven completion `reap_completed` reads the request's
-`chat_id`/`update_id` (from the still-present claimed file, before
-unlink) and writes a notice via `Hive::Daemon::DispatchResultQueue`
+request-driven completion — **including a nil exit_code, i.e. a child
+killed by an R-02 timeout signal** — `reap_completed` reads the
+request's `chat_id`/`update_id` (from the still-present claimed file,
+before unlink) and writes a notice via `Hive::Daemon::DispatchResultQueue`
 into `<state_home>/dispatch_results/*.json` (logged `:dispatch_result_written`).
 The bot drains that directory each `reaper_loop` iteration
 (`Supervisor#drain_dispatch_results`) and relays a `⚠️ <slug>: hive <verb>
-failed (exit N)` message to the originating chat, then unlinks the
-notice. This is the reverse-direction sibling of the dispatch-request
-queue; schema `hive-dispatch-result` v1.
+failed (exit N | killed)` message to the originating chat. This is the
+reverse-direction sibling of the dispatch-request queue; schema
+`hive-dispatch-result` v1.
+
+Reliability contract on the consumer side: a notice is removed **only
+after the relay is confirmed sent** — if Telegram is down it stays on
+disk to retry next tick (never a silent drop). Notices older than
+`DispatchResultQueue::EXPIRY_SEC` (1h) are dropped without relaying
+(no stale-failure spam), and the daemon prunes them each tick
+(`prune_dispatch_results`) so a down bot can't grow the dir without
+bound. A reconnect backlog larger than `DISPATCH_RESULT_SEND_CAP`
+relays the cap individually and collapses the tail into one
+per-chat summary, so it can't flood Telegram.
 
 ## Self-reexec on source drift (ADR-031)
 

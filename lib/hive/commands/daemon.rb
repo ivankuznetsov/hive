@@ -487,9 +487,9 @@ module Hive
       def queue_command
         action = @queue_args[0] || "list"
         unless VALID_QUEUE_ACTIONS.include?(action)
-          raise Hive::InvalidTaskPath,
-                "hive daemon queue: unknown action #{action.inspect} " \
-                "(expected: #{VALID_QUEUE_ACTIONS.join(', ')})"
+          queue_usage_error!(action: action, error_kind: "unknown_action",
+                             message: "hive daemon queue: unknown action #{action.inspect} " \
+                                      "(expected: #{VALID_QUEUE_ACTIONS.join(', ')})")
         end
 
         case action
@@ -497,6 +497,36 @@ module Hive
         when "show"  then queue_show(@queue_args[1])
         when "prune" then queue_prune
         end
+      rescue Hive::InvalidTaskPath, Hive::Error
+        # Already-structured failures (queue_usage_error! / queue_show
+        # not-found) — re-raise for the exit code without re-emitting.
+        raise
+      rescue StandardError => e
+        # Unexpected failure (IO/parse). Under --json an agent must still
+        # get a parseable envelope rather than a bare stack trace (cli-1
+        # from PR #244 ce-code-review), then re-raise for the exit code.
+        emit_queue_error_envelope(action: @queue_args[0], error_kind: "internal",
+                                  message: "#{e.class}: #{e.message}") if @json
+        raise
+      end
+
+      # Emit a hive-daemon-queue error envelope (under --json) and raise a
+      # USAGE-class error so the exit code is non-zero and a human sees
+      # the message on stderr.
+      def queue_usage_error!(action:, error_kind:, message:)
+        emit_queue_error_envelope(action: action, error_kind: error_kind, message: message) if @json
+        raise Hive::InvalidTaskPath, message
+      end
+
+      def emit_queue_error_envelope(action:, error_kind:, message:)
+        puts JSON.generate(
+          "schema" => "hive-daemon-queue",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-queue"),
+          "ok" => false,
+          "action" => action,
+          "error_kind" => error_kind,
+          "message" => message
+        )
       end
 
       def queue_list
@@ -514,8 +544,9 @@ module Hive
 
       def queue_show(request_id)
         if request_id.to_s.empty?
-          raise Hive::InvalidTaskPath,
-                "hive daemon queue show: missing REQUEST_ID (try `hive daemon queue list` first)"
+          queue_usage_error!(action: "show", error_kind: "missing_request_id",
+                             message: "hive daemon queue show: missing REQUEST_ID " \
+                                      "(try `hive daemon queue list` first)")
         end
 
         requests, = load_queue_requests

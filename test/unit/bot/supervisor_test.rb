@@ -1112,6 +1112,82 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  # #1: a notice is retained (retried next tick) when the relay fails —
+  # never silently dropped.
+  def test_drain_dispatch_results_keeps_notice_when_send_fails
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, project: "hive", slug: "t", request_id: "rq1", exit_code: 1,
+        command: "hive review t", state_home: home
+      )
+      @telegram.raise_on_send = IOError.new("telegram down")
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages
+      refute_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a notice must be kept for retry when the Telegram relay fails (#1)"
+    end
+  end
+
+  # #4: a timeout/signal-killed child has a nil exit_code → render as a
+  # kill, not "exit ".
+  def test_drain_dispatch_results_renders_nil_exit_as_killed
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, project: "hive", slug: "wedged", request_id: "rqk", exit_code: nil,
+        command: "hive review wedged", state_home: home
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_includes @telegram.messages.first[:text], "killed (signal/timeout)"
+    end
+  end
+
+  # #6: stale notices are dropped WITHOUT relaying (no hour-old spam) and
+  # pruned to bound growth.
+  def test_drain_dispatch_results_drops_stale_without_sending
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, project: "hive", slug: "old", request_id: "rqold", exit_code: 1,
+        command: "hive review old", state_home: home, now: Time.now - 7200
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages, "a stale notice must not be relayed"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a stale notice must be pruned"
+    end
+  end
+
+  # #6: a large backlog is capped and the tail collapsed into one summary
+  # per chat so a reconnect can't flood Telegram.
+  def test_drain_dispatch_results_caps_and_summarizes_overflow
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      14.times do |i|
+        Hive::Daemon::DispatchResultQueue.write!(
+          chat_id: 42, project: "hive", slug: "t#{i}", request_id: "rq#{i}", exit_code: 1,
+          command: "hive review t#{i}", state_home: home, now: Time.now + i
+        )
+      end
+
+      @supervisor.send(:drain_dispatch_results)
+
+      cap = Hive::Bot::Supervisor::DISPATCH_RESULT_SEND_CAP
+      assert_equal cap + 1, @telegram.messages.size,
+                   "#{cap} individual relays + one overflow summary"
+      assert_includes @telegram.messages.last[:text], "more dispatch failures suppressed"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "the whole backlog is cleared after a successful drain"
+    end
+  end
+
   def test_clear_inline_keyboard_swallows_telegram_errors
     @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
       raise IOError, "telegram offline"

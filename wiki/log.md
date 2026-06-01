@@ -58,6 +58,23 @@ Surface-agnostic (Telegram-incremental or one editor save), and the published `h
 **Pages refreshed:**
 - [[commands/init]] — documents sanitized nested Codex/QMD calls in generated llm-wiki scripts.
 
+## [2026-06-01T01:00:00Z] fix — PR #244 ce-code-review: ADV-1/C3 hardening
+
+**Action:** Ran `/ce-code-review` on PR #244 (11 reviewers) and fixed the P1 + feature-integrity P2 findings:
+
+1. **#1 (P1)** — `Bot::Supervisor#drain_dispatch_results` removed a notice even when the Telegram relay failed (silent loss). Now removes only after a confirmed send; failures stay on disk for the next reaper tick.
+2. **#2 (P1)** — `hive daemon queue` emitted nothing under `--json` on unknown-action / missing-id / internal errors. Added a `hive-daemon-queue.v1` ErrorPayload arm + `queue_usage_error!`/`emit_queue_error_envelope`; all failure paths now emit a structured envelope.
+3. **#3 (P2)** — C3 claim rename→unlink window could leave both `<id>.json` and `.claimed` → double-dispatch on restart. `pending` now hides a `.json` whose request_id has a `.claimed` sibling; `recover_claims` removes the orphan `.json` too.
+4. **#4 (P2)** — a timeout/signal-killed child has a nil exit_code; the reap guard `exit_code.to_i.zero?` swallowed it → no ADV-1 notice. Changed to `exit_code == 0`; the bot renders nil as `killed (signal/timeout)`.
+5. **#5 (P2)** — `recover_claims` aged claims out at the 600s `EXPIRY_SEC`, dropping live ~90-min runs after 11 min on restart. Added `CLAIM_EXPIRY_SEC`; the dispatcher sizes the window to `child_timeout_sec + kill_grace + 2·poll + margin`.
+6. **#6 (P2)** — `DispatchResultQueue` had no expiry/prune/cap → unbounded growth + reconnect flood. Added `EXPIRY_SEC` + `expired?` + `prune_expired` (daemon prunes each tick); the bot drops stale notices without relaying and caps a backlog at `DISPATCH_RESULT_SEND_CAP` with a per-chat summary.
+
+Deferred to a follow-up (review #7–#19): schema-test parity, `claim` fsync, `pgid_for` nil-on-ESRCH, `chat_id` allowlist re-check on drain, `directory()`/`pending()` dedup, `respond_to?` test-seam removal, `QueueCommand` extraction, `child_timeout_sec` fetch-fallback.
+
+**Tests:** full suite 4242 runs / 0 failures, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/daemon]] (C3 claim-window guards, claim-expiry sizing, ADV-1 reliability contract).
+
 ## [2026-06-01T00:00:00Z] feat — PR #241 deferred follow-ups (AC-05, R-02, AN-1/2/3, ADV-1, C3)
 
 **Action:** Implemented the six deferred follow-ups from the PR #241 ce-code-review on branch `feat/queue-dispatcher-followups`:
@@ -2656,3 +2673,14 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Refreshed pages:**
 - [[stages/review]]
 - [[commands/tui]]
+
+## [2026-06-01T20:15:56Z] cli — refresh daemon queue wiki coverage
+
+**Action:** Refreshed the wiki after commit `b175abf7` added `hive daemon queue` to the CLI index. Verified the docs claim against `lib/hive/cli.rb`, `lib/hive/commands/daemon.rb`, `lib/hive/daemon/dispatch_request_queue.rb`, `schemas/hive-daemon-queue.v1.json`, [[commands/daemon]], and [[modules/daemon]]. Updated the CLI JSON-support summary to include daemon `install` and `queue`, aligned daemon module metadata with the current command surface, refreshed the index date, and recorded the local git-index uncertainty that prevented a normal `git status` check. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/daemon]]
+- [[modules/daemon]]
+- [[index]]
+- [[gaps]]

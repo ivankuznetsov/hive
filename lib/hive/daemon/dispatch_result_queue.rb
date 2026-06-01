@@ -44,6 +44,12 @@ module Hive
       SCHEMA_VERSION = 1
       DIRNAME = "dispatch_results".freeze
 
+      # Age after which a notice is considered stale: not worth relaying
+      # (the operator does not need a "failed" ping for a run that ended
+      # an hour ago) and a candidate for pruning. Bounds directory growth
+      # when the bot is down for an extended period. 1h.
+      EXPIRY_SEC = 3600
+
       Result = Struct.new(
         :result_id, :created_at, :chat_id, :update_id, :project, :slug,
         :request_id, :exit_code, :command, :path,
@@ -110,6 +116,33 @@ module Hive
           entries << parsed
         end
         entries.sort_by { |r| [ r.created_at, r.result_id.to_s ] }
+      end
+
+      # True when `notice` is older than `expiry_sec` relative to `now`.
+      def expired?(notice, now: Time.now, expiry_sec: EXPIRY_SEC)
+        return false unless notice.respond_to?(:created_at)
+
+        created = notice.created_at
+        return false unless created.is_a?(Time)
+
+        (now - created) > expiry_sec
+      end
+
+      # Bound directory growth: remove notices older than `expiry_sec`
+      # (and malformed files) without delivering them. Called by the
+      # daemon each tick so a down/wedged bot can't let the dir grow
+      # without limit. Returns the count removed.
+      def prune_expired(state_home: Hive::Paths.state_home, now: Time.now,
+                        expiry_sec: EXPIRY_SEC)
+        removed = 0
+        pending(state_home: state_home,
+                bad_handler: ->(path:, reason:) { FileUtils.rm_f(path); removed += 1 })
+          .each do |notice|
+          next unless expired?(notice, now: now, expiry_sec: expiry_sec)
+
+          removed += 1 if remove(notice.result_id, state_home: state_home)
+        end
+        removed
       end
 
       # Idempotent removal of the notice for `result_id`.

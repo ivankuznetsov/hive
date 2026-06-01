@@ -4,9 +4,30 @@
   "title": "hive daemon queue output (v1)",
   "description": "Stable contract emitted by `hive daemon queue [list|show|prune] --json`. Read-only inspection of the file-backed dispatch-request queue the bot writes and the daemon consumes. `list` returns all pending requests; `show <id>` returns one; `prune` removes expired/malformed files and reports the count. ok=false (exit 1) when `show` cannot find the requested id.",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" }
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "error_kind", "message"],
+      "description": "Emitted under --json when the queue command itself fails (bad action, missing id, internal error). Distinct from the SuccessPayload ok:false 'show found nothing' result, which carries no error_kind.",
+      "properties": {
+        "schema": { "const": "hive-daemon-queue" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "action": {
+          "type": ["string", "null"],
+          "description": "The attempted action (may be an invalid value for unknown_action, or null)."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": ["unknown_action", "missing_request_id", "internal"]
+        },
+        "message": { "type": "string" }
+      }
+    },
     "Request": {
       "type": "object",
       "additionalProperties": false,

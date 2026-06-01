@@ -122,6 +122,14 @@ module Hive
       # caller decides what to do with a request once it's parsed.
       def pending(state_home: Hive::Paths.state_home, bad_handler: nil)
         dir = directory(state_home: state_home)
+        # C3: request_ids that already have a `.claimed` sibling are
+        # in-flight (claimed) and MUST NOT be returned as pending, even if
+        # a stale `<id>.json` still lingers. `claim` renames the claimed
+        # file into place before unlinking the original; a crash in that
+        # window leaves both files on disk. Skipping any `.json` whose id
+        # is already claimed closes the double-dispatch hole regardless of
+        # crash timing (the leftover `.json` is reaped by recover_claims).
+        claimed_ids = claimed_request_ids(dir)
         entries = []
         Dir.glob(File.join(dir, "*.json")).each do |path|
           parsed = parse_file(path)
@@ -129,6 +137,8 @@ module Hive
             bad_handler&.call(path: path, reason: parsed.to_s)
             next
           end
+          next if claimed_ids.include?(parsed.request_id)
+
           entries << parsed
         end
         entries.sort_by { |req| [ req.created_at, req.request_id.to_s ] }
@@ -227,7 +237,7 @@ module Hive
       # (when supplied) receives `(request_id:, reason:, path:)` per
       # removed file so the caller can log. Returns the count removed.
       def recover_claims(state_home: Hive::Paths.state_home, now: Time.now,
-                         alive: nil, expiry_sec: EXPIRY_SEC, handler: nil)
+                         alive: nil, expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
         dir = directory(state_home: state_home)
         removed = 0
         Dir.glob(File.join(dir, "*#{CLAIMED_SUFFIX}")).each do |path|
@@ -248,6 +258,13 @@ module Hive
           next if owner_alive
 
           File.unlink(path) if File.exist?(path)
+          # C3: also remove any leftover plain `<id>.json` for the same
+          # request — a crash in claim()'s rename→unlink window can leave
+          # both files. Without this the orphan `.json` would be
+          # re-dispatched on the next tick (pending already skips it while
+          # the `.claimed` exists, but once we remove the claim the guard
+          # is gone).
+          remove_pending_sibling(dir, request_id) if request_id
           reason = aged_out ? "claim_expired" : "owner_gone"
           handler&.call(request_id: request_id, reason: reason, path: path)
           removed += 1
@@ -334,6 +351,18 @@ module Hive
       # constant local but adjustable per call.
       EXPIRY_SEC = 600
 
+      # C3: default age after which a CLAIM is force-removed by
+      # `recover_claims`, even if its owner still looks alive (a wedged
+      # child must not pin a claim forever). This is deliberately MUCH
+      # larger than EXPIRY_SEC: EXPIRY_SEC bounds how long an *unclaimed*
+      # request waits to be dispatched, whereas a claim represents an
+      # actively running child that can legitimately run for the full
+      # `daemon.child_timeout_sec` budget (default 2h + the 5-review
+      # autonomous loop's ~90 min). Sized to comfortably exceed that so a
+      # restart never ages out a genuinely live run. The dispatcher
+      # overrides this per-call from the live daemon config.
+      CLAIM_EXPIRY_SEC = 14_400
+
       # Treat `request` as expired if `created_at` is older than
       # `expiry_sec` relative to `now`. `created_at` is a Time; the
       # caller decides what to do with the result (log + remove).
@@ -352,6 +381,40 @@ module Hive
       def request_files(dir)
         Dir.glob(File.join(dir, "*.json")) +
           Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}"))
+      end
+
+      # C3: the set of request_ids that currently have a `.claimed` file
+      # in `dir`. `pending` uses this to hide a lingering `<id>.json`
+      # whose claim already landed (closing the claim-window
+      # double-dispatch hole). Malformed claim files are ignored here —
+      # `recover_claims` is responsible for removing them.
+      def claimed_request_ids(dir)
+        Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each_with_object([]) do |path, ids|
+          data = begin
+            JSON.parse(File.read(path))
+          rescue StandardError
+            next
+          end
+          ids << data["request_id"] if data.is_a?(Hash) && data["request_id"]
+        end
+      end
+
+      # C3: remove a leftover pending `<id>.json` for `request_id` (used
+      # by recover_claims after it removes the matching `.claimed`). Exact
+      # request_id match, mirroring `remove`.
+      def remove_pending_sibling(dir, request_id)
+        Dir.glob(File.join(dir, "*.json")).each do |path|
+          next unless path.include?(request_id.to_s)
+
+          data = begin
+            JSON.parse(File.read(path))
+          rescue StandardError
+            next
+          end
+          next unless data.is_a?(Hash) && data["request_id"] == request_id.to_s
+
+          File.unlink(path) if File.exist?(path)
+        end
       end
 
       # True when a claim's `claimed_at` is older than `expiry_sec`. A nil

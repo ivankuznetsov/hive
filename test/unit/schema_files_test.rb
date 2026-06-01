@@ -1319,6 +1319,21 @@ class SchemaFilesTest < Minitest::Test
                  "Request required-key drift in hive-daemon-queue.v1.json"
   end
 
+  def test_hive_daemon_queue_error_payload_validates
+    schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue")))
+    schemer = JSONSchemer.schema(schema)
+    error_envelope = {
+      "schema" => "hive-daemon-queue", "schema_version" => 1, "ok" => false,
+      "action" => "bogus", "error_kind" => "unknown_action",
+      "message" => "hive daemon queue: unknown action"
+    }
+    assert_empty schemer.validate(error_envelope).to_a,
+                 "error envelope must validate against the ErrorPayload arm"
+    # The error_kind enum is pinned to the producer's set.
+    assert_equal %w[internal missing_request_id unknown_action],
+                 schema.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+  end
+
   # ── hive-daemon-reload ─────────────────────────────────────────────────
 
   def test_hive_daemon_reload_schema_file_exists_and_is_valid_json

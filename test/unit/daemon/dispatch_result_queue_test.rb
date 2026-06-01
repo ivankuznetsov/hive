@@ -126,4 +126,42 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
       assert_empty errors, "written notice must conform to hive-dispatch-result.v1.json: #{errors.inspect}"
     end
   end
+
+  # ── #6: expiry + prune ────────────────────────────────────────────────
+
+  def test_expired_compares_against_now
+    notice = Q::Result.new(
+      result_id: "r", created_at: Time.utc(2026, 5, 28, 18, 0, 0), chat_id: 1,
+      update_id: nil, project: "p", slug: "s", request_id: "rq", exit_code: 1,
+      command: "hive review s", path: nil
+    )
+    later = Time.utc(2026, 5, 28, 19, 0, 1)
+    assert Q.expired?(notice, now: later, expiry_sec: 3600)
+    refute Q.expired?(notice, now: later, expiry_sec: 7200)
+  end
+
+  def test_expired_false_for_non_notice_or_missing_created_at
+    refute Q.expired?(Object.new)
+    no_time = Q::Result.new(result_id: "r", created_at: nil, chat_id: 1, update_id: nil,
+                            project: "p", slug: "s", request_id: "rq", exit_code: 1,
+                            command: "c", path: nil)
+    refute Q.expired?(no_time)
+  end
+
+  def test_prune_expired_removes_old_and_malformed_keeps_fresh
+    Dir.mktmpdir("hive-dispatch-result") do |dir|
+      old = Time.utc(2026, 5, 28, 17, 0, 0)
+      fresh = Time.utc(2026, 5, 28, 18, 59, 50)
+      Q.write!(chat_id: 1, project: "p", slug: "old", request_id: "r1", exit_code: 1,
+               command: "hive review old", state_home: dir, now: old)
+      Q.write!(chat_id: 1, project: "p", slug: "fresh", request_id: "r2", exit_code: 1,
+               command: "hive review fresh", state_home: dir, now: fresh)
+      File.write(File.join(Q.directory(state_home: dir), "20260528-bad.json"), "{not json")
+
+      removed = Q.prune_expired(state_home: dir, now: Time.utc(2026, 5, 28, 19, 0, 0))
+      assert_equal 2, removed, "expired + malformed removed"
+      remaining = Q.pending(state_home: dir)
+      assert_equal %w[fresh], remaining.map(&:slug)
+    end
+  end
 end

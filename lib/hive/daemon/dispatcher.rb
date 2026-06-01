@@ -171,6 +171,9 @@ module Hive
         # frees the slot via the controller.
         enforce_child_timeouts(now: now)
 
+        # 1d. Bound the dispatch-result notice dir (ADV-1 #6).
+        prune_dispatch_results(now: now)
+
         # 2. Fetch status
         result = @status_consumer.fetch
         unless result.ok
@@ -455,7 +458,12 @@ module Hive
                           elapsed_sec: (now - entry.started_at).to_i,
                           envelope_marker: entry.json_envelope&.dig("marker"),
                           envelope_ok: entry.json_envelope&.dig("ok"))
-            notify_dispatch_failure(entry, meta, now: now) unless entry.exit_code.to_i.zero?
+            # Treat any non-zero exit AS WELL AS a nil exit (the child was
+            # terminated by a signal — e.g. an R-02 timeout SIGKILL —
+            # whose Process::Status#exitstatus is nil) as a failure worth
+            # surfacing. `exit_code.to_i.zero?` would mask the nil case and
+            # silently swallow timeout kills (#4 from PR #244 ce-code-review).
+            notify_dispatch_failure(entry, meta, now: now) unless entry.exit_code == 0
           end
           @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
           if entry.exit_code == Hive::ExitCodes::CONFIG
@@ -1002,6 +1010,7 @@ module Hive
 
         Hive::Daemon::DispatchRequestQueue.recover_claims(
           state_home: dispatch_request_state_home, now: now, alive: alive,
+          expiry_sec: claim_expiry_sec,
           handler: ->(request_id:, reason:, path:) {
             @logger.event(:dispatch_request_recovered,
                           request_id: request_id, reason: reason, path: path)
@@ -1020,6 +1029,36 @@ module Hive
         false
       rescue Errno::EPERM
         true
+      end
+
+      # C3 (#5): age a claim out only after the child's full run budget
+      # could plausibly have elapsed — child_timeout_sec + kill grace + a
+      # couple of poll intervals + margin. EXPIRY_SEC (the unclaimed-
+      # request window, 600s) is far too short: it would drop a live
+      # ~90-min run's claim 10 minutes into a restart. When the timeout is
+      # disabled (child_timeout_sec=0, no bound) fall back to the queue's
+      # generous CLAIM_EXPIRY_SEC.
+      def claim_expiry_sec
+        timeout = @daemon_cfg.fetch("child_timeout_sec", 0).to_i
+        return Hive::Daemon::DispatchRequestQueue::CLAIM_EXPIRY_SEC unless timeout.positive?
+
+        grace = @daemon_cfg.fetch("child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC).to_i
+        timeout + grace + (@poll_interval_sec.to_i * 2) + 600
+      end
+
+      # ADV-1 (#6): drop stale dispatch-result notices each tick so a
+      # down/wedged bot can't let the dir grow without bound. The bot
+      # itself also skips+removes stale notices on drain; this is the
+      # daemon-side backstop for when no bot is consuming at all. Never
+      # crashes a tick.
+      def prune_dispatch_results(now:)
+        Hive::Daemon::DispatchResultQueue.prune_expired(
+          state_home: dispatch_request_state_home, now: now
+        )
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "prune_dispatch_results raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
       end
 
       # ADV-1: write a failure-notice file the bot will drain + relay to

@@ -3,11 +3,11 @@ title: CLI Surface
 type: api
 source: bin/hive, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-05-27
+updated: 2026-06-01
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. `hive tui` is the human-only dashboard over `hive status`; `hive daemon` auto-advances safe rows; `hive bot` runs the Telegram mobile surface for human-input gates. `status`, `run`, `approve`, `findings`, `markers`, `metrics`, daemon lifecycle/enrollment, and bot lifecycle support `--json` where documented. Process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. `hive tui` is the human-only dashboard over `hive status`; `hive daemon` auto-advances safe rows; `hive bot` runs the Telegram mobile surface for human-input gates. `status`, `run`, `approve`, `findings`, `markers`, `metrics`, daemon lifecycle/install/enrollment/queue, and bot lifecycle support `--json` where documented. Process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
@@ -54,7 +54,7 @@ tags: [cli, api]
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check) and `--json` (single `hive-init.v1` success document with resolved answers and project metadata; precondition failures keep the legacy stderr + exit-code contract).
-- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, the `daemon` subcommands (`status`, `stop`, `reload`, `enable`, `disable`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon lifecycle JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-enroll.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v1`; `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`.
+- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v1`; `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works (without the rewrite, Thor would consume `--help` as the next positional argument).
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
 
@@ -107,5 +107,5 @@ A few stage runners still call `warn`/`exit N` directly for non-bug user errors 
 ## Backlinks
 
 - [[architecture]]
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/bot]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/daemon]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/bot]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]

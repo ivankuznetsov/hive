@@ -3,7 +3,7 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-05-25
+updated: 2026-06-01
 tags: [index, wiki]
 ---
 
@@ -11,7 +11,7 @@ tags: [index, wiki]
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
 Page count: 68
-Updated: 2026-05-25
+Updated: 2026-06-01
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive.
 

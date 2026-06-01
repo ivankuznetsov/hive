@@ -16,23 +16,36 @@ configure_qmd_environment() {
   fi
 }
 
+configure_git_tool_environment() {
+  GIT_ENV_UNSET_ARGS=()
+  local name
+  while IFS= read -r name; do
+    [ -n "$name" ] && GIT_ENV_UNSET_ARGS+=("-u" "$name")
+  done < <(git rev-parse --local-env-vars 2>/dev/null || true)
+}
+
+run_without_git_env() {
+  env "${GIT_ENV_UNSET_ARGS[@]}" "$@"
+}
+
 configure_qmd_environment
+configure_git_tool_environment
 
 run_qmd() {
   command -v qmd >/dev/null 2>&1 || return 0
 
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" qmd "$@"
+    run_without_git_env timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" qmd "$@"
   else
-    qmd "$@"
+    run_without_git_env qmd "$@"
   fi
 }
 
 run_codex() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
+    run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
   else
-    codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
+    run_without_git_env codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
   fi
 }
 

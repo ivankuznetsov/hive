@@ -181,6 +181,9 @@ class InitTest < Minitest::Test
           assert_includes File.read(refresh_script), "Do not run qmd update or qmd embed yourself"
           assert_includes File.read(post_commit_script), "LLM_WIKI_CODEX_TIMEOUT"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_TIMEOUT"
+          assert_includes File.read(refresh_script), "git rev-parse --local-env-vars"
+          assert_includes File.read(post_commit_script), "git rev-parse --local-env-vars"
+          assert_includes File.read(post_commit_script), "run_without_git_env timeout"
           assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
           assert_includes File.read(post_commit_script), "Do not run qmd update or qmd embed yourself"
           refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
@@ -248,6 +251,71 @@ class InitTest < Minitest::Test
         assert_includes hook, "printf 'existing hook\\n'"
         assert_equal 1, hook.scan("# BEGIN LLM WIKI POST-COMMIT").length
         assert_equal 1, hook.scan("# END LLM WIKI POST-COMMIT").length
+      end
+    end
+  end
+
+  def test_init_places_managed_post_commit_hook_before_existing_terminal_exit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        hook_path = File.join(dir, ".git", "hooks", "post-commit")
+        File.write(hook_path, "#!/usr/bin/env bash\nprintf 'existing hook\n'\nexit 0\n")
+        File.chmod(0o755, hook_path)
+
+        Hive::LlmWikiBootstrap.install!(dir, scheduler: false)
+
+        hook = File.read(hook_path)
+        assert_includes hook, "printf 'existing hook\n'"
+        assert_equal 1, hook.scan("# BEGIN LLM WIKI POST-COMMIT").length
+        assert_equal 1, hook.scan("# END LLM WIKI POST-COMMIT").length
+        assert_operator hook.index("# BEGIN LLM WIKI POST-COMMIT"), :<, hook.rindex("exit 0")
+      end
+    end
+  end
+
+  def test_llm_wiki_post_commit_refresh_clears_git_hook_environment_for_nested_tools
+    with_tmp_home do
+      with_tmp_git_repo do |dir|
+        Hive::LlmWikiBootstrap.install!(dir, post_commit_hook: false, scheduler: false)
+
+        fake_bin = File.join(dir, "fake-bin")
+        FileUtils.mkdir_p(fake_bin)
+        %w[codex qmd].each do |tool|
+          tool_path = File.join(fake_bin, tool)
+          File.write(tool_path, <<~BASH)
+            #!/usr/bin/env bash
+            {
+              printf '#{tool}:GIT_INDEX_FILE=%s\n' "${GIT_INDEX_FILE-}"
+              printf '#{tool}:GIT_DIR=%s\n' "${GIT_DIR-}"
+              printf '#{tool}:GIT_WORK_TREE=%s\n' "${GIT_WORK_TREE-}"
+            } >> "${HIVE_TEST_HOOK_ENV_LOG:?}"
+          BASH
+          File.chmod(0o755, tool_path)
+        end
+
+        FileUtils.mkdir_p(File.join(dir, "docs"))
+        File.write(File.join(dir, "docs", "change.md"), "changed\n")
+        run!("git", "-C", dir, "add", "docs/change.md")
+        run!("git", "-C", dir, "commit", "-m", "docs", "--quiet")
+
+        log_path = File.join(dir, "hook-env.log")
+        with_env(
+          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
+          "HIVE_TEST_HOOK_ENV_LOG" => log_path,
+          "GIT_INDEX_FILE" => File.join(dir, "foreign.index"),
+          "GIT_DIR" => File.join(dir, ".git"),
+          "GIT_WORK_TREE" => dir
+        ) do
+          run!(File.join(dir, ".llm-wiki", "post-commit-refresh.sh"))
+        end
+
+        log = File.read(log_path)
+        assert_includes log, "codex:GIT_INDEX_FILE=\n"
+        assert_includes log, "qmd:GIT_INDEX_FILE=\n"
+        assert_includes log, "codex:GIT_DIR=\n"
+        assert_includes log, "qmd:GIT_DIR=\n"
+        refute_includes log, "foreign.index"
+        refute_includes log, dir
       end
     end
   end

@@ -19,7 +19,20 @@ module Hive
           fi
         }
 
+        configure_git_tool_environment() {
+          GIT_ENV_UNSET_ARGS=()
+          local name
+          while IFS= read -r name; do
+            [ -n "$name" ] && GIT_ENV_UNSET_ARGS+=("-u" "$name")
+          done < <(git rev-parse --local-env-vars 2>/dev/null || true)
+        }
+
+        run_without_git_env() {
+          env "${GIT_ENV_UNSET_ARGS[@]}" "$@"
+        }
+
         configure_qmd_environment
+        configure_git_tool_environment
 
         find_qmd() {
           if [ -n "${HIVE_QMD_BIN:-}" ] && [ -x "$HIVE_QMD_BIN" ]; then
@@ -68,9 +81,9 @@ module Hive
           qmd_bin="$(find_qmd)" || return 0
 
           if command -v timeout >/dev/null 2>&1; then
-            timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@" && return 0 || rc=$?
+            run_without_git_env timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@" && return 0 || rc=$?
           else
-            "$qmd_bin" "$@" && return 0 || rc=$?
+            run_without_git_env "$qmd_bin" "$@" && return 0 || rc=$?
           fi
 
           if [ "$rc" -eq 124 ]; then
@@ -93,9 +106,9 @@ module Hive
           #{QMD_BASH_HELPERS}
           run_codex() {
             if command -v timeout >/dev/null 2>&1; then
-              timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
+              run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
             else
-              codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
+              run_without_git_env codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
             fi
           }
 
@@ -160,9 +173,9 @@ module Hive
             local prompt="$1"
             ran_refresh=1
             if command -v timeout >/dev/null 2>&1; then
-              timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
+              run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
             else
-              codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
+              run_without_git_env codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
             fi
           }
 

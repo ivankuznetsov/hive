@@ -112,7 +112,7 @@ module Hive
         #{POST_COMMIT_END}
       BASH
       existing = File.exist?(hook_path) ? File.read(hook_path) : "#!/usr/bin/env bash\n"
-      write_file(hook_path, managed_content(existing, POST_COMMIT_BEGIN, POST_COMMIT_END, block))
+      write_file(hook_path, managed_hook_content(existing, block))
       File.chmod(File.stat(hook_path).mode | 0o111, hook_path)
     end
 
@@ -123,6 +123,18 @@ module Hive
     def replace_block(path, begin_marker, end_marker, block)
       existing = File.exist?(path) ? File.read(path) : ""
       write_file(path, managed_content(existing, begin_marker, end_marker, block))
+    end
+
+    def managed_hook_content(existing, block)
+      pattern = /#{Regexp.escape(POST_COMMIT_BEGIN)}.*?#{Regexp.escape(POST_COMMIT_END)}\n?/m
+      content = existing.sub(pattern, "")
+      content = "#{content.rstrip}\n" unless content.empty?
+
+      if content.match?(/(?:\A|\n)exit\s+0\s*(?:#.*)?\n?\z/)
+        return content.sub(/\n?exit\s+0\s*(?:#.*)?\n?\z/, "\n#{block}\nexit 0\n")
+      end
+
+      managed_content(content, POST_COMMIT_BEGIN, POST_COMMIT_END, block)
     end
 
     def managed_content(existing, begin_marker, end_marker, block)

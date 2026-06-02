@@ -2,6 +2,28 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-02T08:13Z] fix — post-review hardening of llm-wiki hook environment sanitization
+
+**Action:** Addressed 4 findings from `/ce-code-review` on PR #245 (managed_hook_content regex too narrow, bash-3.2 empty-array safety in run_without_git_env, thin env-var scrub coverage in tests, missing negative test for unwrapped codex/qmd calls):
+
+1. **Regex broadening**: `managed_hook_content` now detects any terminal `exit …` line (not just `exit 0`), preserving the original exit text. Early-return `exit 0` inside `if/then/fi` is documented as an unsupported pattern.
+2. **bash 3.2 safety**: `run_without_git_env` expands `GIT_ENV_UNSET_ARGS` via the null-safe `${arr[@]+"${arr[@]}"}` form in all three locations.
+3. **Test coverage**: env-leak integration test now iterates every name from `git rev-parse --local-env-vars` rather than asserting only `GIT_INDEX_FILE`/`GIT_DIR`/`GIT_WORK_TREE`.
+4. **Negative test**: new sweep asserts every `codex exec` line in the generated scripts is wrapped by `run_without_git_env`.
+
+**Tests added**: `test_init_places_managed_post_commit_hook_before_terminal_non_zero_exit` plus extensions to `test_llm_wiki_post_commit_refresh_clears_git_hook_environment_for_nested_tools` and the script-content assertion block.
+
+**Pages refreshed**: none (no public-surface changes).
+
+## [2026-06-01T18:31:39Z] fix — sanitize llm-wiki post-commit child Git environment
+
+**Action:** Hardened Hive's managed llm-wiki refresh scripts and active local post-commit hook after a Git hook `GIT_INDEX_FILE` leak let nested agent/plugin Git operations write marketplace index entries into a project worktree index. Generated refresh scripts now collect `git rev-parse --local-env-vars` and run Codex/QMD child processes through `env -u ...`; the runtime hook installer places the managed llm-wiki block before a preserved terminal `exit 0`; and the active Hive hook now delegates only to `.llm-wiki/post-commit-refresh.sh`.
+
+**Tests added:** Integration coverage verifies generated scripts contain Git-env sanitization, preserved hooks with terminal `exit 0` still execute the managed block, and fake Codex/QMD children launched by post-commit refresh do not receive `GIT_INDEX_FILE`, `GIT_DIR`, or `GIT_WORK_TREE`.
+
+**Pages refreshed:**
+- [[commands/init]] — documents sanitized nested Codex/QMD calls in generated llm-wiki scripts.
+
 ## [2026-05-28T23:30:00Z] fix — PR #241 ce-code-review fixups: schema file, argv+slug validation, security hardening, reliability
 
 **Action:** Addressed 14 findings from `/ce-code-review` on PR #241 across 10 reviewers (correctness, testing, maintainability, project-standards, agent-native, learnings, reliability, security, adversarial, api-contract, cli-readiness):

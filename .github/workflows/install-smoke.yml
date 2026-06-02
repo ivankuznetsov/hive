@@ -11,7 +11,7 @@ jobs:
     name: Shell checks
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: bash -n install.sh
       - run: bash -n packaging/verify-release.sh
       - name: Shellcheck
@@ -27,14 +27,14 @@ jobs:
     name: macOS dry run
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: bash install.sh --dry-run --version=v0.1.0
 
   arch-dry-run:
     name: Arch dry run
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: |
           docker run --rm -v "$PWD:/src" -w /src archlinux:latest \
             bash -lc 'pacman -Sy --noconfirm bash curl grep sed gawk coreutils jq && bash install.sh --dry-run --version=v0.1.0'
@@ -43,7 +43,7 @@ jobs:
     name: install.sh die paths (malformed inputs)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: rejects bogus HIVE_VERSION
         env:
           HIVE_VERSION: 'v0.1.0/../../evil'
@@ -70,7 +70,7 @@ jobs:
     # not yet cut. Skipped on PRs that change install.sh syntactically
     # but predate a published release.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -109,7 +109,7 @@ jobs:
     # install` shipped post-v0.1.0) and skips their assertions when
     # the released binary doesn't have them yet.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -139,7 +139,7 @@ jobs:
     name: install.sh fixture regressions
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -285,7 +285,7 @@ jobs:
     name: install.sh unsupported platform messages
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Alpine/musl exits tier-3
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:latest \

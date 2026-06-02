@@ -3,7 +3,7 @@ title: hive update
 type: command
 source: lib/hive/commands/update.rb, lib/hive/install_channel.rb
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-27
 tags: [command, install, update]
 ---
 
@@ -41,6 +41,10 @@ A missing marker means `dev`, the git-checkout fallback. Malformed markers fail 
 
 The bash channel deliberately downloads to a tempfile rather than piping remote script bytes into a shell. Helper preflight checks make missing `brew`, `curl`, `yay`, or `paru` errors actionable.
 
+## Nudge command (shared with the update flow)
+
+`Hive::Commands::Update.nudge_command(channel)` returns the canonical one-line update command per channel — `brew upgrade ivankuznetsov/hive/hive` for brew, and `hive update` for both `aur` and `bash` — and `nil` for `dev` (git clone has no single canonical command). The daemon-driven [[update-flow]] uses this string when it records a per-version nudge. The `aur` and `bash` channels nudge `hive update` rather than a raw package-manager command: `aur` because the real updater picks `yay` or `paru` at runtime (a hardcoded `yay …` would fail for paru-only users), and `bash` because in-place auto-update (U7) isn't built yet.
+
 ## Tests
 
 - `test/unit/commands/update_test.rb` covers channel selection, dry-run output, bash-prefix reuse, helper preflights, malformed marker handling, and AUR helper fallback.
@@ -48,4 +52,4 @@ The bash channel deliberately downloads to a tempfile rather than piping remote 
 
 ## Backlinks
 
-- [[cli]] · [[operating]] · [[modules/config]]
+- [[cli]] · [[operating]] · [[modules/config]] · [[update-flow]]

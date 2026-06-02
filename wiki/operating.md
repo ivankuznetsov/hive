@@ -36,8 +36,9 @@ signed with cosign keyless attestation. All channels download the same `.gem`,
 verify the signature, run `gem install` against it, and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
 Runtime deps (bubbletea, lipgloss, thor, telegram-bot-ruby) come from
-rubygems.org with precompiled platform binaries — no native build chain on
-the user's machine.
+rubygems.org with precompiled platform binaries. The managed llm-wiki indexer,
+QMD, is installed separately through npm into Hive's data prefix when npm is
+available; Hive does not auto-install Node.js/npm itself.
 
 | Tier | Platforms | Status |
 |------|-----------|--------|
@@ -70,12 +71,16 @@ bash "$tmpdir/hive-install.sh"
 | `--version=<tag>` (or `HIVE_VERSION=<tag>`) | Skip the GitHub API call and install a specific `vX.Y.Z` tag. |
 | `HIVE_REPO_OWNER` / `HIVE_REPO_NAME` | Override the upstream owner/repo (for forks or mirror staging). Inputs are shape-validated. |
 | `HIVE_BIN_OVERRIDE` (read by `hv` wrapper) | Point `hv` at a custom install path when Apache Hive shadows it. |
+| `HIVE_INSTALL_QMD=0` | Skip the managed QMD install step. Use only when npm is unavailable or a host policy forbids npm package installs. |
+| `HIVE_QMD_NPM_PACKAGE` | Override the npm package spec used for QMD install; defaults to `@tobilu/qmd`. |
+| `HIVE_QMD_BIN` | Runtime override read by generated wiki scripts and `hive doctor`; points at an executable `qmd` when PATH or the managed install path is not enough. |
 
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
-verifies `hive --version`, runs `hive daemon install --json` so the per-user
-daemon service is installed/enabled by default, offers `hive init`, and treats
-the skills package as optional marketplace content.
+installs or repairs the QMD wiki indexer when npm is available, verifies
+`hive --version`, runs `hive daemon install --json` so the per-user daemon
+service is installed/enabled by default, offers `hive init`, and treats the
+skills package as optional marketplace content.
 
 Fresh installs use XDG locations:
 

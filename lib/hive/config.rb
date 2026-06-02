@@ -263,6 +263,15 @@ module Hive
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
+      # Update flow (plan 2026-05-27-002). The daemon checks the latest
+      # release on a throttled cadence and, on the install.sh channel,
+      # auto-updates when idle; brew/AUR get a nudge. Both knobs default
+      # ON during the dev period — `check: false` disables the probe
+      # entirely; `auto: false` keeps checks/nudges but never self-updates.
+      "update" => {
+        "check" => true,
+        "auto" => true
+      },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
       # from the global config via load_global_bot. The token lives
@@ -288,6 +297,18 @@ module Hive
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5,
         "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"
+      },
+      # Stage-level invariants enforced by `Hive::Stages::Base.with_stage_events`.
+      # `ensure_clean_on_exit` (default true) makes worktree-owning stages
+      # — `4-execute`, `6-review`, `8-finalize` — fail loudly when they
+      # leave residue at stage exit. Residue that passes
+      # `review.fix.auto_commit.scope_check` is auto-committed as
+      # `chore(<stage>): commit residual worktree changes`; out-of-scope
+      # residue surfaces as `:error reason=ensure_clean_on_exit_failed`.
+      # Set to `false` to opt the entire invariant out (not recommended
+      # outside legacy projects).
+      "stages" => {
+        "ensure_clean_on_exit" => true
       },
       # Auto-rebase pre-step for `hive run` (plan
       # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).
@@ -660,6 +681,38 @@ module Hive
       # cfg["daemon"].
       validate_daemon!({ "daemon" => merged }, path)
       merged
+    end
+
+    # Load the global `update` block (auto/check) from the XDG config
+    # path, merged over DEFAULTS["update"]. Used by `hive daemon start`
+    # so an operator's opt-out actually takes effect at runtime. Returns
+    # the bare defaults when no global config exists.
+    def load_global_update
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["update"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "update in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["update"]), override)
+      validate_update!(merged, path)
+      merged
+    end
+
+    def validate_update!(merged, path)
+      %w[check auto].each do |key|
+        value = merged[key]
+        next if [ true, false ].include?(value)
+
+        raise ConfigError,
+              "update.#{key} in #{describe_source(path)} must be true or false; got #{value.inspect}"
+      end
     end
 
     # Load and validate the global `bot` block from the XDG config path.

@@ -38,6 +38,7 @@ require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
 require "hive/tui/views/token_stats"
 require "hive/tui/views/usage_footer"
+require "hive/update_check/state"
 
 module Hive
   module Tui
@@ -108,11 +109,19 @@ module Hive
       def initialize(
         hive_model: Hive::Tui::Model.initial,
         dispatch: ->(_msg) { },
-        clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) }
+        clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) },
+        update_state: nil
       )
         @hive_model = hive_model
         @dispatch = dispatch
         @clipboard_probe = clipboard_probe
+        # Shared update-check state (written by the daemon). Read on a short
+        # TTL so the footer reflects a new nudge without re-reading the file
+        # on every render frame. Lazily constructed so tests and non-daemon
+        # sessions pay nothing until the footer asks.
+        @update_state = update_state
+        @update_nudge_cache = nil
+        @update_nudge_checked_at = nil
         # `@healed_folders` is touched from the main runner thread
         # (`auto_heal_kill_class_errors` registers folders before
         # spawning heals) AND from heal Threads (which refresh the
@@ -833,6 +842,10 @@ module Hive
       end
 
       def red_status_autofix(row)
+        if manual_only_red_status_recovery?(row)
+          return [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ]
+        end
+
         if row.action_key.to_s == "error" && row.marker.to_s != "error"
           return dispatch_diagnostic_retry(row)
         end
@@ -845,6 +858,18 @@ module Hive
         else
           [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ]
         end
+      end
+
+      def manual_only_red_status_recovery?(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        marker = row.marker.to_s.downcase
+
+        if marker == "review_error"
+          return attrs["phase"] == "fix" &&
+            %w[fix_status_check_failed fix_tampered].include?(attrs["reason"].to_s)
+        end
+
+        marker == "error" && %w[dirty_worktree ensure_clean_on_exit_failed].include?(attrs["reason"].to_s)
       end
 
       # Wrap red_status_autofix so the detail screen closes after the
@@ -3202,9 +3227,40 @@ module Hive
           end
 
           line = "#{footer_hint} · #{Views::UsageFooter.text(aggregate)}"
+          nudge = update_nudge
+          # Prepend so truncation trims the hint tail, not the higher-priority
+          # "you're behind" notice.
+          line = "#{update_nudge_label(nudge)} · #{line}" if nudge
           line = Views::Format.truncate(line, usable_width) if usable_width
           Hive::Tui::Styles::HINT.render(line)
         end
+      end
+
+      UPDATE_NUDGE_TTL_SEC = 10
+
+      def update_nudge_label(nudge)
+        "update #{nudge.latest}: #{nudge.command}"
+      end
+
+      # Read the daemon-written nudge at most once per TTL window. Any error
+      # (missing/corrupt state) degrades to "no nudge" so the footer never
+      # breaks.
+      def update_nudge
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        if @update_nudge_checked_at && (now - @update_nudge_checked_at) < UPDATE_NUDGE_TTL_SEC
+          return @update_nudge_cache
+        end
+
+        @update_nudge_checked_at = now
+        @update_nudge_cache = update_check_state&.nudge
+      rescue StandardError
+        @update_nudge_cache = nil
+      end
+
+      def update_check_state
+        @update_state ||= Hive::UpdateCheck::State.new
+      rescue StandardError
+        nil
       end
 
       def usage_footer_line(usable_width = nil)

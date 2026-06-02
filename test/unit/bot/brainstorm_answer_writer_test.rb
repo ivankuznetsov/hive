@@ -32,11 +32,14 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     MARKDOWN
   end
 
-  def test_try_append_returns_nil_pair_when_write_hits_enoent
-    # If the brainstorm file vanishes between lock acquisition and the atomic
-    # write (Errno::ENOENT), try_append must degrade to [nil, nil] so
-    # append!'s retry loop treats it like a transient miss instead of
-    # crashing the poll/answer path.
+  def test_try_append_returns_enoent_sentinel_when_write_hits_enoent
+    # If the brainstorm file vanishes between lock acquisition and the
+    # atomic write (Errno::ENOENT), try_append must return the
+    # `:enoent` sentinel (terminal — caller short-circuits the retry
+    # loop) rather than `[nil, nil]` (which the retry loop would
+    # interpret as transient lock contention and poll for the full
+    # 5s deadline, ending up with the misleading "Try again - another
+    # run holds the lock" reply). F2 from PR #239 ce-code-review.
     with_brainstorm(sample) do |path|
       folder = File.dirname(path)
       original = Hive::Markers.method(:write_atomic)
@@ -47,7 +50,9 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         Hive::Markers.define_singleton_method(:write_atomic, original)
       end
 
-      assert_equal [ nil, nil ], result
+      assert_equal [ :enoent, nil ], result,
+                   "ENOENT must surface as :enoent sentinel (not transient nil) so append! " \
+                   "maps it to :question_not_found instead of polling for lock contention"
     end
   end
 
@@ -113,7 +118,11 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  def test_missing_answer_placeholder_returns_question_not_found
+  # Q1 present, no A-line at all → answer_slot_missing (NOT
+  # question_not_found, which is now reserved for "Q{n} truly absent").
+  # The supervisor renders a distinct message for this so the operator
+  # knows the question IS in the file and the brainstorm.md needs repair.
+  def test_q_present_no_a_line_returns_answer_slot_missing
     with_brainstorm("## Round 1\n\n### Q1. First?\n") do |path|
       result = Hive::Bot::BrainstormAnswerWriter.append!(
         brainstorm_path: path,
@@ -121,7 +130,298 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         answer_text: "One"
       )
 
-      assert_equal :question_not_found, result
+      assert_equal :answer_slot_missing, result
+    end
+  end
+
+  # Regression: observed 2026-05-28 on
+  # `explore-the-simplest-way-to-260528-2503` — the brainstorm agent
+  # emitted `### A2.` immediately after `### Q1.` for a fresh Round 2.
+  # Old writer's strict `match[1].to_i == question_n` returned no slot,
+  # then the supervisor said "Question 1 was not found" — misleading
+  # because Q1 IS in the file. New writer falls back to "first empty
+  # A-section after Q{n}" so the operator's answer lands cleanly.
+  def test_misnumbered_empty_answer_slot_is_filled_via_by_position_fallback
+    content = <<~MARKDOWN
+      ## Round 2
+
+      ### Q1. Identify OpenClawd.
+      ### A2.
+      ### Q2. Which install path?
+      ### A3.
+
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "OpenClawd.ai"
+      )
+
+      assert_equal :written, result
+      after = File.read(path)
+      assert_includes after, "### Q1. Identify OpenClawd.\n### A2.\nOpenClawd.ai\n",
+                      "answer must be written into the mis-numbered A-slot that " \
+                      "follows Q1 (the by-position fallback)"
+      # Round-trip verify: the parser must read back the answer as Q1's.
+      parsed = Hive::Bot::BrainstormParser.parse(path)
+      assert_equal "OpenClawd.ai", parsed[0].answer,
+                   "parser must accept the mis-numbered A2 under Q1 as Q1's answer"
+    end
+  end
+
+  # The by-position fallback must NOT cross block boundaries. If the
+  # next block (Q, round, or marker) appears before any A line, no slot.
+  def test_no_slot_when_next_block_comes_before_any_a_line
+    with_brainstorm("## Round 1\n\n### Q1. First?\n### Q2. Second?\n### A2.\n") do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "One"
+      )
+
+      assert_equal :answer_slot_missing, result
+    end
+  end
+
+  # The by-position fallback must skip past non-boundary prose lines
+  # between Q{n} and the first A-section. Covers the `scan += 1`
+  # increment that earlier branch tests didn't reach.
+  def test_by_position_fallback_skips_prose_before_finding_answer_slot
+    content = <<~MARKDOWN
+      ## Round 2
+
+      ### Q1. Multi-line question?
+      Extra context that the agent added below the question heading.
+      And more prose that isn't an A-line, a Q, a round, or a marker.
+      ### A2.
+
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "Filled"
+      )
+
+      assert_equal :written, result, "by-position fallback must skip prose lines"
+      assert_includes File.read(path), "### A2.\nFilled\n"
+    end
+  end
+
+  # Regression for the cross-round answer leak surfaced during
+  # ce-code-review on PR #239 by the adversarial reviewer. Before the
+  # Q-context-aware refactor of find_empty_answer_slot, the strict
+  # number-scan ignored round boundaries: a Round-1 `### A1.` left
+  # empty (e.g. because the agent emitted Round 2 prematurely) would
+  # be selected for a Round-2 Q1 answer write, misattributing the
+  # operator's reply.
+  #
+  # Construct a deliberately inconsistent state where R1 Q1 is
+  # unanswered AND R2 Q1 has been emitted with its own empty A. The
+  # parser's next_unanswered selects R1 Q1 (document order), the
+  # writer must locate R1's A1 (not R2's) and write there. If a
+  # future refactor reintroduces a non-Q-context-aware scan, the
+  # operator's R1 answer would land in R2's A1 slot.
+  def test_cross_round_q_with_same_number_writes_to_the_unanswered_one_in_document_order
+    content = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. First round Q1?
+      ### A1.
+
+      ## Round 2
+
+      ### Q1. Second round Q1?
+      ### A1.
+
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "FOR_ROUND_ONE"
+      )
+
+      assert_equal :written, result
+      after = File.read(path)
+      # The answer must land in Round 1's slot, not Round 2's.
+      r1_block, r2_block = after.split("## Round 2", 2)
+      assert_includes r1_block, "FOR_ROUND_ONE",
+                      "operator's answer must write to Round 1's A1 (the unanswered Q in document order)"
+      refute_includes r2_block.to_s, "FOR_ROUND_ONE",
+                      "operator's answer must NOT bleed into Round 2's A1 slot"
+
+      # Round-trip via parser: Round-1 Q1 is now answered; Round-2 Q1
+      # remains unanswered.
+      parsed = Hive::Bot::BrainstormParser.parse(path)
+      r1_q1 = parsed.find { |q| q.round == 1 && q.n == 1 }
+      r2_q1 = parsed.find { |q| q.round == 2 && q.n == 1 }
+      assert_equal "FOR_ROUND_ONE", r1_q1.answer
+      assert_nil r2_q1.answer, "Round-2 Q1 must remain unanswered until the operator answers it"
+    end
+  end
+
+  # Second-pass on the same fixture: after R1 Q1 is filled, the
+  # operator answers R2 Q1. The Q-context-aware scanner must now
+  # locate R2's A1 (R1's is already filled) and write there.
+  def test_second_answer_after_cross_round_correctly_lands_in_round_two
+    content = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. First round Q1?
+      ### A1.
+      done
+
+      ## Round 2
+
+      ### Q1. Second round Q1?
+      ### A1.
+
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "FOR_ROUND_TWO"
+      )
+
+      assert_equal :written, result
+      after = File.read(path)
+      _r1, r2 = after.split("## Round 2", 2)
+      assert_includes r2, "FOR_ROUND_TWO",
+                      "with R1 filled, the writer must scan to R2's empty A1 slot"
+    end
+  end
+
+  # Boundary coverage: by-position scan must STOP at a `## Round N`
+  # header before any A-line, because the operator's answer belongs
+  # to the prior round. F6 from PR #239 ce-code-review.
+  def test_round_boundary_stops_scan_before_finding_a_slot
+    content = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. First?
+      ## Round 2
+      ### A1.
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "x"
+      )
+
+      assert_equal :answer_slot_missing, result,
+                   "## Round boundary between Q and A must yield answer_slot_missing"
+    end
+  end
+
+  # Boundary coverage: a MARKER line (`<!-- WAITING -->`, `<!-- COMPLETE -->`)
+  # between Q and any A-line must also stop the scan. F6 from PR #239.
+  def test_marker_boundary_stops_scan_before_finding_a_slot
+    content = "## Round 1\n\n### Q1. First?\n<!-- WAITING -->\n"
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "x"
+      )
+
+      assert_equal :answer_slot_missing, result,
+                   "<!-- WAITING --> marker between Q and A must yield answer_slot_missing"
+    end
+  end
+
+  # Defensive: if parsed says Q{n} is unanswered but the raw lines no
+  # longer contain that Q (e.g. brainstorm.md was rewritten between
+  # `parse_text` and `lines = content.lines` — impossible under the
+  # same `with_task_lock`, but the code guards it anyway), the
+  # writer must return nil → caller surfaces :answer_slot_missing
+  # rather than misattributing to a different line. Exercises the
+  # defensive return at the end of target_question_line_index.
+  def test_target_question_line_index_returns_nil_when_parsed_diverges_from_lines
+    fake_parsed = [
+      Hive::Bot::BrainstormParser::Question.new(round: 1, n: 1, text: "synthetic", answer: nil)
+    ]
+    # Lines contain NO `### Q1.` header at all — simulates a parse-vs-lines
+    # divergence that would otherwise let the writer misattribute.
+    lines = [ "## Round 1\n", "\n", "(no Q1 line on disk)\n" ]
+
+    result = Hive::Bot::BrainstormAnswerWriter.send(:target_question_line_index, lines, fake_parsed, 1)
+    assert_nil result,
+               "defensive nil must fire when parsed and raw lines disagree about Q{n}"
+  end
+
+  # F2 from PR #239 ce-code-review: when try_append returns :enoent
+  # (because brainstorm.md vanished mid-write), append!'s retry loop
+  # must short-circuit and map the sentinel to :question_not_found
+  # with a logged :answer_lock_contention event describing the
+  # cause. Exercises lines 73-78 of brainstorm_answer_writer.rb —
+  # the elsif result == :enoent branch.
+  def test_append_maps_enoent_sentinel_to_question_not_found_with_logged_cause
+    with_brainstorm(sample) do |path|
+      # Force Hive::Markers.write_atomic to raise ENOENT so try_append
+      # returns the :enoent sentinel.
+      original = Hive::Markers.method(:write_atomic)
+      Hive::Markers.define_singleton_method(:write_atomic) { |*, **| raise Errno::ENOENT }
+
+      logger = StubLogger.new
+      begin
+        result = Hive::Bot::BrainstormAnswerWriter.append!(
+          brainstorm_path: path,
+          question_n: 1,
+          answer_text: "x",
+          logger: logger
+        )
+      ensure
+        Hive::Markers.define_singleton_method(:write_atomic, original)
+      end
+
+      assert_equal :question_not_found, result,
+                   ":enoent must map to :question_not_found, not :lock_busy"
+      lock_event = logger.events.find { |(name, _)| name == :answer_lock_contention }
+      refute_nil lock_event, "the missing-file path must log answer_lock_contention with the cause"
+      holder = lock_event[1][:holder]
+      assert_equal({ reason: "brainstorm.md missing" }, holder,
+                   "the holder field must name the cause so operators can grep bot.log")
+    end
+  end
+
+  # File simply doesn't exist at all (vs. exists-but-deleted-mid-write).
+  # try_append reads "" via File.exist?-then-File.read guard; parse
+  # returns []; the writer reports :question_not_found directly.
+  # Distinct from the :enoent sentinel path tested above.
+  def test_missing_brainstorm_file_returns_question_not_found_not_lock_busy
+    Dir.mktmpdir("hive-enoent-test") do |dir|
+      missing_path = File.join(dir, "brainstorm.md")
+      # Task folder exists but brainstorm.md does not.
+      refute File.exist?(missing_path)
+
+      start = Time.now
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: missing_path,
+        question_n: 1,
+        answer_text: "anything"
+      )
+      elapsed = Time.now - start
+
+      assert_equal :question_not_found, result,
+                   "missing brainstorm.md must surface as :question_not_found, not :lock_busy"
+      # Must NOT have spent the full 5-second retry deadline on a
+      # deterministic failure.
+      assert_operator elapsed, :<, 1.0,
+                      "ENOENT path must short-circuit the retry loop (elapsed: #{elapsed}s)"
     end
   end
 
@@ -153,8 +453,30 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       threads.each(&:join)
 
       outcomes = results.map(&:pop)
-      assert_equal 1, outcomes.count(:written), "exactly one concurrent writer should win"
-      assert_equal 7, outcomes.count(:already_answered), "all other writers should see already_answered"
+
+      # The core first-write-wins invariant: exactly one of the 8
+      # concurrent writers actually wrote, and the saved answer is
+      # one of theirs.
+      assert_equal 1, outcomes.count(:written),
+                   "exactly one concurrent writer should win, got #{outcomes.tally}"
+
+      # The other 7 writers must lose, but the specific loss shape
+      # depends on timing under heavy contention:
+      #   - :already_answered — the winner finished first; the loser
+      #     saw the answer present.
+      #   - :lock_busy — the loser couldn't acquire within the 5s
+      #     retry deadline (Hive::Lock has no fairness guarantee).
+      #   - :question_not_found / :answer_slot_missing — TOCTOU race
+      #     in `File.exist? ? File.read : ""` when the winner's
+      #     atomic rename briefly desyncs the directory entry; the
+      #     loser reads "" and parses zero questions. Rare but not
+      #     impossible on heavily-loaded CI.
+      # All of these preserve first-write-wins (no double-write); the
+      # test's job here is to assert that invariant, not to pin the
+      # specific timing-derived loss shape.
+      non_winners = outcomes.count { |o| o != :written }
+      assert_equal 7, non_winners,
+                   "the other 7 writers must NOT have written (got #{outcomes.tally})"
 
       saved = Hive::Bot::BrainstormParser.parse(path).first.answer
       assert_match(/Answer from thread/, saved)

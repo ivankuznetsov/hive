@@ -1,0 +1,44 @@
+name: update_flow_pipeline
+description: >
+  Full pipeline (behind): a real `hive daemon` probes a controlled "latest"
+  release via the local stub, detects it is behind, writes update_check.json,
+  and the nudge surfaces in `hive daemon status --json` and the TUI footer.
+tags: [update, daemon]
+steps:
+  # Force the brew install channel so the nudge command is the real brew string.
+  - kind: write_file
+    path: "{run_home}/install-channel"
+    content: "brew\n"
+
+  # Local stub serves a version far above the running one → guaranteed "behind".
+  - kind: start_releases_stub
+    tag: "v999.0.0"
+
+  # Start the real daemon attached; the stub URL is auto-injected as
+  # HIVE_RELEASES_API_URL. Disable ADR-031 self-re-exec for a stable test.
+  - kind: spawn_background
+    id: daemon
+    args: [daemon, start]
+    env:
+      HIVE_DAEMON_NO_AUTO_REEXEC: "1"
+
+  # The update check runs on the first tick; wait for the nudge to land.
+  - kind: state_assert
+    path: "{run_home}/update_check.json"
+    match: '"latest": "999\.0\.0"'
+    timeout: 30
+
+  # --json surface: agents can see the available update + current version.
+  - kind: json_assert
+    args: [daemon, status, --json]
+    schema: hive-daemon-status
+    pick: [update_nudge, latest]
+    equals: "999.0.0"
+  - kind: json_assert
+    args: [daemon, status, --json]
+    schema: hive-daemon-status
+    pick: [update_nudge, command]
+    equals: "brew upgrade ivankuznetsov/hive/hive"
+
+  - kind: stop_process
+    id: daemon

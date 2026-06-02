@@ -228,7 +228,14 @@ module Hive
       def parse_match_attr(match_attr)
         return [ nil, nil ] if match_attr.nil? || match_attr.to_s.empty?
 
-        key, value = match_attr.to_s.split("=", 2)
+        # `Hive::Markers.error_recovery_match_attr` may encode multiple
+        # `key=value` pairs comma-separated (e.g.
+        # `marker_id=abc,reason=ensure_clean_on_exit_failed`). Only the
+        # first token is used as the alert-store invalidation guard;
+        # the canonical token is the leading one, which is `marker_id`
+        # when present (race-safe), or `reason` otherwise.
+        first_pair = match_attr.to_s.split(",", 2).first
+        key, value = first_pair.to_s.split("=", 2)
         return [ nil, nil ] if key.to_s.empty? || value.nil?
 
         [ key.to_s, value.to_s ]

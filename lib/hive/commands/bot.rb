@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/bot/supervisor"
 require "hive/bot/logger"
 require "hive/paths"
+require "hive/update_check/state"
 
 module Hive
   module Commands
@@ -82,7 +83,11 @@ module Hive
         supervisor = Hive::Bot::Supervisor.new(
           config: bot_config,
           token: Hive::Config.telegram_bot_token!,
-          dry_run: @dry_run
+          dry_run: @dry_run,
+          # Same shared state file the daemon writes — makes the cross-process
+          # contract visible at the call site (Supervisor would default to this
+          # anyway).
+          update_state: Hive::UpdateCheck::State.new
         )
         supervisor.run_forever
       ensure

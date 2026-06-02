@@ -13,6 +13,7 @@ module Hive
       error
       round_waiting
       round_complete
+      clean_exit_auto_committed
     ].freeze
 
     STATUS_TAIL_LINES = 20

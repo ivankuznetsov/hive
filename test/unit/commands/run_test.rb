@@ -145,6 +145,45 @@ class CommandsRunTest < Minitest::Test
     assert_equal({ "kind" => Hive::Schemas::NextActionKind::NO_OP }, unknown)
   end
 
+  # CleanExit's `:error reason=ensure_clean_on_exit_failed` used to
+  # fall through the bare NO_OP branch, stranding agents. Now it
+  # surfaces an EDIT envelope keyed on the worktree root, with the
+  # parsed `residue_paths` array and the copy-paste recovery
+  # command. Other `:error` reasons keep the NO_OP shape so the new
+  # branch is narrowly scoped.
+  def test_json_next_action_surfaces_residue_paths_for_ensure_clean_on_exit_failed
+    run = command
+    t = task(folder: "/tmp/hive-task", stage_name: "finalize", stage_index: 8)
+
+    clean_exit_failure = run.send(
+      :json_next_action,
+      t,
+      marker(:error,
+             "reason" => "ensure_clean_on_exit_failed",
+             "residue_paths" => "wiki/notes.md, lib/foo.rb",
+             "marker_id" => "abc123")
+    )
+    other_error = run.send(
+      :json_next_action,
+      t,
+      marker(:error, "reason" => "git_status_failed", "marker_id" => "abc123")
+    )
+
+    assert_equal Hive::Schemas::NextActionKind::EDIT, clean_exit_failure.fetch("kind")
+    assert_equal "/tmp/worktree", clean_exit_failure.fetch("target")
+    assert_equal "ensure_clean_on_exit_failed", clean_exit_failure.fetch("reason")
+    assert_equal [ "wiki/notes.md", "lib/foo.rb" ], clean_exit_failure.fetch("residue_paths")
+    assert_equal [ "error" ], clean_exit_failure.fetch("markers_to_clear")
+    assert_match(/commit or discard/, clean_exit_failure.fetch("instructions"))
+    assert_match(/reason=ensure_clean_on_exit_failed/, clean_exit_failure.fetch("instructions"))
+    assert clean_exit_failure.key?("rerun_with"),
+           "ensure_clean_on_exit_failed must include rerun_with so agents have a copy-paste verb"
+
+    # Other :error reasons keep the generic NO_OP shape.
+    assert_equal Hive::Schemas::NextActionKind::NO_OP, other_error.fetch("kind")
+    assert_equal({ "reason" => "git_status_failed", "marker_id" => "abc123" }, other_error.fetch("error"))
+  end
+
   def test_report_text_covers_manual_and_stale_guidance
     run = command
     t = task

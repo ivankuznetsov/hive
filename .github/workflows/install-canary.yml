@@ -1,0 +1,41 @@
+name: Install canary
+
+# Weekly real-install of the latest release across all channels/OSes, to catch
+# environmental drift (rubygems platform gems, Ruby bumps, Homebrew/Arch base
+# changes) even when no new release is cut. A failure opens/updates the
+# install-failure issue (via install-verify.yml's report job).
+
+on:
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-latest:
+    name: Resolve latest release
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.latest.outputs.version }}
+    steps:
+      - name: Find latest published release tag
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')"
+          [[ -n "$version" ]] || { echo "no published release found" >&2; exit 1; }
+          echo "verifying latest release: ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve-latest
+    uses: ./.github/workflows/install-verify.yml
+    with:
+      version: ${{ needs.resolve-latest.outputs.version }}
+    permissions:
+      contents: read
+      issues: write

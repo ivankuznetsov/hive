@@ -197,6 +197,19 @@ module Hive
       # manual_only? below.
       ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
 
+      # Review fix-phase reasons whose recovery requires a human. A retry
+      # would only clear REVIEW_ERROR and re-enter the same unsafe state.
+      REVIEW_ERROR_MANUAL_ONLY_REASONS = %w[fix_status_check_failed fix_tampered].freeze
+
+      # Error-marker reasons whose recovery requires a human (the runner
+      # can't auto-clear them via the standard markers-clear + retry-verb
+      # loop). `dirty_worktree` is the legacy finalize reason — kept
+      # listed so any in-flight error files still get the right routing.
+      # `ensure_clean_on_exit_failed` is the new
+      # `stages.ensure_clean_on_exit` plan reason: residue out of scope,
+      # or the auto-commit itself failed (sign-policy / git error).
+      ERROR_MANUAL_ONLY_REASONS = %w[dirty_worktree ensure_clean_on_exit_failed].freeze
+
       # Single source of truth for "this state has no auto-recovery".
       # Pass attrs: nil from callers that only have the marker name
       # (e.g. callback handlers); pass row.attrs from in-process checks
@@ -207,7 +220,27 @@ module Hive
         return false if attrs.nil?
 
         attrs = attrs.to_h.transform_keys(&:to_s)
-        marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
+        return true if marker == "review_error" && attrs["phase"] == "fix" && REVIEW_ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
+        return true if marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
+
+        false
+      end
+
+      # Returns the operator-facing reply text for a manual-only state.
+      # The default ("open it on a laptop") covers `execute_stale` and
+      # the rare attrs-gated review_error/fix_tampered case; dirty-
+      # worktree variants get a more actionable hint that names the
+      # right repair step.
+      def manual_only_reply(marker:, attrs: nil)
+        marker = marker.to_s.downcase
+        attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
+        if marker == "review_error" && attrs["reason"].to_s == "fix_status_check_failed"
+          "Hive can't auto-recover a worktree whose Git status cannot be read. Open the worktree, repair Git state, then rerun review."
+        elsif marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
+          "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
+        else
+          "Hive has no automatic recovery for this state - open it on a laptop."
+        end
       end
 
       def manual_only_recovery?(row)

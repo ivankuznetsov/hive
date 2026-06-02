@@ -18,6 +18,7 @@ module Hive
     class ChildSupervisor
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
                              :state_file_path, :started_at, :finished_at, :json_envelope,
+                             :request_id,
                              keyword_init: true)
 
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
@@ -45,7 +46,8 @@ module Hive
       # ConcurrencyController bookkeeping stays consistent across both
       # modes.
       def spawn(command_string:, project:, slug:, stage:,
-                hive_state_path: nil, state_file_path: nil, dry_run: nil)
+                hive_state_path: nil, state_file_path: nil, dry_run: nil,
+                request_id: nil)
         effective_dry_run = dry_run.nil? ? @dry_run : dry_run
 
         argv = parse_command(command_string)
@@ -63,7 +65,8 @@ module Hive
           @running[next_dry_pid] = {
             project: project, slug: slug, stage: stage,
             command: command_string, state_file_path: state_file_path,
-            started_at: Time.now, log_path: nil, dry_run: true
+            started_at: Time.now, log_path: nil, dry_run: true,
+            request_id: request_id
           }
           return @running.keys.last
         end
@@ -85,7 +88,8 @@ module Hive
         @running[pid] = {
           project: project, slug: slug, stage: stage,
           command: command_string, state_file_path: state_file_path,
-          started_at: Time.now, log_path: log_path, dry_run: false
+          started_at: Time.now, log_path: log_path, dry_run: false,
+          request_id: request_id
         }
         pid
       end
@@ -113,7 +117,8 @@ module Hive
             pid: pid, exit_code: status.exitstatus,
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
             command: entry[:command], state_file_path: entry[:state_file_path],
-            started_at: entry[:started_at], finished_at: now, json_envelope: envelope
+            started_at: entry[:started_at], finished_at: now, json_envelope: envelope,
+            request_id: entry[:request_id]
           )
         end
         completed
@@ -131,7 +136,8 @@ module Hive
             pid: pid, exit_code: 0,
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
             command: entry[:command], state_file_path: entry[:state_file_path],
-            started_at: entry[:started_at], finished_at: now, json_envelope: nil
+            started_at: entry[:started_at], finished_at: now, json_envelope: nil,
+            request_id: entry[:request_id]
           )
         end
         completed.each { |c| @running.delete(c.pid) }

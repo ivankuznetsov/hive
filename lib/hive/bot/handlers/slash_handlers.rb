@@ -83,6 +83,7 @@ module Hive
           conversation_store.clear(chat_id: update.chat_id, slug: state.slug)
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "run", state.slug, "--json" ],
+                            project: state.respond_to?(:project) ? state.project : nil,
                             slug: state.slug)
         end
 

@@ -35,10 +35,19 @@ module Hive
 
       attr_reader :max_concurrent_runs, :max_concurrent_per_project, :max_runs_per_day_per_project
 
-      def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:)
+      def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
+                     dispatch_state: nil)
         @max_concurrent_runs = max_concurrent_runs
         @max_concurrent_per_project = max_concurrent_per_project
         @max_runs_per_day_per_project = max_runs_per_day_per_project
+        # Optional Hive::Daemon::DispatchBaselines store. When present, the
+        # `[project, slug] => mtime` baseline map survives daemon restarts so
+        # an already-answered needs_input row isn't re-stranded on first sight
+        # (Policy#decide_edit relies on this baseline). nil = in-memory only.
+        # The store owns its own logger and emits the full set of typed events
+        # (`:daemon_dispatch_baselines_*`) for both expected I/O errors and the
+        # defense-in-depth broad-StandardError rescue.
+        @dispatch_state = dispatch_state
 
         # pid → { project, slug, stage, command, started_at, state_file_mtime_at_dispatch }
         @running = {}
@@ -54,8 +63,12 @@ module Hive
         @quarantine = Set.new
         # Set<project> (post-CONFIG=78)
         @dropped_projects = Set.new
-        # [project, slug] → Time (mtime of state file at last dispatch)
-        @last_dispatched_mtime = {}
+        # [project, slug] → Time (mtime LAST observed on the state file —
+        # at dispatch, post-completion refresh, or `:record_baseline` seed;
+        # see `observe_state_file_mtime` / `record_dispatch`). Seeded from
+        # the persisted store so a restart keeps the baselines the next
+        # tick compares against (fail-closed: {} if absent/corrupt).
+        @last_dispatched_mtime = @dispatch_state ? @dispatch_state.load : {}
       end
 
       # Predicate: can the daemon spawn a child for (project, slug) now?
@@ -124,6 +137,7 @@ module Hive
         return if mtime.nil?
 
         @last_dispatched_mtime[[ project, slug ]] = mtime
+        persist_dispatch_baselines!
       end
 
       # Record a fresh dispatch. Caller is the dispatcher AFTER the
@@ -141,7 +155,38 @@ module Hive
           state_file_mtime_at_dispatch: state_file_mtime
         }
         @daily_counts[[ project, started_at.to_date ]] += 1
-        @last_dispatched_mtime[[ project, slug ]] = state_file_mtime if state_file_mtime
+        if state_file_mtime
+          @last_dispatched_mtime[[ project, slug ]] = state_file_mtime
+          persist_dispatch_baselines!
+        end
+      end
+
+      # Drop persisted baselines for tasks no longer present in a successful
+      # status scan, so the file doesn't grow unbounded as tasks are archived
+      # or dropped. `live_keys` is the authoritative set of [project, slug]
+      # pairs the dispatcher saw this tick. The dispatcher only calls this on
+      # an overall-successful fetch (never on a transient empty/failed scan).
+      #
+      # `scope_projects` is REQUIRED: only baselines whose project is in this
+      # set get a chance to be pruned. The dispatcher passes `result.projects`
+      # so per-project status errors (`not_initialised`, `missing_project_path`)
+      # — which filter a project out of both `Result#rows` AND `Result#projects`
+      # for transient NFS hiccups, `hive forget` races, or re-bootstrapping
+      # projects — keep their baselines untouched. Letting this kwarg default
+      # would silently re-strand answered tasks the next time those failures
+      # hit, which is the exact regression the persistence layer exists to
+      # prevent. Pass an empty set to short-circuit pruning entirely.
+      def prune_dispatch_baselines(live_keys, scope_projects:)
+        live = live_keys.to_set
+        scope = scope_projects.to_set
+        before = @last_dispatched_mtime.size
+        @last_dispatched_mtime.select! do |(project, slug), _value|
+          # Out-of-scope projects (errored this tick) keep their baselines.
+          next true unless scope.include?(project)
+
+          live.include?([ project, slug ])
+        end
+        persist_dispatch_baselines! if @last_dispatched_mtime.size != before
       end
 
       # Record a child completion. Side-effects on cooldown / quarantine
@@ -230,6 +275,15 @@ module Hive
       end
 
       private
+
+      # Write-through the baseline map to the persisted store. The store
+      # owns the entire error-handling surface: narrow IOError/SystemCallError
+      # rescues + a defense-in-depth broad StandardError rescue, each surfacing
+      # a typed `:daemon_dispatch_baselines_*` event. The controller stays
+      # ignorant of file I/O.
+      def persist_dispatch_baselines!
+        @dispatch_state&.write(@last_dispatched_mtime)
+      end
 
       def running_count_for(project)
         @running.count { |_pid, entry| entry[:project] == project } +

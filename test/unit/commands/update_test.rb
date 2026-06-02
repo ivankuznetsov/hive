@@ -158,4 +158,12 @@ class UpdateCommandTest < Minitest::Test
 
     assert_match(/required helper 'curl' not found/, err.message)
   end
+
+  def test_nudge_command_per_channel
+    assert_equal "brew upgrade ivankuznetsov/hive/hive", Hive::Commands::Update.nudge_command("brew")
+    # aur + bash both nudge `hive update` (aur: paru-vs-yay picked at runtime).
+    assert_equal "hive update", Hive::Commands::Update.nudge_command("aur")
+    assert_equal "hive update", Hive::Commands::Update.nudge_command("bash")
+    assert_nil Hive::Commands::Update.nudge_command("dev")
+  end
 end

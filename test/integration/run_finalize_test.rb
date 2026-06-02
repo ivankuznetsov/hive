@@ -126,7 +126,14 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
-  def test_finalize_dirty_worktree_sets_error
+  # After the `stages.ensure_clean_on_exit` plan landed, the legacy
+  # `dirty_worktree` marker is replaced by `ensure_clean_on_exit_failed`
+  # for the scope-violating residue case. The Telegram bot routes that
+  # reason to manual-only so an operator gets the "open it on a laptop"
+  # reply instead of a retry loop. `dirty` at the worktree root matches
+  # no allowed_paths in the default scope-check config, so CleanExit
+  # returns :scope_violation and finalize marks :error.
+  def test_finalize_dirty_worktree_out_of_scope_marks_clean_exit_failure
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, worktree_path, pr_md = setup_finalize_task(dir)
@@ -137,7 +144,54 @@ class RunFinalizeTest < Minitest::Test
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
-        assert_equal "dirty_worktree", marker.attrs["reason"]
+        assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"],
+                     "scope-violating residue must surface via the new ensure_clean_on_exit_failed reason"
+        assert_includes marker.attrs["residue_paths"].to_s, "dirty"
+      end
+    end
+  end
+
+  # Defense-in-depth backstop: in-scope residue at finalize entry must
+  # auto-commit as `chore(8-finalize): commit residual worktree changes`
+  # (with structured Hive-Auto-Commit trailers) and let finalize push,
+  # rather than abort. This is the path that self-heals an in-flight
+  # feature whose stage hook didn't yet exist.
+  def test_finalize_dirty_worktree_in_scope_auto_commits_and_pushes
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        # `lib/foo.rb` matches the default review.fix.auto_commit
+        # scope_check allowlist (`lib/**`).
+        FileUtils.mkdir_p(File.join(worktree_path, "lib"))
+        File.write(File.join(worktree_path, "lib", "foo.rb"), "module Foo; end\n")
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        head_subject, _err, head_status = Open3.capture3(
+          "git", "-C", worktree_path, "log", "-1", "--pretty=%s"
+        )
+        head_body, _err2, body_status = Open3.capture3(
+          "git", "-C", worktree_path, "log", "-1", "--pretty=%B"
+        )
+        assert head_status.success?
+        assert body_status.success?
+        assert_equal "chore(8-finalize): commit residual worktree changes",
+                     head_subject.strip,
+                     "finalize backstop must commit residue with the canonical chore() subject"
+        assert_match(/Hive-Auto-Commit: residue/, head_body)
+        assert_match(/Hive-Auto-Commit-Reason: finalize_entry_backstop/, head_body)
+        assert_match(/Hive-Stage: 8-finalize/, head_body)
+
+        # And the marker is NOT in error — finalize proceeded past
+        # verify_state! into the agent path.
+        marker = Hive::Markers.current(pr_md)
+        refute_equal :error, marker.name,
+                     "in-scope residue must not produce a finalize error marker"
+
+        # A residue log was dropped under the task log dir.
+        task = Hive::Task.new(task_dir)
+        residue_logs = Dir[File.join(task.log_dir, "finalize-residue-committed-*.log")]
+        refute_empty residue_logs, "finalize backstop must record the residue commit to a log file"
       end
     end
   end

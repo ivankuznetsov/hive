@@ -27,9 +27,18 @@ module Hive
         # a retry against a tampered fix.
         def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:,
                        attrs: nil)
-          if manual_only?(marker, attrs)
+          # `match_attr` is a single `key=value` pair the inline-button
+          # path encoded into callback_data because the full row.attrs
+          # hash doesn't survive a Telegram callback. Synthesise a
+          # minimal attrs Hash from it so the attrs-gated manual-only
+          # rules (review_error+fix_tampered, error+dirty_worktree,
+          # error+ensure_clean_on_exit_failed) refuse on the callback
+          # path too — not only the slash-handler path that already
+          # passes the full row.attrs.
+          resolved_attrs = attrs || attrs_from_match_attr(match_attr)
+          if manual_only?(marker, resolved_attrs)
             return result_class.new(action: :reply,
-                                    text: "Hive has no automatic recovery for this state - open it on a laptop.")
+                                    text: manual_only_text(marker, resolved_attrs))
           end
 
           verb = retry_verb_for_stage(stage)
@@ -51,6 +60,32 @@ module Hive
 
         def self.manual_only?(marker, attrs = nil)
           Hive::Bot::NotificationBuilders.manual_only?(marker: marker, attrs: attrs)
+        end
+
+        def self.manual_only_text(marker, attrs)
+          Hive::Bot::NotificationBuilders.manual_only_reply(marker: marker, attrs: attrs)
+        end
+
+        # Inline keyboard callback_data carries `key=value` pairs via
+        # `recovery_match_attr`, comma-separated when more than one is
+        # encoded (e.g. `marker_id=abc,reason=ensure_clean_on_exit_failed`
+        # — both tokens are needed so `manual_only?` can route on
+        # `reason` while `marker_id` remains the race-safe clear
+        # guard). Split each pair on the first `=` so a value like
+        # `foo=bar=baz` keeps the trailing `=baz` intact.
+        def self.attrs_from_match_attr(match_attr)
+          raw = match_attr.to_s
+          return nil unless raw.include?("=")
+
+          attrs = {}
+          raw.split(",").each do |pair|
+            next unless pair.include?("=")
+
+            key, value = pair.split("=", 2)
+            key = key.to_s.strip
+            attrs[key] = value unless key.empty?
+          end
+          attrs.empty? ? nil : attrs
         end
 
         def self.retry_verb_for_stage(stage)

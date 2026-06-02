@@ -21,7 +21,9 @@
         "log_file",
         "service_installed",
         "service_enabled",
-        "unit_path"
+        "unit_path",
+        "current_version",
+        "update_nudge"
       ],
       "properties": {
         "schema": { "const": "hive-daemon-status" },
@@ -58,6 +60,21 @@
         "unit_path": {
           "type": ["string", "null"],
           "description": "Absolute path of the autostart unit file; null on unsupported platforms or if the probe could not run."
+        },
+        "current_version": {
+          "type": "string",
+          "description": "The running hive version, so a caller can compare against update_nudge.latest itself."
+        },
+        "update_nudge": {
+          "type": ["object", "null"],
+          "description": "Available-update nudge written by the daemon, or null when up to date / unknown.",
+          "additionalProperties": false,
+          "required": ["latest", "channel", "command"],
+          "properties": {
+            "latest": { "type": "string", "description": "Latest published release version." },
+            "channel": { "type": "string", "description": "Detected install channel (brew/aur/bash)." },
+            "command": { "type": "string", "description": "Exact command to update on this channel." }
+          }
         }
       }
     }

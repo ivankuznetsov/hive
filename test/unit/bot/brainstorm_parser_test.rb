@@ -197,4 +197,70 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_predicate questions.first, :answered?
     refute_predicate questions.last, :answered?
   end
+
+  # Regression: observed 2026-05-28 on
+  # `explore-the-simplest-way-to-260528-2503` — the brainstorm agent
+  # emitted `### A2.` immediately after `### Q1.` for a fresh Round 2.
+  # Old parser dropped the mis-numbered A line entirely (strict `current[:n]
+  # == match[1].to_i`), then later flagged Q1 as unanswered after the user
+  # filled the slot, which had the bot re-asking Q1 in a loop. New parser
+  # accepts the first A-section under a Q as that Q's answer slot.
+  def test_misnumbered_answer_header_after_question_is_treated_as_answer_slot
+    questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 2
+
+      ### Q1. Identify OpenClawd.
+      ### A2.
+      OpenClawd.ai
+
+      ### Q2. Which install path?
+      ### A2.
+      claude plugin
+    MARKDOWN
+
+    assert_equal 2, questions.size
+    assert_equal "OpenClawd.ai", questions[0].answer,
+                 "mis-numbered A2 after Q1 must be accepted as Q1's answer"
+    assert_equal "claude plugin", questions[1].answer,
+                 "the duplicate A2 after Q2 (correctly numbered) must still be accepted"
+    assert_predicate questions[0], :answered?
+    assert_predicate questions[1], :answered?
+  end
+
+  # The lenient rule must NOT swallow an A-section that appears BEFORE
+  # any Q on the page — that would corrupt unrelated content.
+  def test_answer_before_any_question_is_ignored
+    questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### A99.
+      orphan
+
+      ### Q1. First?
+      ### A1.
+      real answer
+    MARKDOWN
+
+    assert_equal 1, questions.size
+    assert_equal "real answer", questions[0].answer
+  end
+
+  # When a Q has no A-section at all (parser sees Q followed by another
+  # Q or end-of-file), it stays unanswered. The lenient rule fires only
+  # when an A line is actually present.
+  def test_question_with_no_answer_section_stays_unanswered
+    questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. First?
+
+      ### Q2. Second?
+      ### A2.
+      yes
+    MARKDOWN
+
+    assert_equal 2, questions.size
+    assert_nil questions[0].answer, "Q1 with no A line must stay unanswered"
+    assert_equal "yes", questions[1].answer
+  end
 end

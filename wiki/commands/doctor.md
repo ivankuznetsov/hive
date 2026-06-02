@@ -3,11 +3,11 @@ title: hive doctor
 type: command
 source: lib/hive/commands/doctor.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-05-14
+updated: 2026-05-26
 tags: [command, preflight, skills, tmux]
 ---
 
-**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/compound-engineering:ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. When `claude.mode: tmux`, it also checks `tmux >= 3.0`; legacy configs with `brainstorm.runtime` get an advisory warning. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
+**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/compound-engineering:ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. When `claude.mode: tmux`, it also checks `tmux >= 3.0`; initialized projects also get a non-fatal `wiki/qmd` dependency row so missing/broken QMD and native Node ABI mismatches are visible. Legacy configs with `brainstorm.runtime` get an advisory warning. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
 
 ## Usage
 
@@ -29,8 +29,8 @@ Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
 
 `Doctor#call` builds dependency/warning rows plus two skill row kinds and concatenates them:
 
-- **`kind: "dependency"`** — currently `claude/tmux`, present only when `Hive::Config.claude_mode(cfg) == :tmux`; `:missing` and `:version_too_old` make doctor exit 65.
-- **`kind: "warning"`** — advisory rows that do not fail doctor, including exported Claude API-key env vars under tmux mode and legacy `brainstorm.runtime` still present in raw YAML.
+- **`kind: "dependency"`** — `claude/tmux` when `Hive::Config.claude_mode(cfg) == :tmux`, plus `wiki/qmd` when the current project has `.llm-wiki/`. Tmux `:missing` / `:version_too_old` rows make doctor exit 65; QMD rows are `:present` or warning-only because Hive can still fall back to plain wiki files.
+- **`kind: "warning"`** — advisory rows that do not fail doctor, including exported Claude API-key env vars under tmux mode, missing/broken QMD, native QMD ABI failures, and legacy `brainstorm.runtime` still present in raw YAML.
 
 - **`kind: "stage"`** — one row per entry in `STAGES = %w[brainstorm plan]`. `label = stage`. Reads `cfg.dig(stage, "agent")` (default `"claude"`) and resolves the skill via `Hive::Config.stage_skill`. Plan defaults are agent-aware: Claude keeps the legacy `/plan` alias, Codex gets `/llm-wiki:wiki-plan`, and Pi gets `/skill:wiki-plan` after profile formatting. A legacy `plan.skill: /plan` config is also mapped to llm-wiki's canonical `wiki-plan` skill for Codex/Pi. The resolved skill is routed through `profile.format_skill_invocation(skill)` before verification.
 - **`kind: "reviewer"`** — one row per entry in `cfg.dig("review", "reviewers")`. `label = "6-review/<name>"`. Reads `agent`, `name`, `kind` (default `"agent"`), and `skill`. The bare config skill is formatted through `profile.format_skill_invocation` to obtain the full invocation before passing to `verify_skill`, so the JSON envelope's `skill` field is uniform across stage and reviewer rows.
@@ -67,7 +67,7 @@ A new agent profile becomes "doctorable" by registering a `Hive::SkillCheck::*` 
     {"kind": "stage", "stage": "plan", "label": "plan", "agent": "pi", "configured_skill": "/llm-wiki:wiki-plan", "skill": "/skill:wiki-plan", "status": "present", "message": "..."},
     {"kind": "reviewer", "stage": "6-review", "name": "claude-ce-code-review", "label": "6-review/claude-ce-code-review", "agent": "claude", "configured_skill": "ce-code-review", "skill": "/ce-code-review", "status": "missing", "message": "..."}
   ],
-  "summary": {"missing": 1, "present": 2, "not_applicable": 0}
+  "summary": {"missing": 1, "version_too_old": 0, "present": 2, "not_applicable": 0, "warning": 0}
 }
 ```
 
@@ -76,6 +76,7 @@ Field history (all additive — schema name stays `v1`):
 - 2026-05-07: `kind`, `name`, `label` added on `checks[]`.
 - 2026-05-07: `configured_skill` added on `checks[]`. Carries the raw config-supplied value alongside `skill`, which carries the profile-aware formatted invocation. Pi stage rows are the most affected; consumers that need to round-trip back to the operator's config should read `configured_skill`, not `skill`.
 - 2026-05-14: plan-stage defaults became agent-aware. Codex and Pi now resolve the llm-wiki `wiki-plan` skill directly instead of requiring a local `plan` alias.
+- 2026-05-26: initialized projects gained a non-fatal `wiki/qmd` dependency row. Doctor resolves QMD through `HIVE_QMD_BIN`, PATH, Hive's managed data-prefix install, or an `install-prefix` sidecar, and reports native addon failures with a `npm rebuild better-sqlite3` repair hint.
 
 ## Init preflight (non-fatal)
 
@@ -85,7 +86,7 @@ Rescue scope is `StandardError` (with a `Errno::EPIPE` micro-rescue around `warn
 
 ## Tests
 
-- `test/unit/commands/doctor_test.rb` — stage rows, reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, JSON envelope shape, long-label width, `attr_reader :rows` exposure.
+- `test/unit/commands/doctor_test.rb` — stage rows, reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, QMD managed-binary and broken-binary rows, JSON envelope shape, long-label width, `attr_reader :rows` exposure.
 - `test/unit/skill_check_test.rb` — per-agent verifier paths (including pi recursive walks, settings entries, manifest entries, glob-metacharacter rejection).
 - `test/integration/init_doctor_preflight_test.rb` — all-green silence, single-missing stderr warning, multi-missing including a reviewer row, init exit-code unchanged, preflight crash → bug-hint warning, config-load error → bug-hint warning.
 

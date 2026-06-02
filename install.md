@@ -4,7 +4,7 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 ## Goal
 
-Install the latest stable Hive release, verify `hive --version`, set up daemon autostart, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; all three channels (Homebrew, AUR, install.sh) download the same signed `.gem` and run `gem install` against it. Daemon autostart is global install-time setup; project setup only decides whether that project is enrolled for daemon dispatch.
+Install the latest stable Hive release, install or repair the QMD wiki indexer, verify `hive --version`, set up daemon autostart, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, agent CLIs, or Node.js/npm; QMD is the exception once npm is already available because Hive's managed wiki refresh scripts use it. The bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; all three channels (Homebrew, AUR, install.sh) download the same signed `.gem` and run `gem install` against it. Daemon autostart is global install-time setup; project setup only decides whether that project is enrolled for daemon dispatch.
 
 ## Detect
 
@@ -15,7 +15,9 @@ uname -s
 uname -m
 test -f /etc/os-release && cat /etc/os-release || true
 command -v hive || true
+command -v qmd || true
 hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' && echo "hive installed" || echo "hive not installed"
+qmd --version 2>/dev/null || true
 ```
 
 `bin/hive --version` prints a bare `X.Y.Z` line (no `hive ` prefix). Apache Hive's `hive --version` first line starts with a capital-H `Hive X.Y.Z`, so a strict `^[0-9]+\.[0-9]+\.[0-9]+$` regex distinguishes the two. If the strict match SUCCEEDS, the host already has the Hive CLI: SKIP the Install Commands block below and go straight to Verify / Initialize Project. To upgrade an existing Hive install, run `hive update` instead of reinstalling. If the strict match fails, continue with the Install Commands below.
@@ -57,8 +59,8 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.1.5 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.5/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.1.10 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.10/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -67,11 +69,33 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.1.5 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.5/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.1.10 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.10/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
 ```
+
+## Install / Repair QMD
+
+The bash installer installs QMD automatically when npm is available. For Homebrew/AUR installs, or when `qmd --version` fails with a native module / `NODE_MODULE_VERSION` error, install or repair Hive's managed QMD copy:
+
+```bash
+if command -v npm >/dev/null 2>&1; then
+  qmd_prefix="${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd"
+  qmd_bin_home="${XDG_BIN_HOME:-$HOME/.local/bin}"
+  mkdir -p "$qmd_bin_home"
+  npm install --global --prefix "$qmd_prefix" --no-audit --no-fund "${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
+  npm rebuild --global --prefix "$qmd_prefix" better-sqlite3 >/dev/null 2>&1 || true
+  ln -sfn "$qmd_prefix/bin/qmd" "$qmd_bin_home/qmd"
+  "$qmd_prefix/bin/qmd" --version
+else
+  echo "qmd install skipped: npm is missing; install Node.js/npm and rerun this section" >&2
+fi
+```
+
+Two env knobs tune this step: `HIVE_QMD_BIN` is a runtime override pointing at an executable `qmd` (read by the generated wiki scripts and `hive doctor` when PATH or the managed install path is not enough), and `HIVE_QMD_NPM_PACKAGE` overrides the npm package spec used for the install (defaults to `@tobilu/qmd`).
+
+Do not install Node.js/npm automatically. If npm is missing, report that Hive core is installed but QMD-backed wiki search needs Node.js/npm.
 
 ## Verify
 
@@ -134,4 +158,5 @@ Report:
 - daemon autostart setup result from `"$hive_cmd" daemon install --json`
 - whether `hive init` was run
 - missing runtime dependencies from `hive doctor`
+- `qmd --version` output, or the reason QMD install/repair was skipped
 - whether the optional skills package was installed or skipped

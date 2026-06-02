@@ -1256,6 +1256,33 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # CleanExit `:error reason=ensure_clean_on_exit_failed` is the
+  # stage-exit invariant refusing to auto-commit residue. Mirror the
+  # `auto_commit_*_failed` REVIEW_ERROR routing: never emit a retry
+  # command, since operator inspection is required. Without this
+  # branch, `suggested_next_action_payload` would fall through to
+  # `retry_command_string` and emit a clear+rerun recipe — the bot's
+  # manual-only routing already refuses to dispatch it, so consumers
+  # would see contradictory signals between the bot reply and the
+  # CLI envelope.
+  def test_clean_exit_failed_is_manual_fix_with_null_command
+    with_tmp_dir do |dir|
+      task = fake_task(stage_name: "finalize", stage_index: 8, project_root: dir)
+
+      payload = Hive::TaskAction.for(
+        task,
+        marker(:error,
+               "reason" => "ensure_clean_on_exit_failed",
+               "residue_paths" => "wiki/notes.md",
+               "marker_id" => "abc123")
+      ).diagnostic.fetch("suggested_next_action")
+
+      assert_equal "manual_fix", payload.fetch("kind")
+      assert_nil payload["command"],
+                 "ensure_clean_on_exit_failed must carry no shell recipe — operator inspection required"
+    end
+  end
+
   def test_auto_commit_signing_failures_are_manual_fix
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
@@ -1272,6 +1299,28 @@ class TaskActionTest < Minitest::Test
         assert_match(/review\.fix\.auto_commit\.sign_policy/, diagnostic.fetch("detail"))
         assert_match(/commit or revert/, diagnostic.fetch("detail"))
       end
+    end
+  end
+
+  def test_fix_status_check_failure_is_manual_fix
+    with_tmp_dir do |dir|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(
+          :review_error,
+          "phase" => "fix",
+          "reason" => "fix_status_check_failed",
+          "message" => "fatal: unable to read 26d9b9b4b284d58add70f2ed2d581a1ab503fa67",
+          "pass" => "1"
+        )
+      ).diagnostic
+
+      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_match(/could not read the task worktree Git status/, diagnostic.fetch("detail"))
+      assert_match(/Repair the worktree/, diagnostic.fetch("detail"))
     end
   end
 
@@ -1298,14 +1347,20 @@ class TaskActionTest < Minitest::Test
     error_suggested = error_diagnostic.fetch("suggested_next_action")
 
     assert_equal "retry", error_suggested.fetch("kind")
+    # F1: `error_recovery_match_attr` now encodes `marker_id` + `reason` as a
+    # comma-separated pair so the bot's inline-button callback path can route
+    # `manual_only?` on `reason` without re-reading the state file. The
+    # markers-clear CLI handles comma-separated pairs natively (parse_match_attrs
+    # in lib/hive/commands/markers.rb), so the encoded form is consumer-safe.
     assert_equal [
       "hive", "markers", "clear", error_task.folder,
-      "--name", "ERROR", "--match-attr", "marker_id=err-70",
+      "--name", "ERROR", "--match-attr", "marker_id=err-70,reason=agent_failed",
       "&&", "hive", "run", error_task.folder
     ], Shellwords.split(error_suggested.fetch("command"))
     refute_includes error_diagnostic.fetch("summary"), "marker_id"
     refute_includes error_diagnostic.fetch("detail"), "marker_id"
-    assert_includes Shellwords.split(error_suggested.fetch("command")), "marker_id=err-70"
+    assert_includes Shellwords.split(error_suggested.fetch("command")),
+                    "marker_id=err-70,reason=agent_failed"
 
     legacy_error_suggested = Hive::TaskAction.for(
       error_task,

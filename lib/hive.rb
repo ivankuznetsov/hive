@@ -1,6 +1,11 @@
 module Hive
-  VERSION = "0.1.5".freeze
+  VERSION = "0.1.10".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
+  # Canonical GitHub org + repo. Referenced by the release probe
+  # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
+  # One place to change on a repository rename.
+  REPO_OWNER = "ivankuznetsov".freeze
+  REPO_NAME = "hive".freeze
 
   module Schemas
     # JSON schema versions for the agent-callable contracts emitted by the
@@ -28,7 +33,13 @@ module Hive
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,
-      "hive-bot-install" => 1
+      "hive-bot-install" => 1,
+      # File-backed dispatch request the bot writes for the daemon to
+      # consume. One JSON file per pending request under the state-home
+      # `dispatch_requests/` directory. See
+      # `Hive::Daemon::DispatchRequestQueue` and
+      # `Hive::Bot::DispatchRequestWriter`.
+      "hive-dispatch-request" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

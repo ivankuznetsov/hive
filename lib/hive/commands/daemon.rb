@@ -7,11 +7,13 @@ require "hive/paths"
 require "hive/lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/logger"
 require "hive/invoked_binary"
+require "hive/update_check/state"
 
 module Hive
   module Commands
@@ -133,20 +135,29 @@ module Hive
         # etc.) actually take effect. PR-40 review P1 #2: this used to
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
-        config = { "daemon" => daemon_cfg }
+        config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update }
 
-        controller = Hive::Daemon::ConcurrencyController.new(
-          max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
-          max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
-          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project")
-        )
-        supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
-        status_consumer = Hive::Daemon::StatusConsumer.new
+        # Build the logger BEFORE the controller so both the controller and
+        # the persisted-baselines store get wired to it. Otherwise a torn
+        # baseline file / lock error / disk-full write silently no-ops via
+        # `@logger&.event` — re-stranding the very `needs_input` tasks this
+        # PR exists to protect, invisibly.
         logger = Hive::Daemon::Logger.new(
           path: daemon_cfg.fetch("log_file", log_file),
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        controller = Hive::Daemon::ConcurrencyController.new(
+          max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
+          max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
+          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project"),
+          # Persist first-sight dispatch baselines so a daemon restart doesn't
+          # re-strand already-answered needs_input tasks. The store owns all
+          # `:daemon_dispatch_baselines_*` typed events via its own logger.
+          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
+        )
+        supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
+        status_consumer = Hive::Daemon::StatusConsumer.new
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
         )
@@ -154,7 +165,8 @@ module Hive
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
-          merge_watcher: merge_watcher, dry_run: @dry_run
+          merge_watcher: merge_watcher, dry_run: @dry_run,
+          update_state: Hive::UpdateCheck::State.new
         )
 
         reexec_requested = false
@@ -319,7 +331,11 @@ module Hive
             "log_file" => log_file,
             "service_installed" => service_state["service_installed"],
             "service_enabled" => service_state["service_enabled"],
-            "unit_path" => service_state["unit_path"]
+            "unit_path" => service_state["unit_path"],
+            # Agent-native parity with the TUI footer / bot push: expose the
+            # update nudge so a programmatic caller can detect "behind" too.
+            "current_version" => Hive::VERSION,
+            "update_nudge" => update_nudge_payload
           )
         elsif running
           puts "hive daemon: running (pid #{pid}, uptime #{uptime_sec}s)"
@@ -340,6 +356,17 @@ module Hive
         Hive::Commands::Daemon::ServiceInstaller.new.service_state
       rescue StandardError
         { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
+      end
+
+      # The daemon-written update nudge, as a plain Hash for the status
+      # envelope (nil when current or unknown). Never raises out of status.
+      def update_nudge_payload
+        nudge = Hive::UpdateCheck::State.new.nudge
+        return nil unless nudge
+
+        { "latest" => nudge.latest, "channel" => nudge.channel, "command" => nudge.command }
+      rescue StandardError
+        nil
       end
 
       def reload_daemon

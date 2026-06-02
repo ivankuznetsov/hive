@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -52,16 +52,57 @@ jobs:
           path: hive-cli-*.gem
           if-no-files-found: error
 
+  install-gate:
+    name: gem-install gate / ${{ matrix.runs-on }}
+    runs-on: ${{ matrix.runs-on }}
+    needs: build
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on: [macos-15, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: hive-cli-gem
+          path: dist
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: gem install the built gem
+        # Native-runner expansion of build's "Smoke test built gem":
+        # confirm the gem installs + runs on macOS arm64 and Linux arm64
+        # before publishing. x86_64 is already covered by `build`. The
+        # gem is arch=any Ruby, so no Arch/emulated cell here — a flaky
+        # emulated cell must never block a release (real Arch install is
+        # covered post-release by install-verify.yml).
+        run: |
+          gem_file="$(ls dist/hive-cli-*.gem | head -n 1)"
+          [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem artifact" >&2; exit 1; }
+          sandbox="$(mktemp -d)/gem-sandbox"
+          mkdir -p "$sandbox"
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" gem install "$gem_file" \
+            --install-dir "$sandbox" \
+            --bindir "$sandbox/bin" \
+            --no-document \
+            --source https://rubygems.org
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" "$sandbox/bin/hive" --version
+
   release-finalize:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
-    needs: build
+    needs: [build, install-gate]
     permissions:
       contents: write
       id-token: write
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      # Job-level so the announce step's `if:` can read it — a step-level
+      # env is not yet in scope for that step's own condition (same reason
+      # HOMEBREW_TAP_TOKEN lives here). Optional: absent secret => skip.
+      DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
     # `aur_enabled` lets the separate `aur-publish` job gate on the
     # presence of the AUR secret. A job-level `if:` CANNOT read
     # `secrets.*` (and job-scoped `env` is not yet in scope there), so we
@@ -70,8 +111,8 @@ jobs:
     outputs:
       aur_enabled: ${{ steps.aur_gate.outputs.enabled }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: hive-cli-gem
           path: dist
@@ -100,6 +141,25 @@ jobs:
             --title "$REF_NAME" \
             --notes "Hive $REF_NAME" \
             --verify-tag
+      - name: Announce release on Discord
+        if: ${{ env.DISCORD_RELEASE_WEBHOOK != '' }}
+        # Non-fatal: a Discord webhook hiccup must never abort the release or
+        # block the downstream brew/AUR jobs. The webhook URL stays a secret —
+        # only the message body (built with jq, fed to curl via stdin) is
+        # constructed here, and nothing echoes the URL.
+        continue-on-error: true
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          content="🚀 **hive ${REF_NAME}** is out — \`gem install hive-cli\`"$'\n'"Release notes: https://github.com/${REPO}/releases/tag/${REF_NAME}"
+          jq -nc --arg c "$content" '{content: $c, allowed_mentions: {parse: []}}' \
+            | curl -sSf -X POST -H 'Content-Type: application/json' -d @- "$DISCORD_RELEASE_WEBHOOK" >/dev/null
+          echo "discord: announced ${REF_NAME}"
+      - name: Announce release on Discord (audit when skipped)
+        if: ${{ env.DISCORD_RELEASE_WEBHOOK == '' }}
+        run: |
+          echo "discord: skipped; DISCORD_RELEASE_WEBHOOK is not set"
       - name: Notify Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         # Non-fatal: a tap dispatch hiccup must not abort the release or
@@ -161,7 +221,7 @@ jobs:
         # packaging/render.rb does `require "erb"` — without it the render
         # step dies with `cannot load such file -- erb (LoadError)`.
         run: pacman -Syu --noconfirm --needed git openssh cosign ruby ruby-erb jq github-cli
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download and cosign-verify release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -233,3 +293,17 @@ jobs:
             git commit -m "hive-bin ${PKG_VERSION}"
             git push
           fi
+
+  # Post-release: now that the gem is released and the brew/AUR packages
+  # are published, do the REAL channel installs (brew install / yay -S /
+  # install.sh) of this version. Runs whenever release-finalize succeeded,
+  # regardless of whether aur-publish ran (it self-skips without the secret).
+  post-release-verify:
+    needs: [release-finalize, aur-publish]
+    if: ${{ always() && needs.release-finalize.result == 'success' }}
+    uses: ./.github/workflows/install-verify.yml
+    with:
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      issues: write

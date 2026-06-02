@@ -26,6 +26,7 @@ module Hive
         codex_failed
         answer_written
         answer_skipped_already_answered
+        answer_slot_missing
         reconnect_summary
         config_reloaded
         envelope_parse_failure
@@ -35,6 +36,8 @@ module Hive
         unknown_stage_label
         alert_store_corrupt
         deprecated_config
+        update_nudge_pushed
+        update_nudge_error
         fatal
       ].freeze
 

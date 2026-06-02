@@ -1,4 +1,6 @@
 require "json"
+require "open3"
+require "timeout"
 
 require "hive"
 require "hive/config"
@@ -52,7 +54,7 @@ module Hive
       end
 
       def call
-        @rows = check_tmux + check_legacy_brainstorm_runtime + check_stages + check_reviewers
+        @rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime + check_stages + check_reviewers
         if @json
           @output.puts JSON.generate(envelope(@rows))
         else
@@ -97,6 +99,100 @@ module Hive
         ]
         rows.concat(tmux_runtime_warnings)
         rows
+      end
+
+      def check_llm_wiki_qmd
+        return [] unless @project_root && File.directory?(File.join(@project_root, ".llm-wiki"))
+
+        qmd = find_qmd
+        unless qmd
+          return [ warning_row(
+            stage: "wiki",
+            label: "wiki/qmd",
+            agent: "qmd",
+            configured_skill: "@tobilu/qmd",
+            skill: "qmd",
+            message: "qmd is not installed or not discoverable; install Node.js/npm then run " \
+                     "`npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" @tobilu/qmd` " \
+                     "(`hive update` also repairs qmd on bash-channel installs), or set HIVE_QMD_BIN to an executable qmd"
+          ) ]
+        end
+
+        begin
+          out, err, status = Timeout.timeout(15) { Open3.capture3(qmd, "--version") }
+        rescue Timeout::Error, SystemCallError => e
+          return [ warning_row(
+            stage: "wiki",
+            label: "wiki/qmd",
+            agent: "qmd",
+            configured_skill: "@tobilu/qmd",
+            skill: "qmd",
+            message: "qmd at #{qmd} timed out or could not be executed (#{e.message}); reinstall with " \
+                     "`npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" @tobilu/qmd` " \
+                     "(or rebuild better-sqlite3 with `npm rebuild better-sqlite3`)"
+          ) ]
+        end
+
+        if status.success?
+          return [ {
+            kind: "dependency",
+            stage: "wiki",
+            label: "wiki/qmd",
+            agent: "qmd",
+            configured_skill: "@tobilu/qmd",
+            skill: "qmd",
+            status: "present",
+            message: [ qmd, out.strip ].reject(&:empty?).join(" ")
+          } ]
+        end
+
+        diagnostic = first_diagnostic_line(err, out)
+        detail = diagnostic.empty? ? "" : " (#{diagnostic})"
+        [ warning_row(
+          stage: "wiki",
+          label: "wiki/qmd",
+          agent: "qmd",
+          configured_skill: "@tobilu/qmd",
+          skill: "qmd",
+          message: "qmd is installed at #{qmd} but failed to start#{detail}; " \
+                   "reinstall with `npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" " \
+                   "@tobilu/qmd`, or rebuild the active npm install with `npm rebuild better-sqlite3` " \
+                   "(`hive update` also repairs qmd on bash-channel installs)"
+        ) ]
+      end
+
+      def find_qmd
+        env_qmd = ENV["HIVE_QMD_BIN"].to_s
+        return env_qmd if !env_qmd.empty? && File.executable?(env_qmd)
+
+        path_qmd = which("qmd")
+        return path_qmd if path_qmd
+
+        data_home = ENV["XDG_DATA_HOME"].to_s.empty? ? File.expand_path("~/.local/share") : ENV["XDG_DATA_HOME"]
+        candidates = [
+          File.join(data_home, "hive", "qmd", "bin", "qmd"),
+          File.expand_path("~/.local/share/hive/qmd/bin/qmd")
+        ]
+
+        prefix_file = File.join(data_home, "hive", "install-prefix")
+        if File.readable?(prefix_file)
+          prefix = File.read(prefix_file).lines.first.to_s.strip
+          candidates << File.join(prefix, "hive", "qmd", "bin", "qmd") unless prefix.empty?
+        end
+
+        candidates.find { |candidate| File.file?(candidate) && File.executable?(candidate) }
+      end
+
+      def which(name)
+        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
+          path = File.join(dir, name)
+          return path if File.file?(path) && File.executable?(path)
+        end
+        nil
+      end
+
+      def first_diagnostic_line(*parts)
+        parts.join("\n").lines.map(&:strip).find { |line| !line.empty? }.to_s
       end
 
       def check_legacy_brainstorm_runtime

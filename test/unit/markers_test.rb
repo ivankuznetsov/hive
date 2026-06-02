@@ -126,10 +126,24 @@ class MarkersTest < Minitest::Test
     end
   end
 
-  def test_error_recovery_match_attr_prefers_marker_id
-    attrs = { "reason" => "exit_code", "exit_code" => "70", "marker_id" => "err-70" }
+  def test_error_recovery_match_attr_prefers_marker_id_alone_when_no_reason
+    attrs = { "exit_code" => "70", "marker_id" => "err-70" }
 
     assert_equal "marker_id=err-70", Hive::Markers.error_recovery_match_attr(attrs)
+  end
+
+  # `marker_id` keeps its primary "race-safe clear guard" role, but the
+  # bot's inline-button callback path needs `reason` reconstructable
+  # from the callback_data so `manual_only?` can route
+  # `ensure_clean_on_exit_failed` / `dirty_worktree` into operator-only
+  # reply. Encode both as comma-separated pairs; `marker_id` stays the
+  # leading token so AlertStore.parse_match_attr's first-token guard
+  # still operates on it.
+  def test_error_recovery_match_attr_encodes_marker_id_and_reason_when_both_present
+    attrs = { "reason" => "ensure_clean_on_exit_failed", "marker_id" => "err-70" }
+
+    assert_equal "marker_id=err-70,reason=ensure_clean_on_exit_failed",
+                 Hive::Markers.error_recovery_match_attr(attrs)
   end
 
   def test_error_recovery_match_attr_falls_back_to_reason_and_exit_code

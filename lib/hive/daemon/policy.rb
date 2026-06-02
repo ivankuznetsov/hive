@@ -7,6 +7,9 @@ module Hive
     #   :dispatch          — run `row.suggested_command` as a child
     #   :poll_for_merge    — hand off to PrMergeWatcher (finalize → done)
     #   :wait_for_debounce — user is mid-edit; let mtime settle
+    #   :wait_for_answers  — brainstorm Q&A still has unanswered questions;
+    #                        hold the resume until every question is
+    #                        answered (Telegram answers land one at a time)
     #   :skip              — do nothing this tick
     #
     # The daemon adds NO new approval logic. Forward-advance safety is
@@ -82,16 +85,25 @@ module Hive
       # @param now [Time] current time (injected for testability)
       # @param edit_debounce_sec [Integer] minimum age of mtime before a
       #   `:edit`-class row is eligible for dispatch (default 30s)
+      # @param answers_pending [Boolean] true when this is a brainstorm
+      #   Q&A row that still has unanswered questions. The mtime-debounce
+      #   resume CANNOT tell "answered 1 of 3, still going" from "done"
+      #   (each Telegram answer bumps the file mtime), so a would-be
+      #   `:dispatch` on an edit-resume row is held as `:wait_for_answers`
+      #   while answers are pending. The first-sight `:record_baseline`
+      #   and the `:skip`/`:wait_for_debounce` outcomes are unaffected, so
+      #   the editor-bulk-save path still resumes once it is complete. The
+      #   dispatcher computes this by parsing the brainstorm file.
       #
       # @return [Symbol] one of :dispatch, :poll_for_merge, :wait_for_debounce,
-      #   :record_baseline, :skip
+      #   :wait_for_answers, :record_baseline, :skip
       #
       # `:record_baseline` is the first-sight `kind: edit` outcome:
       # the dispatcher does NOT spawn a child, but it MUST call
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
       def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
-                 now:, edit_debounce_sec: 30)
+                 now:, edit_debounce_sec: 30, answers_pending: false)
         return :skip if action.nil?
         # Three branches dispatch the row's command verbatim (advance,
         # plan_approval) or via the edit-resume path (edit_resume).
@@ -111,10 +123,17 @@ module Hive
         elsif action == MERGE_WAIT_ACTION
           :poll_for_merge
         elsif edit_resume?(action)
-          decide_edit(state_file_mtime: state_file_mtime,
-                      last_dispatched: last_dispatched_state_file_mtime,
-                      now: now,
-                      debounce_sec: edit_debounce_sec)
+          outcome = decide_edit(state_file_mtime: state_file_mtime,
+                                last_dispatched: last_dispatched_state_file_mtime,
+                                now: now,
+                                debounce_sec: edit_debounce_sec)
+          # Hold the resume while a brainstorm Q&A still has unanswered
+          # questions. Only the terminal `:dispatch` is gated — the
+          # first-sight `:record_baseline` and the `:skip`/
+          # `:wait_for_debounce` outcomes pass through unchanged so the
+          # mtime baseline is still seeded and the editor-bulk-save path
+          # dispatches normally once every answer is in.
+          outcome == :dispatch && answers_pending ? :wait_for_answers : outcome
         else
           # `recover_execute` / `recover_review` / `agent_running` /
           # `archived` / `error` plus any unknown future TaskActionKind

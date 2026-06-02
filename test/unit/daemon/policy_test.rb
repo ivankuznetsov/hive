@@ -320,10 +320,59 @@ class HiveDaemonPolicyTest < Minitest::Test
     assert_equal :skip, decide(action: "needs_input", stage: "3-plan", command: "")
   end
 
+  # ── answers_pending gate (brainstorm Q&A) ──────────────────────────────
+
+  def test_needs_input_holds_dispatch_when_answers_pending
+    # Would dispatch (mtime past debounce), but unanswered questions remain.
+    assert_equal :wait_for_answers,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: T0 - 600,
+                        answers_pending: true)
+  end
+
+  def test_needs_input_dispatches_when_answers_complete
+    assert_equal :dispatch,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: T0 - 600,
+                        answers_pending: false)
+  end
+
+  def test_answers_pending_does_not_override_record_baseline
+    # First-sight must still seed the baseline even while answers pend,
+    # otherwise the editor-bulk-save path would never get a baseline to
+    # compare against and could never resume.
+    assert_equal :record_baseline,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil,
+                        answers_pending: true)
+  end
+
+  def test_answers_pending_does_not_override_debounce_or_skip
+    assert_equal :wait_for_debounce,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 5,
+                        last_dispatched_state_file_mtime: T0 - 600,
+                        answers_pending: true)
+    assert_equal :skip,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 100,
+                        last_dispatched_state_file_mtime: T0 - 100,
+                        answers_pending: true)
+  end
+
   private
 
   def decide(action:, command:, stage: nil, state_file_mtime: nil,
-             last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30)
+             last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
+             answers_pending: false)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
@@ -331,7 +380,8 @@ class HiveDaemonPolicyTest < Minitest::Test
       state_file_mtime: state_file_mtime,
       last_dispatched_state_file_mtime: last_dispatched_state_file_mtime,
       now: now,
-      edit_debounce_sec: edit_debounce_sec
+      edit_debounce_sec: edit_debounce_sec,
+      answers_pending: answers_pending
     )
   end
 end

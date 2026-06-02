@@ -8,6 +8,30 @@ class HiveBotBrainstormParserTest < Minitest::Test
     File.join(FIXTURE_DIR, name)
   end
 
+  # The parser now lives at Hive::BrainstormParser (shared with the
+  # daemon); Hive::Bot::BrainstormParser is a back-compat alias.
+  def test_bot_namespace_is_an_alias_for_the_shared_parser
+    assert_same Hive::BrainstormParser, Hive::Bot::BrainstormParser
+    assert_same Hive::BrainstormParser::Question, Hive::Bot::BrainstormParser::Question
+  end
+
+  # The file is read concurrently (the bot appends answers while the
+  # daemon parses to gate auto-resume), so parse must be total: invalid
+  # UTF-8 / a torn mid-append read must degrade, not raise.
+  def test_parse_tolerates_invalid_utf8_without_raising
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "brainstorm.md")
+      File.binwrite(path, "## Round 1\n### Q1.\nWhat?\n### A1.\n\xFF\xFE\n")
+      # If parse raised on the invalid bytes this would error the test.
+      questions = Hive::BrainstormParser.parse(path)
+      assert_equal 1, questions.size, "the question is still recoverable past the bad bytes"
+    end
+  end
+
+  def test_parse_returns_empty_for_missing_file
+    assert_empty Hive::BrainstormParser.parse("/no/such/brainstorm.md")
+  end
+
   def test_parses_two_rounds_and_returns_first_unanswered_in_document_order
     questions = Hive::Bot::BrainstormParser.parse(fixture("round1_full_round2_partial.md"))
 

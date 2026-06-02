@@ -2,6 +2,33 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
+
+**Action:** Addressed the actionable `/ce-code-review` findings on PR #268:
+
+- **Parse-error hardening (#1):** `Hive::BrainstormParser.parse` is now total — it scrubs invalid UTF-8 and rescues `ENOENT`/`EACCES`/`IOError` → so a torn concurrent read (the bot appends an answer while the daemon parses) or garbled bytes degrade instead of raising. The dispatcher's residual `:fatal` rescue is deduped per `[project, slug]` so a persistently unreadable file can't log every ~30s tick.
+- **Fail-open rationale (#2, reconsidered):** the adversarial "fail closed on zero questions" suggestion was **not** adopted — the bot locates questions with the *same* parser, so a zero-parseable-question file can't be answered via the bot anyway; resuming (re-running the agent to regenerate) is the self-healing path and holding would strand. Documented in code + wiki.
+- **End-to-end test (#5):** added a `handle_row` test proving the daemon actually *resumes* (spawns) on a parse error, plus dedup, multi-round, no-A-slot, and zero-question tests.
+- **Doc:** updated `wiki/modules/bot.md` to describe `Hive::Bot::BrainstormParser` as a back-compat alias.
+
+Deferred to follow-up issues: the "question with no fillable `### A` slot → indefinite hold" strand (bot answer-writer concern) and surfacing an `unanswered_questions` count in `hive status` (schema change).
+
+**Tests:** full suite 4171 runs / 0 failures, 100% line coverage, rubocop clean.
+
+## [2026-06-02T00:00:00Z] fix — daemon holds brainstorm resume until all Q&A answers are in (#267)
+
+**Action:** Fixed the daemon resuming a brainstorm mid-Q&A. The bot writes each Telegram answer to `brainstorm.md` individually (bumping mtime), and the daemon's `needs_input` edit-resume fired ~`edit_debounce_sec` after the **first** answer — re-running `hive brainstorm` with partial answers and grabbing the task `.lock`.
+
+- Relocated the pure parser to `Hive::BrainstormParser` (`lib/hive/brainstorm_parser.rb`); `Hive::Bot::BrainstormParser` is now a back-compat alias so the daemon can share it.
+- `Policy.decide` gained `answers_pending:` and a new `:wait_for_answers` outcome — it downgrades only the terminal `:dispatch`, leaving `:record_baseline` / `:skip` / `:wait_for_debounce` intact so the editor-bulk-save path still resumes when complete.
+- `Dispatcher#brainstorm_answers_pending?` parses a `2-brainstorm` `needs_input` row's file (fails open on error); the hold is logged `:skipped reason=answers_pending`.
+
+Surface-agnostic (Telegram-incremental or one editor save), and the published `hive-status` schema is untouched.
+
+**Tests:** full suite 4166 runs / 0 failures, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/daemon]] (new "Brainstorm answers-pending gate" section + Policy outcomes) and [[commands/daemon]] (needs_input row behavior).
+
 ## [2026-06-02T23:20:00Z] fix(openclaw) - avoid core slash-command collisions and unsafe agent paths
 
 **Action:** Review follow-up for the in-tree OpenClaw skill bundle. Renamed the Hive new/approve shortcuts to `/hive-new` and `/hive-approve` so they do not collide with OpenClaw's built-in `/new` and `/approve` commands, kept already-prefixed skill names from being published as `hive-hive-*`, and strengthened skill instructions for foreground daemon commands, streaming tails, `approve --force`, nested destructive umbrella commands, and `init --json` TTY prompt behavior.

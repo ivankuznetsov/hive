@@ -17,7 +17,7 @@ the safety-relevant decisions are unit-testable without forking.
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, and mtime debounce → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:skip`. Source of truth for "should this row fire a child?". |
+| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, mtime debounce, and `answers_pending` → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:wait_for_answers` / `:record_baseline` / `:skip`. Source of truth for "should this row fire a child?". |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), cooldowns, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates schema version; surfaces parse failures as `Result(ok: false)`. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached. |
@@ -119,6 +119,50 @@ policy dispatches the row's `hive develop ... --from 3-plan` command
 immediately. Brainstorm, execute, and review `needs_input` rows still
 use mtime-baseline + debounce because those states represent actual
 user-authored answers or review decisions.
+
+## Brainstorm answers-pending gate
+
+mtime-debounce assumes a single edit gesture (one editor save). A
+multi-question brainstorm Q&A answered over Telegram is **N separate
+writes** — `Hive::Bot::DispatchRequestWriter`/the answer writer appends
+each answer to `brainstorm.md` one at a time, bumping the mtime each
+time. Without a guard, the daemon's edit-resume would fire ~`edit_debounce_sec`
+after the **first** answer and re-run `hive brainstorm` with a partially
+answered file (and grab the task `.lock`, bouncing the operator's next
+answer with "Try again — another run holds the lock").
+
+The fix gates the resume on whether any questions are still unanswered:
+
+- `Dispatcher#brainstorm_answers_pending?(row)` parses the brainstorm
+  file (via the shared `Hive::BrainstormParser`, relocated out of
+  `Hive::Bot::` for exactly this reason) for a `2-brainstorm`
+  `needs_input` row and returns true while any `### Q{n}.` lacks an
+  answer. It returns false for every non-brainstorm edit-resume row
+  (execute/review carry no Q&A markers). **Fails open** (resume) on a
+  file that parses to ZERO questions or on an unexpected error — and
+  this is self-healing, not a gap: the Telegram bot locates questions
+  with the *same* parser, so a file with no parseable `### Q{n}.` (empty,
+  agent crashed mid-write, header drift) is one the operator can't answer
+  via the bot either; the recovery is to re-run the brainstorm agent,
+  which regenerates a clean file, and holding would strand it instead.
+  `parse` is hardened (encoding-scrub + IO-resilient) so a torn
+  concurrent read — the bot appends an answer while the daemon parses —
+  degrades rather than raises; the residual `:fatal` rescue is deduped
+  per `[project, slug]` so a persistently unreadable file can't spam the
+  log every tick.
+- `Policy.decide` takes `answers_pending:` and downgrades a would-be
+  `:dispatch` to `:wait_for_answers` — but **only** the terminal
+  dispatch. The first-sight `:record_baseline`, `:skip`, and
+  `:wait_for_debounce` outcomes pass through unchanged, so the mtime
+  baseline is still seeded and the **editor-bulk-save** path (all answers
+  in one save → no unanswered slots) resumes normally.
+- The dispatcher logs the hold as `:skipped reason=answers_pending`.
+
+This is surface-agnostic: it holds whether answers arrive incrementally
+via the bot or all at once via a direct edit, and the published
+`hive-status` schema is untouched (the daemon parses the file directly).
+The bot's own "all answered → enqueue a dispatch request" path then just
+races the row-scan to the same gate; the per-slug in-flight gate dedups.
 
 ## Persisted dispatch baselines (restart survival)
 

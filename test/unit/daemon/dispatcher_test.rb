@@ -1538,6 +1538,157 @@ end
     end
   end
 
+  # ── brainstorm answers-pending gate ───────────────────────────────────
+
+  def test_handle_row_holds_brainstorm_resume_while_answers_pending
+    dispatcher, supervisor, controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n### Q2.\nWhy?\n### A2.\nyes\n")
+    # Seed a baseline so decide_edit would otherwise dispatch (mtime newer).
+    controller.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    dispatcher.send(:handle_row, r, now: T0)
+
+    assert_empty supervisor.spawned,
+                 "must NOT resume the brainstorm while Q1 is unanswered"
+    assert(logger.events.any? { |(n, a)| n == :skipped && a[:reason] == "answers_pending" },
+           "the hold must be logged as :skipped reason=answers_pending")
+  end
+
+  def test_handle_row_resumes_brainstorm_once_all_answered
+    dispatcher, supervisor, controller, = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\nbecause\n### Q2.\nWhy?\n### A2.\nyes\n")
+    controller.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    dispatcher.send(:handle_row, r, now: T0)
+
+    assert_equal 1, supervisor.spawned.size,
+                 "resumes once every question is answered"
+  end
+
+  def test_brainstorm_answers_pending_predicate_branches
+    dispatcher, = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    pending = File.join(folder, "brainstorm.md")
+    File.write(pending, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+    done = File.join(folder, "done.md")
+    File.write(done, "## Round 1\n### Q1.\nWhat?\n### A1.\nanswered\n")
+
+    assert dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: pending, folder: folder))
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: done, folder: folder))
+    # Not a brainstorm stage → no Q&A, never pending.
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "6-review",
+                               state_file: pending, folder: folder))
+    # Not a needs_input row.
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "ready_to_brainstorm", stage: "2-brainstorm",
+                               state_file: pending, folder: folder))
+    # Missing file → not pending.
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: "/no/such/brainstorm.md", folder: folder))
+  end
+
+  def test_brainstorm_answers_pending_fails_open_on_parse_error
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+    r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
+
+    with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
+      refute dispatcher.send(:brainstorm_answers_pending?, r),
+             "a parse error must fail OPEN (false) so a malformed file can't strand the task"
+    end
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("brainstorm_answers_pending") })
+  end
+
+  # #5: end-to-end — on a parse error the daemon must actually RESUME
+  # (re-run the agent to self-heal), not just have the predicate return
+  # false. Seed a baseline so Policy reaches :dispatch.
+  def test_handle_row_resumes_brainstorm_on_parse_error
+    dispatcher, supervisor, controller, = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+    controller.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
+      dispatcher.send(:handle_row, r, now: T0)
+    end
+    assert_equal 1, supervisor.spawned.size,
+                 "fail-open must let the daemon resume (re-run the agent) rather than strand"
+  end
+
+  # #1: a persistent parse error logs :fatal only once per (project, slug)
+  # — not on every ~30s tick — and re-arms after a successful parse.
+  def test_brainstorm_parse_error_log_is_deduped_per_slug
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+    r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
+
+    with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
+      3.times { dispatcher.send(:brainstorm_answers_pending?, r) }
+    end
+    fatals = logger.events.count { |(n, a)| n == :fatal && a[:slug] == "s1" }
+    assert_equal 1, fatals, "three failing ticks must log :fatal once, not three times"
+
+    # A successful parse clears the flag so a later recurrence logs again.
+    dispatcher.send(:brainstorm_answers_pending?, r)
+    with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
+      dispatcher.send(:brainstorm_answers_pending?, r)
+    end
+    assert_equal 2, logger.events.count { |(n, a)| n == :fatal && a[:slug] == "s1" },
+                 "the dedup re-arms after a successful parse"
+  end
+
+  def test_brainstorm_answers_pending_multi_round_and_edge_files
+    dispatcher, = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+
+    # Round 1 fully answered, Round 2 still open → pending.
+    multi = File.join(folder, "multi.md")
+    File.write(multi, "## Round 1\n### Q1.\nA?\n### A1.\nyes\n## Round 2\n### Q2.\nB?\n### A2.\n\n")
+    assert dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: multi, folder: folder))
+
+    # A `### Q` with NO `### A` slot at all → still unanswered → held
+    # (documents the no-fillable-slot case; recovery is operator/bot side).
+    noslot = File.join(folder, "noslot.md")
+    File.write(noslot, "## Round 1\n### Q1.\nA?\n")
+    assert dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: noslot, folder: folder))
+
+    # Zero parseable questions (empty / header drift) → fail OPEN (resume
+    # to re-run the agent); the bot can't answer it either.
+    zeroq = File.join(folder, "zeroq.md")
+    File.write(zeroq, "## Round 1\nno questions here\n")
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: zeroq, folder: folder))
+  end
+
   private
 
   def events_include?(logger, name)

@@ -1,7 +1,9 @@
 require "test_helper"
+require "json"
 require "hive/bot/supervisor"
 require "hive/bot/telegram"
 require "hive/bot/brainstorm_parser"
+require "hive/daemon/dispatch_request_queue"
 
 class HiveBotScenarioBrainstormTest < Minitest::Test
   include HiveTestHelper
@@ -59,7 +61,18 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
     answers = Hive::Bot::BrainstormParser.parse(brainstorm).map(&:answer)
     assert_equal [ "Answer 1", "Answer 2", "Answer 3", "Answer 4" ], answers
-    assert_equal [ "hive", "run", slug, "--json" ], child.commands.last
+    # After plan 2026-05-28-002, `hive run` is queue-routable: the bot
+    # writes a dispatch-request file under <HIVE_HOME>/dispatch_requests/
+    # instead of spawning a child. The daemon picks the request up.
+    assert_empty child.commands,
+                 "hive run must no longer spawn from the bot — it's the daemon's job now"
+    request_files = Dir.glob(File.join(@home, "dispatch_requests", "*.json"))
+    assert_equal 1, request_files.size, "exactly one dispatch request must have landed in the queue"
+    payload = JSON.parse(File.read(request_files.first))
+    assert_equal [ "hive", "run", slug, "--json" ], payload["argv"]
+    assert_equal "hive", payload["project"]
+    assert_equal slug, payload["slug"]
+    assert_equal "bot", payload["requestor"]
   end
 
   private

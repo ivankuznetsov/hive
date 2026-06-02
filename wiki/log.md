@@ -2,6 +2,169 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T23:30:00Z] fix — PR #241 ce-code-review fixups: schema file, argv+slug validation, security hardening, reliability
+
+**Action:** Addressed 14 findings from `/ce-code-review` on PR #241 across 10 reviewers (correctness, testing, maintainability, project-standards, agent-native, learnings, reliability, security, adversarial, api-contract, cli-readiness):
+
+1. **PS-01/AC-01 — Schema file**: Added `schemas/hive-dispatch-request.v1.json`. Was registered in `SCHEMA_VERSIONS` but the corresponding file was missing, breaking `test/unit/schema_files_test.rb`'s invariant that every key has a published schema. External validators / third-party producers can now reference it.
+2. **SEC-1+SEC-5+L-1 — Slug/project/argv validation**: `valid_argv?` now requires argv length ≥ 2, all non-empty strings, and validates the positional slug at `argv[2]` against ADR-012's regex (`^[a-z][a-z0-9-]{0,62}[a-z0-9]$`) for non-`markers` verbs. `parse_data` validates `project` against a name regex and `slug` against the ADR-012 regex — blocks path-traversal candidates at the queue boundary.
+3. **SEC-3 — Queue dir 0700**: `directory()` now `mkdir_p(..., mode: 0o700)` plus chmod-tightens an already-existing dir. Without this, default umask 0022 left the dir world-readable.
+4. **C2 — Conversation preservation on queue write failure**: `auto_run_after_answers` only clears the conversation on a non-nil dispatch return. A queue write failure (read-only state dir, ENOSPC) no longer strands the operator without a `/done` backstop.
+5. **AC-04 — Producer-side project/slug guards**: `DispatchRequestWriter.write!` raises `ArgumentError` on empty project or slug. Producer-side failure is louder and actionable rather than swallowed downstream.
+6. **R-01 — Per-iteration rescue in `process_dispatch_requests`**: A `Process.spawn` failure (Errno::EAGAIN under fork-exhaustion) in one iteration no longer aborts the rest of the pending queue. Failure logs `reason: spawn_failure: <class>: <message>` and the request file stays for retry.
+7. **C4 — `project_enabled?` gate**: Mirrors `handle_row`. A disabled project's queued requests log `:dispatch_request_blocked reason=project_disabled` and stay for retry once re-enabled.
+8. **R-04/M-05 — Gate ordering**: `running_task?` now precedes `can_dispatch?` so an in-flight slug doesn't incur the more expensive cap-counting scan.
+9. **M-02 — Dead `respond_to?` guard removed**: `ChildExit` always defines `request_id` (nilable); the `respond_to?` check was dead code.
+10. **PS-02 — ADR-033 added**: Records the single-dispatcher invariant. Supersedes ADR-026's "subprocess caller" model for state-mutating verbs while preserving it for read-only verbs (status / doctor / new / approve / accept-finding / reject-finding).
+
+**Tests added** (5):
+- `test_dispatch_request_blocked_when_project_is_disabled` (C4).
+- `test_dispatch_request_spawn_failure_logs_and_does_not_abort_subsequent_iterations` (R-01).
+- `test_write_rejects_empty_project_or_slug` (AC-04).
+- `test_directory_is_created_with_user_only_permissions` (SEC-3).
+- Updated `test_pending_rejects_missing_fields_and_bad_created_at` to cover new `invalid_project` and `invalid_slug` reasons (SEC-5).
+
+**Coverage:** 100.00% line coverage (17667/17667). RuboCop clean. Full suite: 4131 / 15061 / 0 failures / 0 errors / 2 skips.
+
+**Refreshed pages:**
+- [[decisions]] — ADR-033 records the single-dispatcher invariant and the ADR-026 amendment.
+
+**Deferred** (out of scope for the fix pass; tracked as follow-ups):
+- AN-1/AN-2/AN-3: `hive bot dispatch-requests --json` / `hive dispatch drain` / `hive dispatch enqueue` CLI verbs.
+- R-02: per-verb child timeout (current behavior: hung child indefinitely locks per-slug gate until daemon restart).
+- ADV-1: child non-zero exit → Telegram error reply (currently observable only in daemon.log).
+- C3: atomic claim + restart-recovery to prevent duplicate dispatch after daemon SIGKILL.
+- AC-02: clarify whether `:dispatch_request_written` event should exist alongside `:dispatched_command via=queue` (current implementation uses the latter; consistent with bot.log conventions).
+- AC-05: alert-reset timing change in `dispatch_command_sequence` for queue-routable sequences.
+
+## [2026-05-28T22:30:00Z] fix — PR #239 ce-code-review fixups: Q-context-aware answer-slot scan + ENOENT distinction + structured answer_slot_missing event
+
+**Action:** Addressed 10 findings from `/ce-code-review` on PR #239:
+
+1. **Q-context-aware slot location**: `Hive::Bot::BrainstormAnswerWriter.find_empty_answer_slot` now anchors on the parser-identified target Q's line (via a new `target_question_line_index` helper) and walks forward to the first empty A-section before the next block boundary. Replaces the two-step strict-then-fallback scan, which ignored Q/round context — a brainstorm.md with empty `### A1.` in Round 1 (still unanswered) AND Round 2's own `### A1.` would route the operator's Round-2 answer into Round-1's slot. Same combined function also handles the original off-by-one A-header tolerance (e.g. `### A2.` after `### Q1.`) without misattributing.
+2. **ENOENT distinguished from lock contention**: `try_append` returns the `:enoent` sentinel when `brainstorm.md` is missing mid-write; `append!` maps it to `:question_not_found` (short-circuit) instead of polling the full 5s retry deadline and returning a misleading `:lock_busy`.
+3. **Structured answer_slot_missing event**: added to `Hive::Bot::Logger::EVENTS` and the `schemas/hive-bot-log.v1.json` enum. Supervisor's branch now emits the event alongside the Telegram reply — operator-agents tailing `bot.log` see the malformed-slot state without parsing the human-readable text.
+4. **Consolidated regex constants**: `BrainstormAnswerWriter` now reuses `BrainstormParser::{QUESTION,ANSWER,ROUND,MARKER}_RE` directly; the in-file copies subtly diverged (writer's `QUESTION_RE` didn't capture title) and the duplication was a silent-drift risk.
+5. **Canonical heading helpers**: `Hive::Bot::BrainstormParser.question_header(n)` / `.answer_header(n)`. Supervisor's `:answer_slot_missing` reply uses them instead of hard-coding `### A#{n}.`. If the brainstorm.md format ever changes, this is the single place to update.
+6. **Enriched operator instruction**: the reply now says "Ensure exactly one empty `### A{n}.` sits immediately after `### Q{n}.` (remove any stale mis-numbered `### A.` header in between)" — guarding against the double-A-header trap the prior wording could lead an operator into.
+
+**Refreshed pages:**
+- [[modules/bot]] — `BrainstormParser` and `BrainstormAnswerWriter` rows expanded to describe the lenient-A-header rule, Q-context-aware slot location, and the `:answer_slot_missing` / `:question_not_found` mapping.
+
+## [2026-05-28T21:00:00Z] refactor — single-dispatcher via file-backed dispatch-request queue (plan 2026-05-28-002)
+
+**Action:** Eliminated the bot↔daemon dual-writer race for
+`hive run`-class verbs. Before: both the daemon AND the bot could
+spawn `hive run`, but only the daemon refreshed its
+`last_dispatched_mtime` baseline on reap. Bot-spawned reaps were
+invisible to the daemon, so the agent's own write to brainstorm.md
+looked like a new user edit on the next tick → redundant redispatch
+→ task lock held 1-2 min → bot rejects user answers with "Try again
+— another run holds the lock". Smoking gun on 2026-05-28 18:13:14
+→ 18:13:44 in `daemon.log`.
+
+The fix collapses the two dispatchers into one:
+
+- New `Hive::Daemon::DispatchRequestQueue` (`lib/hive/daemon/dispatch_request_queue.rb`):
+  file-backed queue at `<state_home>/dispatch_requests/<ts>-<id>.json`,
+  allowlists `run develop brainstorm plan review open-pr artifacts
+  finalize archive markers`. Schema `hive-dispatch-request` v1.
+- New `Hive::Bot::DispatchRequestWriter` (`lib/hive/bot/dispatch_request_writer.rb`):
+  atomic tmp+rename JSON write. Validates argv against the queue's
+  allowlist at the call site too.
+- `Hive::Daemon::Dispatcher#tick` runs
+  `process_dispatch_requests(now:)` BEFORE the per-row scan. Gates
+  per request: allowlist → expiry (10 min) → project lookup →
+  per-slug in-flight → concurrency caps → spawn. Threads
+  `request_id` through `ChildSupervisor#spawn` and `ChildExit` so
+  `reap_completed` can unlink the file and log
+  `:dispatch_request_completed`.
+- `Hive::Bot::Supervisor#execute_dispatch` rewrites queue-routable
+  argv into `DispatchRequestWriter.write!`; the bot stops being a
+  child-process launcher for those verbs.
+- Per-slug in-flight gate added to `dispatch_or_block` so the
+  row scan can't double-spawn a slug whose request just dispatched
+  earlier in the same tick.
+
+New telemetry events in `daemon.log`:
+`dispatch_request_observed/_dispatched/_completed/_blocked/
+_rejected/_expired`. Bot's `:dispatched_command` event gains a
+`via=queue` tag and `request_id` to distinguish the two paths.
+
+**Tests:** four integration tests including
+`test/integration/regression_redundant_redispatch_test.rb` which
+replays the exact 18:13 sequence and asserts no redundant
+redispatch.
+
+**Refreshed pages:**
+- [[modules/daemon]] — new module-map row for
+  `DispatchRequestQueue`; new "Single-dispatcher" section describing
+  per-step gates + telemetry.
+- [[modules/bot]] — new module-map row for `DispatchRequestWriter`;
+  new "Single-dispatcher invariant" section with the audit
+  command.
+- [[architecture]] — new "Dispatch flow" section with the bot →
+  queue → daemon → child diagram.
+
+## [2026-05-28T13:50:00Z] fix — CleanExit follow-ups: bot callback reason encoding + agent-actionable next_action
+
+**Action:** Two further CleanExit fixes:
+
+1. **`Hive::Markers.error_recovery_match_attr` encodes both `marker_id` and `reason`** when both are present (comma-separated, `marker_id=...,reason=...`). Telegram inline-button callbacks now reconstruct enough attrs for `Hive::Bot::Handlers::RecoverySequence.manual_only?` to refuse `dirty_worktree` / `ensure_clean_on_exit_failed` — previously the callback path only carried `marker_id=<hex>` and the manual-only check (which reads `attrs["reason"]`) never matched, so the bot kept dispatching the retry verb. `Hive::Bot::AlertStore.parse_match_attr` keeps using the leading token (`marker_id=...`) as its race-safe invalidation guard.
+2. **`hive run --json` next_action for `:error reason=ensure_clean_on_exit_failed`** now emits an `EDIT` envelope (target = worktree path, `residue_paths` parsed as an array, `instructions` carrying the canonical recovery one-liner, `markers_to_clear: ["error"]`, `rerun_with` set). `Hive::TaskAction#suggested_next_action_payload` gets a `clean_exit_manual_failure?` predicate returning `{kind: "manual_fix", command: nil}` — mirroring the `auto_commit_manual_failure?` shape so polling consumers see the explicit "do not auto-retry" signal that matches the bot's manual-only routing decision.
+
+**Refreshed pages:**
+- [[bot]] — `RecoverySequence` now refuses inline-button retries on the new manual-only reasons via the comma-encoded `match_attr` round-trip.
+
+## [2026-05-28T13:30:00Z] fix — CleanExit follow-ups: stale result[:commit], ConfigError surfacing, 300s git timeout
+
+**Action:** Three follow-up fixes to the CleanExit invariant landed today:
+
+1. **`enforce_clean_exit!` clears stale `result[:commit]`** — when CleanExit overwrites a runner's success marker with `ensure_clean_on_exit_failed`, `Hive::Stages::Base#enforce_clean_exit!` now returns `{status:, overwrote_marker:}`, and `with_stage_events` mutates `result[:commit] = "ensure_clean_on_exit_failed"` + `result[:status] = :error` so `commands/run.rb#commit_after` writes a hive-state commit matching the on-disk marker instead of a stale `"review_complete"`.
+2. **`Hive::ConfigError` no longer silently dropped** — invalid `review.fix.auto_commit.sign_policy` config now overwrites the marker to `:error reason=ensure_clean_on_exit_failed detail="invalid sign_policy config: ..."` (200-char truncated) instead of falling into the generic `StandardError` warn-and-continue branch. Other `StandardError` keeps the warn+nil transient path.
+3. **300s timeout on clean-exit git ops** — `CleanExit.porcelain_status` (`git status --porcelain`), `CleanExit.run!` add-step (`git add -A`), `CleanExit.failure_with_unstage` (`git reset HEAD --`), `AutoCommit.staged_auto_commit_paths` (`git diff --cached --name-only`), and `AutoCommit.auto_commit_failure_with_unstage` (`git reset HEAD --`) are now bounded by `AutoCommit.capture_git_with_timeout` (300s via `Timeout.timeout` around `Open3.capture3`). A hung pre-commit hook or frozen pager surfaces as `{success: false, timed_out: true, message: "<label> timed out after 300s"}` propagated as `:git_failed`, causing the canonical `ensure_clean_on_exit_failed` marker.
+
+**Refreshed pages:**
+- [[state-model]] — marker-grammar row for `ensure_clean_on_exit_failed` now spells out the `detail=` carrier for the ConfigError variant, the 300s timeout on git ops, and the `result[:commit]` rewrite that keeps the hive-state commit aligned with the on-disk marker.
+
+## [2026-05-28T12:00:00Z] feat — Hive::Stages::CleanExit invariant + ensure_clean_on_exit config + bot manual-only routing
+
+**Action:** Shipped the clean-worktree-on-exit invariant (`lib/hive/stages/clean_exit.rb`) as a `with_stage_events` post-yield hook gated on the new global config key `stages.ensure_clean_on_exit` (default `true`). Hooks every stage in `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`; PAUSE_MARKERS (currently `:execute_waiting`, `:review_waiting`) skip enforcement. Behavior: on a clean worktree do nothing; on dirty residue that is fully inside `review.fix.auto_commit.scope_check.allowed_paths`, auto-commit via the shared `Hive::Stages::AutoCommit` primitives so per-pass review-fix and stage-exit share one implementation; on scope-violating or git-failed residue, overwrite the current marker to `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> -->`. Finalize now also runs CleanExit as an *entry* backstop so 6-review residue self-heals before finalize logic begins. The bot routes `ensure_clean_on_exit_failed` (alongside the legacy `dirty_worktree`) into the manual-only reply path — no inline retry button — because the residue requires operator inspection. CleanExit + finalize's residue-log writer keep the marker grammar in `Hive::Markers::KNOWN_NAMES` honest by reusing the existing `ERROR` name with a new `reason` attr.
+
+**New/refreshed pages:**
+- [[stages/finalize]] — Precondition #4 rewritten to describe the entry+exit CleanExit invariant and the new `ensure_clean_on_exit_failed` marker shape.
+- [[state-model]] — marker grammar row updated to mention `ensure_clean_on_exit_failed` with `residue_paths` attr; per-project config schema documents `stages.ensure_clean_on_exit`.
+- [[stages/review]] — Phase 4 / AutoCommit ownership now also called out as the implementation shared by the stage-exit invariant.
+- [[bot]] — manual-only reply enrichment notes that `dirty_worktree` and `ensure_clean_on_exit_failed` both route to the manual path.
+
+## [2026-05-28T10:30:00Z] refactor — extract Hive::Stages::AutoCommit from Review
+
+**Action:** Pure-extract of the per-pass auto-commit primitives (scope-check, sign-policy, git-commit invocation, signing-error pattern set, unstage-on-failure) out of `Hive::Stages::Review` into `lib/hive/stages/auto_commit.rb` so the upcoming stage-exit `CleanExit` invariant can share one implementation. Review's behavior is byte-identical — same `fix(review): apply pass NN findings` commit message + Hive-Fix-* trailers + `auto_commit_fix_worktree` flow; Review's in-file consumers now delegate to `AutoCommit` module-functions, and legacy `Review::AUTO_COMMIT_*` constants remain as aliases.
+
+**Refreshed pages:**
+- [[stages/review]] — source list now includes `lib/hive/stages/auto_commit.rb`; Phase 4 prose names the module as the shared owner of the scope/sign/commit primitives.
+
+## [2026-05-28T10:00:00Z] fix(daemon) — review-fix delta on dispatch-baseline persistence
+
+**Action:** Addressed ce-code-review findings on the persistence PR. P0: four newly-written dispatcher tests were silently dropped because they sat below `private` — Minitest only discovers public methods, so the regression that motivates the whole file had zero behavioral coverage in CI; reordered so tests stay public above `private`. P2: closed an FD leak in `DispatchBaselines#acquire_lock` (flock-raise after `File.open` succeeded skipped the close — symmetric to the existing `release_lock` fix). P2: added `:daemon_dispatch_baselines_loaded` (boot-time signal with entry count + suspend flag) and `:daemon_dispatch_baselines_newer_schema_suspended` (positive signal that downgrade protection is engaged), so a silently-disabled persistence layer cannot mask the very regression it exists to prevent. P2: made `prune_dispatch_baselines(scope_projects:)` REQUIRED (was nil-defaulted) — a future caller forgetting it would have silently re-stranded answered tasks across per-project status errors. P2: moved the broad `rescue StandardError` defense-in-depth from `ConcurrencyController#persist_dispatch_baselines!` INTO `DispatchBaselines#write` itself, so the store now owns its entire error surface (controller no longer needs a `logger:` kwarg). P3 cleanups: dropped the unreachable `version < SCHEMA_VERSION` load branch, tightened vacuous test assertions (release_lock close-attempted sentinel, root-safe write-failure test via `file_as_parent`), and rewrote `test_nil_store_keeps_state_in_memory` to assert on real behavior instead of a circular `Dir.glob`. Updated [[modules/daemon]]'s failure-mode-visibility paragraph and added the scope-projects-required note.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-05-27T23:40:00Z] fix(daemon) — persist dispatch baselines across restart
+
+**Action:** Documented the new `Hive::Daemon::DispatchBaselines` store and the restart-survival behavior it gives the daemon's first-sight edit baseline. The `[project, slug] → state_file_mtime` map (in `ConcurrencyController`) was in-memory only, so a daemon restart re-stranded already-answered `needs_input` tasks (a pre-restart answer stopped looking "newer than baseline"); it's now write-through-persisted to `daemon_dispatch_baselines.json` under the state home, fail-closed on load, pruned to the live task set each successful tick. Replaces the rejected marker-`ts` approach (closed PR #229) — no marker-format dependency, mtime-to-mtime comparison. Added a "Persisted dispatch baselines" section and a module-map row to [[modules/daemon]].
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-05-27T18:00:00Z] feat — daemon-driven update flow (check + nudge, U1–U5)
+
+**Action:** Added the update flow (plan 2026-05-27-002): `Hive::UpdateCheck` release probe, `UpdateCheck::State` shared JSON store, `update.check`/`update.auto` config, dispatcher integration (throttled check + per-channel nudge), and the nudge surfaces (TUI footer + once-per-version bot push). Every channel is nudge-only for now; bash auto-update (U7) is deferred.
+
+**New/refreshed pages:**
+- [[update-flow]] · [[state-model]] · [[commands/update]]
+
 ## [2026-05-27T12:00:00Z] ci — cross-OS install verification (real installs)
 
 **Action:** CI now does real installs of every channel on its native OS via `packaging/verify-channel.sh` + the reusable `.github/workflows/install-verify.yml` (matrix: bash/ubuntu x86+arm, brew/macos-15, aur/arch container). Three layers: a pre-release `install-gate` in `release.yml` (gem-installs on macos+ubuntu-arm before publishing), `post-release-verify` (real brew/yay/install.sh of the published version), and a weekly `install-canary.yml`. Failures open/update a single `install-failure` GitHub issue. This matrix immediately caught and drove fixes for real channel bugs (broken `yay -S hive-bin`, brew `hv` shim, brew marker path) shipped in v0.1.5. aarch64-AUR deferred (official `archlinux` image is x86_64-only). Runbook: `docs/RELEASING.md#install-verification`.
@@ -2389,3 +2552,25 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[decisions]]
+
+## [2026-05-27T13:30:00Z] bot — acknowledge successful /idea capture
+
+**Action:** Fixed the `/idea` project picker appearing to do nothing on tap. `Supervisor#child_completion_text` returned nil for every exit-0 child, so a successful `hive new` (idea capture) sent no confirmation; the picker token was already consumed, so a confused re-tap reported "idea picker expired." `child_completion_text` now confirms a successful `hive new` (keyed on the verb at `argv[1]`, since `normalize_hive_bin` rewrites `argv[0]`). Audit found `/approve` and `/done` share the silent-success shape but degrade gracefully (downstream notification + WRONG_STAGE on re-tap), so they were left as-is.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
+## [2026-05-30T15:21:04Z] review — auto-commit scoped pre-fix residue
+
+**Action:** Updated 6-review Phase 4 so in-scope residue found before the fix agent is committed through the shared CleanExit/AutoCommit path with `Hive-Auto-Commit-Reason: pre_fix_dirty_worktree`, then rechecked before spawning the fix agent. Out-of-scope residue still lands `REVIEW_ERROR phase=fix reason=fix_dirty_worktree`. The clean-exit event type is now accepted so these commits are visible in `events.jsonl`.
+
+**Refreshed pages:**
+- [[stages/review]]
+
+## [2026-05-30T19:55:00Z] recovery — make Git-status-check failures manual-only
+
+**Action:** `REVIEW_ERROR phase=fix reason=fix_status_check_failed` now emits `suggested_next_action.kind=manual_fix`, bot recovery refuses `/autofix`, and TUI red-status Enter refuses instead of clearing and rerunning. The same TUI guard covers manual-only `ERROR` reasons such as `ensure_clean_on_exit_failed` so unreadable or dirty worktrees are repaired by an operator before retry.
+
+**Refreshed pages:**
+- [[stages/review]]
+- [[commands/tui]]

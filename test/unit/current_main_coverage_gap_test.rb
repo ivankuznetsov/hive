@@ -686,7 +686,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
 
       assert_equal worktree, commit_calls.fetch(0).fetch(0)
       assert_equal "inherit", commit_calls.fetch(0).fetch(1)
-      commit_argv = Hive::Stages::Review.send(:auto_commit_git_commit_argv, worktree, "inherit", "message")
+      commit_argv = Hive::Stages::AutoCommit.send(:auto_commit_git_commit_argv, worktree, "inherit", "message")
       assert_equal [ "git", "-C", worktree, "commit" ], commit_argv.first(4)
       refute_includes commit_argv, "commit.gpgsign=false"
     end
@@ -727,7 +727,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
 
       assert_equal worktree, commit_calls.fetch(0).fetch(0)
       assert_equal "bypass", commit_calls.fetch(0).fetch(1)
-      commit_argv = Hive::Stages::Review.send(:auto_commit_git_commit_argv, worktree, "bypass", "message")
+      commit_argv = Hive::Stages::AutoCommit.send(:auto_commit_git_commit_argv, worktree, "bypass", "message")
       assert_equal [ "git", "-C", worktree, "-c", "commit.gpgsign=false", "commit" ], commit_argv.first(6)
     end
   end

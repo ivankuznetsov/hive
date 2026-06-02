@@ -628,6 +628,56 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_review_auto_commits_in_scope_pre_fix_residue_before_fix_agent
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        residue_file = File.join(worktree, "wiki", "reviewer-residue.md")
+        fix_file = File.join(worktree, "test", "fix-agent-ran.txt")
+        FileUtils.mkdir_p(File.dirname(residue_file))
+        File.write(residue_file, "residue before fix\n")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          mkdir -p "$(dirname '#{fix_file}')"
+          printf 'fix agent ran\n' > "#{fix_file}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal 0, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+
+        assert_equal "fix agent ran\n", File.read(fix_file)
+        assert_equal "", `git -C #{worktree} status --porcelain`
+
+        latest_subject = `git -C #{worktree} log -1 --pretty=%s`.strip
+        residue_subject = `git -C #{worktree} log -1 --pretty=%s HEAD~1`.strip
+        residue_body = `git -C #{worktree} log -1 --pretty=%B HEAD~1`
+        assert_equal "fix(review): apply pass 01 findings", latest_subject
+        assert_equal "chore(6-review): commit residual worktree changes", residue_subject
+        assert_includes residue_body, "Hive-Auto-Commit-Reason: pre_fix_dirty_worktree"
+
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        assert events.any? { |event|
+          event["event_type"] == "clean_exit_auto_committed" &&
+            event["message"].to_s.include?("reason=pre_fix_dirty_worktree")
+        }, "pre-fix residue auto-commit should be visible in events.jsonl"
+      end
+    end
+  end
+
   def test_review_fix_agent_refuses_to_auto_commit_pre_existing_dirty_worktree
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

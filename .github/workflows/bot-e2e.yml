@@ -1,0 +1,52 @@
+name: bot-e2e
+
+# Headless end-to-end test of the Telegram bot /idea capture flow. Drives a
+# real @BotFather test bot via a Telethon user-client (account session stored
+# as the TG_SESSION secret). Manual-only: automating a user account against
+# Telegram is gentle-use-only, and only one poller may hold the test token at
+# a time, so this must not run concurrently or on every push.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bot-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  idea-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/bot-e2e-setup
+      - name: Run headless /idea E2E
+        working-directory: test/e2e/tg
+        env: &tg_env
+          HIVE_REPO: ${{ github.workspace }}
+          BOT_LAUNCHER: "bundle exec ruby"
+          HIVE_BIN: ${{ runner.temp }}/hivebin
+          TG_CAPTURE_PROJECT: e2eproj
+          TG_BOT_USERNAME: Testivanshive_bot
+          HIVE_TEST_BOT_TOKEN: ${{ secrets.HIVE_TEST_BOT_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_DRIVER_ID: ${{ secrets.TG_DRIVER_ID }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: .venv/bin/python run_e2e.py
+
+  # Runs AFTER idea-flow (never concurrently) — only one poller may hold the
+  # test token at a time. Asserts the bot proactively pushes the update nudge.
+  nudge-flow:
+    needs: idea-flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/bot-e2e-setup
+      - name: Run headless update-nudge push E2E
+        working-directory: test/e2e/tg
+        env: *tg_env
+        run: .venv/bin/python run_nudge_e2e.py

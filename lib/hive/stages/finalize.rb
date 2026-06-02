@@ -1,5 +1,6 @@
 require "fileutils"
 require "open3"
+require "time"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
@@ -8,6 +9,7 @@ require "hive/secret_patterns"
 require "hive/claude_launcher"
 require "hive/stages"
 require "hive/stages/base"
+require "hive/stages/clean_exit"
 require "hive/worktree"
 
 module Hive
@@ -152,9 +154,41 @@ module Hive
                             detail: err.to_s.strip[0, 200])
           return { commit: "finalize_git_status_failed", status: :error }
         end
+        # Defense-in-depth backstop. Stages already enforce a clean
+        # worktree at exit via Hive::Stages::Base.with_stage_events, but
+        # finalize is the last gate before push — and existing in-flight
+        # features that landed at 8-finalize *before* the invariant
+        # shipped must still self-heal. Residue passing the scope check
+        # is auto-committed as `chore(8-finalize): commit residual
+        # worktree changes`; scope-violating residue (or a git failure)
+        # lands `:error reason=ensure_clean_on_exit_failed` so the bot
+        # routes it to manual-only recovery instead of looping retries.
         unless out.empty?
-          Hive::Markers.set(task.state_file, :error, reason: "dirty_worktree")
-          return { commit: "finalize_dirty_worktree", status: :error }
+          result = Hive::Stages::CleanExit.run!(
+            worktree_path: worktree_path,
+            stage: "8-finalize",
+            task: task,
+            cfg: cfg || {},
+            reason: :finalize_entry_backstop
+          )
+          case result[:status]
+          when :auto_committed
+            log_finalize_residue_committed(task, result)
+            # Fall through to the push / pushed? logic below — the
+            # residue is now part of the branch history.
+          when :scope_violation, :git_failed
+            attrs = {
+              reason: "ensure_clean_on_exit_failed",
+              detail: result[:message].to_s[0, 200]
+            }
+            attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
+            Hive::Markers.set(task.state_file, :error, **attrs)
+            return { commit: "finalize_dirty_worktree", status: :error }
+          when :clean
+            # status said dirty but CleanExit saw clean — race with an
+            # operator who committed manually between the two reads.
+            # Continue to the push gate.
+          end
         end
 
         return nil if pushed?(worktree_path, branch)
@@ -166,6 +200,28 @@ module Hive
                           reason: "unpushed_commits",
                           detail: push_result.stderr.to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      # Record an auto-committed-residue event under the task's log dir so
+      # the operator scanning logs can tell the residue commit was
+      # produced by the finalize backstop (vs. a per-stage `stage_exit`
+      # hook). Best-effort — log-write failure must not abort finalize.
+      def log_finalize_residue_committed(task, result)
+        return unless task.respond_to?(:log_dir)
+
+        FileUtils.mkdir_p(task.log_dir)
+        ts = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
+        path = File.join(task.log_dir, "finalize-residue-committed-#{ts}.log")
+        body = <<~LOG
+          finalize backstop auto-committed worktree residue
+          head: #{result[:head]}
+          commit_subject: #{result[:commit_subject]}
+          paths:
+          #{Array(result[:paths]).map { |p| "  - #{p}" }.join("\n")}
+        LOG
+        File.write(path, body)
+      rescue StandardError => e
+        warn "[hive] finalize-residue log write failed: #{e.class}: #{e.message}"
       end
 
       def validate_complete_marker(task, marker, expected_pr_url)

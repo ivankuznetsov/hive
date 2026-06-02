@@ -200,6 +200,51 @@ with the same per-spawn `<user_supplied_<hex>>` nonce boundary as stage
 prompts, and Codex only returns a draft. The bot writes the literal
 confirmed draft; Codex never edits `brainstorm.md` directly.
 
+## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
+
+For state-mutating workflow verbs (`run`, `develop`, `brainstorm`,
+`plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`,
+`markers clear`) there is exactly ONE writer: the daemon. The bot
+and any future external caller (TUI, web UI) are producers that
+write file-backed JSON requests; the daemon's tick loop is the
+only thing that calls `Process.spawn` on those verbs.
+
+```
+operator → /done in Telegram
+   └─ Hive::Bot::Supervisor#execute_dispatch
+        └─ Hive::Bot::DispatchRequestWriter.write!
+             └─ <state_home>/dispatch_requests/<ts>-<id>.json
+                  ↑ atomic tmp + File.rename — partial reads impossible
+   ┄ wait for next daemon tick ┄
+   └─ Hive::Daemon::Dispatcher#tick
+        └─ Hive::Daemon::DispatchRequestQueue.pending
+             └─ allowlist + expiry + per-slug in-flight gate
+                  └─ Hive::Daemon::ChildSupervisor#spawn (with request_id)
+                       └─ hive run ... (the real subprocess)
+                            └─ reap_completed
+                                 ├─ controller.observe_state_file_mtime (refresh baseline)
+                                 ├─ DispatchRequestQueue.remove(request_id)
+                                 └─ :dispatch_request_completed event
+```
+
+Read-only verbs (`hive status`, `hive status --diagnose`,
+`hive doctor`, `gh pr view`) and verbs outside the allowlist
+(`hive new`, `hive approve`, `hive accept-finding`,
+`hive reject-finding`) still spawn directly from the bot via
+`Hive::Bot::ChildSupervisor`. They don't bump task state-file
+mtimes and don't cause the dual-writer race the queue exists to
+prevent.
+
+Why the file-backed queue beats an event bus or sockets: every
+hive-state-mutating operation already touches the filesystem
+under one well-known root (`Hive::Paths.state_home`), the
+atomic-rename idiom is already standard in this codebase
+(`Hive::Markers.write_atomic`, `DispatchBaselines#persist!`),
+and the daemon's tick was already a single-threaded sequential
+loop. The queue is the smallest possible addition that satisfies
+the single-dispatcher invariant. See [[modules/daemon]]
+§"Single-dispatcher" for the per-step gates and telemetry events.
+
 ## Code conventions
 
 - Ruby 3.4, frozen-string-literal **disabled** (per `.rubocop.yml`).

@@ -4,6 +4,7 @@ require "tmpdir"
 require "hive/markers"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
@@ -43,12 +44,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def spawn(command_string:, project:, slug:, stage:,
-              hive_state_path: nil, state_file_path: nil, dry_run: nil)
+              hive_state_path: nil, state_file_path: nil, dry_run: nil,
+              request_id: nil)
       pid = @next_pid
       @next_pid += 1
       @spawned << {
         pid: pid, command: command_string, project: project, slug: slug,
-        stage: stage, state_file_path: state_file_path, dry_run: dry_run
+        stage: stage, state_file_path: state_file_path, dry_run: dry_run,
+        request_id: request_id
       }
       pid
     end
@@ -97,7 +100,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
-                      project_enabled: true)
+                      project_enabled: true, dispatch_state: nil, status_result: nil,
+                      dispatch_request_state_home: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -107,11 +111,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
     }
     controller = Hive::Daemon::ConcurrencyController.new(
       max_concurrent_runs: 5, max_concurrent_per_project: 5,
-      max_runs_per_day_per_project: 100
+      max_runs_per_day_per_project: 100,
+      dispatch_state: dispatch_state
     )
     supervisor = FakeSupervisor.new
     status = FakeStatusConsumer.new
-    status.next_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: rows, error: nil)
+    # Mirror what StatusConsumer emits in production: a `projects` list derived
+    # from the rows being returned. Without this the dispatcher's prune scope
+    # is empty and prune_dispatch_baselines never drops anything — making the
+    # prune-on-tick path effectively dead in any test that relies on the
+    # default `status_result`.
+    projects_for_rows = rows.map(&:project).uniq.map do |name|
+      Hive::Daemon::StatusConsumer::ProjectInfo.new(name: name, legacy_stage_dirs: [])
+    end
+    status.next_result = status_result ||
+                         Hive::Daemon::StatusConsumer::Result.new(
+                           ok: true, rows: rows, projects: projects_for_rows, error: nil
+                         )
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
 
@@ -122,7 +138,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status,
       logger: logger,
       merge_watcher: merge_watcher,
-      dry_run: dry_run
+      dry_run: dry_run,
+      dispatch_request_state_home: dispatch_request_state_home
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -1075,10 +1092,463 @@ def test_interruptible_sleep_stops_after_shutdown_request
   assert_equal [ 0.5 ], sleeps
 end
 
-  private
+  # ── dispatch-baseline persistence across restart ───────────────────────
+  # Tests below MUST stay above the `private` declaration further down —
+  # Minitest only discovers public test methods. A prior arrangement hid them
+  # under `private` and silently ran zero of them (line coverage stayed green
+  # via other tests indirectly exercising `prune_dispatch_baselines`, masking
+  # the regression these tests pin).
 
+  # The core fix: a needs_input row answered BEFORE a daemon restart must
+  # dispatch, not be re-stranded. The pre-restart "ask" baseline is persisted;
+  # the live state-file mtime (the user's answer) is newer, so the freshly
+  # restarted dispatcher dispatches. Without persistence the reloaded baseline
+  # would be nil → first-sight → :record_baseline → skip (the bug).
+  def test_pre_restart_answer_dispatches_after_restart_via_persisted_baseline
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "writero", slug: "add-x", mtime: T0 - 600) # the ask
+
+      answered = row(project: "writero", slug: "add-x", stage: "2-brainstorm",
+                     action: "needs_input",
+                     command: "hive brainstorm add-x --from 2-brainstorm",
+                     mtime: T0 - 40) # user's answer: newer than ask, past 30s debounce
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [ answered ],
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_equal 1, sup.spawned.size, "a pre-restart answer must dispatch, not be re-stranded"
+      assert events_include?(logger, :dispatched)
+    end
+  end
+
+  def test_tick_prunes_baselines_for_tasks_absent_from_status
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "p", slug: "gone", mtime: T0 - 600)
+      seed_baseline(path, project: "p", slug: "present", mtime: T0 - 600)
+
+      present = row(project: "p", slug: "present", stage: "2-brainstorm",
+                    action: "needs_input",
+                    command: "hive brainstorm present --from 2-brainstorm",
+                    mtime: T0 - 600) # equal to baseline → :skip, no re-dispatch
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        rows: [ present ],
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      _dispatcher.tick(now: T0)
+
+      assert_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "gone"),
+                 "a task absent from the status scan must be pruned from baselines"
+      refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "present"),
+                 "a task still present must keep its baseline"
+    end
+  end
+
+  def test_failed_status_fetch_does_not_prune_baselines
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "p", slug: "keep", mtime: T0 - 600)
+
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path),
+        status_result: Hive::Daemon::StatusConsumer::Result.new(ok: false, rows: [], error: "boom")
+      )
+      _dispatcher.tick(now: T0)
+
+      refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "keep"),
+                 "a transient status failure must NOT wipe persisted baselines"
+    end
+  end
+
+  # Per-project errors (`not_initialised`, `missing_project_path`) cause
+  # `StatusConsumer` to drop a project from BOTH rows AND projects, even
+  # though the overall fetch is `ok: true`. Without a scope guard the prune
+  # would silently wipe every baseline for that project on the spot — the
+  # exact stranding regression. The dispatcher passes `result.projects` as
+  # the scope so an errored project keeps its baselines until it reappears.
+  def test_per_project_error_does_not_wipe_that_projects_baselines
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "writero", slug: "answered", mtime: T0 - 600)
+      seed_baseline(path, project: "errored", slug: "answered-too", mtime: T0 - 600)
+
+      writero_row = row(project: "writero", slug: "answered", stage: "2-brainstorm",
+                        action: "needs_input",
+                        command: "hive brainstorm answered --from 2-brainstorm",
+                        mtime: T0 - 600)
+      # `errored` project is filtered out of rows AND projects by the consumer
+      # — mirror that here.
+      result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [ writero_row ],
+        projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "writero", legacy_stage_dirs: []) ],
+        error: nil
+      )
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path),
+        status_result: result
+      )
+      _dispatcher.tick(now: T0)
+
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "errored", slug: "answered-too"),
+                   "a project absent from result.projects (per-project error) must NOT have its baselines pruned"
+      # Sanity: writero/answered's baseline is still there too (mtime == baseline → :skip).
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
+    end
+  end
+
+  # ── dispatch-request queue integration ───────────────────────────────
+
+  Q = Hive::Daemon::DispatchRequestQueue
+
+  def write_request_file(dir, slug:, request_id:, created_at: T0, argv: nil, project: "p1",
+                         trigger: "answer_complete")
+    argv ||= [ "hive", "run", slug, "--json" ]
+    path = File.join(Q.directory(state_home: dir), Q.filename_for(created_at: created_at, request_id: request_id))
+    payload = {
+      "schema" => "hive-dispatch-request",
+      "schema_version" => 1,
+      "request_id" => request_id,
+      "created_at" => created_at.utc.iso8601,
+      "project" => project,
+      "slug" => slug,
+      "argv" => argv,
+      "requestor" => "bot",
+      "chat_id" => 42,
+      "update_id" => 99,
+      "trigger" => trigger
+    }
+    File.write(path, JSON.generate(payload))
+    path
+  end
+
+  def stub_find_project!(dispatcher, project_name)
+    Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+    Hive::Config.define_singleton_method(:find_project) do |name|
+      name == project_name ? { "name" => project_name, "path" => "/tmp/nonexistent", "hive_state_path" => "/tmp/nonexistent/.hive-state" } : nil
+    end
+    dispatcher
+  end
+
+  def restore_find_project!
+    if Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+      Hive::Config.define_singleton_method(:find_project, Hive::Config.method(:__orig_find_project))
+    end
+  end
+
+  def test_dispatch_request_observed_logged_and_dispatched
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "R1")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        observed = logger.events.find { |(n, _)| n == :dispatch_request_observed }
+        dispatched = logger.events.find { |(n, _)| n == :dispatch_request_dispatched }
+        refute_nil observed
+        refute_nil dispatched
+        assert_equal "R1", observed[1][:request_id]
+        assert_equal 1, sup.spawned.size
+        assert_equal "hive run s1 --json", sup.spawned.first[:command]
+        assert_equal "R1", sup.spawned.first[:request_id]
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_rejected_when_argv_not_allowlisted
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "BAD",
+                         argv: [ "hive", "doctor" ])
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        rejected = logger.events.find { |(n, attrs)| n == :dispatch_request_rejected && attrs[:request_id] == "BAD" }
+        refute_nil rejected
+        assert_equal "invalid_argv", rejected[1][:reason]
+        assert_empty sup.spawned
+        assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_rejected_when_project_unknown
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "RX", project: "unknown-proj")
+      # No stub for find_project ⇒ returns nil
+      Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+      Hive::Config.define_singleton_method(:find_project) { |_| nil }
+      begin
+        dispatcher.tick(now: T0)
+
+        rejected = logger.events.find { |(n, attrs)| n == :dispatch_request_rejected && attrs[:request_id] == "RX" }
+        refute_nil rejected
+        assert_equal "unknown_project", rejected[1][:reason]
+        assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_blocked_when_in_flight_for_same_slug
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Pre-seed an in-flight slot for (p1, s1)
+      ctrl.record_dispatch(pid: 7777, project: "p1", slug: "s1", stage: nil,
+                           command: "hive run s1", started_at: T0,
+                           state_file_mtime: nil)
+      write_request_file(state_home, slug: "s1", request_id: "DEF")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find { |(n, _)| n == :dispatch_request_blocked }
+        refute_nil blocked
+        assert_equal "in_flight", blocked[1][:reason]
+        # The request file MUST remain on disk for the next tick.
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_equal 1, files.size
+        # Sup must NOT have spawned this request (only the pre-seeded slot exists).
+        assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  # C4 from PR #241 ce-code-review: process_dispatch_requests must
+  # gate on project_enabled? so a disabled project's queued requests
+  # don't dispatch. Mirrors handle_row's project_enabled? gate.
+  def test_dispatch_request_blocked_when_project_is_disabled
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "DISABLED")
+      stub_find_project!(dispatcher, "p1")
+      # Force the project to look disabled.
+      dispatcher.define_singleton_method(:project_enabled?) { |_| false }
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |(n, attrs)|
+          n == :dispatch_request_blocked && attrs[:request_id] == "DISABLED"
+        end
+        refute_nil blocked, ":dispatch_request_blocked must fire for a disabled project"
+        assert_equal "project_disabled", blocked[1][:reason]
+        # Request file stays on disk for retry once project is re-enabled.
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_equal 1, files.size,
+                     "disabled-project block must NOT remove the request file"
+        assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  # R-01 from PR #241 ce-code-review: a spawn failure (Errno::EAGAIN
+  # under fork-exhaustion, or any other StandardError raised by
+  # dispatch_request!) must not abort the rest of the pending queue.
+  # The failure is logged and the request file is left on disk for
+  # the next tick to retry.
+  def test_dispatch_request_spawn_failure_logs_and_does_not_abort_subsequent_iterations
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Two requests for different slugs in the same tick. The first
+      # raises on dispatch; the second must still be processed.
+      write_request_file(state_home, slug: "s1", request_id: "FAIL1",
+                          created_at: T0)
+      write_request_file(state_home, slug: "s2", request_id: "OK2",
+                          created_at: T0 + 1)
+      stub_find_project!(dispatcher, "p1")
+
+      # Make dispatch_request! raise the FIRST time and succeed after.
+      original = dispatcher.method(:dispatch_request!)
+      call_count = 0
+      dispatcher.define_singleton_method(:dispatch_request!) do |req, now:|
+        call_count += 1
+        raise Errno::EAGAIN, "fork: Resource temporarily unavailable" if call_count == 1
+
+        original.call(req, now: now)
+      end
+
+      begin
+        dispatcher.tick(now: T0)
+
+        # First request → logged as rejected, file left on disk.
+        failed = logger.events.find do |(n, attrs)|
+          n == :dispatch_request_rejected && attrs[:request_id] == "FAIL1"
+        end
+        refute_nil failed,
+                   "spawn failure must surface as :dispatch_request_rejected"
+        assert_match(/spawn_failure: Errno::EAGAIN/, failed[1][:reason])
+        # File NOT removed — next tick retries.
+        files_after = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert(files_after.any? { |p| p.include?("FAIL1") },
+               "FAIL1 file must remain for retry")
+
+        # Second request still dispatched despite the first's failure.
+        assert(sup.spawned.any? { |entry| entry[:request_id] == "OK2" },
+               "subsequent request must dispatch even after a prior iteration raised")
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_malformed_request_file_routes_through_bad_handler
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Write a syntactically broken JSON file directly into the
+      # queue dir so DispatchRequestQueue.pending routes it through
+      # the bad_handler the dispatcher injects (which logs +
+      # unlinks).
+      dir = Q.directory(state_home: state_home)
+      File.write(File.join(dir, "20260528T180000000000-BAD.json"), "{not json")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        rejected = logger.events.find { |(n, attrs)|
+          n == :dispatch_request_rejected && attrs[:reason] == "malformed_json"
+        }
+        refute_nil rejected,
+                   ":dispatch_request_rejected reason=malformed_json must fire from the queue's bad_handler"
+        assert_empty sup.spawned
+        # The bad_handler must unlink the file so the queue doesn't
+        # re-process it on every tick.
+        assert_empty Dir.glob(File.join(dir, "*.json")),
+                     "malformed files must be unlinked once the bad_handler logs them"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_expired_removed_without_dispatch
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Created 11 minutes before "now"
+      ancient = T0 - (11 * 60)
+      write_request_file(state_home, slug: "s1", request_id: "OLD", created_at: ancient)
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        expired = logger.events.find { |(n, _)| n == :dispatch_request_expired }
+        refute_nil expired, "a 11-min-old request must be reaped before dispatch"
+        assert_empty sup.spawned
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_empty files, "expired requests must be unlinked from the queue dir"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_per_slug_in_flight_gate_within_one_tick_blocks_same_slug_row_dispatch
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      # A row exists for the same slug as the queued request. The
+      # request scan fires first and `record_dispatch`'s the controller.
+      # When the row scan later sees the same slug, `dispatch_or_block`
+      # must consult the controller and refuse rather than spawn a
+      # second child against the same task.
+      row_for_same_slug = row(slug: "s1", action: "ready_to_plan",
+                              command: "hive plan s1 --from 2-brainstorm")
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [ row_for_same_slug ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "FIRST")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        # Exactly one spawn — for the request — not two.
+        assert_equal 1, sup.spawned.size,
+                     "per-slug in-flight gate must keep the row scan from double-spawning"
+        assert_equal "FIRST", sup.spawned.first[:request_id]
+        blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:reason] == "in_flight" }
+        refute_nil blocked, "row scan must log :blocked reason=in_flight when slug is already running"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_completed_logs_on_child_reap
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "REQ-X")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+        spawned_pid = sup.spawned.first[:pid]
+        sup.define_singleton_method(:reap_all) do |now: Time.now|
+          [
+            ChildExit.new(
+              pid: spawned_pid, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+              command: "hive run s1 --json", state_file_path: nil,
+              started_at: T0, finished_at: now, json_envelope: nil,
+              request_id: "REQ-X"
+            )
+          ]
+        end
+
+        dispatcher.tick(now: T0 + 60)
+
+        completed = logger.events.find { |(n, _)| n == :dispatch_request_completed }
+        refute_nil completed
+        assert_equal "REQ-X", completed[1][:request_id]
+        # The file MUST have been unlinked.
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_empty files
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  private
 
   def events_include?(logger, name)
     logger.events.any? { |(n, _)| n == name }
+  end
+
+  def seed_baseline(path, project:, slug:, mtime:)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 5, max_concurrent_per_project: 5,
+      max_runs_per_day_per_project: 100,
+      dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+    ).observe_state_file_mtime(project: project, slug: slug, mtime: mtime)
   end
 end

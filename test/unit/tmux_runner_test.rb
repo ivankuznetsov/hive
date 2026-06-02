@@ -125,14 +125,19 @@ class TmuxRunnerTest < Minitest::Test
         socket_name: @socket_name
       )
 
-      error = with_env("HIVE_TMUX_COMMAND_TIMEOUT_SEC" => "0.25") do
+      # 1.0s, not 0.25s: each fake-tmux invocation is a fresh Ruby process
+      # (~100-200ms startup, more under CI load), so the FIRST `load-buffer`
+      # call can exceed a sub-second budget and trip the timeout on the wrong
+      # command before `send-keys`'s 5s sleep is reached. Give Ruby startup
+      # comfortable headroom; the timeout still fires at 1s on send-keys.
+      error = with_env("HIVE_TMUX_COMMAND_TIMEOUT_SEC" => "1.0") do
         assert_raises(Hive::TmuxRunner::CommandTimedOut) do
           runner.send_prompt("hello")
         end
       end
 
       assert_match(/send-keys/, error.message)
-      assert_match(/timed out after 0.25s/, error.message)
+      assert_match(/timed out after 1.0s/, error.message)
       assert_prompt_buffer_cleaned_up(log_path)
     end
   end

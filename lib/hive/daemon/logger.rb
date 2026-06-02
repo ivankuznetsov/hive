@@ -44,6 +44,23 @@ module Hive
         gh_error
         marker_healed
         marker_heal_failed
+        update_available
+        update_check_no_result
+        update_check_error
+        update_nudge_no_command
+        daemon_dispatch_baselines_corrupt
+        daemon_dispatch_baselines_lock_error
+        daemon_dispatch_baselines_write_error
+        daemon_dispatch_baselines_tmp_sweep_error
+        daemon_dispatch_baselines_unexpected_error
+        daemon_dispatch_baselines_loaded
+        daemon_dispatch_baselines_newer_schema_suspended
+        dispatch_request_observed
+        dispatch_request_dispatched
+        dispatch_request_completed
+        dispatch_request_rejected
+        dispatch_request_blocked
+        dispatch_request_expired
         fatal
       ].freeze
 

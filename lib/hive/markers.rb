@@ -153,7 +153,22 @@ module Hive
     def error_recovery_match_attr(attrs)
       attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
       marker_id = attrs["marker_id"].to_s
-      return "marker_id=#{marker_id}" unless marker_id.empty?
+      reason = attrs["reason"].to_s
+      # When a `marker_id` is present, callers want it as the primary
+      # `--match-attr` guard so race-y recoveries can't clear a newer
+      # marker by accident. But the inline-button callback path needs
+      # the `reason` too — `manual_only?` checks `attrs["reason"]` on
+      # the reconstructed attrs hash to route
+      # `ensure_clean_on_exit_failed` / `dirty_worktree` into the
+      # operator-only reply. Encode both as a comma-separated pair so
+      # `RecoverySequence.attrs_from_match_attr` reconstructs both
+      # keys, and `Hive::Bot::AlertStore.parse_match_attr` keeps using
+      # the leading `marker_id=...` token as the canonical guard.
+      if !marker_id.empty?
+        return "marker_id=#{marker_id}" if reason.empty?
+
+        return "marker_id=#{marker_id},reason=#{reason}"
+      end
 
       parts = []
       %w[reason exit_code].each do |key|

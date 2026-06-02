@@ -1,12 +1,114 @@
 require_relative "../../test_helper"
-require "shellwords"
-require "tmpdir"
 require_relative "repro_script_writer"
 require_relative "scenario"
 
 class E2EReproScriptWriterTest < Minitest::Test
   def make_step(kind, args: {}, position: 1)
     Hive::E2E::Step.new(kind: kind, args: args, description: "", position: position)
+  end
+
+  # Regression (ce-code-review): update-flow scenarios write/assert under
+  # {run_home} and use the new stateful step kinds. The repro must NOT abort
+  # at "step 1 not replayable" — run_home paths replay, and start_releases_stub
+  # / spawn_background / stop_process emit RUNNABLE bash (not informational
+  # comments) so failure artifacts actually replay.
+  def test_run_home_paths_and_new_kinds_produce_a_usable_repro
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [
+            make_step("write_file", args: { "path" => "{run_home}/install-channel", "content" => "brew\n" }, position: 1),
+            make_step("start_releases_stub", args: { "tag" => "v999.0.0" }, position: 2),
+            make_step("spawn_background", args: { "id" => "daemon", "args" => %w[daemon start] }, position: 3),
+            make_step("state_assert", args: { "path" => "{run_home}/update_check.json", "match" => "999" }, position: 4),
+            make_step("stop_process", args: { "id" => "daemon" }, position: 5)
+          ]
+          body = File.read(Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: steps, failed_index: 5
+          ).write)
+
+          refute_match(/not replayable/, body, "run_home write_file must replay, not abort the repro")
+          assert_match(/cat > \S*install-channel/, body, "run_home write_file should emit a heredoc")
+          assert_includes body, File.join(run_home, "update_check.json")
+          # start_releases_stub launches ReleasesStubServer in a background Ruby
+          # child, captures its URL via a tempfile, and exports HIVE_RELEASES_API_URL.
+          assert_match(/# step 2 start_releases_stub: tag=v999\.0\.0/, body)
+          assert_match(/HIVE_REPRO_STUB_URL_FILE=\$\(mktemp/, body,
+                       "start_releases_stub must capture the stub's URL via mktemp + ReleasesStubServer")
+          # Shellwords escapes the single quotes around the require literal;
+          # match the Ruby identifier instead. This both proves the stub-server
+          # class is being required AND that ruby_body went into the -e flag.
+          assert_includes body, "releases_stub_server",
+                          "start_releases_stub must require the harness's stub-server class"
+          assert_match(/ -e /, body,
+                       "start_releases_stub must invoke ruby -e with the inline server script")
+          assert_match(/export HIVE_RELEASES_API_URL=/, body,
+                       "start_releases_stub must export HIVE_RELEASES_API_URL for downstream steps")
+          # spawn_background launches the daemon under setsid (matching
+          # BackgroundProcess pgroup: true) and captures its PID for stop_process.
+          assert_match(/# step 3 spawn_background id=daemon: hive daemon start/, body)
+          assert_match(/setsid /, body, "spawn_background must use setsid so the pgroup matches BackgroundProcess")
+          assert_match(/HIVE_REPRO_BG_PID_DAEMON=\$!/, body,
+                       "spawn_background must capture $! into a per-id PID variable")
+          assert_match(/HIVE_REPRO_BG_PIDS\+=\("\$HIVE_REPRO_BG_PID_DAEMON"\)/, body,
+                       "spawn_background must register the PID in the global teardown array")
+          # stop_process TERMs the matching pgroup with a brief KILL grace.
+          assert_match(/# step 5 stop_process id=daemon/, body)
+          assert_match(/kill -TERM -"\$HIVE_REPRO_BG_PID_DAEMON"/, body,
+                       "stop_process must signal the per-id PID's pgroup")
+          # Script-level teardown trap reaps any survivors.
+          assert_match(/trap _hive_repro_cleanup EXIT/, body,
+                       "the harness teardown trap must be installed at script entry")
+        end
+      end
+    end
+  end
+
+  # The generated repro for the update-flow pipeline must be syntactically
+  # valid bash. Catches accidental quoting / heredoc / line-continuation
+  # regressions in the new stateful-kind emissions without needing a real
+  # daemon to replay end-to-end.
+  def test_update_flow_pipeline_repro_is_syntactically_valid_bash
+    require_relative "scenario_parser"
+    require_relative "paths"
+
+    scenario_path = File.join(Hive::E2E::Paths.scenarios_dir, "update_flow_pipeline.yml")
+    scenario = Hive::E2E::ScenarioParser.parse(scenario_path)
+
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: scenario.steps, failed_index: scenario.steps.size
+          ).write
+
+          out = `bash -n #{Shellwords.escape(path)} 2>&1`
+          assert $CHILD_STATUS.success?, "bash -n must accept the generated repro.sh:\n#{out}\n\nscript:\n#{File.read(path)}"
+        end
+      end
+    end
+  end
+
+  # The two single-step blocks for start_releases_stub and stop_process
+  # must themselves be valid bash — i.e. quoting around the embedded Ruby
+  # heredoc-equivalents holds up. Easier to inspect than the full pipeline.
+  def test_start_releases_stub_block_parses_with_bash
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [ make_step("start_releases_stub", args: { "tag" => "v1.2.3" }, position: 1) ]
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: steps, failed_index: 1
+          ).write
+
+          out = `bash -n #{Shellwords.escape(path)} 2>&1`
+          assert $CHILD_STATUS.success?, "start_releases_stub block must be valid bash:\n#{out}\n\n#{File.read(path)}"
+        end
+      end
+    end
   end
 
   def test_writes_executable_script_with_shebang_env_and_cli_command

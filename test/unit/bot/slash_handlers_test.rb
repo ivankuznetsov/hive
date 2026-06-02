@@ -251,6 +251,23 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(/no automatic recovery/, result.text)
   end
 
+  def test_autofix_refuses_attrs_gated_manual_only_fix_status_check_failed_row
+    status_check_failed = Row.new(project: "hive", slug: "status-260530-abcd", stage: "6-review",
+                                  marker: "review_error",
+                                  attrs: {
+                                    "phase" => "fix",
+                                    "reason" => "fix_status_check_failed",
+                                    "pass" => "1"
+                                  },
+                                  diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    handlers = autofix_handlers([ status_check_failed ])
+
+    result = handlers.autofix(Update.new(text: "/autofix status-260530-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic recovery/, result.text)
+  end
+
   def test_autofix_no_retry_verb_for_stage_replies_cleanly
     # A retryable 9-done row passes the retryable gate but has no retry verb,
     # so RecoverySequence.build's stage check produces the clean refusal.

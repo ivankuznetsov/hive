@@ -6,7 +6,9 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/events"
 require "hive/markers"
+require "hive/stages/clean_exit"
 require "hive/usage_db"
+require "hive/worktree"
 
 module Hive
   module Stages
@@ -114,7 +116,15 @@ module Hive
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
 
-      def with_stage_events(task)
+      # Stage labels whose runner mutates the worktree directly. Adding a
+      # new worktree-touching stage requires a deliberate edit here —
+      # whitelist (not blacklist) keeps the `ensure_clean_on_exit`
+      # invariant surgical. `2-brainstorm`, `3-plan`, `5-open-pr`,
+      # `7-artifacts`, `9-done` only write to the task state folder
+      # (`.hive-state/stages/...`), so the invariant doesn't apply there.
+      WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize].freeze
+
+      def with_stage_events(task, cfg: nil)
         stage = stage_label(task)
         Hive::Events.emit(
           task_folder: task.folder,
@@ -124,6 +134,22 @@ module Hive
           message: "run started"
         )
         result = yield
+        if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
+          enforce_outcome = enforce_clean_exit!(task, cfg, stage)
+          # When CleanExit overwrites the runner's marker to
+          # `:error reason=ensure_clean_on_exit_failed`, the stage's own
+          # `result[:commit]` (e.g. "review_complete") is now stale —
+          # `commands/run.rb#commit_after` would otherwise write a
+          # misleading hive-state commit advertising a success that
+          # didn't happen. Replace the commit action with the actual
+          # outcome so the hive-state commit matches the on-disk marker.
+          if enforce_outcome.is_a?(Hash) && enforce_outcome[:overwrote_marker]
+            result = (result.is_a?(Hash) ? result : {}).merge(
+              commit: "ensure_clean_on_exit_failed",
+              status: :error
+            )
+          end
+        end
         marker = Hive::Markers.current(task.state_file)
         emit_marker_event(task, stage, marker)
         Hive::Events.emit(
@@ -140,6 +166,144 @@ module Hive
       rescue StandardError => e
         emit_rescue_close(task, stage, "#{e.class}: #{e.message}")
         raise
+      end
+
+      # Read `stages.ensure_clean_on_exit` (default true). Explicit
+      # `false` opts the whole invariant out — useful for legacy projects
+      # that haven't reconfigured `review.fix.auto_commit.scope_check`
+      # and don't want stage-exit residue to fail loudly yet.
+      def ensure_clean_on_exit_enabled?(cfg)
+        return true unless cfg.is_a?(Hash)
+
+        value = cfg.dig("stages", "ensure_clean_on_exit")
+        value.nil? || value != false
+      end
+
+      # Markers whose presence means the runner intentionally paused for
+      # operator action (4-execute mid-pass dirty-worktree pause,
+      # 6-review wall-clock stale, etc.). The exit-invariant explicitly
+      # does NOT touch the worktree on these — they ARE the
+      # "operator-decide" semantic and the runner has typed-marker
+      # context the generic invariant lacks (see plan §"Non-goals":
+      # "Changing what the 4-execute stage does when it detects a
+      # waiting dirty worktree mid-pass ... is not in scope").
+      #
+      # The list is narrowed to markers actually reachable on
+      # `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`:
+      # the generic `:waiting` and `:manual_steering` markers are
+      # written by `2-brainstorm` / `3-plan` agents, never on a
+      # worktree-owning stage. Adding a new pause marker to a
+      # worktree-owning stage requires a deliberate edit here.
+      PAUSE_MARKERS = %i[execute_waiting review_waiting].freeze
+
+      # CleanExit checks the worktree at `stage_exit`. On residue:
+      #   - `:auto_committed` → log and fall through (the residue is
+      #     committed; the stage marker the runner wrote stands).
+      #   - `:scope_violation` / `:git_failed` → write
+      #     `:error reason=ensure_clean_on_exit_failed`, BUT never
+      #     downgrade an already-terminal `:error` (the wrapped runner's
+      #     own error wins for diagnostic clarity).
+      #
+      # Returns a sentinel hash describing the outcome so the caller
+      # (`with_stage_events`) can decide whether the stage's
+      # `result[:commit]` is now stale:
+      #   { status: :clean | :auto_committed | :scope_violation |
+      #             :git_failed | :skipped,
+      #     overwrote_marker: true | false }
+      # `:skipped` covers PAUSE_MARKERS and missing-worktree no-ops; any
+      # rescued StandardError returns nil so call sites keep their
+      # historical "treat as no-op" behaviour.
+      def enforce_clean_exit!(task, cfg, stage)
+        worktree_path = read_worktree_path(task)
+        return { status: :skipped, overwrote_marker: false } unless worktree_path && File.directory?(worktree_path)
+
+        # The runner may have already paused intentionally — let that
+        # marker stand and skip the invariant entirely. Without this,
+        # 4-execute's `:execute_waiting reason=dirty_worktree` pause
+        # would be overwritten by `:error reason=ensure_clean_on_exit_failed`
+        # the moment the agent dropped an out-of-scope file.
+        existing_marker = Hive::Markers.current(task.state_file)
+        return { status: :skipped, overwrote_marker: false } if PAUSE_MARKERS.include?(existing_marker.name)
+
+        result = Hive::Stages::CleanExit.run!(
+          worktree_path: worktree_path,
+          stage: stage,
+          task: task,
+          cfg: cfg,
+          reason: :stage_exit
+        )
+
+        case result[:status]
+        when :clean, :auto_committed
+          log_clean_exit_event(task, stage, result)
+          { status: result[:status], overwrote_marker: false }
+        when :scope_violation, :git_failed
+          overwrote = mark_clean_exit_failure(task, result, existing_marker)
+          { status: result[:status], overwrote_marker: overwrote }
+        else
+          { status: result[:status], overwrote_marker: false }
+        end
+      rescue Hive::ConfigError => e
+        # Misconfiguration (invalid sign_policy etc.) is not transient
+        # I/O; the operator needs to see it. Mark `:error` so the
+        # failure surfaces through the same recovery surface as a
+        # scope-violation residue, instead of silently dropping into
+        # the generic `rescue StandardError` warn-and-continue path.
+        warn "[hive] ensure_clean_on_exit invalid config: #{e.message}"
+        existing_marker = safe_current_marker(task)
+        overwrote = mark_clean_exit_failure(
+          task,
+          { status: :git_failed,
+            message: "invalid sign_policy config: #{e.message}" },
+          existing_marker
+        )
+        { status: :git_failed, overwrote_marker: overwrote }
+      rescue StandardError => e
+        warn "[hive] ensure_clean_on_exit raised #{e.class}: #{e.message}; leaving marker untouched"
+        nil
+      end
+
+      def safe_current_marker(task)
+        Hive::Markers.current(task.state_file)
+      rescue StandardError
+        nil
+      end
+
+      def read_worktree_path(task)
+        return nil unless task.respond_to?(:worktree_yml_path)
+        return nil unless File.exist?(task.worktree_yml_path)
+
+        pointer = Hive::Worktree.read_pointer(task.folder)
+        pointer && pointer["path"]
+      rescue StandardError
+        nil
+      end
+
+      def log_clean_exit_event(task, stage, result)
+        return unless result[:status] == :auto_committed
+
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :clean_exit_auto_committed,
+          message: "head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
+        )
+      rescue StandardError
+        nil
+      end
+
+      def mark_clean_exit_failure(task, result, existing_marker = nil)
+        existing_marker ||= safe_current_marker(task)
+        return false if existing_marker && error_marker?(existing_marker.name)
+
+        attrs = {
+          reason: "ensure_clean_on_exit_failed",
+          detail: result[:message].to_s[0, 200]
+        }
+        attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
+        Hive::Markers.set(task.state_file, :error, **attrs)
+        true
       end
 
       # `error` + closing `stage_exit` pair so drill-down readers see a

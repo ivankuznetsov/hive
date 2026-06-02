@@ -71,19 +71,22 @@ class HiveCommandsDaemonTest < Minitest::Test
     config = daemon_config
     captured = nil
 
+    update_config = { "check" => true, "auto" => true }
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
       with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
-        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
-          captured = kwargs
-          dispatcher
-        }) do
-          command.call
+        with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
+          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+            captured = kwargs
+            dispatcher
+          }) do
+            command.call
+          end
         end
       end
     end
 
     assert_equal [ :run_forever ], dispatcher.calls
-    assert_equal({ "daemon" => config }, captured.fetch(:config))
+    assert_equal({ "daemon" => config, "update" => update_config }, captured.fetch(:config))
     assert_equal true, captured.fetch(:dry_run)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
@@ -221,6 +224,37 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_operator doc.fetch("uptime_sec"), :>=, 0
   end
 
+
+  def test_status_json_includes_update_nudge_when_present
+    with_env("HIVE_HOME" => @home) do
+      Hive::UpdateCheck::State.new.set_nudge(latest: "9.9.9", channel: "brew",
+                                             command: "brew upgrade ivankuznetsov/hive/hive")
+      command = daemon("status", json: true)
+      write_pid_payload(pid: 1234)
+      command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+      command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+
+      out, _err = capture_io { command.call }
+      doc = JSON.parse(out)
+      assert_equal "9.9.9", doc.dig("update_nudge", "latest")
+      assert_equal "brew", doc.dig("update_nudge", "channel")
+      assert_equal Hive::VERSION, doc.fetch("current_version")
+    end
+  end
+
+  def test_status_json_update_nudge_null_when_state_raises
+    command = daemon("status", json: true)
+    write_pid_payload(pid: 1234)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+
+    out, _err = with_replaced_singleton_method(
+      Hive::UpdateCheck::State, :new, ->(*_a, **_k) { raise "state boom" }
+    ) { capture_io { command.call } }
+    doc = JSON.parse(out)
+    assert_nil doc.fetch("update_nudge"), "a failed state read degrades update_nudge to null, not a crash"
+    assert_equal true, doc.fetch("running")
+  end
 
   def test_status_json_merges_service_state_fields
     command = daemon("status", json: true)

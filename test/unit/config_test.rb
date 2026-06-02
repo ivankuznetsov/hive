@@ -1967,6 +1967,63 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_update_defaults_on
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+      cfg = Hive::Config.load_global_update
+      assert_equal true, cfg["check"]
+      assert_equal true, cfg["auto"]
+    end
+  end
+
+  def test_load_global_update_honors_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        update:
+          auto: false
+      YAML
+      cfg = Hive::Config.load_global_update
+      assert_equal false, cfg["auto"], "operator opt-out of auto-update must take effect"
+      assert_equal true, cfg["check"], "unspecified keys fall back to defaults"
+    end
+  end
+
+  def test_load_global_update_falls_back_to_defaults_when_no_file
+    Dir.mktmpdir do |dir|
+      old = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+      cfg = Hive::Config.load_global_update
+      assert_equal true, cfg["check"]
+      assert_equal true, cfg["auto"]
+    ensure
+      ENV["HIVE_HOME"] = old
+    end
+  end
+
+  def test_load_global_update_rejects_non_hash_block
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        update: enabled
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_update }
+      assert_match(/update.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_global_update_rejects_non_boolean
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        update:
+          check: sometimes
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_update }
+      assert_match(/update\.check.*must be true or false/, err.message)
+    end
+  end
+
   # ── Telegram bot global settings ──────────────────────────────────────
 
   def test_load_returns_documented_bot_defaults_when_key_absent

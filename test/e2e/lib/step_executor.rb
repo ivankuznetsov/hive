@@ -6,7 +6,9 @@ require "hive/lock"
 require "hive/markers"
 require "hive/stages"
 require_relative "artifact_capture"
+require_relative "background_process"
 require_relative "cli_driver"
+require_relative "releases_stub_server"
 require_relative "diff_walker"
 require_relative "json_validator"
 require_relative "paths"
@@ -78,11 +80,26 @@ module Hive
       rescue StandardError => e
         on_failure(e, started)
       ensure
+        teardown_harness_processes
         @tmux_lifecycle.stop_asciinema(delete: !@preserve_cast)
         @tmux_lifecycle.cleanup
       end
 
       private
+
+      # Reap any long-lived processes / stub servers a scenario started, so they
+      # never outlive the scenario (TERM the daemon/bot pgroup, close the stub).
+      # Each stop is rescued independently so one failure can't abandon the rest.
+      def teardown_harness_processes
+        (@ctx.harness_state[:background] || {}).each_value { |proc| safe_stop(proc) }
+        safe_stop(@ctx.harness_state[:releases_stub])
+      end
+
+      def safe_stop(stoppable)
+        stoppable&.stop
+      rescue StandardError
+        nil
+      end
 
       def dispatch(step)
         send("step_#{step.kind}", step)
@@ -251,10 +268,72 @@ module Hive
 
       def step_log_assert(step)
         path = expand_path(step.args.fetch("path"))
+        regex = Regexp.new(expand_string(step.args.fetch("match")))
+        # Optional polling: a long-lived process (e.g. the bot) writes its log
+        # asynchronously, so wait up to `timeout` for the line to appear — an
+        # explicit condition wait, not a fixed sleep.
+        deadline = Time.now + (step.args["timeout"] || 0).to_f
+        loop do
+          return if File.exist?(path) && File.read(path).match?(regex)
+          break if Time.now >= deadline
+
+          sleep 0.2
+        end
         raise StepFailure.new(step, "log file not found: #{path}") unless File.exist?(path)
 
-        regex = Regexp.new(expand_string(step.args.fetch("match")))
-        raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}") unless File.read(path).match?(regex)
+        raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}")
+      end
+
+      def step_start_releases_stub(step)
+        tag = expand_string(step.args.fetch("tag"))
+        @ctx.harness_state[:releases_stub]&.stop
+        @ctx.harness_state[:releases_stub] = ReleasesStubServer.new(tag: tag)
+      end
+
+      def step_spawn_background(step)
+        id = expand_string(step.args.fetch("id"))
+        args = expand(step.args.fetch("args"))
+        env = expand(step.args["env"] || {})
+        # Auto-inject the running stub's URL so scenarios don't have to thread
+        # an ephemeral port through; an explicit env entry still wins.
+        if (stub = @ctx.harness_state[:releases_stub]) && !env.key?("HIVE_RELEASES_API_URL")
+          env = env.merge("HIVE_RELEASES_API_URL" => stub.url)
+        end
+        procs = (@ctx.harness_state[:background] ||= {})
+        procs[id]&.stop
+        procs[id] = BackgroundProcess.new(
+          args: args, sandbox_dir: @ctx.sandbox_dir, run_home: @ctx.run_home,
+          env: env, log_path: File.join(@ctx.run_home, "background", "#{id}.log")
+        ).start
+      end
+
+      def step_stop_process(step)
+        id = expand_string(step.args.fetch("id"))
+        proc = (@ctx.harness_state[:background] || {})[id]
+        raise StepFailure.new(step, "no background process #{id.inspect}") unless proc
+
+        proc.stop
+      end
+
+      def step_tui_refute(step)
+        tmux = @tmux_lifecycle.start_session
+        anchor = expand_string(step.args.fetch("anchor"))
+        deadline = monotonic_time + (step.args["timeout"] || 2.0).to_f
+        # Assert absence only on a STABLE frame (two equal captures), so we
+        # don't pass on a mid-render frame that simply hasn't drawn it yet.
+        previous = nil
+        loop do
+          pane = tmux.capture_pane
+          if pane == previous
+            raise StepFailure.new(step, "expected TUI to NOT contain #{anchor.inspect}") if pane.include?(anchor)
+            return
+          end
+          previous = pane
+          break if monotonic_time >= deadline
+
+          sleep 0.1
+        end
+        raise StepFailure.new(step, "expected TUI to NOT contain #{anchor.inspect}") if previous.to_s.include?(anchor)
       end
 
       # ---- helpers -------------------------------------------------------
@@ -354,8 +433,10 @@ module Hive
       end
 
       def expand_path(value)
-        expanded = expand_string(value.to_s)
-        PathSafety.contained_path!(@ctx.sandbox_dir, expanded, "scenario path")
+        # Allow the sandbox project dir OR its HIVE_HOME (run_home) — both are
+        # test-controlled. The update flow's state (update_check.json) and the
+        # install-channel marker live under run_home, a sibling of the project.
+        PathSafety.contained_path_any!([ @ctx.sandbox_dir, @ctx.run_home ], expand_string(value.to_s), "scenario path")
       end
 
       def contained_relative_path(root, value, label)

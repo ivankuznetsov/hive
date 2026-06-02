@@ -17,13 +17,15 @@ module Hive
       end
 
       STEP_KINDS = %w[
-        cli tui_keys tui_expect state_assert json_assert seed_state write_file
+        cli tui_keys tui_expect tui_refute state_assert json_assert seed_state write_file
         register_project wait_subprocess editor_action log_assert ruby_block
+        start_releases_stub spawn_background stop_process
       ].freeze
 
       REQUIRED_KEYS = {
         "cli" => %w[args],
         "tui_expect" => %w[anchor],
+        "tui_refute" => %w[anchor],
         "state_assert" => %w[path],
         "json_assert" => %w[args schema],
         "seed_state" => %w[stage],
@@ -31,7 +33,10 @@ module Hive
         "register_project" => %w[name],
         "editor_action" => %w[args],
         "log_assert" => %w[path match],
-        "ruby_block" => %w[block]
+        "ruby_block" => %w[block],
+        "start_releases_stub" => %w[tag],
+        "spawn_background" => %w[id args],
+        "stop_process" => %w[id]
       }.freeze
 
       def self.parse(path)
@@ -81,7 +86,7 @@ module Hive
 
       def validate_step_types(kind, step)
         case kind
-        when "cli", "json_assert", "editor_action"
+        when "cli", "json_assert", "editor_action", "spawn_background"
           invalid!("#{kind}.args must be an array", line_for(kind)) unless step["args"].is_a?(Array)
         when "tui_keys"
           key_count = %w[keys text].count { |key| step.key?(key) }

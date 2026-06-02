@@ -47,6 +47,7 @@
 /logs/
 .qmd/
 /.llm-wiki/qmd-cache/
+/.llm-wiki/post-commit-refresh.log
 .worktrees/
 
 # Telegram E2E headless client (Telethon) — local secrets/artifacts

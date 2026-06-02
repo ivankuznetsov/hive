@@ -27,9 +27,18 @@ class OpenClawSkillsTest < Minitest::Test
     version
   ].freeze
 
+  OPENCLAW_RESERVED_COMMANDS = %w[
+    approve
+    commands
+    help
+    new
+    status
+    whoami
+  ].freeze
+
   EXPECTED_SKILLS = {
     "hive" => { description: "Drive any Hive CLI workflow from OpenClaw.", command: "hive" },
-    "new" => { cli: "new_task", command: "hive new" },
+    "hive-new" => { cli: "new_task", command: "hive new" },
     "brainstorm" => { cli: "brainstorm", command: "hive brainstorm" },
     "plan" => { cli: "plan", command: "hive plan" },
     "work" => { cli: "develop", command: "hive develop" },
@@ -42,7 +51,7 @@ class OpenClawSkillsTest < Minitest::Test
     "findings" => { cli: "findings", command: "hive findings" },
     "accept-finding" => { cli: "accept_finding", command: "hive accept-finding" },
     "reject-finding" => { cli: "reject_finding", command: "hive reject-finding" },
-    "approve" => { cli: "approve", command: "hive approve" },
+    "hive-approve" => { cli: "approve", command: "hive approve" },
     "run" => { cli: "run_task", command: "hive run" },
     "markers" => { cli: "markers", command: "hive markers" },
     "rebase-status" => { cli: "rebase_status", command: "hive rebase-status" },
@@ -51,6 +60,16 @@ class OpenClawSkillsTest < Minitest::Test
     "bot" => { cli: "bot", command: "hive bot" },
     "init" => { cli: "init", command: "hive init" }
   }.freeze
+
+  EXPECTED_CLAWHUB_SLUGS = EXPECTED_SKILLS.keys.to_h do |skill|
+    slug = if skill == "hive" || skill.start_with?("hive-")
+             skill
+    else
+             "hive-#{skill}"
+    end
+
+    [ skill, slug ]
+  end.freeze
 
   def test_skill_directories_match_supported_openclaw_surface
     actual = ROOT.children.select(&:directory?).map { |path| path.basename.to_s }.sort
@@ -78,6 +97,13 @@ class OpenClawSkillsTest < Minitest::Test
                  "ADMIN_EXCLUDED_COMMANDS references non-existent Thor commands: #{stale_exclusions.inspect}"
   end
 
+  def test_skill_names_do_not_collide_with_openclaw_reserved_commands
+    collisions = EXPECTED_SKILLS.keys & OPENCLAW_RESERVED_COMMANDS
+
+    assert_empty collisions,
+                 "Hive OpenClaw skill names collide with OpenClaw core commands: #{collisions.inspect}"
+  end
+
   def test_skill_frontmatter_and_bodies_are_valid
     EXPECTED_SKILLS.each do |skill, expected|
       metadata, body = read_skill(skill)
@@ -95,6 +121,73 @@ class OpenClawSkillsTest < Minitest::Test
       assert_includes body, expected.fetch(:command), "#{skill} must document its CLI dispatch"
       assert_includes body, "Pass arguments safely", "#{skill} must avoid shell interpolation"
     end
+  end
+
+  def test_publish_checklist_does_not_double_prefix_hive_slugs
+    readme = Pathname.new(__dir__).join("../../openclaw/README.md").expand_path.read
+
+    EXPECTED_CLAWHUB_SLUGS.each_value do |slug|
+      assert_includes readme, "| `#{slug}` |", "planned slug table must include #{slug}"
+    end
+
+    assert_includes readme, '[ "${name#hive-}" != "$name" ]'
+    assert_includes readme, 'slug="$name"'
+  end
+
+  def test_dedicated_skills_guard_blocking_and_bypass_paths
+    _approve_metadata, approve_body = read_skill("hive-approve")
+    _bot_metadata, bot_body = read_skill("bot")
+    _daemon_metadata, daemon_body = read_skill("daemon")
+    _init_metadata, init_body = read_skill("init")
+
+    assert_includes approve_body, "--force"
+    assert_includes approve_body, "explicit user confirmation"
+
+    assert_includes bot_body, "start --foreground"
+    assert_includes bot_body, "tail"
+    assert_includes bot_body, "explicit user confirmation"
+
+    assert_includes daemon_body, "start --detach"
+    assert_includes daemon_body, "foreground `start` without `--detach`"
+    assert_includes daemon_body, "streaming `tail`"
+
+    assert_includes init_body, "--json` only changes the output envelope"
+    assert_includes init_body, "stdin redirected from `/dev/null`"
+  end
+
+  def test_umbrella_skill_guards_destructive_and_blocking_commands
+    _metadata, body = read_skill("hive")
+
+    %w[
+      drop
+      uninstall
+      update
+      forget
+      prune
+      migrate
+      metrics
+    ].each do |verb|
+      assert_includes body, verb
+    end
+
+    [
+      "daemon stop",
+      "daemon disable --all",
+      "daemon install --force",
+      "bot stop",
+      "bot install --force",
+      "markers clear",
+      "approve --force"
+    ].each do |command|
+      assert_includes body, command
+    end
+
+    assert_includes body, "restate the effect"
+    assert_includes body, "explicit user confirmation"
+    assert_includes body, "hive daemon start --detach"
+    assert_includes body, "hive daemon tail"
+    assert_includes body, "hive bot start --foreground"
+    assert_includes body, "hive bot tail"
   end
 
   def read_skill(skill)

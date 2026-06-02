@@ -14,4 +14,4 @@ Before running anything, check `command -v hive`. If it is missing, stop and tel
 
 Treat the user's slash-command text as arguments for `hive bot`. If the subcommand is missing, ask one concise question or run `hive bot --help`. Run the command from the current project/workspace directory unless the user gives another path. Pass arguments safely; do not interpolate raw user text into a shell string.
 
-Prefer `--json` for lifecycle commands when you need structured output. Before `install --force` or `stop`, restate the effect and get explicit user confirmation.
+Prefer `--json` for lifecycle commands when you need structured output. Before `install --force`, `stop`, `tail`, or `start --foreground`, restate the effect and get explicit user confirmation.

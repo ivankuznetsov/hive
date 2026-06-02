@@ -30,7 +30,8 @@ OpenClaw's documented grouping support is a filesystem organization feature
 (`skills/<group>/<skill>/SKILL.md`), not a single marketplace slug that installs
 many slash commands. The bundle therefore ships an umbrella `/hive` skill for a
 one-command entry point, plus optional shortcut skills such as `/plan`, `/work`,
-and `/ce-review` for frequent workflows.
+and `/ce-review` for frequent workflows. Shortcuts that would collide with
+OpenClaw core commands keep the `hive-` prefix.
 
 ## Prerequisite
 
@@ -72,7 +73,7 @@ The intended published slugs are:
 | ClawHub slug | Slash command | Hive command |
 |---|---|---|
 | `hive` | `/hive` | Any `hive ...` command |
-| `hive-new` | `/new` | `hive new` |
+| `hive-new` | `/hive-new` | `hive new` |
 | `hive-brainstorm` | `/brainstorm` | `hive brainstorm` |
 | `hive-plan` | `/plan` | `hive plan` |
 | `hive-work` | `/work` | `hive develop` |
@@ -85,7 +86,7 @@ The intended published slugs are:
 | `hive-findings` | `/findings` | `hive findings` |
 | `hive-accept-finding` | `/accept-finding` | `hive accept-finding` |
 | `hive-reject-finding` | `/reject-finding` | `hive reject-finding` |
-| `hive-approve` | `/approve` | `hive approve` |
+| `hive-approve` | `/hive-approve` | `hive approve` |
 | `hive-run` | `/run` | `hive run` |
 | `hive-markers` | `/markers` | `hive markers` |
 | `hive-rebase-status` | `/rebase-status` | `hive rebase-status` |
@@ -94,13 +95,13 @@ The intended published slugs are:
 | `hive-bot` | `/bot` | `hive bot` |
 | `hive-init` | `/init` | `hive init` |
 
-`/hive-status` is prefixed because OpenClaw already has a built-in `/status`
-command. `hive tui` is intentionally not shipped as a skill — it is a
-human-only interactive dashboard and rejects `--json` with EX_USAGE (64);
-agents should drive the same data via `hive status --json` and the typed
-workflow verbs. `hive version` is omitted from the bundle because
-`hive --version` (already exposed through the umbrella `/hive`) covers
-that need without a dedicated slug. Destructive or rarely used admin
+`/hive-new`, `/hive-approve`, and `/hive-status` are prefixed because OpenClaw
+already has built-in `/new`, `/approve`, and `/status` commands. `hive tui` is
+intentionally not shipped as a skill — it is a human-only interactive dashboard
+and rejects `--json` with EX_USAGE (64); agents should drive the same data via
+`hive status --json` and the typed workflow verbs. `hive version` is omitted
+from the bundle because `hive --version` (already exposed through the umbrella
+`/hive`) covers that need without a dedicated slug. Destructive or rarely used admin
 commands such as `hive drop`, `hive uninstall`, `hive update`,
 `hive forget`, `hive prune`, `hive migrate`, and `hive metrics` remain
 available through `/hive ...`, where the agent sees the complete
@@ -113,8 +114,13 @@ Dry-run every skill before publishing:
 ```bash
 for skill in openclaw/skills/*; do
   name="$(basename "$skill")"
-  slug="hive-$name"
-  test "$name" = "hive" && slug="hive"
+  if [ "$name" = "hive" ]; then
+    slug="hive"
+  elif [ "${name#hive-}" != "$name" ]; then
+    slug="$name"
+  else
+    slug="hive-$name"
+  fi
 
   clawhub skill publish "$skill" \
     --slug "$slug" \

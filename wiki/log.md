@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-02T23:20:00Z] fix(openclaw) - avoid core slash-command collisions and unsafe agent paths
+
+**Action:** Review follow-up for the in-tree OpenClaw skill bundle. Renamed the Hive new/approve shortcuts to `/hive-new` and `/hive-approve` so they do not collide with OpenClaw's built-in `/new` and `/approve` commands, kept already-prefixed skill names from being published as `hive-hive-*`, and strengthened skill instructions for foreground daemon commands, streaming tails, `approve --force`, nested destructive umbrella commands, and `init --json` TTY prompt behavior.
+
+**Refreshed pages:**
+- [[gaps]] - OpenClaw publication is still an external maintainer step; the in-tree bundle now documents the collision-safe skill names.
+
 ## [2026-06-02T08:13Z] fix — post-review hardening of llm-wiki hook environment sanitization
 
 **Action:** Addressed 4 findings from `/ce-code-review` on PR #245 (managed_hook_content regex too narrow, bash-3.2 empty-array safety in run_without_git_env, thin env-var scrub coverage in tests, missing negative test for unwrapped codex/qmd calls):

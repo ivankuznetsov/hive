@@ -1,5 +1,5 @@
 ---
-name: new
+name: hive-new
 description: Create a new task in 1-inbox of PROJECT
 version: 0.1.0
 user-invocable: true

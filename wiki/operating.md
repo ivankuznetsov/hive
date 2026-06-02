@@ -136,6 +136,13 @@ still succeeds without it:
 | Codex | `codex plugin install ivankuznetsov/hive-skills` |
 | Pi | `pi install ivankuznetsov/hive-skills` |
 
+OpenClaw support now lives in-tree under `openclaw/skills/`. It is a skill
+bundle, not a TypeScript plugin: `/hive` is the umbrella command, while
+shortcuts such as `/plan`, `/work`, and `/ce-review` map to the existing
+`hive plan`, `hive develop`, and `hive review` CLI verbs. ClawHub publishing is
+still an external maintainer step; until it is live, use local checkout installs
+from `openclaw/README.md`.
+
 ## Release verification
 
 The release ceremony exercises the published artifact end-to-end via

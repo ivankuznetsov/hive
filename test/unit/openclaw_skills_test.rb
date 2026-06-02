@@ -1,0 +1,200 @@
+require "test_helper"
+require "hive/cli"
+require "pathname"
+require "yaml"
+
+class OpenClawSkillsTest < Minitest::Test
+  ROOT = Pathname.new(__dir__).join("../../openclaw/skills").expand_path
+  HOMEPAGE = "https://github.com/ivankuznetsov/hive"
+
+  # Thor commands that intentionally have no OpenClaw skill. `help` and
+  # `tree` are Thor built-ins. `tui` is human-only and rejects --json
+  # with EX_USAGE (64). `version` is covered by `hive --version`.
+  # Destructive admin verbs (drop/uninstall/update/forget/prune/migrate/
+  # metrics) fall back to the umbrella `/hive ...` skill where the agent
+  # sees the full command before execution.
+  ADMIN_EXCLUDED_COMMANDS = %w[
+    drop
+    forget
+    help
+    metrics
+    migrate
+    prune
+    tree
+    tui
+    uninstall
+    update
+    version
+  ].freeze
+
+  OPENCLAW_RESERVED_COMMANDS = %w[
+    approve
+    commands
+    help
+    new
+    status
+    whoami
+  ].freeze
+
+  EXPECTED_SKILLS = {
+    "hive" => { description: "Drive any Hive CLI workflow from OpenClaw.", command: "hive" },
+    "hive-new" => { cli: "new_task", command: "hive new" },
+    "brainstorm" => { cli: "brainstorm", command: "hive brainstorm" },
+    "plan" => { cli: "plan", command: "hive plan" },
+    "work" => { cli: "develop", command: "hive develop" },
+    "open-pr" => { cli: "open_pr", command: "hive open-pr" },
+    "ce-review" => { cli: "review", command: "hive review" },
+    "artifacts" => { cli: "artifacts", command: "hive artifacts" },
+    "finalize" => { cli: "finalize", command: "hive finalize" },
+    "archive" => { cli: "archive", command: "hive archive" },
+    "hive-status" => { cli: "status", command: "hive status" },
+    "findings" => { cli: "findings", command: "hive findings" },
+    "accept-finding" => { cli: "accept_finding", command: "hive accept-finding" },
+    "reject-finding" => { cli: "reject_finding", command: "hive reject-finding" },
+    "hive-approve" => { cli: "approve", command: "hive approve" },
+    "run" => { cli: "run_task", command: "hive run" },
+    "markers" => { cli: "markers", command: "hive markers" },
+    "rebase-status" => { cli: "rebase_status", command: "hive rebase-status" },
+    "doctor" => { cli: "doctor", command: "hive doctor" },
+    "daemon" => { cli: "daemon", command: "hive daemon" },
+    "bot" => { cli: "bot", command: "hive bot" },
+    "init" => { cli: "init", command: "hive init" }
+  }.freeze
+
+  EXPECTED_CLAWHUB_SLUGS = EXPECTED_SKILLS.keys.to_h do |skill|
+    slug = if skill == "hive" || skill.start_with?("hive-")
+             skill
+    else
+             "hive-#{skill}"
+    end
+
+    [ skill, slug ]
+  end.freeze
+
+  def test_skill_directories_match_supported_openclaw_surface
+    actual = ROOT.children.select(&:directory?).map { |path| path.basename.to_s }.sort
+
+    assert_equal EXPECTED_SKILLS.keys.sort, actual
+  end
+
+  # Drift check: every Thor command in lib/hive/cli.rb must either ship a
+  # SKILL.md (mapped via EXPECTED_SKILLS) or be listed in
+  # ADMIN_EXCLUDED_COMMANDS. Reading from `Hive::CLI.all_commands.keys`
+  # — not from a hand-maintained list — is what makes this an actual
+  # drift guard. Add a new workflow verb to lib/hive/cli.rb without a
+  # corresponding skill and this test goes red.
+  def test_every_non_admin_thor_command_has_a_skill
+    thor_commands = Hive::CLI.all_commands.keys.sort
+    mapped_clis = EXPECTED_SKILLS.values.filter_map { |v| v[:cli] }.sort
+
+    uncovered = thor_commands - mapped_clis - ADMIN_EXCLUDED_COMMANDS
+    assert_empty uncovered,
+                 "every non-admin Thor command must have a SKILL.md mapped in EXPECTED_SKILLS " \
+                 "(or be listed in ADMIN_EXCLUDED_COMMANDS). Missing: #{uncovered.inspect}"
+
+    stale_exclusions = ADMIN_EXCLUDED_COMMANDS - thor_commands
+    assert_empty stale_exclusions,
+                 "ADMIN_EXCLUDED_COMMANDS references non-existent Thor commands: #{stale_exclusions.inspect}"
+  end
+
+  def test_skill_names_do_not_collide_with_openclaw_reserved_commands
+    collisions = EXPECTED_SKILLS.keys & OPENCLAW_RESERVED_COMMANDS
+
+    assert_empty collisions,
+                 "Hive OpenClaw skill names collide with OpenClaw core commands: #{collisions.inspect}"
+  end
+
+  def test_skill_frontmatter_and_bodies_are_valid
+    EXPECTED_SKILLS.each do |skill, expected|
+      metadata, body = read_skill(skill)
+
+      assert_equal skill, metadata.fetch("name")
+      assert_equal expected.fetch(:description) { Hive::CLI.all_commands.fetch(expected.fetch(:cli)).description },
+                   metadata.fetch("description")
+      assert_equal "0.1.0", metadata.fetch("version")
+      assert_equal true, metadata.fetch("user-invocable")
+      assert_equal HOMEPAGE, metadata.dig("metadata", "openclaw", "homepage")
+      assert_equal [ "hive" ], metadata.dig("metadata", "openclaw", "requires", "bins"),
+                   "#{skill} must declare hive in metadata.openclaw.requires.bins"
+
+      assert_includes body, "command -v hive", "#{skill} must fail loudly when hive is missing"
+      assert_includes body, expected.fetch(:command), "#{skill} must document its CLI dispatch"
+      assert_includes body, "Pass arguments safely", "#{skill} must avoid shell interpolation"
+    end
+  end
+
+  def test_publish_checklist_does_not_double_prefix_hive_slugs
+    readme = Pathname.new(__dir__).join("../../openclaw/README.md").expand_path.read
+
+    EXPECTED_CLAWHUB_SLUGS.each_value do |slug|
+      assert_includes readme, "| `#{slug}` |", "planned slug table must include #{slug}"
+    end
+
+    assert_includes readme, '[ "${name#hive-}" != "$name" ]'
+    assert_includes readme, 'slug="$name"'
+  end
+
+  def test_dedicated_skills_guard_blocking_and_bypass_paths
+    _approve_metadata, approve_body = read_skill("hive-approve")
+    _bot_metadata, bot_body = read_skill("bot")
+    _daemon_metadata, daemon_body = read_skill("daemon")
+    _init_metadata, init_body = read_skill("init")
+
+    assert_includes approve_body, "--force"
+    assert_includes approve_body, "explicit user confirmation"
+
+    assert_includes bot_body, "start --foreground"
+    assert_includes bot_body, "tail"
+    assert_includes bot_body, "explicit user confirmation"
+
+    assert_includes daemon_body, "start --detach"
+    assert_includes daemon_body, "foreground `start` without `--detach`"
+    assert_includes daemon_body, "streaming `tail`"
+
+    assert_includes init_body, "--json` only changes the output envelope"
+    assert_includes init_body, "stdin redirected from `/dev/null`"
+  end
+
+  def test_umbrella_skill_guards_destructive_and_blocking_commands
+    _metadata, body = read_skill("hive")
+
+    %w[
+      drop
+      uninstall
+      update
+      forget
+      prune
+      migrate
+      metrics
+    ].each do |verb|
+      assert_includes body, verb
+    end
+
+    [
+      "daemon stop",
+      "daemon disable --all",
+      "daemon install --force",
+      "bot stop",
+      "bot install --force",
+      "markers clear",
+      "approve --force"
+    ].each do |command|
+      assert_includes body, command
+    end
+
+    assert_includes body, "restate the effect"
+    assert_includes body, "explicit user confirmation"
+    assert_includes body, "hive daemon start --detach"
+    assert_includes body, "hive daemon tail"
+    assert_includes body, "hive bot start --foreground"
+    assert_includes body, "hive bot tail"
+  end
+
+  def read_skill(skill)
+    text = ROOT.join(skill, "SKILL.md").read
+    match = text.match(/\A---\r?\n(?<frontmatter>.*?)\r?\n---\r?\n(?<body>.*)\z/m)
+    refute_nil match, "#{skill} must start with YAML frontmatter"
+
+    [ YAML.safe_load(match[:frontmatter], aliases: false), match[:body] ]
+  end
+end

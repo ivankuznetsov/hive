@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-02T23:20:00Z] fix(openclaw) - avoid core slash-command collisions and unsafe agent paths
+
+**Action:** Review follow-up for the in-tree OpenClaw skill bundle. Renamed the Hive new/approve shortcuts to `/hive-new` and `/hive-approve` so they do not collide with OpenClaw's built-in `/new` and `/approve` commands, kept already-prefixed skill names from being published as `hive-hive-*`, and strengthened skill instructions for foreground daemon commands, streaming tails, `approve --force`, nested destructive umbrella commands, and `init --json` TTY prompt behavior.
+
+**Refreshed pages:**
+- [[gaps]] - OpenClaw publication is still an external maintainer step; the in-tree bundle now documents the collision-safe skill names.
+
 ## [2026-06-02T08:13Z] fix — post-review hardening of llm-wiki hook environment sanitization
 
 **Action:** Addressed 4 findings from `/ce-code-review` on PR #245 (managed_hook_content regex too narrow, bash-3.2 empty-array safety in run_without_git_env, thin env-var scrub coverage in tests, missing negative test for unwrapped codex/qmd calls):
@@ -282,6 +289,16 @@ redispatch.
 
 **Refreshed pages:**
 - [[commands/bot]]
+
+## [2026-05-28T20:50:00Z] openclaw — in-tree skill bundle
+
+**Action:** Added `openclaw/skills/` as Hive's OpenClaw skill surface. The bundle uses an umbrella `/hive` skill for arbitrary `hive ...` commands plus shortcuts for the day-to-day workflow (`/plan`, `/work`, `/ce-review`, and related stage/finding/admin helpers). Each skill preflights `command -v hive`, documents safe argument passing, and dispatches to the existing CLI instead of adding an OpenClaw TypeScript plugin runtime.
+
+**Docs:** `README.md` now has a "Works with OpenClaw.ai" section. `openclaw/README.md` records the Skills-vs-Plugin recommendation, the local install commands, planned ClawHub slugs, and the dry-run publish loop. ClawHub publication and listing evidence remain external maintainer steps.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
 
 ## [2026-05-27T00:00:00Z] release — implement Homebrew + AUR publishing (gem-based)
 

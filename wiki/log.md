@@ -2,6 +2,19 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
+
+**Action:** Addressed the actionable `/ce-code-review` findings on PR #268:
+
+- **Parse-error hardening (#1):** `Hive::BrainstormParser.parse` is now total — it scrubs invalid UTF-8 and rescues `ENOENT`/`EACCES`/`IOError` → so a torn concurrent read (the bot appends an answer while the daemon parses) or garbled bytes degrade instead of raising. The dispatcher's residual `:fatal` rescue is deduped per `[project, slug]` so a persistently unreadable file can't log every ~30s tick.
+- **Fail-open rationale (#2, reconsidered):** the adversarial "fail closed on zero questions" suggestion was **not** adopted — the bot locates questions with the *same* parser, so a zero-parseable-question file can't be answered via the bot anyway; resuming (re-running the agent to regenerate) is the self-healing path and holding would strand. Documented in code + wiki.
+- **End-to-end test (#5):** added a `handle_row` test proving the daemon actually *resumes* (spawns) on a parse error, plus dedup, multi-round, no-A-slot, and zero-question tests.
+- **Doc:** updated `wiki/modules/bot.md` to describe `Hive::Bot::BrainstormParser` as a back-compat alias.
+
+Deferred to follow-up issues: the "question with no fillable `### A` slot → indefinite hold" strand (bot answer-writer concern) and surfacing an `unanswered_questions` count in `hive status` (schema change).
+
+**Tests:** full suite 4171 runs / 0 failures, 100% line coverage, rubocop clean.
+
 ## [2026-06-02T00:00:00Z] fix — daemon holds brainstorm resume until all Q&A answers are in (#267)
 
 **Action:** Fixed the daemon resuming a brainstorm mid-Q&A. The bot writes each Telegram answer to `brainstorm.md` individually (bumping mtime), and the daemon's `needs_input` edit-resume fired ~`edit_debounce_sec` after the **first** answer — re-running `hive brainstorm` with partial answers and grabbing the task `.lock`.

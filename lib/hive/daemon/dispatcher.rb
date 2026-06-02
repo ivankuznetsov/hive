@@ -131,6 +131,10 @@ module Hive
         # Production passes nil so `DispatchRequestQueue` resolves
         # `Hive::Paths.state_home`; unit tests inject a sandbox.
         @dispatch_request_state_home = dispatch_request_state_home
+        # `[project, slug] → last-logged error signature` for the
+        # brainstorm-gate parse-error log dedup (see
+        # `brainstorm_answers_pending?`).
+        @brainstorm_parse_errors = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -544,13 +548,22 @@ module Hive
       end
 
       # True when `row` is a brainstorm `needs_input` row whose
-      # `brainstorm.md` still has unanswered questions. Only brainstorm
+      # `brainstorm.md` still has UNANSWERED questions. Only brainstorm
       # rows carry Q&A markers, so every other edit-resume row (execute /
       # review WAITING) returns false and behaves exactly as before. The
       # daemon parses the file directly (the published hive-status schema
       # carries no question count) via the shared `Hive::BrainstormParser`.
-      # Fails OPEN (returns false → resume allowed) on any parse error so
-      # a malformed file never strands a task.
+      #
+      # Fails OPEN (returns false → resume allowed) when the file parses
+      # to ZERO questions or on an unexpected error. This is deliberate
+      # and self-healing, NOT a gap: the Telegram bot locates questions
+      # with the SAME parser, so a file with no parseable `### Q{n}.`
+      # (empty, agent crashed mid-write, or header drift) is one the
+      # operator cannot answer via the bot either — the only way forward
+      # is to re-run the brainstorm agent, which regenerates a clean file.
+      # Holding instead would strand the task. The gate's job is narrow:
+      # block the resume only while there are questions the operator is
+      # actively answering.
       def brainstorm_answers_pending?(row)
         return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
         return false unless row.stage == BRAINSTORM_STAGE_DIR
@@ -559,12 +572,27 @@ module Hive
         return false unless path && File.exist?(path)
 
         parsed = Hive::BrainstormParser.parse(path)
-        Hive::BrainstormParser.unanswered_questions(parsed).any?
+        pending = Hive::BrainstormParser.unanswered_questions(parsed).any?
+        @brainstorm_parse_errors.delete([ row.project, row.slug ])
+        pending
       rescue StandardError => e
-        @logger.event(:fatal,
-                      message: "brainstorm_answers_pending? raised: #{e.class}: #{e.message}",
-                      keeping_previous: true)
+        # `parse` is total (scrubs encoding, swallows IO), so this is a
+        # belt-and-suspenders guard. Dedup the log per (project, slug) so
+        # a persistently unreadable file can't emit `:fatal` on every
+        # ~30s tick forever — only on first sight and on change.
+        log_brainstorm_parse_error(row, e)
         false
+      end
+
+      def log_brainstorm_parse_error(row, error)
+        key = [ row.project, row.slug ]
+        signature = "#{error.class}: #{error.message}"
+        return if @brainstorm_parse_errors[key] == signature
+
+        @brainstorm_parse_errors[key] = signature
+        @logger.event(:fatal,
+                      message: "brainstorm_answers_pending? raised: #{signature}",
+                      project: row.project, slug: row.slug, keeping_previous: true)
       end
 
       def dispatch_or_block(row, now:, trigger: "advance")

@@ -21,8 +21,21 @@ module Hive
 
     module_function
 
+    # Read + parse a brainstorm file. Total by construction: a missing /
+    # unreadable file and invalid UTF-8 both degrade to a best-effort
+    # parse rather than raising. This matters because the file is read
+    # concurrently — the Telegram bot appends answers while the daemon
+    # parses to gate auto-resume — so a torn mid-append read (a split
+    # multibyte boundary) must not raise. `scrub` replaces invalid bytes
+    # with U+FFFD; a partially-written answer body then simply looks
+    # unanswered for that one tick (the safe direction).
     def parse(path)
-      parse_text(File.exist?(path) ? File.read(path, encoding: "UTF-8") : "")
+      raw = begin
+        File.read(path, encoding: "UTF-8")
+      rescue Errno::ENOENT, Errno::EACCES, IOError
+        ""
+      end
+      parse_text(raw.scrub)
     end
 
     def parse_text(text)

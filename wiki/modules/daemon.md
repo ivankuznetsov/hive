@@ -137,9 +137,19 @@ The fix gates the resume on whether any questions are still unanswered:
   file (via the shared `Hive::BrainstormParser`, relocated out of
   `Hive::Bot::` for exactly this reason) for a `2-brainstorm`
   `needs_input` row and returns true while any `### Q{n}.` lacks an
-  answer. It **fails open** (false) on any parse error so a malformed
-  file never strands a task, and returns false for every non-brainstorm
-  edit-resume row (execute/review carry no Q&A markers).
+  answer. It returns false for every non-brainstorm edit-resume row
+  (execute/review carry no Q&A markers). **Fails open** (resume) on a
+  file that parses to ZERO questions or on an unexpected error — and
+  this is self-healing, not a gap: the Telegram bot locates questions
+  with the *same* parser, so a file with no parseable `### Q{n}.` (empty,
+  agent crashed mid-write, header drift) is one the operator can't answer
+  via the bot either; the recovery is to re-run the brainstorm agent,
+  which regenerates a clean file, and holding would strand it instead.
+  `parse` is hardened (encoding-scrub + IO-resilient) so a torn
+  concurrent read — the bot appends an answer while the daemon parses —
+  degrades rather than raises; the residual `:fatal` rescue is deduped
+  per `[project, slug]` so a persistently unreadable file can't spam the
+  log every tick.
 - `Policy.decide` takes `answers_pending:` and downgrades a would-be
   `:dispatch` to `:wait_for_answers` — but **only** the terminal
   dispatch. The first-sight `:record_baseline`, `:skip`, and

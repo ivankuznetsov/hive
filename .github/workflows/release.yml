@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -63,7 +63,7 @@ jobs:
       matrix:
         runs-on: [macos-15, ubuntu-24.04-arm]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: hive-cli-gem
           path: dist
@@ -111,8 +111,8 @@ jobs:
     outputs:
       aur_enabled: ${{ steps.aur_gate.outputs.enabled }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: hive-cli-gem
           path: dist
@@ -221,7 +221,7 @@ jobs:
         # packaging/render.rb does `require "erb"` — without it the render
         # step dies with `cannot load such file -- erb (LoadError)`.
         run: pacman -Syu --noconfirm --needed git openssh cosign ruby ruby-erb jq github-cli
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download and cosign-verify release artifacts
         env:
           GH_TOKEN: ${{ github.token }}

@@ -56,7 +56,8 @@ module Hive
         :suggested_command,
         :next_action,
         :diagnostic,
-        :live_task_lock
+        :live_task_lock,
+        :unanswered_questions
       ) do
         # worktree_path defaults to nil so existing test factories that
         # predate PR #84 finding #8 can keep their existing Row.new
@@ -65,8 +66,12 @@ module Hive
         # live_task_lock defaults to false so older JSON payloads (and
         # tests written before issue #144) keep classifying correctly;
         # production payloads always emit the boolean explicitly.
-        def initialize(worktree_path: nil, live_task_lock: false, **rest)
-          super(worktree_path: worktree_path, live_task_lock: live_task_lock, **rest)
+        # unanswered_questions defaults to 0 so payloads / test factories
+        # that predate issue #270 keep working; production payloads always
+        # emit the integer explicitly.
+        def initialize(worktree_path: nil, live_task_lock: false, unanswered_questions: 0, **rest)
+          super(worktree_path: worktree_path, live_task_lock: live_task_lock,
+                unanswered_questions: unanswered_questions, **rest)
         end
       end
 
@@ -135,7 +140,8 @@ module Hive
           suggested_command: payload["suggested_command"],
           next_action: payload["next_action"],
           diagnostic: payload["diagnostic"],
-          live_task_lock: payload["live_task_lock"] == true
+          live_task_lock: payload["live_task_lock"] == true,
+          unanswered_questions: payload["unanswered_questions"].to_i
         ).freeze
       end
 

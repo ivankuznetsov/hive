@@ -7,10 +7,15 @@ require "hive/lock"
 require "hive/stages"
 require "hive/task_action"
 require "hive/task_resolver"
+require "hive/brainstorm_parser"
 
 module Hive
   module Commands
     class Status
+      # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
+      # count unanswered questions from (issue #270).
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+
       ICON = {
         none: "·",
         waiting: "⏸",
@@ -186,12 +191,40 @@ module Hive
           # and would have to handle JSON null otherwise. Additive field per
           # the SCHEMA_VERSIONS policy in lib/hive.rb — no version bump.
           "live_task_lock" => row[:live_task_lock] == true,
+          # Count of still-unanswered brainstorm Q&A questions (issue #270).
+          # 0 for every non-brainstorm / non-needs_input row. Lets an agent
+          # or operator tell "the daemon is holding this brainstorm because
+          # N answers are outstanding" apart from "genuinely waiting for a
+          # first answer" or "broken" — the daemon's answers-pending gate
+          # is otherwise only visible in daemon.log. Additive field per the
+          # SCHEMA_VERSIONS policy in lib/hive.rb — no version bump (mirrors
+          # `live_task_lock`).
+          "unanswered_questions" => unanswered_question_count(row),
           "action" => row[:action_key],
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
           "next_action" => row[:next_action],
           "diagnostic" => row[:diagnostic]
         }
+      end
+
+      # Number of unanswered `### Q{n}.` slots in a brainstorm task's
+      # `brainstorm.md`. Only meaningful for a `2-brainstorm` `needs_input`
+      # row; everything else is 0 without touching disk. Degrades to 0 on
+      # any read/parse error (status must never fail because a brainstorm
+      # file is mid-write or malformed). Uses the shared, total
+      # `Hive::BrainstormParser` — the same parser the daemon gate and the
+      # bot answer-writer use, so the three never disagree.
+      def unanswered_question_count(row)
+        return 0 unless row[:action_key] == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        return 0 unless row[:stage] == BRAINSTORM_STAGE_DIR
+
+        path = row[:state_file]
+        return 0 unless path && File.exist?(path)
+
+        Hive::BrainstormParser.unanswered_questions(Hive::BrainstormParser.parse(path)).size
+      rescue StandardError
+        0
       end
 
       def diagnose_call

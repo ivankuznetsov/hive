@@ -58,6 +58,49 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # #270: a held brainstorm exposes its unanswered-question count so a
+  # consumer can tell "daemon is holding this" from "broken". Every other
+  # row reports 0.
+  def test_json_payload_emits_unanswered_questions_for_held_brainstorm
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      bs = File.join(hive_state, "stages", "2-brainstorm", "bs-task-260525-cccc")
+      ex = File.join(hive_state, "stages", "4-execute", "ex-task-260525-dddd")
+      FileUtils.mkdir_p(bs)
+      FileUtils.mkdir_p(ex)
+      # Q1 unanswered, Q2 answered → count 1; WAITING marker → needs_input.
+      File.write(File.join(bs, "brainstorm.md"),
+                 "## Round 1\n### Q1.\nWhat?\n### A1.\n\n### Q2.\nWhy?\n### A2.\nyes\n<!-- WAITING -->\n")
+      File.write(File.join(ex, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+
+      tasks = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ]).fetch("projects").first.fetch("tasks")
+      brainstorm = tasks.find { |t| t.fetch("slug") == "bs-task-260525-cccc" }
+      execute = tasks.find { |t| t.fetch("slug") == "ex-task-260525-dddd" }
+
+      assert_equal "needs_input", brainstorm.fetch("action"),
+                   "precondition: the brainstorm row is a needs_input hold"
+      assert_equal 1, brainstorm.fetch("unanswered_questions")
+      assert_equal 0, execute.fetch("unanswered_questions"),
+                   "non-brainstorm rows always report 0"
+    end
+  end
+
+  # #270: unanswered_question_count must never break `hive status` — a
+  # parse error on a mid-write/malformed brainstorm.md degrades to 0.
+  def test_unanswered_question_count_degrades_to_zero_on_parse_error
+    with_tmp_dir do |dir|
+      path = File.join(dir, "brainstorm.md")
+      File.write(path, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+      row = { action_key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+              stage: "2-brainstorm", state_file: path }
+      with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
+        assert_equal 0, Hive::Commands::Status.new.send(:unanswered_question_count, row)
+      end
+    end
+  end
+
   def test_call_rejects_empty_diagnose_and_write_without_diagnose
     error = assert_raises(Hive::Error) { Hive::Commands::Status.new(diagnose: "  ").call }
     assert_match(/--diagnose requires a non-empty task slug/, error.message)

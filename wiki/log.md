@@ -8,6 +8,17 @@ Append-only log of all wiki operations.
 
 **Tests/docs:** Added focused queue and dispatcher tests for schema-valid claim sidecars, spawn-failure release, sequence promotion/discard, and the default timeout. Updated [[modules/bot]], [[modules/daemon]], and [[commands/daemon]] to match the sidecar and timeout behavior.
 
+## [2026-06-03T00:00:00Z] feat — brainstorm Q&A: create missing answer slots (#269) + surface unanswered count in status (#270)
+
+**Action:** Follow-ups to the PR #268 review, stacked on that branch.
+
+- **#269** — `Hive::Bot::BrainstormAnswerWriter` now **creates** a missing `### A{n}.` slot (at the end of the Q-block, before the next Q/Round/marker boundary, via the parser's canonical `answer_header`) instead of dead-ending with `:answer_slot_missing`. A brainstorm agent that emitted a question without an answer block no longer strands the operator (which, with the daemon's answers-pending gate, held the task indefinitely). `:answer_slot_missing` remains a defensive fallback.
+- **#270** — `hive status --json` task rows now carry `unanswered_questions` (count of open `### Q{n}.` slots for a `2-brainstorm` `needs_input` row, computed via the shared `Hive::BrainstormParser`; 0 elsewhere). Additive field, no `SCHEMA_VERSIONS` bump (same policy as `live_task_lock`). Lets a consumer tell a gate-hold from a broken/first-wait task.
+
+**Tests:** full suite passing, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/bot]] (answer-writer slot creation), [[commands/status]] (`unanswered_questions`), [[modules/daemon]] (gate now observable + answerable).
+
 ## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
 
 **Action:** Addressed the actionable `/ce-code-review` findings on PR #268:

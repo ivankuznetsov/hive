@@ -183,6 +183,7 @@
         "claude_pid",
         "claude_pid_alive",
         "live_task_lock",
+        "unanswered_questions",
         "action",
         "action_label",
         "suggested_command",
@@ -268,6 +269,11 @@
         "live_task_lock": {
           "description": "True when the task's .lock file points at a process that is still running (PID alive + start time matches). False when the lock is absent, the PID is dead, or PID reuse was detected. Coerced from nil/true/false to a strict boolean so external consumers (TUI, bots) never see JSON null.",
           "type": "boolean"
+        },
+        "unanswered_questions": {
+          "description": "Count of still-unanswered brainstorm Q&A questions (`### Q{n}.` slots with no answer) for a 2-brainstorm needs_input row; 0 for every other row. Lets a consumer distinguish a brainstorm the daemon is intentionally holding (answers outstanding) from one genuinely waiting for a first answer or broken — the daemon's answers-pending gate is otherwise only visible in daemon.log. Degrades to 0 if the file is missing/mid-write/malformed.",
+          "type": "integer",
+          "minimum": 0
         },
         "action": {
           "type": "string",

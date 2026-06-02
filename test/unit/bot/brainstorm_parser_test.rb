@@ -8,6 +8,13 @@ class HiveBotBrainstormParserTest < Minitest::Test
     File.join(FIXTURE_DIR, name)
   end
 
+  # The parser now lives at Hive::BrainstormParser (shared with the
+  # daemon); Hive::Bot::BrainstormParser is a back-compat alias.
+  def test_bot_namespace_is_an_alias_for_the_shared_parser
+    assert_same Hive::BrainstormParser, Hive::Bot::BrainstormParser
+    assert_same Hive::BrainstormParser::Question, Hive::Bot::BrainstormParser::Question
+  end
+
   def test_parses_two_rounds_and_returns_first_unanswered_in_document_order
     questions = Hive::Bot::BrainstormParser.parse(fixture("round1_full_round2_partial.md"))
 

@@ -1538,6 +1538,85 @@ end
     end
   end
 
+  # ── brainstorm answers-pending gate ───────────────────────────────────
+
+  def test_handle_row_holds_brainstorm_resume_while_answers_pending
+    dispatcher, supervisor, controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n### Q2.\nWhy?\n### A2.\nyes\n")
+    # Seed a baseline so decide_edit would otherwise dispatch (mtime newer).
+    controller.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    dispatcher.send(:handle_row, r, now: T0)
+
+    assert_empty supervisor.spawned,
+                 "must NOT resume the brainstorm while Q1 is unanswered"
+    assert(logger.events.any? { |(n, a)| n == :skipped && a[:reason] == "answers_pending" },
+           "the hold must be logged as :skipped reason=answers_pending")
+  end
+
+  def test_handle_row_resumes_brainstorm_once_all_answered
+    dispatcher, supervisor, controller, = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\nbecause\n### Q2.\nWhy?\n### A2.\nyes\n")
+    controller.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
+    r = row(action: "needs_input", stage: "2-brainstorm",
+            command: "hive brainstorm s1 --from 2-brainstorm",
+            state_file: bpath, mtime: T0 - 60, folder: folder)
+
+    dispatcher.send(:handle_row, r, now: T0)
+
+    assert_equal 1, supervisor.spawned.size,
+                 "resumes once every question is answered"
+  end
+
+  def test_brainstorm_answers_pending_predicate_branches
+    dispatcher, = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    pending = File.join(folder, "brainstorm.md")
+    File.write(pending, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+    done = File.join(folder, "done.md")
+    File.write(done, "## Round 1\n### Q1.\nWhat?\n### A1.\nanswered\n")
+
+    assert dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: pending, folder: folder))
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: done, folder: folder))
+    # Not a brainstorm stage → no Q&A, never pending.
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "6-review",
+                               state_file: pending, folder: folder))
+    # Not a needs_input row.
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "ready_to_brainstorm", stage: "2-brainstorm",
+                               state_file: pending, folder: folder))
+    # Missing file → not pending.
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               state_file: "/no/such/brainstorm.md", folder: folder))
+  end
+
+  def test_brainstorm_answers_pending_fails_open_on_parse_error
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+    bpath = File.join(folder, "brainstorm.md")
+    File.write(bpath, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+    r = row(action: "needs_input", stage: "2-brainstorm", state_file: bpath, folder: folder)
+
+    with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
+      refute dispatcher.send(:brainstorm_answers_pending?, r),
+             "a parse error must fail OPEN (false) so a malformed file can't strand the task"
+    end
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("brainstorm_answers_pending") })
+  end
+
   private
 
   def events_include?(logger, name)

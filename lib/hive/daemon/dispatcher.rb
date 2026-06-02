@@ -4,6 +4,7 @@ require "shellwords"
 require "hive/config"
 require "hive/stages"
 require "hive/task_action"
+require "hive/brainstorm_parser"
 require "hive/daemon/policy"
 require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
@@ -30,6 +31,10 @@ module Hive
     # graceful shutdown / config reload.
     class Dispatcher
       attr_reader :controller, :supervisor, :logger
+
+      # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
+      # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -494,7 +499,8 @@ module Hive
           last_dispatched_state_file_mtime:
             @controller.last_dispatched_state_file_mtime_for(project: row.project, slug: row.slug),
           now: now,
-          edit_debounce_sec: @edit_debounce_sec
+          edit_debounce_sec: @edit_debounce_sec,
+          answers_pending: brainstorm_answers_pending?(row)
         )
 
         case decision
@@ -521,12 +527,44 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "baseline_recorded")
+        when :wait_for_answers
+          # Brainstorm Q&A still has unanswered questions. Each Telegram
+          # answer bumps the file mtime, so without this gate the daemon
+          # would resume mid-session (with partial answers) and grab the
+          # task lock, bouncing the operator's next answer.
+          @logger.event(:skipped, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "answers_pending")
         when :poll_for_merge
           enqueue_merge_watch(row)
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
         end
+      end
+
+      # True when `row` is a brainstorm `needs_input` row whose
+      # `brainstorm.md` still has unanswered questions. Only brainstorm
+      # rows carry Q&A markers, so every other edit-resume row (execute /
+      # review WAITING) returns false and behaves exactly as before. The
+      # daemon parses the file directly (the published hive-status schema
+      # carries no question count) via the shared `Hive::BrainstormParser`.
+      # Fails OPEN (returns false → resume allowed) on any parse error so
+      # a malformed file never strands a task.
+      def brainstorm_answers_pending?(row)
+        return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        return false unless row.stage == BRAINSTORM_STAGE_DIR
+
+        path = row.state_file
+        return false unless path && File.exist?(path)
+
+        parsed = Hive::BrainstormParser.parse(path)
+        Hive::BrainstormParser.unanswered_questions(parsed).any?
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "brainstorm_answers_pending? raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+        false
       end
 
       def dispatch_or_block(row, now:, trigger: "advance")

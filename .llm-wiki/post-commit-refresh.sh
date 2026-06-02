@@ -25,7 +25,7 @@ configure_git_tool_environment() {
 }
 
 run_without_git_env() {
-  env "${GIT_ENV_UNSET_ARGS[@]}" "$@"
+  env "${GIT_ENV_UNSET_ARGS[@]+"${GIT_ENV_UNSET_ARGS[@]}"}" "$@"
 }
 
 configure_qmd_environment

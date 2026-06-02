@@ -130,8 +130,14 @@ module Hive
       content = existing.sub(pattern, "")
       content = "#{content.rstrip}\n" unless content.empty?
 
-      if content.match?(/(?:\A|\n)exit\s+0\s*(?:#.*)?\n?\z/)
-        return content.sub(/\n?exit\s+0\s*(?:#.*)?\n?\z/, "\n#{block}\nexit 0\n")
+      # Insert before a terminal `exit ...` line so the managed block stays reachable.
+      # Limitation: an *early-return* exit inside `if/then/fi` short-circuits at runtime
+      # and is not detected here — bash parsing is out of scope. Hooks with that pattern
+      # must place the managed-block markers manually.
+      terminal_exit = /(?<=\A|\n)exit(?:\s+[^\n]*)?\s*\n?\z/
+      if (match = content.match(terminal_exit))
+        exit_line = match[0].chomp
+        return "#{content[0...match.begin(0)]}#{block}\n#{exit_line}\n"
       end
 
       managed_content(content, POST_COMMIT_BEGIN, POST_COMMIT_END, block)

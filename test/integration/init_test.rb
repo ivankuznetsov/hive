@@ -184,6 +184,14 @@ class InitTest < Minitest::Test
           assert_includes File.read(refresh_script), "git rev-parse --local-env-vars"
           assert_includes File.read(post_commit_script), "git rev-parse --local-env-vars"
           assert_includes File.read(post_commit_script), "run_without_git_env timeout"
+          assert_includes File.read(refresh_script), "run_without_git_env timeout"
+          [ refresh_script, post_commit_script ].each do |script_path|
+            File.read(script_path).each_line.with_index(1) do |line, n|
+              next unless line.include?("codex exec")
+              assert_includes line, "run_without_git_env",
+                "#{script_path}:#{n}: `codex exec` must be wrapped with run_without_git_env: #{line.strip}"
+            end
+          end
           assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
           assert_includes File.read(post_commit_script), "Do not run qmd update or qmd embed yourself"
           refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
@@ -273,10 +281,33 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_places_managed_post_commit_hook_before_terminal_non_zero_exit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        hook_path = File.join(dir, ".git", "hooks", "post-commit")
+        File.write(hook_path, "#!/usr/bin/env bash\nprintf 'existing hook\n'\nexit 1\n")
+        File.chmod(0o755, hook_path)
+
+        Hive::LlmWikiBootstrap.install!(dir, scheduler: false)
+
+        hook = File.read(hook_path)
+        assert_includes hook, "printf 'existing hook\n'"
+        assert_equal 1, hook.scan("# BEGIN LLM WIKI POST-COMMIT").length
+        assert_equal 1, hook.scan("# END LLM WIKI POST-COMMIT").length
+        assert_operator hook.index("# BEGIN LLM WIKI POST-COMMIT"), :<, hook.rindex("exit 1")
+      end
+    end
+  end
+
   def test_llm_wiki_post_commit_refresh_clears_git_hook_environment_for_nested_tools
     with_tmp_home do
       with_tmp_git_repo do |dir|
         Hive::LlmWikiBootstrap.install!(dir, post_commit_hook: false, scheduler: false)
+
+        env_var_names = `git -C #{dir} rev-parse --local-env-vars`
+                        .split("\n").map(&:strip).reject(&:empty?)
+        assert_includes env_var_names, "GIT_INDEX_FILE",
+                        "sanity check: git must expose at least GIT_INDEX_FILE"
 
         fake_bin = File.join(dir, "fake-bin")
         FileUtils.mkdir_p(fake_bin)
@@ -285,9 +316,10 @@ class InitTest < Minitest::Test
           File.write(tool_path, <<~BASH)
             #!/usr/bin/env bash
             {
-              printf '#{tool}:GIT_INDEX_FILE=%s\n' "${GIT_INDEX_FILE-}"
-              printf '#{tool}:GIT_DIR=%s\n' "${GIT_DIR-}"
-              printf '#{tool}:GIT_WORK_TREE=%s\n' "${GIT_WORK_TREE-}"
+              while IFS= read -r name; do
+                [ -n "$name" ] || continue
+                printf '#{tool}:%s=%s\\n' "$name" "${!name-}"
+              done < <(git rev-parse --local-env-vars 2>/dev/null || true)
             } >> "${HIVE_TEST_HOOK_ENV_LOG:?}"
           BASH
           File.chmod(0o755, tool_path)
@@ -298,22 +330,38 @@ class InitTest < Minitest::Test
         run!("git", "-C", dir, "add", "docs/change.md")
         run!("git", "-C", dir, "commit", "-m", "docs", "--quiet")
 
-        log_path = File.join(dir, "hook-env.log")
-        with_env(
+        # Each var must be non-empty so the scrub is observable. A few vars
+        # (object/common dirs, config-parameters/count, replace-ref base) would
+        # crash the parent `git diff-tree HEAD` inside post-commit-refresh.sh if
+        # set to garbage, so they get non-empty values that still let git
+        # function. The assertion remains: the *child* (codex/qmd) must see
+        # each name as empty after run_without_git_env.
+        polluted_env = env_var_names.to_h { |name| [ name, "polluted" ] }
+        polluted_env.merge!(
           "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
-          "HIVE_TEST_HOOK_ENV_LOG" => log_path,
+          "HIVE_TEST_HOOK_ENV_LOG" => File.join(dir, "hook-env.log"),
           "GIT_INDEX_FILE" => File.join(dir, "foreign.index"),
           "GIT_DIR" => File.join(dir, ".git"),
-          "GIT_WORK_TREE" => dir
-        ) do
+          "GIT_WORK_TREE" => dir,
+          "GIT_OBJECT_DIRECTORY" => File.join(dir, ".git", "objects"),
+          "GIT_COMMON_DIR" => File.join(dir, ".git"),
+          "GIT_CONFIG_COUNT" => "0",
+          "GIT_CONFIG_PARAMETERS" => "'core.bare=false'",
+          "GIT_REPLACE_REF_BASE" => "refs/replace/"
+        )
+
+        log_path = polluted_env.fetch("HIVE_TEST_HOOK_ENV_LOG")
+        with_env(polluted_env) do
           run!(File.join(dir, ".llm-wiki", "post-commit-refresh.sh"))
         end
 
         log = File.read(log_path)
-        assert_includes log, "codex:GIT_INDEX_FILE=\n"
-        assert_includes log, "qmd:GIT_INDEX_FILE=\n"
-        assert_includes log, "codex:GIT_DIR=\n"
-        assert_includes log, "qmd:GIT_DIR=\n"
+        env_var_names.each do |name|
+          assert_includes log, "codex:#{name}=\n",
+                          "codex must observe scrubbed #{name}"
+          assert_includes log, "qmd:#{name}=\n",
+                          "qmd must observe scrubbed #{name}"
+        end
         refute_includes log, "foreign.index"
         refute_includes log, dir
       end

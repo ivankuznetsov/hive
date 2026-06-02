@@ -675,11 +675,15 @@ module Hive
           "hive daemon #{subcommand}: too many positional arguments " \
             "#{targets.inspect}; expected exactly one PROJECT (or --all)"
         end
-        emit_daemon_argv_error(
-          subcommand: subcommand,
-          message: message,
-          error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
-        )
+        if subcommand == "queue"
+          emit_daemon_queue_argv_error(action: targets.first, message: message)
+        else
+          emit_daemon_argv_error(
+            subcommand: subcommand,
+            message: message,
+            error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+          )
+        end
       end
       if options[:force] && subcommand != "install"
         emit_daemon_argv_error(
@@ -725,6 +729,24 @@ module Hive
           warn message
         end
         raise error
+      end
+
+      def emit_daemon_queue_argv_error(action:, message:)
+        require "hive/commands/daemon"
+        require "json"
+        if options[:json]
+          puts JSON.generate(
+            "schema" => "hive-daemon-queue",
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-queue"),
+            "ok" => false,
+            "action" => action,
+            "error_kind" => "invalid_arguments",
+            "message" => message
+          )
+        else
+          warn message
+        end
+        raise Hive::InvalidTaskPath, message
       end
     end
 

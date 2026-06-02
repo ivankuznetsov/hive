@@ -1580,6 +1580,19 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
+  def test_queue_too_many_positionals_json_emits_queue_error_envelope
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "one", "two", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-queue", doc["schema"]
+      assert_equal false, doc["ok"]
+      assert_equal "invalid_arguments", doc["error_kind"]
+      assert_equal "show", doc["action"]
+    end
+  end
+
   def test_queue_show_missing_id_json_emits_error_envelope
     with_isolated_hive_home do |_home, env|
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,

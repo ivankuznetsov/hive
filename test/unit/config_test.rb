@@ -1764,7 +1764,7 @@ class ConfigTest < Minitest::Test
       assert_equal 60,    cfg.dig("daemon", "transient_retry_backoff_sec")
       assert_equal 600,   cfg.dig("daemon", "shutdown_grace_sec")
       # R-02 per-child timeout knobs.
-      assert_equal 7200,  cfg.dig("daemon", "child_timeout_sec")
+      assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
       assert_equal({},    cfg.dig("daemon", "child_verb_timeouts"))
     end

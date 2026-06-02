@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T00:00:00Z] fix — PR #244 queue-claim and recovery-sequence hardening
+
+**Action:** Repaired the PR #244 follow-up branch after rebase onto current `main`. Dispatch-request claims now keep the request JSON schema-valid and store mutable `pid` / `process_start_time` / `claimed_at` fields in a `.claim` sidecar; the daemon preclaims before spawn and releases the claim if spawn fails. Bot recovery sequences now enqueue only the first queue request and persist the retry as a `.sequence` sidecar that the daemon promotes only after the current request exits 0; failed or killed clears discard the retry, and first-request enqueue failures discard the orphan sidecar. Restored `daemon.child_timeout_sec` to `0` by default so existing configs keep historical unbounded children unless operators opt into a cap. Request and claim timestamps now include microseconds. Top-level `hive daemon queue ... --json` argv-shape failures now emit `hive-daemon-queue.v1` (`error_kind=invalid_arguments`) instead of leaking through the enroll schema.
+
+**Tests/docs:** Added focused queue and dispatcher tests for schema-valid claim sidecars, spawn-failure release, sequence promotion/discard, and the default timeout. Updated [[modules/bot]], [[modules/daemon]], and [[commands/daemon]] to match the sidecar and timeout behavior.
+
 ## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
 
 **Action:** Addressed the actionable `/ce-code-review` findings on PR #268:
@@ -2682,5 +2688,17 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[cli]]
 - [[commands/daemon]]
 - [[modules/daemon]]
+- [[index]]
+- [[gaps]]
+
+## [2026-06-03T00:57:00Z] daemon/bot — refresh queue error and dispatch-result coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `b3193bd4` changed the daemon queue command, daemon request/result queues, dispatcher completion handling, Telegram bot dispatch-result relay, and the `hive-daemon-queue.v1` schema. Verified the committed diff and relevant source files. Added bot-side coverage for retry-safe dispatch-result draining, stale notice dropping, overflow summaries, and nil exit-code rendering; made the daemon queue JSON `ErrorPayload` arm explicit in CLI/daemon command coverage; refreshed page dates and recorded verification scope in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/daemon]]
+- [[modules/daemon]]
+- [[modules/bot]]
 - [[index]]
 - [[gaps]]

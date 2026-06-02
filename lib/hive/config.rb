@@ -262,14 +262,12 @@ module Hive
         "shutdown_grace_sec" => 600,
         # R-02: per-child wall-clock timeout for daemon-spawned `hive`
         # children. `child_timeout_sec` is the default cap (0 disables —
-        # children run unbounded, the historical behaviour). The default
-        # is generous (2h) so the 5-review autonomous loop — which can
-        # hold its task lock for ~90 min — is never killed mid-pass; it
-        # exists to reap a genuinely wedged child, not to bound normal
-        # runs. `child_verb_timeouts` overrides the default per hive verb
+        # children run unbounded, the historical behaviour). Operators can
+        # set a project/global cap when they want the daemon to reap genuinely
+        # wedged children. `child_verb_timeouts` overrides the default per hive verb
         # (e.g. {"review" => 10800}). `child_kill_grace_sec` is the
         # SIGTERM→SIGKILL escalation window.
-        "child_timeout_sec" => 7200,
+        "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
         "child_verb_timeouts" => {},
         "log_max_bytes" => 10_485_760,

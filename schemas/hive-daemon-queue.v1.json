@@ -12,7 +12,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "action", "error_kind", "message"],
-      "description": "Emitted under --json when the queue command itself fails (bad action, missing id, internal error). Distinct from the SuccessPayload ok:false 'show found nothing' result, which carries no error_kind.",
+      "description": "Emitted under --json when the queue command itself fails (bad action, invalid argv shape, missing id, internal error). Distinct from the SuccessPayload ok:false 'show found nothing' result, which carries no error_kind.",
       "properties": {
         "schema": { "const": "hive-daemon-queue" },
         "schema_version": { "const": 1 },
@@ -23,7 +23,7 @@
         },
         "error_kind": {
           "type": "string",
-          "enum": ["unknown_action", "missing_request_id", "internal"]
+          "enum": ["unknown_action", "invalid_arguments", "missing_request_id", "internal"]
         },
         "message": { "type": "string" }
       }

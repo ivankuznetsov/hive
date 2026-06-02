@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-01
+updated: 2026-06-03
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -286,19 +286,22 @@ A pending request file used to stay as `<id>.json` from spawn until
 reap. A daemon crash in that window re-dispatched the request on
 restart — re-running work that may already have completed. The fix
 (`DispatchRequestQueue.claim`) renames the file to
-`<id>.json.claimed` the instant the daemon spawns the child, stamping
-the child's `pid` + `process_start_time` under a `claim` key. Claimed
+`<id>.json.claimed` before the daemon spawns the child. The claimed JSON
+stays a schema-valid `hive-dispatch-request.v1`; mutable claim metadata
+(`pid`, `process_start_time`, `claimed_at`) lives in a sibling
+`<id>.json.claimed.claim` sidecar that is updated after spawn. Claimed
 files are invisible to `pending` (the glob matches `*.json`, not
 `*.json.claimed`), so a later tick never re-observes them — **each
-queued request is dispatched at most once, ever**. The claimed file is
-unlinked on reap (`remove` matches both pending and claimed files).
+queued request is dispatched at most once, ever**. The claimed file,
+claim sidecar, and any sequence sidecar are unlinked on reap.
 
-`claim` renames the claimed file into place, then unlinks the original
-`<id>.json` as a *separate* step — a crash in that window leaves both
-files. Two guards close the resulting double-dispatch hole: `pending`
-skips any `<id>.json` whose request_id already has a `.claimed` sibling
-(so a lingering original is never re-observed), and `recover_claims`
-removes the orphan `<id>.json` alongside the `.claimed` it sweeps.
+`claim` uses a single rename of `<id>.json` to `<id>.json.claimed`, but
+a crash or filesystem race can still leave a stale original beside a
+claimed file. Two guards close the resulting double-dispatch hole:
+`pending` skips any `<id>.json` whose request_id already has a
+`.claimed` sibling (so a lingering original is never re-observed), and
+`recover_claims` removes the orphan `<id>.json` alongside the `.claimed`
+it sweeps.
 
 At startup, `Dispatcher#recover_dispatch_claims` sweeps claim files
 left by a prior process via `DispatchRequestQueue.recover_claims`:
@@ -324,14 +327,24 @@ Each removal logs `:dispatch_request_recovered request_id=… reason=owner_gone|
 `ChildSupervisor` enforces a per-child timeout so a wedged `hive run`
 can't hold a concurrency slot until daemon shutdown. The timeout is
 resolved AT SPAWN from the verb (`daemon.child_verb_timeouts[verb]`
-falling back to `daemon.child_timeout_sec`, default 7200s; `0`
-disables) and frozen on the running entry so a mid-run reload never
+falling back to `daemon.child_timeout_sec`, default `0` (disabled)) and
+frozen on the running entry so a mid-run reload never
 retroactively kills a live child. Each tick, `Dispatcher#enforce_child_timeouts`
 calls `ChildSupervisor#enforce_timeouts`: a child past its deadline gets
 SIGTERM, then SIGKILL after `daemon.child_kill_grace_sec` (default 30s),
 each logged as `:child_timeout action=term|kill elapsed_sec=… timeout_sec=…`.
 The killed child surfaces as a normal `ChildExit` on a later reap. See
 [[config]] for the knobs.
+
+### Queue sequence continuations
+
+Bot recovery flows can be two-step operations: clear the recovery marker,
+then retry the workflow verb. The bot writes only the first request and
+stores later argv arrays in `<request_id>.sequence`. On successful reap
+(`exit_code == 0`), `Dispatcher#promote_dispatch_sequence` writes the
+next request with the original Telegram routing metadata; on non-zero or
+nil exit it discards the sidecar. This keeps retries from running when
+the marker-clear command failed.
 
 ### Failure feedback to Telegram (ADV-1)
 

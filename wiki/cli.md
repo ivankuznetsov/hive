@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-01
+updated: 2026-06-03
 tags: [cli, api]
 ---
 
@@ -102,7 +102,7 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 
 A few stage runners still call `warn`/`exit N` directly for non-bug user errors that don't yet have a typed class — most notably `Init#validate_git_repo!` / `validate_clean_tree!` (exit 1), `Execute#run!` for `plan.md missing` (exit 1), and the `OpenPr` / `Finalize` network/auth abort paths. Migrating these to typed exceptions is tracked as Phase 2 follow-up work.
 
-**Error envelopes.** Every `--json`-supporting command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`) appear automatically. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). Errors that fire before Thor parses argv (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
+**Error envelopes.** Every `--json`-supporting command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`) appear automatically. `hive daemon queue --json` uses its own `hive-daemon-queue.v1` `ErrorPayload` arm for queue-command failures (`unknown_action`, `missing_request_id`, `internal`) so queue inspectors still receive one schema-specific document. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). Errors that fire before Thor parses argv (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
 
 ## Backlinks
 

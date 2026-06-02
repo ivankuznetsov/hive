@@ -1330,7 +1330,7 @@ class SchemaFilesTest < Minitest::Test
     assert_empty schemer.validate(error_envelope).to_a,
                  "error envelope must validate against the ErrorPayload arm"
     # The error_kind enum is pinned to the producer's set.
-    assert_equal %w[internal missing_request_id unknown_action],
+    assert_equal %w[internal invalid_arguments missing_request_id unknown_action],
                  schema.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
   end
 

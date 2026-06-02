@@ -442,12 +442,15 @@ module Hive
           # Struct), so `respond_to?` is dead code per M-02 from
           # PR #241 ce-code-review. Just check the value.
           if entry.request_id
-            # ADV-1: read the request's Telegram routing metadata BEFORE
-            # remove() unlinks the file, so a non-zero exit can be surfaced
-            # back to the originating chat.
+            # ADV-1: read routing metadata BEFORE remove() unlinks the file,
+            # so a non-zero exit can be surfaced back to the originating chat.
             meta = Hive::Daemon::DispatchRequestQueue.metadata(
               entry.request_id, state_home: dispatch_request_state_home
             )
+            promote_dispatch_sequence(entry, meta, now: now) if entry.exit_code == 0
+            Hive::Daemon::DispatchRequestQueue.discard_sequence(
+              entry.request_id, state_home: dispatch_request_state_home
+            ) unless entry.exit_code == 0
             Hive::Daemon::DispatchRequestQueue.remove(
               entry.request_id, state_home: dispatch_request_state_home
             )
@@ -458,11 +461,6 @@ module Hive
                           elapsed_sec: (now - entry.started_at).to_i,
                           envelope_marker: entry.json_envelope&.dig("marker"),
                           envelope_ok: entry.json_envelope&.dig("ok"))
-            # Treat any non-zero exit AS WELL AS a nil exit (the child was
-            # terminated by a signal — e.g. an R-02 timeout SIGKILL —
-            # whose Process::Status#exitstatus is nil) as a failure worth
-            # surfacing. `exit_code.to_i.zero?` would mask the nil case and
-            # silently swallow timeout kills (#4 from PR #244 ce-code-review).
             notify_dispatch_failure(entry, meta, now: now) unless entry.exit_code == 0
           end
           @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
@@ -948,6 +946,7 @@ module Hive
       def dispatch_request!(req, now:)
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
+        preclaim_dispatch_request(req, now: now)
         pid = dispatch_command(
           command,
           project: req.project, slug: req.slug,
@@ -962,29 +961,55 @@ module Hive
           trigger: req.trigger.to_s.empty? ? "dispatch_request" : req.trigger,
           request_id: req.request_id
         )
-        claim_dispatch_request(req, pid: pid, now: now)
+        update_dispatch_request_claim(req, pid: pid, now: now)
         @logger.event(:dispatch_request_dispatched,
                       request_id: req.request_id, pid: pid,
                       project: req.project, slug: req.slug,
                       command: command, trigger: req.trigger,
                       chat_id: req.chat_id, update_id: req.update_id)
+      rescue StandardError
+        Hive::Daemon::DispatchRequestQueue.release_claim(
+          req.request_id, state_home: dispatch_request_state_home
+        )
+        raise
       end
 
-      # C3: claim the just-spawned request file. Dry-run pids are
-      # non-positive (no real process to record a start time for), so we
-      # still claim but with a nil start_time. A claim failure is
-      # non-fatal — the worst case is the historical behaviour (file
-      # lingers as `.json` and the per-slug in-flight gate prevents a
-      # same-tick double-dispatch).
-      def claim_dispatch_request(req, pid:, now:)
+      def preclaim_dispatch_request(req, now:)
+        claimed = Hive::Daemon::DispatchRequestQueue.claim(
+          req.request_id, pid: nil, process_start_time: nil,
+          now: now, state_home: dispatch_request_state_home
+        )
+        raise "dispatch request claim failed for #{req.request_id}" unless claimed
+
+        claimed
+      end
+
+      def update_dispatch_request_claim(req, pid:, now:)
         start_time = pid.is_a?(Integer) && pid.positive? ? Hive::Lock.process_start_time(pid) : nil
-        Hive::Daemon::DispatchRequestQueue.claim(
+        Hive::Daemon::DispatchRequestQueue.update_claim(
           req.request_id, pid: pid, process_start_time: start_time,
           now: now, state_home: dispatch_request_state_home
         )
       rescue StandardError => e
         @logger.event(:fatal,
-                      message: "claim_dispatch_request raised: #{e.class}: #{e.message}",
+                      message: "update_dispatch_request_claim raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+      end
+
+      def promote_dispatch_sequence(entry, meta, now:)
+        Hive::Daemon::DispatchRequestQueue.promote_sequence(
+          entry.request_id,
+          project: (meta && meta[:project]) || entry.project,
+          slug: (meta && meta[:slug]) || entry.slug,
+          requestor: (meta && meta[:requestor]) || "bot",
+          chat_id: meta && meta[:chat_id],
+          update_id: meta && meta[:update_id],
+          state_home: dispatch_request_state_home,
+          now: now
+        )
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "promote_dispatch_sequence raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
       end
 

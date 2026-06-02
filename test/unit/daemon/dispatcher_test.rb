@@ -1219,7 +1219,7 @@ end
       "schema" => "hive-dispatch-request",
       "schema_version" => 1,
       "request_id" => request_id,
-      "created_at" => created_at.utc.iso8601,
+      "created_at" => created_at.utc.iso8601(6),
       "project" => project,
       "slug" => slug,
       "argv" => argv,
@@ -1340,6 +1340,128 @@ end
     end
   end
 
+  def test_reap_promotes_sequence_only_after_success
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(
+        state_home,
+        slug: "s1",
+        request_id: "SEQ1",
+        argv: [ "hive", "markers", "clear", "s1", "--json" ]
+      )
+      Q.write_sequence!(
+        "SEQ1",
+        remaining_argvs: [ [ "hive", "review", "s1", "--from", "6-review", "--json" ] ],
+        state_home: state_home
+      )
+      exited = ChildExit.new(
+        pid: 558, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+        command: "hive markers clear s1 --json", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQ1"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      dispatcher.send(:reap_completed, now: T0 + 1)
+
+      pending = Q.pending(state_home: state_home)
+      assert_equal 1, pending.size
+      assert_equal [ "hive", "review", "s1", "--from", "6-review", "--json" ],
+                   pending.first.argv
+      refute_equal "SEQ1", pending.first.request_id
+      assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "SEQ1*")),
+                   "the consumed sequence sidecar must be removed"
+    end
+  end
+
+  def test_reap_discards_sequence_after_failure
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(
+        state_home,
+        slug: "s1",
+        request_id: "SEQF",
+        argv: [ "hive", "markers", "clear", "s1", "--json" ]
+      )
+      Q.write_sequence!(
+        "SEQF",
+        remaining_argvs: [ [ "hive", "review", "s1", "--from", "6-review", "--json" ] ],
+        state_home: state_home
+      )
+      exited = ChildExit.new(
+        pid: 559, exit_code: 1, project: "p1", slug: "s1", stage: nil,
+        command: "hive markers clear s1 --json", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQF"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      dispatcher.send(:reap_completed, now: T0 + 1)
+
+      assert_empty Q.pending(state_home: state_home),
+                   "a retry must not be enqueued when the marker clear command failed"
+      assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "SEQF*")),
+                   "the failed sequence sidecar must be discarded"
+    end
+  end
+
+  def test_dispatch_request_releases_claim_when_spawn_raises
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "RFAIL")
+      sup.define_singleton_method(:spawn) { |**_kwargs| raise "spawn failed" }
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+        assert_equal [ "RFAIL" ], Q.pending(state_home: state_home).map(&:request_id)
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_update_dispatch_request_claim_logs_helper_errors
+    dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+    entry = Hive::Daemon::DispatchRequestQueue::Request.new(
+      path: "/tmp/request.json", request_id: "R1", created_at: T0,
+      project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+      requestor: "bot", chat_id: 42, update_id: 12, trigger: "test"
+    )
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :update_claim, ->(*, **_kwargs) { raise "claim write failed" }
+    ) do
+      dispatcher.send(:update_dispatch_request_claim, entry, pid: 123, now: T0)
+    end
+
+    assert(logger.events.any? { |(name, attrs)|
+      name == :fatal && attrs[:message].include?("update_dispatch_request_claim raised")
+    })
+  end
+
+  def test_promote_dispatch_sequence_logs_helper_errors
+    dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+    entry = ChildExit.new(
+      pid: 555, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+      command: "hive markers clear s1", state_file_path: nil,
+      started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQERR"
+    )
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :promote_sequence, ->(*, **_kwargs) { raise "promote failed" }
+    ) do
+      dispatcher.send(:promote_dispatch_sequence, entry, nil, now: T0)
+    end
+
+    assert(logger.events.any? { |(name, attrs)|
+      name == :fatal && attrs[:message].include?("promote_dispatch_sequence raised")
+    })
+  end
+
   # #4: a signal-killed child (R-02 timeout) has a nil exit_code; the reap
   # guard must treat nil as a failure and still write an ADV-1 notice.
   def test_reap_writes_notice_on_nil_exit_signal_kill
@@ -1448,7 +1570,7 @@ end
     # Asserted by not raising; the rescue logs :fatal.
   end
 
-  def test_claim_dispatch_request_swallows_errors
+  def test_preclaim_dispatch_request_raises_on_claim_failure
     dispatcher, = make_dispatcher
     req = Hive::Daemon::DispatchRequestQueue::Request.new(
       request_id: "X", created_at: T0, project: "p1", slug: "s1",
@@ -1458,7 +1580,9 @@ end
     with_replaced_singleton_method(
       Hive::Daemon::DispatchRequestQueue, :claim, ->(*_a, **_kw) { raise "boom" }
     ) do
-      dispatcher.send(:claim_dispatch_request, req, pid: 5, now: T0)
+      assert_raises(RuntimeError) do
+        dispatcher.send(:preclaim_dispatch_request, req, now: T0)
+      end
     end
   end
 

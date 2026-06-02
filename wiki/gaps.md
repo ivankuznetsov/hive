@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-06-01
+updated: 2026-06-03
 tags: [gap, todo]
 ---
 
@@ -42,6 +42,7 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 10. **`live_task_lock` daemon behavior is unit-pinned but not live-smoked.** PR #151 adds StatusConsumer parsing, stale-healer skips, and dispatcher capacity accounting for rows whose only liveness signal is a verified task `.lock`. Unit tests cover the contracts; no live daemon restart/rebase smoke artifact was found in-tree.
 11. **`claude.permission_mode` should be live-checked against current Claude Code.** Config, init prompts, tmux wrapper docs, and headless argv tests now cover the supported values, but there is no recorded live run proving every accepted mode still matches the installed Claude CLI's current behavior.
 12. **Local git index health affected the 2026-06-01 wiki refresh.** `git status --short` failed with `fatal: unable to read 7afa1ea39e410defd0219acecd295e3108f5f93a`; `git ls-files -s` mapped that blob to `plugins/zoom/CONTRIBUTING.md`. The index also staged deletions for several wiki pages while the files still existed in the working tree. This refresh verified the committed docs change via `git show HEAD` and direct source reads, but a normal clean-tree check remains unresolved in this checkout.
+13. **PR #244 final verification remains before merge.** The 2026-06-03 repair adds focused coverage for queue claim sidecars, recovery-sequence continuations, and the unbounded timeout default, but the branch still needs its final focused test/rubocop pass, `/ce-code-review`, and hosted CI before merge.
 
 ## Release install follow-ups
 

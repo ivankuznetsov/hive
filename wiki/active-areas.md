@@ -11,6 +11,8 @@ tags: [roadmap, status]
 
 ## Status
 
+Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` replaces the dead `which` delegators. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
+
 Recent history inspected on 2026-05-25:
 
 | Commit | Area | Notes |

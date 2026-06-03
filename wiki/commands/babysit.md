@@ -1,7 +1,7 @@
 ---
 title: hive babysit
 type: command
-source: lib/hive/cli.rb, lib/hive/commands/babysit.rb
+source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
 updated: 2026-06-03
 tags: [command, babysitter, daemon, github]
@@ -67,14 +67,16 @@ On success, the babysitter is silent on the PR. On failure, timeout, or budget e
 
 `--dry-run` sets the dispatcher dry-run flag. The agent prompt tells the agent to write `.babysitter-dry-run-plan.md` instead of mutating GitHub, and `Hive::Babysitter::DryRunEnv` prepends a PATH overlay where `git` and `gh` point at babysitter stubs. The stubs are default-deny: they strip leading global options, pass through only known read-only commands, and skip anything mutating or unknown while appending the skipped invocation to `.babysitter-dry-run-skipped.log`.
 
-The current `git` stub read-only allowlist is `branch` (bare, `--show-current`, or `--contains`), `cat-file`, `describe`, `diff`, `grep`, `log`, `ls-files`, `ls-tree`, `merge-base`, `remote`, `rev-list`, `rev-parse`, `show`, `status`, and `config` when paired with `--get`, `--get-all`, or `--list`. The current `gh` stub read-only allowlist is `api` with no method or GET, `auth status`, `pr checks/diff/list/status/view`, `run list/view/watch`, `repo view`, and `workflow list/view`.
+The current `git` stub read-only allowlist is `branch` (bare, `--show-current`, or `--contains`), `cat-file`, `describe`, `diff`, `grep`, `log`, `ls-files`, `ls-tree`, `merge-base`, `remote`, `rev-list`, `rev-parse`, `show`, `status`, and `config` when paired with `--get`, `--get-all`, or `--list`. The current `gh` stub read-only allowlist is `api` with no mutating method and no payload flags, `api --method GET ...` / `api -XGET ...`, `auth status`, `pr checks/diff/list/status/view`, `run list/view/watch`, `repo view`, and `workflow list/view`.
+
+For `gh api`, payload-bearing forms are treated as writes unless the command explicitly sets GET. Dry-run skips implicit-POST calls such as `gh api repos/owner/repo/issues/123/comments -f body=hi`, `-F body=@comment.md`, `--raw-field body=hi`, `--field body=hi`, and `--input payload.json`, while still passing explicit GET reads such as `gh api --method GET repos/owner/repo/issues -f state=open`.
 
 The dry-run guard is best-effort: an agent that invokes absolute binary paths can bypass the PATH overlay. Use throwaway repos for destructive validation until a stronger sandbox exists.
 
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation and lifecycle helpers.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

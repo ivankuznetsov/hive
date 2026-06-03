@@ -21,7 +21,7 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::ContextBuilder` | `lib/hive/babysitter/context_builder.rb` | Builds prompt-ready status rollup, failing-job logs, and diff stat. |
 | `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from the PR head branch. |
 | `Hive::Babysitter::GhOps` | `lib/hive/babysitter/gh_ops.rb` | Hive-driven GitHub side effects: force-with-lease push, label, comment, rerun. Honors dry-run. |
-| `Hive::Babysitter::DryRunEnv` | `lib/hive/babysitter/dry_run_env.rb` | PATH overlay for agent-side dry-run `git` / `gh` stubs. |
+| `Hive::Babysitter::DryRunEnv` | `lib/hive/babysitter/dry_run_env.rb` + `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` | PATH overlay for agent-side dry-run `git` / `gh` stubs. |
 | `Hive::Babysitter::Events` | `lib/hive/babysitter/events.rb` | Append-only per-project JSONL events under `.hive-state/babysitter/events.jsonl`. |
 | `Hive::Babysitter::StatusWriter` | `lib/hive/babysitter/status_writer.rb` | Human-readable loop summary appended to `.hive-state/babysitter/status.md`. |
 
@@ -64,7 +64,7 @@ Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-er
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.
 - No Telegram or install/service integration in v1.
 - No success PR comments.
-- Dry-run is best-effort because absolute-path binary invocations can bypass the PATH overlay. Within the overlay, the `git` / `gh` stubs are default-deny: they strip leading global options, skip unknown commands, and only pass through known read-only commands to the real binary. `gh api` only passes through when no method is supplied or the method is GET; `git config` only passes through for read forms (`--get`, `--get-all`, `--list`).
+- Dry-run is best-effort because absolute-path binary invocations can bypass the PATH overlay. Within the overlay, the `git` / `gh` stubs are default-deny: they strip leading global options, skip unknown commands, and only pass through known read-only commands to the real binary. `gh api` passes through only when it has no method and no payload flags, or when the method is explicitly GET; payload flags such as `-f`, `-F`, `--raw-field`, `--field`, and `--input` make a no-method call skip because the GitHub CLI can treat them as write payloads. `git config` only passes through for read forms (`--get`, `--get-all`, `--list`).
 
 ## Backlinks
 

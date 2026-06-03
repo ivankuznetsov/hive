@@ -2,6 +2,28 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
+
+**Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[dependencies]]
+- [[active-areas]]
+- [[architecture]]
+- [[state-model]]
+- [[gaps]]
+
+## [2026-06-03T15:05:00Z] babysitter - refresh gh api dry-run payload guard coverage
+
+**Action:** Refreshed command/API and executable-stub wiki coverage after merge commit `fc8e7739` changed `bin/hive-babysitter-stub-gh` and `test/unit/babysitter/dry_run_env_test.rb`. Verified the committed diff plus the current dry-run wrapper and stub source. Documented that `gh api` calls with payload flags (`-f`, `-F`, `--raw-field`, `--field`, `--input`) are skipped as implicit writes unless the method is explicitly GET, while explicit GET calls can still pass through with query fields. Recorded that the remaining full live-agent `hive babysit --once PROJECT --dry-run` smoke evidence is still absent. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-03T11:05:00Z] babysitter - skip draft PRs explicitly
 
 **Action:** Fixed the babysitter PR selector so GitHub draft PRs are skipped before worktree materialization and agent spawn. The prior label filter treated `draft` as a label, but GitHub exposes draft state as `isDraft`; live babysitter activity showed draft PR #278 being selected despite `labels_ignore: [draft]`. Added the `draft_pr` skipped event outcome and focused ProjectTick coverage.

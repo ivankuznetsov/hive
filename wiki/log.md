@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T20:30:00Z] daemon - PR #244 review follow-up #254 (extract QueueCommand)
+
+**Action:** Extracted the read-only queue-inspection surface from `Commands::Daemon` into `Hive::Commands::Daemon::QueueCommand` (`lib/hive/commands/daemon/queue_command.rb`), mirroring the `ServiceInstaller` extraction (#254). `Commands::Daemon#queue_command` now lazily requires and delegates. The extracted `call` folds forward #262's `Hive::InternalError` wrapping (exit 70 on internal failure) so a later rebase onto a main carrying #297 cannot lose it. Branch stacked on `fix/daemon-queue-244-followups-a` (#294) because the moved `queue_prune` already carries #265's `remove_if_unclaimed`; must merge after #294/#295/#297. Documented in [[modules/daemon]]. 100% line coverage, rubocop clean.
+
 ## [2026-06-03T18:30:00Z] daemon - PR #244 review follow-ups, batch A (dispatch-queue correctness)
 
 **Action:** Implemented the correctness/durability cluster of the deferred PR #244 `/ce-code-review` issues and refreshed [[modules/daemon]]:

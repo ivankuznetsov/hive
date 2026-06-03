@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T03:35:00Z] patrol - rebase wiki coverage onto 0.2.0 main
+
+**Action:** Rebased the draft patrol feature onto current `main` after the babysitter/daemon/release merge batch. Added catalog entries for [[commands/patrol]] and [[modules/patrol]] while preserving the current 0.2.0 release, babysitter, daemon queue, and bot dispatch-result wiki coverage.
+
+**Refreshed pages:**
+- [[index]]
+- [[commands/patrol]]
+- [[modules/patrol]]
+
 ## [2026-06-03T02:45:00Z] release/wiki - refresh 0.2.0 install surface coverage
 
 **Action:** Refreshed wiki command/API surface coverage after commit `7bafcfa1` prepared `0.2.0`. Verified the committed diff (`README.md`, `install.md`, `lib/hive.rb`, `Gemfile.lock`, `CHANGELOG.md`) and the relevant install/update source files. Updated operating and active-area release coverage from stale v0.1.0-era wording to the current v0.2.0 public channels, recorded that AUR/Homebrew are now live surfaces, and narrowed release gaps to tag-trust hardening, macOS x86_64 install support, and external skill/ClawHub publication evidence. Did not run `qmd update` or `qmd embed`.

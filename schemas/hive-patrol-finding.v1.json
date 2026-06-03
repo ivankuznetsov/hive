@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-patrol-finding.v1.json",
+  "title": "hive patrol finding record (v1)",
+  "description": "Durable finding record stored under .hive-state/patrol/findings/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "feature_id",
+    "category",
+    "severity",
+    "confidence",
+    "evidence"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "feature_id": { "type": "string" },
+    "category": {
+      "enum": ["bug", "security", "performance", "documentation", "test-gap", "maintainability"]
+    },
+    "severity": { "enum": ["critical", "high", "medium", "low"] },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "recommendation": { "type": "string" },
+    "fingerprint": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["file"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "snippet": { "type": "string" }
+        }
+      }
+    }
+  }
+}

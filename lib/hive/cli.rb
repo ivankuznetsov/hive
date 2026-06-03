@@ -386,6 +386,30 @@ module Hive
       ).call
     end
 
+    desc "patrol PROJECT", "Run one repository patrol scan cycle for a registered project"
+    long_desc <<~DESC
+      Maps the registered project's repository into durable feature slices
+      under <project>/.hive-state/patrol/, asks the configured patrol
+      agent to review each slice, attempts isolated fixes above the
+      confidence gate, validates configured commands, and opens draft PRs
+      for validated fixes. Patrol never writes findings to 1-inbox or any
+      stage folder; PRs are the only external surface.
+
+      Use --dry-run to map and review without creating fix worktrees,
+      pushing branches, or opening PRs. With --json, emits
+      hive-patrol.v1.
+    DESC
+    option :dry_run, type: :boolean, default: false,
+                     desc: "map and review, but do not fix, push, or open PRs"
+    def patrol(project)
+      require "hive/commands/patrol"
+      Hive::Commands::Patrol.new(
+        project,
+        json: options[:json],
+        dry_run: options[:dry_run]
+      ).call
+    end
+
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered

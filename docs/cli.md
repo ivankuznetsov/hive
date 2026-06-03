@@ -35,6 +35,19 @@ hive accept-finding <slug> 1 3
 hive reject-finding <slug> --severity nit
 ```
 
+## Patrol
+
+`hive patrol PROJECT [--dry-run] [--json]` runs one repository patrol cycle for a registered project whose `.hive-state/config.yml` has `patrol.enabled: true`. The cycle maps semantic feature slices, reviews each slice with the configured patrol agent, attempts fixes above the confidence gate in isolated worktrees, runs configured validation commands, and opens PRs only for validated fixes. It never writes to `1-inbox/` or any stage folder.
+
+The daemon can schedule patrol automatically through `patrol.trigger` (`new_commits` by default) and `patrol.poll_interval_sec`, but the command is also useful for a one-off scan:
+
+```bash
+hive patrol my-project --json
+hive patrol my-project --dry-run --json
+```
+
+The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix, validation, PR, skip, and `last_scanned_sha` counts. Durable patrol state is stored under `<project>/.hive-state/patrol/`.
+
 ## Lower-Level Surface
 
 | Command | Use it for |
@@ -51,6 +64,7 @@ Use these when building scripts, recovering a task, or checking idempotency.
 ## Daemon
 
 The daemon process is global user infrastructure; dispatch is per-project. Install-time setup runs `hive daemon install` so the service survives login/reboot, while `hive init` or `hive daemon enable` decides which projects it may touch. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
+When a project also has `patrol.enabled: true`, the daemon's patrol scheduler dispatches `hive patrol <project> --json` on the configured slow cadence through the same project-enabled and concurrency gates as other daemon children.
 
 ```bash
 hive daemon install
@@ -82,7 +96,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v1` success payload with resolved answers and project metadata; its precondition failures keep the legacy stderr + exit-code contract. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v1` success payload with resolved answers and project metadata; its precondition failures keep the legacy stderr + exit-code contract. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
 
 ## Exit Codes
 

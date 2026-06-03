@@ -1516,4 +1516,82 @@ class SchemaFilesTest < Minitest::Test
     refute schemer.valid?(payload),
            "schema must reject error_kind values outside EnrollErrorKind::ALL"
   end
+
+  # -- hive-patrol ------------------------------------------------------
+
+  def test_hive_patrol_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-patrol")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-patrol",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_patrol_success_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    producer_required = %w[
+      schema schema_version ok project project_root dry_run features_mapped
+      findings fix_candidates fixes_attempted fixes_validated prs_opened
+      pr_urls skipped_findings last_scanned_sha
+    ].sort
+
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-patrol.v1.json"
+  end
+
+  def test_hive_patrol_success_payload_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol"))))
+    payload = {
+      "schema" => "hive-patrol",
+      "schema_version" => 1,
+      "ok" => true,
+      "project" => "demo",
+      "project_root" => "/tmp/demo",
+      "dry_run" => false,
+      "features_mapped" => 1,
+      "findings" => 1,
+      "fix_candidates" => 1,
+      "fixes_attempted" => 1,
+      "fixes_validated" => 1,
+      "prs_opened" => 1,
+      "pr_urls" => [ "https://example.com/pr/1" ],
+      "skipped_findings" => [
+        { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" }
+      ],
+      "last_scanned_sha" => "abc123"
+    }
+
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "hive-patrol success payload must validate"
+  end
+
+  def test_hive_patrol_finding_schema_file_exists_and_accepts_record
+    path = Hive::Schemas.schema_path("hive-patrol-finding")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+
+    payload = {
+      "id" => "finding-1",
+      "feature_id" => "route-home",
+      "category" => "bug",
+      "severity" => "high",
+      "confidence" => "medium",
+      "title" => "Nil dereference",
+      "description" => "The route calls a nil receiver.",
+      "recommendation" => "Guard the receiver before use.",
+      "fingerprint" => "fp1",
+      "evidence" => [
+        { "file" => "app.rb", "line" => 12, "snippet" => "user.name" }
+      ]
+    }
+    errors = JSONSchemer.schema(doc).validate(payload).map { |e| e["error"] }
+    assert_empty errors, "durable patrol finding record must validate"
+  end
 end

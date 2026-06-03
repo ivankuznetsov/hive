@@ -15,6 +15,7 @@ require "hive/commands/status"
 require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
+require "hive/commands/patrol"
 require "hive/commands/markers"
 require "hive/commands/daemon"
 require "hive/commands/bot"
@@ -184,7 +185,13 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_markers_daemon_bot_and_metrics_pass_options
+  def test_patrol_markers_daemon_bot_and_metrics_pass_options
+    with_command_new_stub(Hive::Commands::Patrol) do |calls|
+      Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({ json: true, dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
     with_command_new_stub(Hive::Commands::Markers) do |calls|
       Hive::CLI.start([ "markers", "clear", "slug", "--name", "ERROR", "--project", "proj", "--match-attr", "exit_code=1", "--json" ])
       assert_equal [ "clear", "slug" ], calls.first.fetch(:args)

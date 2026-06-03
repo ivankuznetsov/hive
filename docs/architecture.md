@@ -115,6 +115,7 @@ budget_usd:
   review_triage: 75
   review_fix: 500
   review_browser: 100
+  patrol: 100
 
 timeout_sec:
   brainstorm: 1800
@@ -126,6 +127,7 @@ timeout_sec:
   review_triage: 1800
   review_fix: 14400
   review_browser: 3600
+  patrol: 3600
 
 review:
   ci:
@@ -157,6 +159,21 @@ review:
 
 daemon:
   enabled: true
+
+patrol:
+  enabled: false
+  trigger: new_commits       # or `timer`
+  poll_interval_sec: 600
+  agent: claude
+  min_confidence_to_fix: medium
+  max_findings_per_feature: 10
+  max_prs_per_cycle: 3
+  draft_prs: true
+  commands:
+    format: null
+    lint: null
+    typecheck: null
+    test: null
 
 rebase:
   enabled: true

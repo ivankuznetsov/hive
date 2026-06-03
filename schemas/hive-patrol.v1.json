@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-patrol.v1.json",
+  "title": "hive patrol output (v1)",
+  "description": "Stable contract emitted by `hive patrol PROJECT --json`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "project",
+        "project_root",
+        "dry_run",
+        "features_mapped",
+        "findings",
+        "fix_candidates",
+        "fixes_attempted",
+        "fixes_validated",
+        "prs_opened",
+        "pr_urls",
+        "skipped_findings",
+        "last_scanned_sha"
+      ],
+      "properties": {
+        "schema": { "const": "hive-patrol" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "features_mapped": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 },
+        "fix_candidates": { "type": "integer", "minimum": 0 },
+        "fixes_attempted": { "type": "integer", "minimum": 0 },
+        "fixes_validated": { "type": "integer", "minimum": 0 },
+        "prs_opened": { "type": "integer", "minimum": 0 },
+        "pr_urls": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "skipped_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["finding_id", "fingerprint", "reason"],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "fingerprint": { "type": "string" },
+              "reason": {
+                "enum": ["dismissed", "existing_pr", "low_confidence", "low_severity"]
+              }
+            }
+          }
+        },
+        "last_scanned_sha": { "type": "string" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-patrol" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

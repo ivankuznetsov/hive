@@ -33,7 +33,8 @@ module Hive
         "review_ci" => 100,
         "review_triage" => 75,
         "review_fix" => 500,
-        "review_browser" => 100
+        "review_browser" => 100,
+        "patrol" => 100
       },
       "timeout_sec" => {
         "brainstorm" => 1800,
@@ -45,7 +46,8 @@ module Hive
         "review_ci" => 3600,
         "review_triage" => 1800,
         "review_fix" => 14400,
-        "review_browser" => 3600
+        "review_browser" => 3600,
+        "patrol" => 3600
       },
       # Stage-level agent for single-agent stages. The review
       # stage has its own per-role agent fields under "review.{ci,triage,
@@ -294,6 +296,33 @@ module Hive
         "dry_run" => false,
         "budget_minutes" => 30,
         "budget_usd" => 50
+      },
+      # Repository patrol is opt-in per managed project. When enabled,
+      # the daemon schedules `hive patrol PROJECT` scans that map
+      # semantic code slices, review them with an agent, attempt fixes
+      # in isolated worktrees, validate configured commands, and surface
+      # successful fixes only as GitHub PRs.
+      "patrol" => {
+        "enabled" => false,
+        "trigger" => "new_commits",
+        "poll_interval_sec" => 600,
+        "agent" => "claude",
+        "min_confidence_to_fix" => "medium",
+        "max_findings_per_feature" => 10,
+        "max_prs_per_cycle" => 3,
+        "draft_prs" => true,
+        "include" => [],
+        "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
+        "commands" => {
+          "format" => nil,
+          "lint" => nil,
+          "typecheck" => nil,
+          "test" => nil
+        },
+        "review" => {
+          "max_context_files" => 24,
+          "max_owned_files" => 12
+        }
       },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
@@ -976,6 +1005,7 @@ module Hive
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
+      validate_patrol!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1001,6 +1031,7 @@ module Hive
       agents
       daemon
       babysitter
+      patrol
       bot
       rebase
     ].freeze
@@ -1505,6 +1536,105 @@ module Hive
         raise ConfigError,
               "babysitter.labels_ignore in #{describe_source(source_path)} must be an Array of Strings; " \
               "got #{labels.inspect} (#{labels.class})"
+      end
+    end
+
+    PATROL_TRIGGERS = %w[new_commits timer].freeze
+    PATROL_CONFIDENCE_LEVELS = %w[low medium high].freeze
+    PATROL_NUMERIC_BOUNDS = [
+      [ "poll_interval_sec", 60 ],
+      [ "max_findings_per_feature", 1 ],
+      [ "max_prs_per_cycle", 1 ]
+    ].freeze
+
+    def validate_patrol!(cfg, source_path)
+      patrol = cfg["patrol"]
+      return if patrol.nil?
+
+      enabled = patrol["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "patrol.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      draft_prs = patrol["draft_prs"]
+      unless draft_prs.nil? || draft_prs == true || draft_prs == false
+        raise ConfigError,
+              "patrol.draft_prs in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{draft_prs.inspect} (#{draft_prs.class})"
+      end
+
+      trigger = patrol["trigger"]
+      unless PATROL_TRIGGERS.include?(trigger)
+        raise ConfigError,
+              "patrol.trigger in #{describe_source(source_path)} must be one of " \
+              "#{PATROL_TRIGGERS.inspect}; got #{trigger.inspect} (#{trigger.class})"
+      end
+
+      confidence = patrol["min_confidence_to_fix"]
+      unless PATROL_CONFIDENCE_LEVELS.include?(confidence)
+        raise ConfigError,
+              "patrol.min_confidence_to_fix in #{describe_source(source_path)} must be one of " \
+              "#{PATROL_CONFIDENCE_LEVELS.inspect}; got #{confidence.inspect} (#{confidence.class})"
+      end
+
+      PATROL_NUMERIC_BOUNDS.each do |key, min|
+        value = patrol[key]
+        next if value.nil?
+
+        unless value.is_a?(Integer) && value >= min
+          raise ConfigError,
+                "patrol.#{key} in #{describe_source(source_path)} must be an integer " \
+                ">= #{min}; got #{value.inspect} (#{value.class})"
+        end
+      end
+
+      validate_agent_name!(patrol["agent"], "patrol.agent", source_path)
+      validate_path_glob_list!(patrol["include"], "patrol.include", source_path)
+      validate_path_glob_list!(patrol["exclude"], "patrol.exclude", source_path)
+      validate_patrol_commands!(patrol, source_path)
+      validate_patrol_review!(patrol, source_path)
+    end
+
+    def validate_patrol_commands!(patrol, source_path)
+      commands = patrol["commands"]
+      unless commands.is_a?(Hash)
+        raise ConfigError,
+              "patrol.commands in #{describe_source(source_path)} must be a Hash; " \
+              "got #{commands.inspect} (#{commands.class})"
+      end
+
+      %w[format lint typecheck test].each do |key|
+        value = commands[key]
+        next if value.nil?
+        next if value.is_a?(String) && !value.strip.empty?
+
+        raise ConfigError,
+              "patrol.commands.#{key} in #{describe_source(source_path)} must be null or a non-empty String; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+    end
+
+    def validate_patrol_review!(patrol, source_path)
+      review = patrol["review"]
+      return if review.nil?
+
+      unless review.is_a?(Hash)
+        raise ConfigError,
+              "patrol.review in #{describe_source(source_path)} must be a Hash; " \
+              "got #{review.inspect} (#{review.class})"
+      end
+
+      { "max_context_files" => 0, "max_owned_files" => 1 }.each do |key, min|
+        value = review[key]
+        next if value.nil?
+
+        unless value.is_a?(Integer) && value >= min
+          raise ConfigError,
+                "patrol.review.#{key} in #{describe_source(source_path)} must be an integer " \
+                ">= #{min}; got #{value.inspect} (#{value.class})"
+        end
       end
     end
 

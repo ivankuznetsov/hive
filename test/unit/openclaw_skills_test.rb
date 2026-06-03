@@ -57,6 +57,11 @@ class OpenClawSkillsTest < Minitest::Test
     "rebase-status" => { cli: "rebase_status", command: "hive rebase-status" },
     "doctor" => { cli: "doctor", command: "hive doctor" },
     "daemon" => { cli: "daemon", command: "hive daemon" },
+    "patrol" => {
+      cli: "patrol",
+      description: "Run an opt-in Hive repository patrol scan for a registered project",
+      command: "hive patrol"
+    },
     "babysit" => {
       cli: "babysit",
       description: "Manage the experimental hive-babysitter (start / stop / status / reload / tail / --once)",

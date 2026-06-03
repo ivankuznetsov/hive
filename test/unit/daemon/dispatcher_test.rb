@@ -102,10 +102,36 @@ class HiveDaemonDispatcherTest < Minitest::Test
     attr_reader :last_tick_dropped
   end
 
+  class FakePatrolScheduler
+    attr_accessor :next_dispatches
+    attr_reader :completed, :cancelled
+
+    def initialize
+      @next_dispatches = []
+      @completed = []
+      @cancelled = []
+    end
+
+    def tick(now:)
+      out = @next_dispatches
+      @next_dispatches = []
+      out
+    end
+
+    def complete(project:, exit_code:, now:)
+      @completed << { project: project, exit_code: exit_code, now: now }
+    end
+
+    def cancel(project:)
+      @cancelled << project
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
-                      project_enabled: true, dispatch_state: nil, status_result: nil,
+                      with_patrol_scheduler: false, project_enabled: true,
+                      dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil)
     config = {
       "daemon" => {
@@ -135,6 +161,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                          )
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
+    patrol_scheduler = with_patrol_scheduler ? FakePatrolScheduler.new : nil
 
     dispatcher = Hive::Daemon::Dispatcher.new(
       config: config,
@@ -143,13 +170,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status,
       logger: logger,
       merge_watcher: merge_watcher,
+      patrol_scheduler: patrol_scheduler,
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
-    [ dispatcher, supervisor, controller, logger, merge_watcher ]
+    [ dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler ]
   end
 
   class StubLogger
@@ -391,6 +419,148 @@ class HiveDaemonDispatcherTest < Minitest::Test
     blocked = logger.events.find { |(n, a)| n == :blocked && a[:action] == "archive" }
     refute_nil blocked, "must log :blocked for the archive dispatch"
     assert_equal "global_cap", blocked[1][:reason]
+  end
+
+  def test_patrol_scheduler_dispatches_through_supervisor
+    dispatcher, sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size
+    assert_equal "hive patrol p1 --json", sup.spawned.first[:command]
+    assert_equal "patrol", sup.spawned.first[:stage]
+    event = logger.events.find { |(name, attrs)| name == :dispatched && attrs[:trigger] == "patrol" }
+    refute_nil event
+  end
+
+  def test_patrol_dispatch_skips_when_project_disabled
+    dispatcher, sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true, project_enabled: false
+    )
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    skipped = logger.events.find { |(name, attrs)| name == :skipped && attrs[:action] == "patrol" }
+    refute_nil skipped
+    assert_equal "project_disabled", skipped[1][:reason]
+    assert_includes patrol.cancelled, "p1",
+                    "a gated patrol must release the scheduler's pending marker or the project wedges forever"
+  end
+
+  def test_patrol_dispatch_respects_capacity
+    dispatcher, sup, ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    ctrl.instance_variable_set(:@max_concurrent_runs, 1)
+    ctrl.record_dispatch(pid: 999, project: "p1", slug: "running", stage: "6-review",
+                         command: "hive review running", started_at: T0, state_file_mtime: T0 - 60)
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    blocked = logger.events.find { |(name, attrs)| name == :blocked && attrs[:action] == "patrol" }
+    refute_nil blocked
+    assert_equal "global_cap", blocked[1][:reason]
+    assert_includes patrol.cancelled, "p1",
+                    "a capacity-gated patrol must release its pending marker so it retries when capacity frees"
+  end
+
+  def test_patrol_dispatch_skips_legacy_layout_project
+    legacy_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
+      name: "p1",
+      legacy_stage_dirs: [ "1-inbox" ]
+    )
+    status_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true,
+      rows: [],
+      projects: [ legacy_project ],
+      error: nil
+    )
+    dispatcher, sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true, status_result: status_result
+    )
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    skipped = logger.events.find { |(name, attrs)| name == :skipped && attrs[:action] == "patrol" }
+    refute_nil skipped
+    assert_equal "legacy_layout_detected", skipped[1][:reason]
+    assert_includes patrol.cancelled, "p1"
+  end
+
+  def test_patrol_dispatch_spawn_error_completes_scheduler_with_failure
+    dispatcher, sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    def sup.spawn(**)
+      raise RuntimeError, "spawn failed"
+    end
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ { project: "p1", exit_code: 1, now: T0 } ], patrol.completed
+    fatal = logger.events.find { |(name, attrs)| name == :fatal && attrs[:slug] == "patrol" }
+    refute_nil fatal
+  end
+
+  def test_patrol_completion_is_reported_to_scheduler
+    config = { "daemon" => { "edit_debounce_sec" => 30, "poll_interval_sec" => 30 } }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 5, max_concurrent_per_project: 5,
+      max_runs_per_day_per_project: 100
+    )
+    supervisor = FakeSupervisor.new
+    def supervisor.reap_all(now: Time.now)
+      return [] if @reaped
+
+      @reaped = true
+      [ ChildExit.new(pid: 901, exit_code: 0, project: "p1", slug: "patrol",
+                      stage: "patrol", command: "hive patrol p1 --json",
+                      started_at: T0, finished_at: now, json_envelope: nil) ]
+    end
+    controller.record_dispatch(pid: 901, project: "p1", slug: "patrol", stage: "patrol",
+                               command: "hive patrol p1 --json", started_at: T0,
+                               state_file_mtime: nil)
+    status = FakeStatusConsumer.new
+    logger = StubLogger.new
+    patrol = FakePatrolScheduler.new
+    dispatcher = Hive::Daemon::Dispatcher.new(
+      config: config, controller: controller, supervisor: supervisor,
+      status_consumer: status, logger: logger, patrol_scheduler: patrol
+    )
+
+    dispatcher.tick(now: T0 + 10)
+
+    assert_equal [ { project: "p1", exit_code: 0, now: T0 + 10 } ], patrol.completed
   end
 
   def test_edit_action_within_debounce_after_baseline_logs_debouncing

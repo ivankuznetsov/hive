@@ -14,7 +14,92 @@ class ConfigTest < Minitest::Test
       assert_equal 500, cfg["budget_usd"]["execute_implementation"]
       assert_nil cfg["budget_usd"]["execute_review"],
                  "deprecated execute_review key must be absent from DEFAULTS"
+      assert_equal 100, cfg["budget_usd"]["patrol"]
+      assert_equal 3600, cfg["timeout_sec"]["patrol"]
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_returns_patrol_defaults_disabled
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("patrol", "enabled")
+      assert_equal "new_commits", cfg.dig("patrol", "trigger")
+      assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
+      assert_equal "claude", cfg.dig("patrol", "agent")
+      assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
+      assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
+      assert_equal true, cfg.dig("patrol", "draft_prs")
+      assert_equal [], cfg.dig("patrol", "include")
+      assert_includes cfg.dig("patrol", "exclude"), "node_modules"
+      assert_nil cfg.dig("patrol", "commands", "test")
+      assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
+      assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
+    end
+  end
+
+  def test_load_deep_merges_patrol_overrides
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          enabled: true
+          trigger: timer
+          commands:
+            test: bundle exec rake test
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("patrol", "enabled")
+      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal 600, cfg.dig("patrol", "poll_interval_sec"),
+                   "sibling patrol defaults must survive deep merge"
+      assert_equal "bundle exec rake test", cfg.dig("patrol", "commands", "test")
+      assert_nil cfg.dig("patrol", "commands", "lint")
+    end
+  end
+
+  def test_load_rejects_invalid_patrol_config
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          enabled: true
+          trigger: cron
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/patrol\.trigger/, err.message)
+      assert_match(/new_commits/, err.message)
+      assert_match(/timer/, err.message)
+    end
+  end
+
+  def test_load_rejects_invalid_patrol_field_shapes
+    cases = [
+      "enabled: maybe",
+      "draft_prs: sometimes",
+      "min_confidence_to_fix: certain",
+      "poll_interval_sec: 30",
+      "commands: []",
+      "commands:\n    test: ''",
+      "review: []",
+      "review:\n    max_owned_files: 0"
+    ]
+
+    cases.each do |body|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          patrol:
+            #{body}
+        YAML
+
+        assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      end
     end
   end
 

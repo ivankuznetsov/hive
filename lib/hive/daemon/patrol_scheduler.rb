@@ -1,0 +1,164 @@
+require "json"
+require "open3"
+require "shellwords"
+require "time"
+require "hive/config"
+require "hive/git_ops"
+require "hive/daemon/pr_merge_watcher"
+
+module Hive
+  module Daemon
+    # Slow-cadence collaborator that decides which registered projects
+    # should receive one `hive patrol PROJECT --json` scan cycle. It only
+    # returns dispatch hashes; Dispatcher still owns daemon.enabled,
+    # legacy-layout, dry-run, and concurrency gates before spawning.
+    class PatrolScheduler
+      PATROL_STAGE = "patrol".freeze
+      PATROL_SLUG = "patrol".freeze
+
+      class GitHelper
+        def default_branch(project_root, cfg:)
+          cfg["default_branch"] || Hive::GitOps.new(project_root).detect_default_branch
+        end
+
+        def rev_parse(project_root, ref)
+          out, err, status = Open3.capture3("git", "-C", project_root, "rev-parse", ref)
+          raise Hive::GitError, "git rev-parse #{ref} failed: #{err.strip.empty? ? out : err}" unless status.success?
+
+          out.strip
+        end
+      end
+
+      def initialize(registry: -> { Hive::Config.registered_projects },
+                     config_loader: ->(path) { Hive::Config.load(path) },
+                     git: GitHelper.new)
+        @registry = registry
+        @config_loader = config_loader
+        @git = git
+        @pending = {}
+        @failures = {}
+        @next_check_at = {}
+      end
+
+      def tick(now: Time.now)
+        dispatches = []
+        @registry.call.each do |entry|
+          project = entry.fetch("name")
+          next if pending?(project)
+          next if backed_off?(project, now)
+          # Slow patrol cadence (U2): once a project has been evaluated,
+          # don't re-run its per-project git/config checks until
+          # poll_interval_sec has elapsed. Without this the `new_commits`
+          # trigger shells out to `git rev-parse` on every daemon tick
+          # (~30s) instead of the configured patrol interval. A project
+          # with an outstanding failure is exempt so its backoff schedule
+          # governs the retry rather than the slow poll.
+          next if throttled?(project, now)
+
+          cfg = @config_loader.call(entry.fetch("path"))
+          patrol = cfg.fetch("patrol", {})
+          # Throttle every project we evaluate, including opted-out ones,
+          # *before* the enabled gate. Otherwise a disabled project skips
+          # the throttle and reloads its full config on every ~30s tick
+          # just to rediscover patrol.enabled: false. A project that flips
+          # to enabled mid-interval is picked up on its next poll window.
+          @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+          next unless patrol["enabled"] == true
+          next unless due?(entry, cfg, patrol, now)
+
+          @pending[project] = { started_at: now }
+          dispatches << dispatch_for(entry)
+        rescue Hive::ConfigError, Hive::GitError, KeyError
+          next
+        end
+        dispatches
+      end
+
+      def complete(project:, exit_code:, now: Time.now)
+        @pending.delete(project)
+        if exit_code.to_i.zero?
+          @failures.delete(project)
+        else
+          count = @failures.dig(project, :count).to_i + 1
+          interval = PrMergeWatcher::GH_BACKOFF_SCHEDULE[
+            [ count - 1, PrMergeWatcher::GH_BACKOFF_SCHEDULE.size - 1 ].min
+          ]
+          @failures[project] = { count: count, next_eligible_at: now + interval }
+        end
+      end
+
+      # Release a project the Dispatcher marked pending in `tick` but
+      # then gated (daemon-disabled, legacy layout, or concurrency cap)
+      # before spawning. Clearing the pending marker lets the next
+      # eligible tick re-evaluate it; without this the project stays
+      # pending forever and is never patrolled again until daemon restart
+      # (the gated paths never reach `complete`, which is the only other
+      # thing that clears `@pending`). No failure is recorded — the scan
+      # never ran, so there is nothing to back off from. Genuine spawn
+      # *errors* go through `complete` with a non-zero exit instead.
+      def cancel(project:)
+        @pending.delete(project)
+      end
+
+      def pending?(project)
+        @pending.key?(project)
+      end
+
+      private
+
+      def backed_off?(project, now)
+        deadline = @failures.dig(project, :next_eligible_at)
+        deadline && now < deadline
+      end
+
+      def throttled?(project, now)
+        return false if @failures.key?(project)
+
+        deadline = @next_check_at[project]
+        deadline && now < deadline
+      end
+
+      def due?(entry, cfg, patrol, now)
+        state = read_state(entry.fetch("path"))
+        case patrol.fetch("trigger", "new_commits")
+        when "timer"
+          last = parse_time(state["last_run_at"])
+          last.nil? || (now - last) >= patrol.fetch("poll_interval_sec", 600)
+        else
+          branch = @git.default_branch(entry.fetch("path"), cfg: cfg)
+          current = @git.rev_parse(entry.fetch("path"), branch)
+          current != state["last_scanned_sha"]
+        end
+      end
+
+      def read_state(project_root)
+        path = File.join(project_root, ".hive-state", "patrol", "state.json")
+        return {} unless File.exist?(path)
+
+        parsed = JSON.parse(File.read(path))
+        parsed.is_a?(Hash) ? parsed : {}
+      rescue JSON::ParserError, SystemCallError
+        {}
+      end
+
+      def parse_time(value)
+        value && Time.parse(value)
+      rescue ArgumentError
+        nil
+      end
+
+      def dispatch_for(entry)
+        project = entry.fetch("name")
+        {
+          project: project,
+          slug: PATROL_SLUG,
+          stage: PATROL_STAGE,
+          command: "hive patrol #{Shellwords.escape(project)} --json",
+          state_file_mtime: nil,
+          state_file_path: nil,
+          hive_state_path: entry["hive_state_path"]
+        }
+      end
+    end
+  end
+end

@@ -12,6 +12,7 @@ require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
+require "hive/daemon/patrol_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
 require "hive/invoked_binary"
@@ -178,11 +179,12 @@ module Hive
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
         )
+        patrol_scheduler = Hive::Daemon::PatrolScheduler.new
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
-          merge_watcher: merge_watcher, dry_run: @dry_run,
+          merge_watcher: merge_watcher, patrol_scheduler: patrol_scheduler, dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new
         )
 

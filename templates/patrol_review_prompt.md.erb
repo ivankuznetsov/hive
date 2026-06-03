@@ -1,0 +1,48 @@
+You are reviewing one semantic feature slice for bugs and quality issues.
+
+Project root: <%= project_root %>
+Feature id: <%= feature.id %>
+Feature kind: <%= feature.kind %>
+Entrypoints:
+<% feature.entrypoints.each do |path| -%>
+- <%= path %>
+<% end -%>
+Owned files:
+<% feature.owned_files.each do |path| -%>
+- <%= path %>
+<% end -%>
+Context files:
+<% feature.context_files.each do |path| -%>
+- <%= path %>
+<% end -%>
+Associated tests:
+<% feature.tests.each do |path| -%>
+- <%= path %>
+<% end -%>
+
+Return at most <%= max_findings %> findings. Categories must be one of:
+bug, security, performance, documentation, test-gap, maintainability.
+Severity must be critical, high, medium, or low. Confidence must be high,
+medium, or low.
+
+Write a JSON object to this exact path:
+<%= output_path %>
+
+Required shape:
+{
+  "findings": [
+    {
+      "category": "bug",
+      "severity": "high",
+      "confidence": "medium",
+      "title": "short title",
+      "description": "specific problem",
+      "recommendation": "concrete fix",
+      "evidence": [
+        {"file": "relative/path.rb", "line": 12, "snippet": "code anchor"}
+      ]
+    }
+  ]
+}
+
+Do not edit the repository. Only write the JSON file.

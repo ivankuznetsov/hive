@@ -10,10 +10,10 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 70
+Page count: 72
 Updated: 2026-06-03
 
-Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`; `hive babysit` and the in-tree OpenClaw skill bundle are covered by dedicated command/module pages.
+Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`; `hive babysit`, `hive patrol`, and the in-tree OpenClaw skill bundle are covered by dedicated command/module pages.
 
 ## Pages
 
@@ -34,6 +34,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/metrics]] — `wiki/commands/metrics.md`
 - [[commands/migrate]] — `wiki/commands/migrate.md`
 - [[commands/new]] — `wiki/commands/new.md`
+- [[commands/patrol]] — `wiki/commands/patrol.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/run]] — `wiki/commands/run.md`
@@ -63,6 +64,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/lock]] — `wiki/modules/lock.md`
 - [[modules/markers]] — `wiki/modules/markers.md`
 - [[modules/metrics]] — `wiki/modules/metrics.md`
+- [[modules/patrol]] — `wiki/modules/patrol.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
 - [[modules/rebase]] — `wiki/modules/rebase.md`
 - [[modules/reviewers]] — `wiki/modules/reviewers.md`

@@ -14,6 +14,7 @@ require "hive/daemon/stale_agent_healer"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
+require "hive/daemon/patrol_scheduler"
 require "hive/lock"
 require "hive/paths"
 require "hive/update_check"
@@ -46,9 +47,10 @@ module Hive
       # @param status_consumer [StatusConsumer]
       # @param logger [Hive::Daemon::Logger]
       # @param merge_watcher [PrMergeWatcher, nil]
+      # @param patrol_scheduler [PatrolScheduler, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
-                     merge_watcher: nil, dry_run: false,
+                     merge_watcher: nil, patrol_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil)
         @config = config
@@ -57,6 +59,7 @@ module Hive
         @status_consumer = status_consumer
         @logger = logger
         @merge_watcher = merge_watcher
+        @patrol_scheduler = patrol_scheduler
         @dry_run = dry_run
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -237,6 +240,14 @@ module Hive
         # from double-dispatching. Single-writer invariant: only the
         # daemon spawns `hive run`-class verbs.
         process_dispatch_requests(now: now)
+
+        # 3c. Project-level patrol scans are not task rows, so they do
+        # not go through Policy. They still pass through the same
+        # daemon.enabled, legacy-layout, dry-run, and concurrency gates
+        # before any subprocess is spawned.
+        @patrol_scheduler&.tick(now: now)&.each do |patrol_dispatch|
+          dispatch_patrol_with_gates(patrol_dispatch, now: now)
+        end
 
         # 4. Per-row dispatch
         result.rows.each { |row| handle_row(row, now: now) }
@@ -466,6 +477,9 @@ module Hive
           @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
           if entry.exit_code == Hive::ExitCodes::CONFIG
             @logger.event(:project_dropped, project: entry.project)
+          end
+          if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
+            @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
           end
         end
       end
@@ -802,6 +816,66 @@ module Hive
         # Defensive: re-enqueue path uses File.join + Config lookup
         # which can throw on edge cases. Don't let it crash the tick.
         @logger.event(:fatal, message: "archive dispatch error: #{e.class}: #{e.message}",
+                              project: project, slug: slug)
+      end
+
+      def dispatch_patrol_with_gates(patrol_dispatch, now:)
+        project = patrol_dispatch[:project]
+        slug = patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG
+
+        # Every gated early-return below MUST release the scheduler's
+        # pending marker. The scheduler set `@pending[project]` in `tick`
+        # before producing this dispatch, and only `complete` (called on
+        # child reap) clears it. A gated patrol never spawns a child, so
+        # without `cancel` the project would stay pending forever and
+        # never be patrolled again until the daemon restarts.
+        unless project_enabled?(project)
+          @logger.event(:skipped, project: project, slug: slug,
+                                  stage: patrol_dispatch[:stage],
+                                  action: "patrol",
+                                  reason: "project_disabled")
+          @patrol_scheduler&.cancel(project: project)
+          return
+        end
+
+        if @legacy_layout_projects.key?(project)
+          @logger.event(:skipped, project: project, slug: slug,
+                                  stage: patrol_dispatch[:stage],
+                                  action: "patrol",
+                                  reason: "legacy_layout_detected")
+          @patrol_scheduler&.cancel(project: project)
+          return
+        end
+
+        gate = @controller.can_dispatch?(
+          project: project, slug: slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(project)
+        )
+        unless gate == :ok
+          @logger.event(:blocked, project: project, slug: slug,
+                                  stage: patrol_dispatch[:stage],
+                                  action: "patrol",
+                                  reason: gate.to_s)
+          @patrol_scheduler&.cancel(project: project)
+          return
+        end
+
+        dispatch_command(
+          patrol_dispatch[:command],
+          project: project, slug: slug, stage: patrol_dispatch[:stage],
+          state_file_mtime: patrol_dispatch[:state_file_mtime],
+          state_file_path: patrol_dispatch[:state_file_path],
+          hive_state_path: patrol_dispatch[:hive_state_path],
+          now: now,
+          trigger: "patrol"
+        )
+      rescue StandardError => e
+        # A spawn error is a genuine failure: route it through `complete`
+        # with a non-zero exit so the project both clears its pending
+        # marker AND accrues the failure backoff before being retried.
+        @patrol_scheduler&.complete(project: project, exit_code: 1, now: now)
+        @logger.event(:fatal, message: "patrol dispatch error: #{e.class}: #{e.message}",
                               project: project, slug: slug)
       end
 

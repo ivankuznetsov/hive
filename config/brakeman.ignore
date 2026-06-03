@@ -23,6 +23,14 @@
     {
       "fingerprint": "f4e0dcfe7fbb847c09d2b929e3566c2092dbee71a4c34865e8d86248fad239d4",
       "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#pr_diff_stat. base_ref comes from the PR base ref and head_ref is the local literal HEAD in the babysitter context path; the `origin/<base>...HEAD` revspec is passed as one argv element to execve(2), not through a shell."
+    },
+    {
+      "fingerprint": "872fe3ac01d8099ac5fc97f31b105f0c7023eb663f5ed4a462d80988ee6e1692",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. default_branch is interpolated into a single git revspec argv element (`branch...HEAD`); no shell is invoked."
+    },
+    {
+      "fingerprint": "3a5269f601bcaa4cba48697518aa32a79c4f7ae236c97f07e1af4998ecc61205",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#commit_changes. The finding title becomes the value for git commit's `-m` argument as a discrete argv element; no shell is invoked."
     }
   ],
   "updated": "2026-06-03",

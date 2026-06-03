@@ -27,13 +27,14 @@ loop do
   end
 end
 
-mutating =
-  rest[0, 2] == %w[pr comment] ||
-  rest[0, 2] == %w[pr edit] ||
-  rest[0, 2] == %w[pr review] ||
-  rest[0, 2] == %w[run rerun]
+read_only =
+  rest[0, 2] == %w[auth status] ||
+  rest[0, 2] == %w[pr list] ||
+  rest[0, 2] == %w[pr view] ||
+  rest[0, 2] == %w[run list] ||
+  rest[0, 2] == %w[run view]
 
-if mutating
+unless read_only
   log_skip(argv)
   warn "[dry-run] gh #{argv.join(' ')} skipped"
   exit 0

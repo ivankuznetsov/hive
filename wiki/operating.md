@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-26
+updated: 2026-06-03
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -31,7 +31,7 @@ codified in `CLAUDE.md`'s `## Workflow` section.
 
 ## Install
 
-Hive v0.1.0 ships as the `hive-cli` rubygem attached to each GitHub Release,
+Hive ships as the `hive-cli` rubygem attached to each GitHub Release,
 signed with cosign keyless attestation. All channels download the same `.gem`,
 verify the signature, run `gem install` against it, and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
@@ -42,9 +42,9 @@ available; Hive does not auto-install Node.js/npm itself.
 
 | Tier | Platforms | Status |
 |------|-----------|--------|
-| Tier 1 | macOS arm64, Ubuntu 22.04+ x86_64/aarch64, Arch Linux x86_64/aarch64 | `.gem` artifact and channel docs ship in v1 |
+| Tier 1 | macOS arm64, Ubuntu 22.04+ x86_64/aarch64, Arch Linux x86_64/aarch64 | Homebrew, `install.sh`, and AUR (`hive-bin`) are documented install channels |
 | Tier 2 | Debian 12+, Fedora 40+, WSL2 | Best effort through `install.sh`; no dedicated tap/AUR row |
-| Tier 3 | macOS x86_64 for `install.sh` v0.1.0, Alpine/musl, NixOS, BSD | Unsupported; installer exits with a clear message |
+| Tier 3 | macOS x86_64 for `install.sh`, Alpine/musl, NixOS, BSD | Unsupported; installer exits with a clear message |
 
 Channels:
 
@@ -58,7 +58,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -126,9 +126,9 @@ hive uninstall --force-purge-state
 ```
 
 Skills package marketplace commands are documented for the optional companion
-package, but the package is deferred to a v0.1.x follow-up. Do not run these
-commands until `ivankuznetsov/hive-skills` is published; Hive core install
-still succeeds without it:
+package, but the package is still a separate external publishing follow-up.
+Do not run these commands until `ivankuznetsov/hive-skills` is published; Hive
+core install still succeeds without it:
 
 | Agent | Command shape |
 |-------|---------------|
@@ -156,8 +156,8 @@ the published schemas, and asserts no state leaks outside the prefix.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.1.0
-packaging/verify-release.sh --version=v0.1.0 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.2.0
+packaging/verify-release.sh --version=v0.2.0 --report=json | jq .ok
 ```
 
 Exit codes:

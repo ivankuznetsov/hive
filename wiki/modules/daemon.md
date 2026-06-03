@@ -341,6 +341,14 @@ each logged as `:child_timeout action=term|kill elapsed_sec=… timeout_sec=…`
 The killed child surfaces as a normal `ChildExit` on a later reap. See
 [[config]] for the knobs.
 
+`child_kill_grace_sec` is a **minimum, not a precise timer** (#266):
+`enforce_timeouts` runs once per `poll_interval_sec` tick (default 30s),
+so the actual SIGKILL can arrive up to one poll interval after the grace
+window nominally elapses, and `child_kill_grace_sec: 0` does NOT mean
+immediate KILL — it means "KILL on the next tick after the TERM".
+Operators tuning the grace for a hard real-time bound should account for
+the poll interval.
+
 ### Queue sequence continuations
 
 Bot recovery flows can be two-step operations: clear the recovery marker,

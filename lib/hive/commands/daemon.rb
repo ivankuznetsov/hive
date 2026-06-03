@@ -508,10 +508,13 @@ module Hive
       rescue StandardError => e
         # Unexpected failure (IO/parse). Under --json an agent must still
         # get a parseable envelope rather than a bare stack trace (cli-1
-        # from PR #244 ce-code-review), then re-raise for the exit code.
+        # from PR #244 ce-code-review). Wrap in InternalError so the exit
+        # code is 70 (SOFTWARE) — matching the envelope's `error_kind:
+        # "internal"` — instead of leaking a bare StandardError that
+        # bin/hive can't classify and exits 1 with a stack trace (#262).
         emit_queue_error_envelope(action: @queue_args[0], error_kind: "internal",
                                   message: "#{e.class}: #{e.message}") if @json
-        raise
+        raise Hive::InternalError, "hive daemon queue #{@queue_args[0]}: #{e.class}: #{e.message}"
       end
 
       # Emit a hive-daemon-queue error envelope (under --json) and raise a

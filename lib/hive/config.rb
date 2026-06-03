@@ -269,7 +269,11 @@ module Hive
         # set a project/global cap when they want the daemon to reap genuinely
         # wedged children. `child_verb_timeouts` overrides the default per hive verb
         # (e.g. {"review" => 10800}). `child_kill_grace_sec` is the
-        # SIGTERM→SIGKILL escalation window.
+        # SIGTERM→SIGKILL escalation window — a MINIMUM, not a precise
+        # timer: timeouts are enforced once per `poll_interval_sec` tick, so
+        # the actual SIGKILL can land up to one poll interval late, and
+        # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
+        # "KILL on the next tick after TERM"). (#266)
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
         "child_verb_timeouts" => {},

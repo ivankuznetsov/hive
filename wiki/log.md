@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T20:00:00Z] daemon/bot - PR #244 review follow-ups, batch D (docs + security)
+
+**Action:** Implemented the docs + security cluster of the deferred PR #244 `/ce-code-review` issues:
+
+- **#263** (security) `Supervisor#drain_dispatch_results` now re-checks each notice's `chat_id` against `chat_id_allowlist` before relaying — a chat removed from the allowlist mid-flight, or a notice forged in the 0700 dir, is dropped + removed (logging the new `:dispatch_result_rejected_unauthorized` bot event, added to the logger enum + `hive-bot-log.v1.json`) instead of relayed. Documented in [[modules/bot]].
+- **#262** (docs) documented the `hive daemon queue` exit codes in the `daemon` `long_desc` ([[cli]]) and the [[commands/daemon]] exit-codes table: `list`/`prune` → 0; `show` → 0 found / 1 not-found; unknown action or missing REQUEST_ID → 64 (USAGE); internal error → 70 (SOFTWARE). The issue's "70 on internal error" was NOT true of the code — a bare `StandardError` re-raise exited 1 — so `queue_command` now wraps internal failures in `Hive::InternalError` so the exit code matches the `--json` envelope's `error_kind:"internal"`.
+- **#266** (docs) documented `child_kill_grace_sec` as a tick-jittered **minimum**, not a precise timer (enforced once per `poll_interval_sec`; `0` ≠ immediate KILL) in the config knob comment and [[modules/daemon]].
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

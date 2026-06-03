@@ -52,7 +52,7 @@ module Hive
             return @result_class.new(action: :reply, text: "Use /idea <text> to capture a new idea.")
           end
 
-          return start_idea(update, text: text, stage_media: update.respond_to?(:media?) && update.media?)
+          start_idea(update, text: text, stage_media: update.respond_to?(:media?) && update.media?)
         end
 
         def capture_idea_text(update)
@@ -198,7 +198,7 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea <text>, /answer <slug>, " \
+            text: "Commands: /status [project], /queue, /idea [text], /answer <slug>, " \
                   "/approve <slug>, /autofix <slug>, /details <slug>, /done, /help"
           )
         end

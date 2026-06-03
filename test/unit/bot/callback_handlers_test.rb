@@ -121,7 +121,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     store.start(chat_id: 55, phase: :collecting_files, text: "ship", token: "tok")
     store.set_project(chat_id: 55, project: "hive")
     handlers = Hive::Bot::Handlers::CallbackHandlers.new(
-      pending_ideas: {}, set_last_project: ->(_project) {},
+      pending_ideas: {}, set_last_project: ->(_project) { },
       conversation_store: nil, result_class: Result, logger: @logger,
       idea_draft_store: store
     )

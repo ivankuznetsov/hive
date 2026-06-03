@@ -30,7 +30,7 @@ module Hive
   module Bot
     class Supervisor
       BOT_COMMANDS = [
-        { command: "idea",    description: "Capture a new idea" },
+        { command: "idea",    description: "Capture a new idea with optional files" },
         { command: "status",  description: "Show active tasks" },
         { command: "queue",   description: "Show queued and waiting tasks" },
         { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },

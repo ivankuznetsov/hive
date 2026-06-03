@@ -2862,3 +2862,30 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[stages/index]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-03T12:00:00Z] bot — support Telegram idea attachments
+
+**Action:** Added Telegram photo/document idea capture to the bot. `/idea`
+now creates a per-chat draft, project selection enters attachment
+collection, Done/Skip finalizes through `Hive::Commands::New#call!`, and
+accepted media is staged in a temp dir before being copied into inbox
+`assets/`. Documented the new `stage_attachment`/`commit_idea` supervisor
+actions, allowlisted file types, 20 MiB / 10 attachment defaults, and draft
+TTL config.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[commands/bot]]
+- [[modules/bot]]
+- [[modules/config]]
+- [[gaps]]
+
+## [2026-06-03T10:58:00Z] bot — refresh idea attachment routing coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `af183c0b` routed Telegram idea attachment composition through the bot router and handlers. Verified the committed diff plus `lib/hive/bot/router.rb`, slash/callback handlers, `IdeaDraftStore`, `IdeaAttachmentPolicy`, `Supervisor` attachment staging/commit handling, `Telegram` media/download support, `Hive::Commands::New`, and the focused router/callback/S4 idea tests. Documented `/idea` text-first, no-text, captioned-media, file-first, project-pick, Done/Skip, attachment-type, size, count, staging, and final `Hive::Commands::New#call!` behavior. Recorded that no live Telegram download smoke artifact was found. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[modules/bot]]
+- [[commands/bot]]
+- [[gaps]]

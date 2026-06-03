@@ -2,6 +2,15 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.2.0
+
+- Added the experimental `hive babysit` PR repair daemon. It can inspect repository projects, classify PR health, run bounded agent repair attempts, and record structured babysitter events while preserving dry-run and human-handoff paths.
+- Added the OpenClaw skill bundle and install docs, including skill coverage for the new babysitter command, so agent-facing command guidance stays in sync with the CLI.
+- Fixed daemon/bot dispatch edges around queued requests, per-child timeouts, restart baselines, deferred brainstorm answers, and missing brainstorm answer slots.
+- Fixed review/fix recovery contracts so dirty-worktree and unreadable-status states are surfaced as manual-only instead of feeding the same task back into autofix.
+- Fixed TUI snapshot polling so selection follows the focused task slug instead of drifting when rows reorder.
+- Hardened llm-wiki post-commit hook execution by sanitizing inherited Git hook environment, preventing hook-side repository checkouts from dirtying unrelated Hive worktrees.
+
 ## 0.1.10
 
 - Fixed the daemon stranding already-answered `needs_input` tasks across a restart. The `[project, slug] → state_file_mtime` baseline map (consulted by `Policy#decide_edit` to detect fresh user input) was in-memory only, so a pre-restart answer never looked "newer than baseline" on first sight and got skipped on every tick forever until you manually `touch`ed the state file. Baselines now persist to `daemon_dispatch_baselines.json` under the state home (atomic write + fail-closed load + sibling-flock + orphan-tmp sweep), reload on startup, and prune to the live task set each successful tick — bounded to the projects in the snapshot so a per-project status error doesn't wipe its baselines.

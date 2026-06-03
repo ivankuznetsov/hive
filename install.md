@@ -59,8 +59,8 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.2.0 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.1.11 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.11/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -69,8 +69,8 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.2.0 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.1.11 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.11/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
 ```

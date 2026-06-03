@@ -2,14 +2,22 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
-## 0.2.0
+## 0.1.11
 
-- Added the experimental `hive babysit` PR repair daemon. It can inspect repository projects, classify PR health, run bounded agent repair attempts, and record structured babysitter events while preserving dry-run and human-handoff paths.
-- Added the OpenClaw skill bundle and install docs, including skill coverage for the new babysitter command, so agent-facing command guidance stays in sync with the CLI.
-- Fixed daemon/bot dispatch edges around queued requests, per-child timeouts, restart baselines, deferred brainstorm answers, and missing brainstorm answer slots.
-- Fixed review/fix recovery contracts so dirty-worktree and unreadable-status states are surfaced as manual-only instead of feeding the same task back into autofix.
-- Fixed TUI snapshot polling so selection follows the focused task slug instead of drifting when rows reorder.
-- Hardened llm-wiki post-commit hook execution by sanitizing inherited Git hook environment, preventing hook-side repository checkouts from dirtying unrelated Hive worktrees.
+- Added the experimental `hive babysit` PR repair daemon. It can inspect repository projects, classify PR health, run bounded agent repair attempts in PR worktrees, record structured babysitter state/logs, and preserve dry-run and human-handoff paths.
+- Added `hive patrol`, an opt-in repository patrol that maps feature slices, asks the configured agent to review them, fixes validated findings in isolated worktrees, and opens draft PRs for passing fixes.
+- Added the OpenClaw skill bundle and install docs, including coverage for `hive babysit`, `hive patrol`, daemon/bot/init/admin-safe flows, and collision-safe `/hive-new` / `/hive-approve` names.
+- Added daemon/bot queue inspection and operator feedback surfaces: `hive daemon queue`, dispatch-result notices back to the Telegram bot, at-most-once request claims, and bounded result pruning.
+- Changed daemon dispatch behavior around request queues, restart baselines, per-child timeouts, capacity gates, and PR-merge archive handoff so queued work survives restarts more predictably.
+- Changed brainstorm Q&A recovery so the daemon waits for all questions to be answered before resuming, the bot creates missing answer slots instead of stranding the task, and `hive status --json` exposes `unanswered_questions`.
+- Fixed llm-wiki post-commit hook execution by sanitizing inherited Git hook environment, preventing hook-side QMD/plugin repository checkouts from dirtying unrelated Hive worktrees.
+- Fixed review/fix recovery contracts so dirty-worktree and failed-status-check states are surfaced as manual-only when automation cannot safely fix them.
+- Fixed the TUI cursor so the selected slug is preserved across snapshot polls and row reordering.
+- Fixed dispatch-request and result-queue edge cases around schema-valid claim sidecars, stale-claim recovery, timeout/killed child reporting, queue CLI JSON errors, spawn-failure claim release, and result backlog expiry/capping.
+- Fixed babysitter follow-up issues found during review: missing OpenClaw skill coverage, init-answer drift guards, logger fallback handling, coverage-gate gaps, and Brakeman false-positive documentation for argv-form GitHub commands.
+- Updated release/install docs and wiki coverage for the current install surface, Homebrew/AUR/bash channels, daemon queue, babysitter, patrol, OpenClaw, and llm-wiki hook behavior.
+- Recorded operational learnings for daemon autostart, tmux-capture marker footguns, silent stage rename drift, and review auto-commit policy.
+- Bumped RuboCop from 1.86.2 to 1.87.0 and `actions/upload-artifact` from v4 to v7.
 
 ## 0.1.10
 

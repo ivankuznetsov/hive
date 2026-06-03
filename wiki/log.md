@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T10:02:12Z] release - correct prepared version to 0.1.11
+
+**Action:** Corrected the prepared release metadata from `0.2.0` to `0.1.11` to match Hive's micro-release versioning convention. Updated `Hive::VERSION`, the lockfile package version, current installer URLs, the newest changelog section, and active release/install wiki references.
+
+**Refreshed pages:**
+- [[operating]]
+- [[active-areas]]
+
 ## [2026-06-03T03:35:00Z] patrol - rebase wiki coverage onto 0.2.0 main
 
 **Action:** Rebased the draft patrol feature onto current `main` after the babysitter/daemon/release merge batch. Added catalog entries for [[commands/patrol]] and [[modules/patrol]] while preserving the current 0.2.0 release, babysitter, daemon queue, and bot dispatch-result wiki coverage.

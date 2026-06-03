@@ -5,6 +5,7 @@ require "json"
 require "tmpdir"
 require "hive/commands/status"
 require "hive/diagnosis_agent"
+require "hive/task_meta"
 
 class StatusDiagnoseTest < Minitest::Test
   def with_review_task
@@ -12,6 +13,7 @@ class StatusDiagnoseTest < Minitest::Test
       slug = "red-task-260516-aaaa"
       folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
       FileUtils.mkdir_p(File.join(folder, "reviews"))
+      Hive::TaskMeta.write(folder, id: 42, slug: slug, display_name: "Red Task")
       File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
       File.write(File.join(folder, "reviews", "errors-01.md"), "fix failed\n")
       yield folder, slug
@@ -27,6 +29,8 @@ class StatusDiagnoseTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal "hive-status-diagnose", payload["schema"]
       assert_equal slug, payload["slug"]
+      assert_equal 42, payload["id"]
+      assert_equal "Red Task", payload["display_name"]
       assert_equal "local", payload.dig("diagnostic", "generated_by")
       assert_includes payload.dig("diagnostic", "detail"), "fix failed"
     end

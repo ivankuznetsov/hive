@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-05-25
+updated: 2026-06-03
 tags: [test, minitest, fixtures]
 ---
 
@@ -63,6 +63,7 @@ task default: :test
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, remove, exists?, pointer round-trip, prefix validation. |
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
 | `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check. |
+| `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers, signal cleanup, and wrapper argv policy. |
 
 ## Integration suite (`test/integration/`)
 

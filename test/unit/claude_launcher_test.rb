@@ -789,6 +789,46 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_wait_for_terminal_marker_fails_fast_when_session_dies_before_marker
+    with_tmp_task do |task|
+      Hive::Markers.set(task.state_file, :agent_working,
+                        pid: Process.pid,
+                        started: Time.now.utc.iso8601)
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-session")
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+        marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
+
+        assert_equal :error, marker.name
+        assert_equal "tmux_session_terminated", marker.attrs.fetch("reason")
+        assert_match(/gone-session/, marker.attrs.fetch("message"))
+      end
+    end
+  end
+
+  def test_wait_for_terminal_marker_reports_tmux_error_while_checking_session
+    with_tmp_task do |task|
+      Hive::Markers.set(task.state_file, :agent_working,
+                        pid: Process.pid,
+                        started: Time.now.utc.iso8601)
+      runner = Struct.new(:name) do
+        def session_exists?
+          raise Hive::TmuxError, "server disappeared"
+        end
+      end.new("broken-session")
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+        marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
+
+        assert_equal :error, marker.name
+        assert_equal "tmux_pane_unreadable", marker.attrs.fetch("reason")
+        assert_equal "server disappeared", marker.attrs.fetch("message")
+      end
+    end
+  end
+
   def test_signal_cleanup_helpers_ignore_unlink_races
     with_tmp_task do |task|
       File.write(Hive::ClaudeLauncher.result_path(task), "{}")

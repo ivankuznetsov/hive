@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T00:00:00Z] fix — PR #244 queue-claim and recovery-sequence hardening
+
+**Action:** Repaired the PR #244 follow-up branch after rebase onto current `main`. Dispatch-request claims now keep the request JSON schema-valid and store mutable `pid` / `process_start_time` / `claimed_at` fields in a `.claim` sidecar; the daemon preclaims before spawn and releases the claim if spawn fails. Bot recovery sequences now enqueue only the first queue request and persist the retry as a `.sequence` sidecar that the daemon promotes only after the current request exits 0; failed or killed clears discard the retry, and first-request enqueue failures discard the orphan sidecar. Restored `daemon.child_timeout_sec` to `0` by default so existing configs keep historical unbounded children unless operators opt into a cap. Request and claim timestamps now include microseconds. Top-level `hive daemon queue ... --json` argv-shape failures now emit `hive-daemon-queue.v1` (`error_kind=invalid_arguments`) instead of leaking through the enroll schema.
+
+**Tests/docs:** Added focused queue and dispatcher tests for schema-valid claim sidecars, spawn-failure release, sequence promotion/discard, and the default timeout. Updated [[modules/bot]], [[modules/daemon]], and [[commands/daemon]] to match the sidecar and timeout behavior.
+
 ## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
 
 **Action:** Addressed the actionable `/ce-code-review` findings on PR #268:
@@ -57,6 +63,39 @@ Surface-agnostic (Telegram-incremental or one editor save), and the published `h
 
 **Pages refreshed:**
 - [[commands/init]] — documents sanitized nested Codex/QMD calls in generated llm-wiki scripts.
+
+## [2026-06-01T01:00:00Z] fix — PR #244 ce-code-review: ADV-1/C3 hardening
+
+**Action:** Ran `/ce-code-review` on PR #244 (11 reviewers) and fixed the P1 + feature-integrity P2 findings:
+
+1. **#1 (P1)** — `Bot::Supervisor#drain_dispatch_results` removed a notice even when the Telegram relay failed (silent loss). Now removes only after a confirmed send; failures stay on disk for the next reaper tick.
+2. **#2 (P1)** — `hive daemon queue` emitted nothing under `--json` on unknown-action / missing-id / internal errors. Added a `hive-daemon-queue.v1` ErrorPayload arm + `queue_usage_error!`/`emit_queue_error_envelope`; all failure paths now emit a structured envelope.
+3. **#3 (P2)** — C3 claim rename→unlink window could leave both `<id>.json` and `.claimed` → double-dispatch on restart. `pending` now hides a `.json` whose request_id has a `.claimed` sibling; `recover_claims` removes the orphan `.json` too.
+4. **#4 (P2)** — a timeout/signal-killed child has a nil exit_code; the reap guard `exit_code.to_i.zero?` swallowed it → no ADV-1 notice. Changed to `exit_code == 0`; the bot renders nil as `killed (signal/timeout)`.
+5. **#5 (P2)** — `recover_claims` aged claims out at the 600s `EXPIRY_SEC`, dropping live ~90-min runs after 11 min on restart. Added `CLAIM_EXPIRY_SEC`; the dispatcher sizes the window to `child_timeout_sec + kill_grace + 2·poll + margin`.
+6. **#6 (P2)** — `DispatchResultQueue` had no expiry/prune/cap → unbounded growth + reconnect flood. Added `EXPIRY_SEC` + `expired?` + `prune_expired` (daemon prunes each tick); the bot drops stale notices without relaying and caps a backlog at `DISPATCH_RESULT_SEND_CAP` with a per-chat summary.
+
+Deferred to a follow-up (review #7–#19): schema-test parity, `claim` fsync, `pgid_for` nil-on-ESRCH, `chat_id` allowlist re-check on drain, `directory()`/`pending()` dedup, `respond_to?` test-seam removal, `QueueCommand` extraction, `child_timeout_sec` fetch-fallback.
+
+**Tests:** full suite 4242 runs / 0 failures, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/daemon]] (C3 claim-window guards, claim-expiry sizing, ADV-1 reliability contract).
+
+## [2026-06-01T00:00:00Z] feat — PR #241 deferred follow-ups (AC-05, R-02, AN-1/2/3, ADV-1, C3)
+
+**Action:** Implemented the six deferred follow-ups from the PR #241 ce-code-review on branch `feat/queue-dispatcher-followups`:
+
+1. **AC-05 — Queue-path alert-reset race**: `Bot::Supervisor#enqueue_command_sequence` no longer resets the alert optimistically at enqueue time. The daemon hasn't run `markers clear` yet, so removing the alert-store fingerprint let the next status tick re-fire the same alert (`process_current` sees `entry.nil?`). State-driven recovery + dedupe now remove the alert once the daemon acts.
+2. **R-02 — Per-verb child timeout**: `ChildSupervisor` resolves a per-verb wall-clock timeout at spawn (`daemon.child_verb_timeouts[verb]` → `daemon.child_timeout_sec`, default 7200, 0 disables) and `Dispatcher#enforce_child_timeouts` SIGTERMs then SIGKILLs (after `daemon.child_kill_grace_sec`, default 30) over-deadline children each tick, logging `:child_timeout`. Knobs validated in `Config`.
+3. **AN-1/2/3 — Queue inspection CLI**: `hive daemon queue [list|show <id>|prune]` (+`--json`, schema `hive-daemon-queue.v1`) wraps `DispatchRequestQueue` read primitives.
+4. **ADV-1 — Failure feedback to Telegram**: new `Hive::Daemon::DispatchResultQueue` (`<state_home>/dispatch_results/`, schema `hive-dispatch-result.v1`). The daemon writes a notice on a non-zero request-driven exit (reading `chat_id` from the claimed file before unlink); the bot drains it each `reaper_loop` and relays a `⚠️` message to the originating chat.
+5. **C3 — Atomic-claim restart recovery**: `DispatchRequestQueue.claim` renames `<id>.json` → `<id>.json.claimed` at spawn (stamping pid + process_start_time), making the request invisible to `pending` (at-most-once dispatch). `Dispatcher#recover_dispatch_claims` sweeps stale claims at startup — owner-gone/aged claims removed without re-dispatch, owner-alive left alone — logging `:dispatch_request_recovered`.
+
+New daemon events: `:child_timeout`, `:dispatch_request_recovered`, `:dispatch_result_written`. AC-02 (`:dispatch_request_written` naming) was assessed as a won't-fix nit (`via=queue` on `:dispatched_command` already disambiguates).
+
+**Tests:** full suite 4223 runs / 0 failures, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/daemon]] (claim lifecycle, timeouts, result channel + events), [[commands/daemon]] (`queue` subcommand + timeout caps).
 
 ## [2026-05-28T23:30:00Z] fix — PR #241 ce-code-review fixups: schema file, argv+slug validation, security hardening, reliability
 
@@ -2640,3 +2679,26 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Refreshed pages:**
 - [[stages/review]]
 - [[commands/tui]]
+
+## [2026-06-01T20:15:56Z] cli — refresh daemon queue wiki coverage
+
+**Action:** Refreshed the wiki after commit `b175abf7` added `hive daemon queue` to the CLI index. Verified the docs claim against `lib/hive/cli.rb`, `lib/hive/commands/daemon.rb`, `lib/hive/daemon/dispatch_request_queue.rb`, `schemas/hive-daemon-queue.v1.json`, [[commands/daemon]], and [[modules/daemon]]. Updated the CLI JSON-support summary to include daemon `install` and `queue`, aligned daemon module metadata with the current command surface, refreshed the index date, and recorded the local git-index uncertainty that prevented a normal `git status` check. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/daemon]]
+- [[modules/daemon]]
+- [[index]]
+- [[gaps]]
+
+## [2026-06-03T00:57:00Z] daemon/bot — refresh queue error and dispatch-result coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `b3193bd4` changed the daemon queue command, daemon request/result queues, dispatcher completion handling, Telegram bot dispatch-result relay, and the `hive-daemon-queue.v1` schema. Verified the committed diff and relevant source files. Added bot-side coverage for retry-safe dispatch-result draining, stale notice dropping, overflow summaries, and nil exit-code rendering; made the daemon queue JSON `ErrorPayload` arm explicit in CLI/daemon command coverage; refreshed page dates and recorded verification scope in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/daemon]]
+- [[modules/daemon]]
+- [[modules/bot]]
+- [[index]]
+- [[gaps]]

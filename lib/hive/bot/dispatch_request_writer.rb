@@ -1,115 +1,47 @@
-require "json"
-require "fileutils"
-require "securerandom"
-require "time"
 require "hive/paths"
 require "hive/daemon/dispatch_request_queue"
 
 module Hive
   module Bot
-    # Writes a single dispatch request file into the daemon's queue
-    # directory (`<state_home>/dispatch_requests/`). The bot is the
-    # only producer today; the daemon's
-    # `Hive::Daemon::DispatchRequestQueue` is the only consumer.
-    #
-    # The write is atomic: tmp file + `File.rename` to the final
-    # path. A concurrent daemon scan therefore never observes a
-    # partial JSON document — either the file is absent or it parses
-    # whole. That's the whole reason this lives outside the bot's
-    # process-supervised `ChildSupervisor`: the bot stops being a
-    # child-process launcher for `hive run`-class verbs, and the
-    # write here is the only side-effect we still need.
+    # Writes dispatch request files into the daemon's queue directory.
+    # The bot is a producer only; the daemon is the single dispatcher.
     module DispatchRequestWriter
       module_function
 
-      SCHEMA = Hive::Daemon::DispatchRequestQueue::SCHEMA
-      SCHEMA_VERSION = Hive::Daemon::DispatchRequestQueue::SCHEMA_VERSION
+      def generate_request_id
+        Hive::Daemon::DispatchRequestQueue.generate_request_id
+      end
 
-      # Build, atomic-write, and return the new request_id.
-      #
-      # Required:
-      #   project: the project name (matches `hive status` rows).
-      #   slug:    the task slug.
-      #   argv:    `["hive", "<verb>", ...]`. The verb must already be
-      #            in `Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS`
-      #            — callers go through the same allowlist the daemon
-      #            enforces so a typo at the call site doesn't write a
-      #            request the daemon will reject + remove.
-      #
-      # Optional:
-      #   chat_id, update_id — Telegram routing context. Carried through
-      #     to telemetry only; the daemon does not read them.
-      #   trigger — operator-facing reason for the request (e.g.
-      #     "answer_complete", "autofix", "slash_done"). Telemetry only.
-      #   state_home — test injection point.
-      #   now — clock injection.
       def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
-                 trigger: nil, state_home: Hive::Paths.state_home,
-                 now: Time.now)
-        unless Hive::Daemon::DispatchRequestQueue.valid_argv?(argv)
-          # Caller bug: reject loudly so we never write a request the
-          # daemon would discard + log as rejected. The bot test
-          # harness asserts on this exception so the regression is
-          # caught at the unit-test layer, not in the bot's runtime
-          # logs.
-          raise ArgumentError, "argv #{argv.inspect} is not allowlisted for dispatch requests"
-        end
-
-        # AC-04 from PR #241 ce-code-review: an empty/nil project
-        # silently becomes `""` after `project.to_s`, the daemon
-        # rejects with `:missing_project`, removes the file, and the
-        # operator sees a generic "Couldn't queue" reply. Guard at
-        # the producer boundary so the failure is loud + actionable
-        # rather than silently swallowed downstream.
-        if project.to_s.empty?
-          raise ArgumentError,
-                "project is required for dispatch requests (got #{project.inspect})"
-        end
-        # Symmetric guard for slug — the daemon's `:missing_slug`
-        # reject is the same trap.
-        if slug.to_s.empty?
-          raise ArgumentError,
-                "slug is required for dispatch requests (got #{slug.inspect})"
-        end
-
-        request_id = SecureRandom.hex(8)
-        created_at = now.utc
-        payload = {
-          "schema" => SCHEMA,
-          "schema_version" => SCHEMA_VERSION,
-          "request_id" => request_id,
-          "created_at" => created_at.iso8601,
-          "project" => project.to_s,
-          "slug" => slug.to_s,
-          "argv" => argv,
-          "requestor" => "bot",
-          "chat_id" => chat_id,
-          "update_id" => update_id,
-          "trigger" => trigger.to_s
-        }
-
-        dir = Hive::Daemon::DispatchRequestQueue.directory(state_home: state_home)
-        filename = Hive::Daemon::DispatchRequestQueue.filename_for(
-          created_at: created_at, request_id: request_id
+                 trigger: nil, request_id: generate_request_id,
+                 state_home: Hive::Paths.state_home, now: Time.now)
+        Hive::Daemon::DispatchRequestQueue.write_request!(
+          project: project,
+          slug: slug,
+          argv: argv,
+          requestor: "bot",
+          chat_id: chat_id,
+          update_id: update_id,
+          trigger: trigger,
+          request_id: request_id,
+          state_home: state_home,
+          now: now
         )
-        final_path = File.join(dir, filename)
-        tmp_path = File.join(dir, ".#{filename}.tmp.#{Process.pid}.#{Thread.current.object_id}")
+      end
 
-        File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |f|
-          f.write(JSON.generate(payload))
-          f.flush
-          # Best-effort fsync. If the filesystem returns EINVAL/ENOTSUP
-          # (tmpfs without fsync, some FUSE mounts) the atomic rename
-          # below still guarantees a consistent observable state. We
-          # don't rescue here because the surrounding `write!` rescue-
-          # nothing contract is itself wrapped by callers (the
-          # supervisor's enqueue_dispatch_request catches StandardError).
-          f.fsync
-        end
-        File.rename(tmp_path, final_path)
-        request_id
-      ensure
-        FileUtils.rm_f(tmp_path) if tmp_path && File.exist?(tmp_path)
+      def write_sequence!(request_id:, remaining_argvs:, state_home: Hive::Paths.state_home)
+        Hive::Daemon::DispatchRequestQueue.write_sequence!(
+          request_id,
+          remaining_argvs: remaining_argvs,
+          state_home: state_home
+        )
+      end
+
+      def discard_sequence!(request_id:, state_home: Hive::Paths.state_home)
+        Hive::Daemon::DispatchRequestQueue.discard_sequence(
+          request_id,
+          state_home: state_home
+        )
       end
     end
   end

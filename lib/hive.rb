@@ -30,6 +30,10 @@ module Hive
       "hive-daemon-enroll" => 1,
       "hive-daemon-reload" => 1,
       "hive-daemon-install" => 1,
+      # Read-only inspection of the daemon's dispatch-request queue
+      # (`hive daemon queue [list|show|prune]`). See AN-1/2/3 and
+      # `Hive::Commands::Daemon#queue_command`.
+      "hive-daemon-queue" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,
@@ -39,7 +43,11 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 1
+      "hive-dispatch-request" => 1,
+      # Reverse-direction notice the daemon writes for the bot to relay a
+      # non-zero, bot-originated dispatch back to the originating Telegram
+      # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
+      "hive-dispatch-result" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

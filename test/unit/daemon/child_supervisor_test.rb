@@ -320,6 +320,113 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  # ── R-02: per-verb wall-clock timeout ─────────────────────────────────
+
+  def test_timeout_for_verb_resolves_default_and_override
+    sup = Hive::Daemon::ChildSupervisor.new(
+      hive_bin: FAKE_HIVE,
+      default_timeout_sec: 100,
+      verb_timeouts: { "review" => 600 }
+    )
+    assert_equal 600, sup.timeout_for_verb("review"), "per-verb override wins"
+    assert_equal 100, sup.timeout_for_verb("develop"), "falls back to default"
+    assert_equal 100, sup.timeout_for_verb(""), "empty verb falls back to default"
+  end
+
+  def test_enforce_timeouts_terms_then_kills_over_deadline_child
+    sup = Hive::Daemon::ChildSupervisor.new(
+      hive_bin: FAKE_HIVE, default_timeout_sec: 60, kill_grace_sec: 30
+    )
+    started = Time.now
+    sup.instance_variable_set(:@running, {
+      123 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+               started_at: started, timeout_sec: 60, dry_run: false }
+    })
+    kills = []
+    sup.define_singleton_method(:pgid_for) { |pid| 900 + pid }
+    sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
+
+    # Not yet over the deadline.
+    assert_empty sup.enforce_timeouts(now: started + 59)
+    assert_empty kills
+
+    # Over the deadline → SIGTERM once.
+    term = sup.enforce_timeouts(now: started + 61)
+    assert_equal 1, term.size
+    assert_equal :term, term.first.action
+    assert_equal 61, term.first.elapsed_sec
+    assert_equal 60, term.first.timeout_sec
+    assert_equal [ [ :TERM, -1023 ] ], kills
+
+    # Still alive, but within the kill grace → no second signal.
+    assert_empty sup.enforce_timeouts(now: started + 80)
+    assert_equal [ [ :TERM, -1023 ] ], kills
+
+    # Grace elapsed → SIGKILL once, then never again.
+    kill = sup.enforce_timeouts(now: started + 95)
+    assert_equal 1, kill.size
+    assert_equal :kill, kill.first.action
+    assert_equal [ [ :TERM, -1023 ], [ :KILL, -1023 ] ], kills
+    assert_empty sup.enforce_timeouts(now: started + 200), "kill is sent at most once"
+  end
+
+  def test_enforce_timeouts_disabled_when_timeout_zero
+    sup = Hive::Daemon::ChildSupervisor.new(hive_bin: FAKE_HIVE, default_timeout_sec: 0)
+    sup.instance_variable_set(:@running, {
+      123 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+               started_at: Time.now - 100_000, timeout_sec: 0, dry_run: false }
+    })
+    sup.define_singleton_method(:safe_kill) { |*| flunk "0 timeout must never signal a child" }
+    assert_empty sup.enforce_timeouts(now: Time.now)
+  end
+
+  def test_enforce_timeouts_skips_dry_run_children
+    sup = Hive::Daemon::ChildSupervisor.new(hive_bin: FAKE_HIVE, default_timeout_sec: 1)
+    sup.instance_variable_set(:@running, {
+      -1 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+              started_at: Time.now - 100, timeout_sec: 1, dry_run: true }
+    })
+    sup.define_singleton_method(:safe_kill) { |*| flunk "dry-run children must never be signalled" }
+    assert_empty sup.enforce_timeouts(now: Time.now)
+  end
+
+  def test_update_timeouts_only_affects_future_spawns
+    sup = Hive::Daemon::ChildSupervisor.new(hive_bin: FAKE_HIVE, default_timeout_sec: 60)
+    sup.update_timeouts(default_timeout_sec: 5, verb_timeouts: { "develop" => 9 }, kill_grace_sec: 1)
+    assert_equal 9, sup.timeout_for_verb("develop")
+    assert_equal 5, sup.timeout_for_verb("review")
+  end
+
+  def test_pgid_for_falls_back_to_pid_when_group_gone
+    sup = make
+    # A pid with no process group → Process.getpgid raises ESRCH → the
+    # helper falls back to the pid itself so the caller still has a target.
+    assert_equal 2**30, sup.send(:pgid_for, 2**30)
+  end
+
+  def test_enforce_timeouts_kills_real_sleeping_child
+    skip "skipping signal test under CI containers" if ENV["CI"] == "true"
+
+    with_tmp_dir do |dir|
+      sup = Hive::Daemon::ChildSupervisor.new(
+        hive_bin: FAKE_HIVE,
+        log_dir_for_task: ->(project, slug) { File.join(dir, project, slug, "child.log") },
+        default_timeout_sec: 1, kill_grace_sec: 0
+      )
+      sup.spawn(command_string: "hive run a --exit-code 0 --sleep 30",
+                project: "p1", slug: "a", stage: "6-review")
+      assert_equal 1, sup.in_flight_count
+
+      # Past the 1s deadline with a 0s kill-grace: TERM then KILL.
+      actions = sup.enforce_timeouts(now: Time.now + 5)
+      sup.enforce_timeouts(now: Time.now + 6)
+      assert(actions.any? { |a| a.action == :term })
+
+      completed = wait_for_completion(sup, max_attempts: 100)
+      assert_equal 1, completed.size, "the killed child must surface as a ChildExit on reap"
+    end
+  end
+
   private
 
   def wait_for_completion(sup, expected: 1, max_attempts: 50)

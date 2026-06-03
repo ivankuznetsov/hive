@@ -1276,6 +1276,64 @@ class SchemaFilesTest < Minitest::Test
     assert_equal producer_reasons, schema_reasons
   end
 
+  # ── hive-daemon-queue ──────────────────────────────────────────────────
+
+  def test_hive_daemon_queue_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-daemon-queue")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-daemon-queue",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_daemon_queue_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    # queue_envelope always emits these four; requests/request/malformed/
+    # pruned_count/request_id are per-action optional keys.
+    producer_required = %w[schema schema_version ok action].sort
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-daemon-queue.v1.json"
+  end
+
+  def test_hive_daemon_queue_action_enum_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue")))
+    schema_actions = doc.dig("$defs", "SuccessPayload", "properties", "action", "enum").sort
+    assert_equal Hive::Commands::Daemon::VALID_QUEUE_ACTIONS.sort, schema_actions,
+                 "action enum must match Daemon::VALID_QUEUE_ACTIONS"
+  end
+
+  def test_hive_daemon_queue_request_required_keys_match_producer
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue")))
+    schema_required = doc.dig("$defs", "Request", "required").sort
+    # Mirrors Hive::Commands::Daemon#queue_request_hash.
+    producer_required = %w[
+      request_id created_at age_sec project slug verb argv trigger
+      requestor chat_id update_id expired allowlisted
+    ].sort
+    assert_equal producer_required, schema_required,
+                 "Request required-key drift in hive-daemon-queue.v1.json"
+  end
+
+  def test_hive_daemon_queue_error_payload_validates
+    schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue")))
+    schemer = JSONSchemer.schema(schema)
+    error_envelope = {
+      "schema" => "hive-daemon-queue", "schema_version" => 1, "ok" => false,
+      "action" => "bogus", "error_kind" => "unknown_action",
+      "message" => "hive daemon queue: unknown action"
+    }
+    assert_empty schemer.validate(error_envelope).to_a,
+                 "error envelope must validate against the ErrorPayload arm"
+    # The error_kind enum is pinned to the producer's set.
+    assert_equal %w[internal invalid_arguments missing_request_id unknown_action],
+                 schema.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+  end
+
   # ── hive-daemon-reload ─────────────────────────────────────────────────
 
   def test_hive_daemon_reload_schema_file_exists_and_is_valid_json

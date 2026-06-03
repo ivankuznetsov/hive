@@ -12,6 +12,8 @@ require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/dispatch_result_queue"
+require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/title_formatter"
@@ -36,9 +38,12 @@ module Hive
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
-                     dispatch_request_writer: nil)
+                     dispatch_request_writer: nil, dispatch_result_state_home: nil)
         @config = config
         @dry_run = dry_run
+        # ADV-1: where the daemon drops dispatch-result failure notices.
+        # Tests inject a sandbox; production resolves Hive::Paths.state_home.
+        @dispatch_result_state_home = dispatch_result_state_home
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
         @update_state = update_state || Hive::UpdateCheck::State.new
@@ -248,12 +253,92 @@ module Hive
         until @shutdown
           begin
             reap_children
+            drain_dispatch_results
           rescue StandardError => e
             @logger.event(:fatal, source: "reaper_loop", error_class: e.class.name,
                                    message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
           end
           sleep 1
         end
+      end
+
+      # Max individual failure messages relayed per drain. A larger
+      # backlog (e.g. the bot was down while many runs failed) is
+      # collapsed into one summary line so a reconnect can't flood the
+      # chat or trip Telegram's per-chat rate limit (ADV-1 / #6).
+      DISPATCH_RESULT_SEND_CAP = 10
+
+      # ADV-1: drain the daemon's failure-notice channel and relay each
+      # notice to the chat that initiated the run. The daemon is the
+      # single dispatcher and has no Telegram handle, so this is the only
+      # surface that turns a non-zero daemon-spawned exit into
+      # operator-visible feedback (beyond the marker-driven status alert).
+      #
+      # Reliability contract:
+      #   - A notice is removed ONLY after the relay is confirmed sent. If
+      #     Telegram is down, `safe_send_message` returns nil and the
+      #     notice stays on disk to retry on the next reaper tick (#1) —
+      #     never a silent drop.
+      #   - Stale notices (older than EXPIRY_SEC) are removed WITHOUT
+      #     sending: an hour-old "failed" ping is noise, and this bounds
+      #     directory growth alongside the daemon's prune (#6).
+      #   - Malformed notices are removed quietly so they can't wedge the
+      #     drain.
+      # Public + `now:`-injectable so tests can drive one drain
+      # deterministically.
+      def drain_dispatch_results(now: Time.now)
+        notices = Hive::Daemon::DispatchResultQueue.pending(
+          state_home: dispatch_result_state_home,
+          bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
+        )
+        fresh = notices.reject do |notice|
+          next false unless Hive::Daemon::DispatchResultQueue.expired?(notice, now: now)
+
+          remove_dispatch_result(notice) # stale: drop without relaying
+          true
+        end
+
+        fresh.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
+          sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_failure_text(notice))
+          remove_dispatch_result(notice) if sent
+        end
+
+        relay_dispatch_result_overflow(fresh.drop(DISPATCH_RESULT_SEND_CAP))
+      end
+
+      # Collapse a too-large backlog tail into a single summary message
+      # per chat, removing those notices only if the summary actually
+      # sent (same no-silent-drop contract as the individual path).
+      def relay_dispatch_result_overflow(overflow)
+        return if overflow.empty?
+
+        overflow.group_by(&:chat_id).each do |chat_id, group|
+          sent = safe_send_message(
+            chat_id: chat_id,
+            text: "⚠️ +#{group.size} more dispatch failures suppressed (see daemon.log)."
+          )
+          group.each { |notice| remove_dispatch_result(notice) } if sent
+        end
+      end
+
+      def remove_dispatch_result(notice)
+        Hive::Daemon::DispatchResultQueue.remove(
+          notice.result_id, state_home: dispatch_result_state_home
+        )
+      end
+
+      def dispatch_failure_text(notice)
+        verb = Array(notice.command.to_s.split).fetch(1, "run")
+        # A timeout/signal-killed child has a nil exit_code (Process::Status
+        # #exitstatus is nil when terminated by a signal) — render it as a
+        # kill rather than "exit ".
+        status = notice.exit_code.nil? ? "killed (signal/timeout)" : "exit #{notice.exit_code}"
+        "⚠️ #{notice.slug}: `hive #{verb}` failed (#{status}). " \
+          "Check the task or retry — open it on a laptop if it keeps failing."
+      end
+
+      def dispatch_result_state_home
+        @dispatch_result_state_home || Hive::Paths.state_home
       end
 
       def safe_send_message(chat_id:, text:, reply_markup: nil)
@@ -293,15 +378,12 @@ module Hive
         commands = Array(result.commands)
         reset_pending = !@dry_run && needs_alert_reset?(result)
 
-        # If every command in the sequence is queue-routable (the
-        # common case post-refactor: `markers clear` + `develop`/`review`/`pr`),
-        # write all requests in arrival order and let the daemon's
-        # per-slug in-flight gate serialise execution. There is no
-        # bot-side PID to wait on, so the prior "wait for first to
-        # succeed before dispatching the next" semantics is replaced
-        # by the daemon's per-slug serialisation. Plan 2026-05-28-002.
+        # If every command in the sequence is queue-routable, write only
+        # the first request and keep the rest as a daemon-promoted
+        # continuation. The retry command is not visible to the daemon until
+        # `markers clear` exits 0.
         if commands.all? { |argv| queue_routable?(argv) }
-          return enqueue_command_sequence(commands, result, update, reset_pending: reset_pending)
+          return enqueue_command_sequence(commands, result, update)
         end
 
         failed = false
@@ -313,52 +395,65 @@ module Hive
             slug: result.slug
           )
           last_pid = execute_dispatch(per_command, update)
-          # last_pid is an Integer (spawned) or a String request_id
-          # (queue-routed). Only Integer PIDs can be waited on. A
-          # mixed sequence (one queue command, one spawned) falls
-          # through to the legacy path; today's mixes don't exist but
-          # the guard documents the contract for future surfaces.
           if idx < commands.length - 1 && last_pid.is_a?(Integer)
             unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
               safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
               failed = true
               break
             end
-            # First non-final command (typically `markers clear`) succeeded.
-            # Clear the alert NOW so the row no longer carries a recovery marker
-            # before the retry verb dispatches and before the next status tick.
-            # This closes the race window where reset-before-dispatch would let
-            # process_current re-alert the same fingerprint within seconds of
-            # the Autofix tap.
             if reset_pending
               reset_alert_for_result(result)
               reset_pending = false
             end
           end
         end
-        # Single-command paths (e.g., AGENT_WORKING markers that skip
-        # markers-clear) reach here without ever hitting the between-command
-        # sync point above. Reset the alert post-dispatch — only if we did not
-        # bail out of the loop on a failed precursor.
         reset_alert_for_result(result) if reset_pending && !failed
       end
 
-      # Queue path for `dispatch_command_sequence`: write each request
-      # in arrival order, reset the alert if a reset was queued, and
-      # return. If any write raises, `enqueue_dispatch_request` has
-      # already surfaced a corrective Telegram reply and logged.
-      def enqueue_command_sequence(commands, result, update, reset_pending:)
-        commands.each do |argv|
-          per_command = @router.class::Result.new(
-            action: :dispatch_then_reply,
-            command_argv: argv,
-            project: result.project,
-            slug: result.slug
-          )
-          enqueue_dispatch_request(per_command, update)
+      # Queue path for `dispatch_command_sequence`: write only the FIRST
+      # request and store the remaining argv list as a continuation sidecar.
+      # The daemon promotes that continuation only after the current request
+      # exits 0, preserving the old `markers clear` -> retry dependency while
+      # keeping the daemon as the sole process spawner.
+      def enqueue_command_sequence(commands, result, update)
+        first, *remaining = commands
+        request_id = @dispatch_request_writer.generate_request_id
+        if remaining.any?
+          @dispatch_request_writer.write_sequence!(request_id: request_id, remaining_argvs: remaining)
         end
-        reset_alert_for_result(result) if reset_pending
+
+        per_command = @router.class::Result.new(
+          action: :dispatch_then_reply,
+          command_argv: first,
+          project: result.project,
+          slug: result.slug,
+          intent: result.respond_to?(:intent) ? result.intent : nil
+        )
+        written = enqueue_dispatch_request(per_command, update, request_id: request_id)
+        discard_sequence(request_id) if written.nil? && remaining.any?
+        written
+      rescue StandardError => e
+        discard_sequence(request_id) if defined?(request_id) && request_id
+        @logger.event(:send_failure, source: "enqueue_command_sequence",
+                                      chat_id: update.chat_id,
+                                      slug: result.slug,
+                                      error_class: e.class.name,
+                                      message: e.message)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Couldn't queue the request sequence (#{e.class}). Try again, or open this on a laptop."
+        )
         nil
+      end
+
+      def discard_sequence(request_id)
+        return unless @dispatch_request_writer.respond_to?(:discard_sequence!)
+
+        @dispatch_request_writer.discard_sequence!(request_id: request_id)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "discard_sequence",
+                                      error_class: e.class.name,
+                                      message: e.message)
       end
 
       def needs_alert_reset?(result)
@@ -370,9 +465,7 @@ module Hive
         reset = result.alert_reset
         return unless reset
 
-        @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug],
-                                            stage: reset[:stage], marker: reset[:marker],
-                                            match_attr: reset[:match_attr])
+        @notification_dispatcher.reset_task(**reset)
       end
 
       def render_status_json(envelope, project_filter)
@@ -523,18 +616,18 @@ module Hive
       # `:dispatched_command` with `via=queue` so an operator tailing
       # bot.log can tell the two dispatch surfaces apart. Returns the
       # request_id so callers that previously held onto a PID can
-      # still chain. Existing chain points (dispatch_command_sequence's
-      # `wait_for_child_success`) now degrade: there is no PID to
-      # wait on. The retry verb is enqueued anyway and the per-slug
-      # in-flight gate on the daemon side serialises the two.
-      def enqueue_dispatch_request(result, update)
+      # still chain. Multi-command recovery sequences pass a preallocated
+      # request_id so the continuation sidecar can point at the first request
+      # before that request is visible to the daemon.
+      def enqueue_dispatch_request(result, update, request_id: nil)
         request_id = @dispatch_request_writer.write!(
           project: result.project,
           slug: result.slug,
           argv: Array(result.command_argv),
           chat_id: update.chat_id,
           update_id: update.update_id,
-          trigger: trigger_for_result(result)
+          trigger: trigger_for_result(result),
+          request_id: request_id
         )
         @logger.event(:dispatched_command,
                       project: result.project,

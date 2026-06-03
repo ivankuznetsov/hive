@@ -1388,4 +1388,233 @@ class HiveDaemonCommandTest < Minitest::Test
                       "error message must point operators at the right subcommand"
     end
   end
+
+  # ── queue: list / show / prune (AN-1/2/3) ─────────────────────────────
+
+  # Write a dispatch-request file straight into <home>/dispatch_requests/
+  # so the CLI command reads the same layout the daemon consumes.
+  def write_dispatch_request(home, request_id:, created_at:, slug: "my-task",
+                             argv: nil, project: "hive")
+    dir = File.join(home, "dispatch_requests")
+    FileUtils.mkdir_p(dir)
+    payload = {
+      "schema" => "hive-dispatch-request",
+      "schema_version" => 1,
+      "request_id" => request_id,
+      "created_at" => created_at,
+      "project" => project,
+      "slug" => slug,
+      "argv" => argv || [ "hive", "review", slug, "--json" ],
+      "requestor" => "bot",
+      "chat_id" => 42,
+      "update_id" => 7,
+      "trigger" => "autofix"
+    }
+    File.write(File.join(dir, "#{created_at.tr(':', '')}-#{request_id}.json"),
+               JSON.generate(payload))
+  end
+
+  def test_queue_list_empty_human_output
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "queue")
+      assert_equal 0, status.exitstatus
+      assert_includes out, "empty (no pending dispatch requests)"
+    end
+  end
+
+  def test_queue_list_json_reports_pending_request
+    with_isolated_hive_home do |home, env|
+      write_dispatch_request(home, request_id: "abc12345",
+                             created_at: Time.now.utc.iso8601)
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "list", "--json")
+      assert_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-queue", doc["schema"]
+      assert_equal "list", doc["action"]
+      assert_equal 1, doc["requests"].length
+      req = doc["requests"].first
+      assert_equal "abc12345", req["request_id"]
+      assert_equal "review", req["verb"]
+      assert_equal false, req["expired"]
+      assert_equal true, req["allowlisted"]
+    end
+  end
+
+  def test_queue_show_json_returns_one_request
+    with_isolated_hive_home do |home, env|
+      write_dispatch_request(home, request_id: "show1234",
+                             created_at: Time.now.utc.iso8601)
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "show1234", "--json")
+      assert_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "show", doc["action"]
+      assert_equal "show1234", doc.dig("request", "request_id")
+      assert_equal [ "hive", "review", "my-task", "--json" ], doc.dig("request", "argv")
+    end
+  end
+
+  def test_queue_show_missing_id_exits_1
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "nope9999", "--json")
+      assert_equal 1, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal false, doc["ok"]
+      assert_equal "nope9999", doc["request_id"]
+    end
+  end
+
+  def test_queue_prune_removes_expired_request
+    with_isolated_hive_home do |home, env|
+      # 20 minutes old > 600s expiry.
+      old = (Time.now.utc - 1200).iso8601
+      write_dispatch_request(home, request_id: "exp00001", created_at: old)
+      fresh = Time.now.utc.iso8601
+      write_dispatch_request(home, request_id: "fresh001", created_at: fresh, slug: "keep-me")
+
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "prune", "--json")
+      assert_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal 1, doc["pruned_count"], "only the expired request is pruned"
+
+      # The fresh one survives.
+      remaining = Dir.glob(File.join(home, "dispatch_requests", "*.json"))
+      assert_equal 1, remaining.length
+      assert_includes File.read(remaining.first), "fresh001"
+    end
+  end
+
+  def test_queue_rejects_unknown_action
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "bogus")
+      refute_equal 0, status.exitstatus
+      assert_includes err.to_s + _out.to_s, "unknown action"
+    end
+  end
+
+  def test_queue_rejects_too_many_positionals
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "a", "b")
+      refute_equal 0, status.exitstatus
+      assert_includes err.to_s + _out.to_s, "too many positional arguments"
+    end
+  end
+
+  def test_queue_list_human_output_with_flags_and_malformed
+    with_isolated_hive_home do |home, env|
+      # A normal fresh request, an expired one, a non-allowlisted one, and
+      # a malformed file — exercises every branch of the human list path.
+      write_dispatch_request(home, request_id: "normal01", created_at: Time.now.utc.iso8601)
+      write_dispatch_request(home, request_id: "expired1",
+                             created_at: (Time.now.utc - 1200).iso8601, slug: "old-task")
+      write_dispatch_request(home, request_id: "notallow", created_at: Time.now.utc.iso8601,
+                             slug: "weird-task", argv: [ "hive", "doctor" ])
+      File.write(File.join(home, "dispatch_requests", "20260528-bad.json"), "{not json")
+
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "queue", "list")
+      assert_equal 0, status.exitstatus
+      assert_includes out, "normal01"
+      assert_includes out, "EXPIRED"
+      assert_includes out, "NOT-ALLOWLISTED"
+      assert_includes out, "(malformed)"
+      assert_includes out, "pending"
+    end
+  end
+
+  def test_queue_show_human_output
+    with_isolated_hive_home do |home, env|
+      write_dispatch_request(home, request_id: "showhum1", created_at: Time.now.utc.iso8601)
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "showhum1")
+      assert_equal 0, status.exitstatus
+      assert_includes out, "request_id: showhum1"
+      assert_includes out, "argv:"
+    end
+  end
+
+  def test_queue_show_missing_id_human_warns
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "ghost001")
+      assert_equal 1, status.exitstatus
+      assert_includes err, "no pending request with id ghost001"
+    end
+  end
+
+  def test_queue_show_without_request_id_errors
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show")
+      refute_equal 0, status.exitstatus
+      assert_includes err.to_s + _out.to_s, "missing REQUEST_ID"
+    end
+  end
+
+  def test_queue_prune_human_output
+    with_isolated_hive_home do |home, env|
+      write_dispatch_request(home, request_id: "prunehum",
+                             created_at: (Time.now.utc - 1200).iso8601, slug: "old-task")
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "queue", "prune")
+      assert_equal 0, status.exitstatus
+      assert_includes out, "pruned 1 request"
+    end
+  end
+
+  # #2: --json error paths must emit a parseable hive-daemon-queue
+  # envelope, not a bare stack trace, so an agent can branch on it.
+  def test_queue_unknown_action_json_emits_error_envelope
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "bogus", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-queue", doc["schema"]
+      assert_equal false, doc["ok"]
+      assert_equal "unknown_action", doc["error_kind"]
+      assert_equal "bogus", doc["action"]
+    end
+  end
+
+  def test_queue_too_many_positionals_json_emits_queue_error_envelope
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "one", "two", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-queue", doc["schema"]
+      assert_equal false, doc["ok"]
+      assert_equal "invalid_arguments", doc["error_kind"]
+      assert_equal "show", doc["action"]
+    end
+  end
+
+  def test_queue_show_missing_id_json_emits_error_envelope
+    with_isolated_hive_home do |_home, env|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "show", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "missing_request_id", doc["error_kind"]
+      assert_equal "show", doc["action"]
+    end
+  end
+
+  def test_queue_internal_error_json_emits_envelope
+    with_isolated_hive_home do |home, env|
+      # A file where the queue dir should be makes mkdir_p raise → the
+      # internal-error rescue must still emit a structured envelope.
+      File.write(File.join(home, "dispatch_requests"), "not a directory")
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "queue", "list", "--json")
+      refute_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal false, doc["ok"]
+      assert_equal "internal", doc["error_kind"]
+    end
+  end
 end

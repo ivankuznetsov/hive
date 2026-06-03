@@ -1,6 +1,7 @@
 require "test_helper"
 require "fileutils"
 require "json"
+require "securerandom"
 require "tmpdir"
 require "hive/daemon/dispatch_request_queue"
 
@@ -267,5 +268,338 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
     assert Q.expired?(request, now: later, expiry_sec: 600)
     refute Q.expired?(request, now: later, expiry_sec: 7200)
+  end
+
+  # ── C3: atomic claim + restart recovery ───────────────────────────────
+
+  def test_claim_renames_to_claimed_and_hides_from_pending
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      json_path = write_request(dir, request_id: "clm00001",
+                                created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      claimed = Q.claim("clm00001", pid: 4321, process_start_time: "999",
+                        now: Time.utc(2026, 5, 28, 18, 0, 1), state_home: dir)
+
+      assert_equal "#{json_path}#{Q::CLAIMED_SUFFIX}", claimed
+      refute File.exist?(json_path), "original .json is renamed away"
+      assert File.exist?(claimed)
+      assert_empty Q.pending(state_home: dir),
+                   "a claimed request must be invisible to pending (at-most-once dispatch)"
+
+      data = JSON.parse(File.read(claimed))
+      refute data.key?("claim"), "claimed request JSON must remain schema-valid v1"
+      meta = JSON.parse(File.read("#{claimed}#{Q::CLAIM_META_SUFFIX}"))
+      assert_equal 4321, meta["pid"]
+      assert_equal "999", meta["process_start_time"]
+    end
+  end
+
+  def test_claim_returns_nil_when_no_matching_pending_file
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_nil Q.claim("missing0", pid: 1, state_home: dir)
+    end
+  end
+
+  def test_remove_deletes_claimed_file
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "rmclaim1", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      Q.claim("rmclaim1", pid: 10, state_home: dir)
+      assert Q.remove("rmclaim1", state_home: dir), "remove must find + delete the claimed file"
+      assert_empty Dir.glob(File.join(dir, "dispatch_requests", "*"))
+    end
+  end
+
+  def test_recover_claims_removes_dead_owner_without_redispatch
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "dead0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      Q.claim("dead0001", pid: 4321, process_start_time: "111",
+              now: Time.utc(2026, 5, 28, 18, 0, 1), state_home: dir)
+      recovered = []
+      removed = Q.recover_claims(
+        state_home: dir, now: Time.utc(2026, 5, 28, 18, 1, 0),
+        alive: ->(_pid, _start) { false },
+        handler: ->(request_id:, reason:, path:) { recovered << [ request_id, reason ] }
+      )
+      assert_equal 1, removed
+      assert_equal [ [ "dead0001", "owner_gone" ] ], recovered
+      assert_empty Q.pending(state_home: dir),
+                   "owner-gone claim is removed, NOT re-enqueued (at-most-once)"
+      assert_empty Dir.glob(File.join(dir, "dispatch_requests", "*"))
+    end
+  end
+
+  def test_recover_claims_leaves_live_owner_alone
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "live0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      claimed = Q.claim("live0001", pid: 4321, process_start_time: "111",
+                        now: Time.utc(2026, 5, 28, 18, 0, 1), state_home: dir)
+      removed = Q.recover_claims(
+        state_home: dir, now: Time.utc(2026, 5, 28, 18, 1, 0),
+        alive: ->(_pid, _start) { true }
+      )
+      assert_equal 0, removed
+      assert File.exist?(claimed), "a still-running owner's claim must survive recovery"
+    end
+  end
+
+  def test_recover_claims_expires_aged_claim_even_when_owner_alive
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "aged0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      Q.claim("aged0001", pid: 4321, process_start_time: "111",
+              now: Time.utc(2026, 5, 28, 18, 0, 0), state_home: dir)
+      # 20 minutes later, well past the 600s expiry, even an "alive" owner
+      # must not pin the claim forever.
+      removed = Q.recover_claims(
+        state_home: dir, now: Time.utc(2026, 5, 28, 18, 20, 0),
+        alive: ->(_pid, _start) { true }, expiry_sec: 600
+      )
+      assert_equal 1, removed
+      assert_empty Dir.glob(File.join(dir, "dispatch_requests", "*"))
+    end
+  end
+
+  def test_claim_skips_malformed_decoy_and_returns_nil
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      qdir = Q.directory(state_home: dir)
+      # A .json file whose NAME contains the request_id but whose body is
+      # unparseable — claim must skip it (rescue → next) and, finding no
+      # valid match, return nil.
+      File.write(File.join(qdir, "20260528-clm99999.json"), "{not json")
+      assert_nil Q.claim("clm99999", pid: 1, state_home: dir)
+    end
+  end
+
+  def test_claim_returns_nil_on_directory_enoent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::ENOENT, "vanished" }) do
+        assert_nil Q.claim("anything", pid: 1, state_home: dir)
+      end
+    end
+  end
+
+  def test_metadata_returns_routing_fields
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "meta0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+                    project: "hive", slug: "slug-x")
+      meta = Q.metadata("meta0001", state_home: dir)
+      assert_equal 42, meta[:chat_id]
+      assert_equal "hive", meta[:project]
+    end
+  end
+
+  def test_metadata_returns_nil_when_absent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_nil Q.metadata("nope", state_home: dir)
+    end
+  end
+
+  def test_metadata_skips_malformed_decoy
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      qdir = Q.directory(state_home: dir)
+      File.write(File.join(qdir, "20260528-mdbad001.json"), "{not json")
+      assert_nil Q.metadata("mdbad001", state_home: dir)
+    end
+  end
+
+  def test_metadata_returns_nil_on_directory_enoent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::ENOENT, "vanished" }) do
+        assert_nil Q.metadata("anything", state_home: dir)
+      end
+    end
+  end
+
+  def test_recover_claims_returns_zero_on_directory_enoent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::ENOENT, "vanished" }) do
+        assert_equal 0, Q.recover_claims(state_home: dir, alive: ->(_p, _s) { true })
+      end
+    end
+  end
+
+  def test_recover_claims_expires_claim_with_unparseable_timestamp
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      qdir = Q.directory(state_home: dir)
+      # Hand-craft a claimed file whose sidecar claimed_at is not a timestamp
+      # -> claim_aged_out? rescues the parse and treats it as aged-out.
+      payload = {
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "badts001", "created_at" => Time.utc(2026, 5, 28).iso8601,
+        "project" => "hive", "slug" => "slug-x",
+        "argv" => [ "hive", "run", "slug-x" ], "requestor" => "bot"
+      }
+      claimed = File.join(qdir, "20260528-badts001.json#{Q::CLAIMED_SUFFIX}")
+      File.write(claimed, JSON.generate(payload))
+      File.write("#{claimed}#{Q::CLAIM_META_SUFFIX}", JSON.generate(
+        "pid" => 1, "process_start_time" => "x", "claimed_at" => "not-a-time"
+      ))
+
+      removed = Q.recover_claims(state_home: dir, alive: ->(_p, _s) { true })
+      assert_equal 1, removed
+    end
+  end
+
+  def test_recover_claims_removes_malformed_claim_file
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      claim_dir = Q.directory(state_home: dir)
+      bad = File.join(claim_dir, "20260528-bad.json#{Q::CLAIMED_SUFFIX}")
+      File.write(bad, "{not json")
+      reasons = []
+      removed = Q.recover_claims(
+        state_home: dir, now: Time.now, alive: ->(_p, _s) { true },
+        handler: ->(request_id:, reason:, path:) { reasons << reason }
+      )
+      assert_equal 1, removed
+      assert_equal [ "malformed_claim" ], reasons
+      refute File.exist?(bad)
+    end
+  end
+
+  # #3: claim-window crash leaves both <id>.json and <id>.json.claimed.
+  # pending must hide the orphan .json so it is never re-dispatched.
+  def test_pending_hides_json_when_a_claimed_sibling_exists
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 5, 28, 18, 0, 0)
+      write_request(dir, request_id: "orph0001", created_at: at, slug: "slug-x")
+      Q.claim("orph0001", pid: 1, state_home: dir) # removes the original .json
+      # Simulate the crash leftover: the original .json is back on disk
+      # alongside the .claimed.
+      write_request(dir, request_id: "orph0001", created_at: at, slug: "slug-x")
+
+      assert_empty Q.pending(state_home: dir),
+                   "an orphan .json must be hidden while its .claimed sibling exists (C3)"
+    end
+  end
+
+  # #3: recover_claims removes the orphan .json sibling too, so it can't be
+  # re-dispatched once the claim is gone.
+  def test_recover_claims_removes_orphan_json_sibling
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 5, 28, 18, 0, 0)
+      write_request(dir, request_id: "orph0002", created_at: at, slug: "slug-x")
+      Q.claim("orph0002", pid: 4321, process_start_time: "111", now: at, state_home: dir)
+      write_request(dir, request_id: "orph0002", created_at: at, slug: "slug-x") # crash leftover
+
+      Q.recover_claims(state_home: dir, now: at, alive: ->(_p, _s) { false })
+
+      assert_empty Dir.glob(File.join(dir, "dispatch_requests", "*")),
+                   "both the .claimed and the orphan .json must be removed (C3)"
+    end
+  end
+
+  # remove_pending_sibling tolerates a malformed `.json` whose name
+  # matches the request_id (parse fails → skip, file left intact).
+  def test_recover_claims_tolerates_malformed_pending_sibling
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      at = Time.utc(2026, 5, 28, 18, 0, 0)
+      write_request(dir, request_id: "sib00001", created_at: at, slug: "slug-x")
+      Q.claim("sib00001", pid: 4321, process_start_time: "111", now: at, state_home: dir)
+      claim_dir = Q.directory(state_home: dir)
+      junk = File.join(claim_dir, "20260528-sib00001-junk.json")
+      File.write(junk, "{not json")
+
+      Q.recover_claims(state_home: dir, now: at, alive: ->(_p, _s) { false })
+
+      assert File.exist?(junk), "a malformed sibling is skipped, not unlinked"
+    end
+  end
+
+  # claimed_request_ids ignores a malformed .claimed file rather than
+  # letting it block pending.
+  def test_pending_tolerates_malformed_claimed_file
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "good0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+                    slug: "keep-me")
+      claim_dir = Q.directory(state_home: dir)
+      File.write(File.join(claim_dir, "20260528-junk.json#{Q::CLAIMED_SUFFIX}"), "{not json")
+
+      pending = Q.pending(state_home: dir)
+      assert_equal %w[keep-me], pending.map(&:slug),
+                   "a malformed .claimed file must not hide or block pending requests"
+    end
+  end
+
+  def test_write_and_promote_sequence_enqueues_only_next_command
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_sequence!("seq00001", remaining_argvs: [
+        [ "hive", "markers", "clear", "task", "--name", "ERROR" ],
+        [ "hive", "review", "task", "--json" ]
+      ], state_home: dir)
+
+      promoted = Q.promote_sequence(
+        "seq00001", project: "hive", slug: "task", chat_id: 42,
+        update_id: 99, state_home: dir, now: Time.utc(2026, 5, 28, 18, 0, 2)
+      )
+
+      assert_equal [ "hive", "markers", "clear", "task", "--name", "ERROR" ], promoted.argv
+      pending = Q.pending(state_home: dir)
+      assert_equal [ promoted.request_id ], pending.map(&:request_id)
+      assert_equal [ promoted.argv ], pending.map(&:argv)
+      # The remaining retry is now attached to the promoted request id.
+      next_sequence_path = File.join(Q.directory(state_home: dir), "#{promoted.request_id}#{Q::SEQUENCE_SUFFIX}")
+      assert File.exist?(next_sequence_path)
+      data = JSON.parse(File.read(next_sequence_path))
+      assert_equal [ [ "hive", "review", "task", "--json" ] ], data["remaining_argvs"]
+    end
+  end
+
+  def test_claim_update_and_release_return_defaults_for_missing_inputs
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_nil Q.update_claim("", pid: 123, state_home: dir)
+      assert_nil Q.update_claim("missing", pid: 123, state_home: dir)
+      refute Q.release_claim("", state_home: dir)
+      refute Q.release_claim("missing", state_home: dir)
+    end
+
+    missing_dir = File.join(Dir.tmpdir, "hive-missing-#{SecureRandom.hex(8)}")
+    assert_nil Q.update_claim("missing", pid: 123, state_home: missing_dir)
+    refute Q.release_claim("missing", state_home: missing_dir)
+  end
+
+  def test_claim_update_release_and_discard_tolerate_directory_enoent
+    with_replaced_singleton_method(Q, :directory, ->(**_kwargs) { raise Errno::ENOENT, "gone" }) do
+      assert_nil Q.update_claim("missing", pid: 123, state_home: "/tmp/missing")
+      refute Q.release_claim("missing", state_home: "/tmp/missing")
+      refute Q.discard_sequence("missing-seq", state_home: "/tmp/missing")
+    end
+  end
+
+  def test_write_sequence_rejects_invalid_argv_and_discard_handles_empty_or_missing
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_raises(ArgumentError) do
+        Q.write_sequence!("bad-seq", remaining_argvs: [ [ "echo", "nope" ] ], state_home: dir)
+      end
+
+      refute Q.discard_sequence("", state_home: dir)
+      refute Q.discard_sequence("missing-seq", state_home: dir)
+    end
+
+    missing_dir = File.join(Dir.tmpdir, "hive-missing-#{SecureRandom.hex(8)}")
+    refute Q.discard_sequence("missing-seq", state_home: missing_dir)
+  end
+
+  def test_claim_metadata_reader_tolerates_missing_or_malformed_sidecar
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      claimed_path = File.join(Q.directory(state_home: dir), "missing.json#{Q::CLAIMED_SUFFIX}")
+      assert_nil Q.send(:read_claim_metadata, claimed_path)
+
+      FileUtils.mkdir_p(File.dirname(claimed_path))
+      File.write("#{claimed_path}#{Q::CLAIM_META_SUFFIX}", "{not json")
+      assert_nil Q.send(:read_claim_metadata, claimed_path)
+    end
+  end
+
+  def test_release_claim_restores_pending_request_after_spawn_failure
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "rel00001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      claimed = Q.claim("rel00001", pid: nil, state_home: dir)
+      assert File.exist?(claimed)
+
+      assert Q.release_claim("rel00001", state_home: dir)
+
+      pending = Q.pending(state_home: dir)
+      assert_equal [ "rel00001" ], pending.map(&:request_id)
+      refute File.exist?(claimed)
+      refute File.exist?("#{claimed}#{Q::CLAIM_META_SUFFIX}")
+    end
   end
 end

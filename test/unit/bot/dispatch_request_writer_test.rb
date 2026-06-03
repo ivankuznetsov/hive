@@ -34,7 +34,7 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
       assert_equal "hive-dispatch-request", payload["schema"]
       assert_equal 1, payload["schema_version"]
       assert_equal request_id, payload["request_id"]
-      assert_equal "2026-05-28T18:11:44Z", payload["created_at"]
+      assert_equal "2026-05-28T18:11:44.000000Z", payload["created_at"]
       assert_equal "hive", payload["project"]
       assert_equal "explore-the-simplest-way-to-260528-2503", payload["slug"]
       assert_equal [ "hive", "run", "explore-the-simplest-way-to-260528-2503", "--json" ], payload["argv"]
@@ -150,6 +150,21 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
       assert_equal "bot", req.requestor
       assert_equal "autofix", req.trigger
       assert_equal "markers", req.argv[1]
+    end
+  end
+
+  def test_sequence_helpers_delegate_to_queue
+    Dir.mktmpdir("hive-writer") do |dir|
+      assert W.write_sequence!(
+        request_id: "seq-writer-1",
+        remaining_argvs: [ [ "hive", "review", "task-260528-aaaa", "--json" ] ],
+        state_home: dir
+      )
+
+      sequence_path = File.join(Q.directory(state_home: dir), "seq-writer-1#{Q::SEQUENCE_SUFFIX}")
+      assert File.exist?(sequence_path)
+      assert W.discard_sequence!(request_id: "seq-writer-1", state_home: dir)
+      refute File.exist?(sequence_path)
     end
   end
 end

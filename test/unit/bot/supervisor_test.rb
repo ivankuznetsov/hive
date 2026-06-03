@@ -82,16 +82,37 @@ class HiveBotSupervisorTest < Minitest::Test
   # open-pr/artifacts/finalize/archive/markers) no longer spawn — they
   # land here instead. `write!` returns a request_id so the supervisor's
   # logging path that includes it stays exercised.
-  FakeDispatchRequestWriter = Struct.new(:writes, :next_request_id, :raise_on_write, keyword_init: true) do
-    def write!(project:, slug:, argv:, chat_id: nil, update_id: nil, trigger: nil)
+  FakeDispatchRequestWriter = Struct.new(:writes, :sequences, :discarded_sequences,
+                                         :next_request_id, :raise_on_write,
+                                         :raise_on_sequence, :raise_on_discard,
+                                         keyword_init: true) do
+    def generate_request_id
+      next_request_id || "req-#{writes.length + 1}"
+    end
+
+    def write!(project:, slug:, argv:, chat_id: nil, update_id: nil, trigger: nil, request_id: nil)
       raise raise_on_write if raise_on_write
 
-      id = next_request_id || "req-#{writes.length + 1}"
+      id = request_id || generate_request_id
       writes << {
         project: project, slug: slug, argv: argv, chat_id: chat_id,
         update_id: update_id, trigger: trigger, request_id: id
       }
       id
+    end
+
+    def write_sequence!(request_id:, remaining_argvs:)
+      raise raise_on_sequence if raise_on_sequence
+
+      (self.sequences ||= []) << { request_id: request_id, remaining_argvs: remaining_argvs }
+      true
+    end
+
+    def discard_sequence!(request_id:)
+      raise raise_on_discard if raise_on_discard
+
+      (self.discarded_sequences ||= []) << request_id
+      true
     end
   end
 
@@ -142,7 +163,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
-    @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [])
+    @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [], sequences: [], discarded_sequences: [])
     # Drive the real constructor so any future invariant added to
     # Supervisor#initialize is exercised by every test in this file. We
     # inject all collaborators so the constructor's `||=` defaults never
@@ -919,13 +940,10 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "Dry run: hive plan task", @telegram.messages.last.fetch(:text)
   end
 
-  # Queue-routable command sequences (the post-refactor common case)
-  # write all requests in order; the daemon's per-slug in-flight gate
-  # serialises execution. There is no bot-side wait between commands
-  # and no "stopped because the previous command failed" reply — that
-  # error path now belongs to the daemon's `child_exited` event and
-  # the bot's subsequent status polling. Plan 2026-05-28-002.
-  def test_dispatch_command_sequence_writes_all_queue_requests_in_order
+  # Queue-routable command sequences write only the first request immediately.
+  # The daemon promotes the stored continuation after that first command exits
+  # 0, so a failed `markers clear` cannot run the retry verb.
+  def test_dispatch_command_sequence_writes_first_queue_request_and_sequence_continuation
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [
@@ -941,15 +959,24 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must NOT spawn from the bot — single-dispatcher invariant"
-    assert_equal 2, @dispatch_request_writer.writes.size,
-                 "both `markers clear` and the retry verb must land in the queue"
+    assert_equal 1, @dispatch_request_writer.writes.size,
+                 "only `markers clear` is visible to the daemon immediately"
     assert_equal [ "hive", "markers", "clear", "task", "--name", "REVIEW_ERROR" ],
                  @dispatch_request_writer.writes[0][:argv]
-    assert_equal [ "hive", "review", "task", "--from", "6-review", "--json" ],
-                 @dispatch_request_writer.writes[1][:argv]
+    assert_equal 1, @dispatch_request_writer.sequences.size
+    assert_equal @dispatch_request_writer.writes.first[:request_id],
+                 @dispatch_request_writer.sequences.first[:request_id]
+    assert_equal [ [ "hive", "review", "task", "--from", "6-review", "--json" ] ],
+                 @dispatch_request_writer.sequences.first[:remaining_argvs]
   end
 
-  def test_dispatch_command_sequence_resets_alert_after_queue_writes
+  # AC-05 (PR #241 ce-code-review): the all-queue-routable path must NOT
+  # reset the alert at enqueue time. The daemon hasn't run `markers clear`
+  # yet, so removing the fingerprint here would let the next status tick
+  # re-fire the same alert (entry.nil? -> re-send in process_current).
+  # State-driven recovery removes the alert once the daemon clears the
+  # marker; leaving the fingerprint keeps the persistent dedupe intact.
+  def test_dispatch_command_sequence_does_not_reset_alert_on_queue_path
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [ [ "hive", "review", "task", "--json" ] ],
@@ -960,8 +987,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
-                 @notification_dispatcher.reset_tasks
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "queue path must not reset the alert before the daemon clears the marker (AC-05)"
     assert_equal 1, @dispatch_request_writer.writes.size
     assert_equal [ "hive", "review", "task", "--json" ],
                  @dispatch_request_writer.writes.first[:argv]
@@ -1029,7 +1056,11 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_includes @telegram.messages.last.fetch(:text), "Stopped because the previous command failed"
   end
 
-  def test_dispatch_command_sequence_resets_alert_once_for_two_command_queue_sequence
+  # AC-05: a two-command all-queue sequence (`markers clear` + retry)
+  # must not reset the alert either — same race. The fingerprint stays
+  # until the daemon actually clears the marker and a later status tick
+  # drives recovery.
+  def test_dispatch_command_sequence_does_not_reset_alert_for_two_command_queue_sequence
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [
@@ -1043,13 +1074,68 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    # The reset must fire exactly once for the whole sequence — the
-    # daemon's per-slug gate serialises execution and the bot has no
-    # PID to wait on, so the prior "reset between commands" semantics
-    # collapses into "reset after the sequence is queued".
-    assert_equal 1, @notification_dispatcher.reset_tasks.size
-    assert_equal({ project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil },
-                 @notification_dispatcher.reset_tasks.first)
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "two-command queue sequence must not reset the alert at enqueue time (AC-05)"
+    assert_equal 1, @dispatch_request_writer.writes.size,
+                 "only the first request is enqueued immediately"
+    assert_equal 1, @dispatch_request_writer.sequences.size,
+                 "the retry verb must be held as a daemon-promoted continuation"
+  end
+
+  def test_dispatch_command_sequence_discards_sequence_when_first_request_fails
+    @dispatch_request_writer.raise_on_write = RuntimeError.new("disk full")
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task", "--json" ],
+        [ "hive", "review", "task", "--from", "6-review", "--json" ]
+      ],
+      project: "hive",
+      slug: "task"
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal [ "req-1" ], @dispatch_request_writer.discarded_sequences,
+                 "a continuation sidecar must not survive if the first request never enqueued"
+  end
+
+  def test_dispatch_command_sequence_reports_sequence_write_failure
+    @dispatch_request_writer.raise_on_sequence = RuntimeError.new("sequence disk full")
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task", "--json" ],
+        [ "hive", "review", "task", "--from", "6-review", "--json" ]
+      ],
+      project: "hive",
+      slug: "task"
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal [ "req-1" ], @dispatch_request_writer.discarded_sequences
+    assert_empty @dispatch_request_writer.writes
+    assert(@logger.events.any? { |event| event[:payload][:source] == "enqueue_command_sequence" })
+    assert_match(/Couldn't queue the request sequence/, @telegram.messages.last[:text])
+  end
+
+  def test_dispatch_command_sequence_logs_discard_failure
+    @dispatch_request_writer.raise_on_write = RuntimeError.new("write failed")
+    @dispatch_request_writer.raise_on_discard = RuntimeError.new("unlink failed")
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task", "--json" ],
+        [ "hive", "review", "task", "--from", "6-review", "--json" ]
+      ],
+      project: "hive",
+      slug: "task"
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert(@logger.events.any? { |event| event[:payload][:source] == "discard_sequence" })
   end
 
   def test_dispatch_command_sequence_skips_alert_reset_in_dry_run
@@ -1066,6 +1152,119 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_empty @notification_dispatcher.reset_tasks,
                  "dry_run must not call reset_task even when alert_reset is present"
+  end
+
+  # ── ADV-1: drain daemon failure notices to Telegram ───────────────────
+
+  def test_drain_dispatch_results_relays_failure_to_chat_and_removes
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, update_id: 7, project: "hive", slug: "stuck-task",
+        request_id: "rq000001", exit_code: 4,
+        command: "hive markers clear stuck-task", state_home: home
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_equal 1, @telegram.messages.size, "failure notice must reach the originating chat"
+      msg = @telegram.messages.first
+      assert_equal 42, msg[:chat_id]
+      assert_includes msg[:text], "stuck-task"
+      assert_includes msg[:text], "exit 4"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a relayed notice must be removed so it isn't sent twice"
+    end
+  end
+
+  def test_drain_dispatch_results_removes_malformed_notice
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      dir = Hive::Daemon::DispatchResultQueue.directory(state_home: home)
+      bad = File.join(dir, "20260528-bad.json")
+      File.write(bad, "{not json")
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages, "a malformed notice has no chat to reply to"
+      refute File.exist?(bad), "malformed notice must be removed so it can't wedge the drain"
+    end
+  end
+
+  # #1: a notice is retained (retried next tick) when the relay fails —
+  # never silently dropped.
+  def test_drain_dispatch_results_keeps_notice_when_send_fails
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, project: "hive", slug: "t", request_id: "rq1", exit_code: 1,
+        command: "hive review t", state_home: home
+      )
+      @telegram.raise_on_send = IOError.new("telegram down")
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages
+      refute_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a notice must be kept for retry when the Telegram relay fails (#1)"
+    end
+  end
+
+  # #4: a timeout/signal-killed child has a nil exit_code → render as a
+  # kill, not "exit ".
+  def test_drain_dispatch_results_renders_nil_exit_as_killed
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, project: "hive", slug: "wedged", request_id: "rqk", exit_code: nil,
+        command: "hive review wedged", state_home: home
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_includes @telegram.messages.first[:text], "killed (signal/timeout)"
+    end
+  end
+
+  # #6: stale notices are dropped WITHOUT relaying (no hour-old spam) and
+  # pruned to bound growth.
+  def test_drain_dispatch_results_drops_stale_without_sending
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, project: "hive", slug: "old", request_id: "rqold", exit_code: 1,
+        command: "hive review old", state_home: home, now: Time.now - 7200
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages, "a stale notice must not be relayed"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a stale notice must be pruned"
+    end
+  end
+
+  # #6: a large backlog is capped and the tail collapsed into one summary
+  # per chat so a reconnect can't flood Telegram.
+  def test_drain_dispatch_results_caps_and_summarizes_overflow
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      14.times do |i|
+        Hive::Daemon::DispatchResultQueue.write!(
+          chat_id: 42, project: "hive", slug: "t#{i}", request_id: "rq#{i}", exit_code: 1,
+          command: "hive review t#{i}", state_home: home, now: Time.now + i
+        )
+      end
+
+      @supervisor.send(:drain_dispatch_results)
+
+      cap = Hive::Bot::Supervisor::DISPATCH_RESULT_SEND_CAP
+      assert_equal cap + 1, @telegram.messages.size,
+                   "#{cap} individual relays + one overflow summary"
+      assert_includes @telegram.messages.last[:text], "more dispatch failures suppressed"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "the whole backlog is cleared after a successful drain"
+    end
   end
 
   def test_clear_inline_keyboard_swallows_telegram_errors
@@ -1464,6 +1663,18 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:status_loop)
 
     assert pushed, "status_loop must invoke push_update_nudge each iteration"
+  end
+
+  def test_reaper_loop_drains_dispatch_results_each_iteration
+    supervisor = @supervisor
+    @supervisor.define_singleton_method(:reap_children) { supervisor.request_shutdown! }
+    drained = false
+    @supervisor.define_singleton_method(:drain_dispatch_results) { drained = true }
+    @supervisor.define_singleton_method(:sleep) { |_seconds| }
+
+    @supervisor.send(:reaper_loop)
+
+    assert drained, "reaper_loop must drain the daemon's dispatch-result notice channel (ADV-1)"
   end
 
   def test_reaper_loop_logs_reap_failures

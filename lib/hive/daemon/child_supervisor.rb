@@ -21,9 +21,24 @@ module Hive
                              :request_id,
                              keyword_init: true)
 
+      # A child that breached its wall-clock timeout. The dispatcher logs
+      # one `:child_timeout` event per action (`:term` on first breach,
+      # `:kill` if the grace window elapses without exit).
+      TimeoutAction = Struct.new(:pid, :project, :slug, :stage, :command,
+                                 :action, :elapsed_sec, :timeout_sec,
+                                 keyword_init: true)
+
+      # R-02 (PR #241 ce-code-review): default TERM→KILL escalation window
+      # when the daemon config doesn't supply one. A wedged child gets
+      # SIGTERM, then SIGKILL `kill_grace_sec` later if it ignored TERM.
+      DEFAULT_KILL_GRACE_SEC = 30
+
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
                      log_dir_for_task: nil,
-                     dry_run: false)
+                     dry_run: false,
+                     default_timeout_sec: 0,
+                     verb_timeouts: {},
+                     kill_grace_sec: DEFAULT_KILL_GRACE_SEC)
         @hive_bin = hive_bin
         @dry_run = dry_run
         # Optional injection point: tests pass a lambda taking (project, slug)
@@ -31,8 +46,39 @@ module Hive
         # Falls back to a tmp-style scheme using the project's hive-state
         # directory if the dispatcher doesn't supply one.
         @log_dir_for_task = log_dir_for_task
-        # pid → { project, slug, stage, command, started_at, log_path }
+        # R-02 per-verb wall-clock timeout. `default_timeout_sec` applies
+        # to every spawned child unless `verb_timeouts[verb]` overrides
+        # it; a resolved timeout of 0 (or nil) disables the cap for that
+        # child (the historical behaviour — children ran unbounded until
+        # daemon shutdown). The timeout is resolved AT SPAWN and frozen on
+        # the running entry so a mid-run config reload never retroactively
+        # kills an in-flight child.
+        @default_timeout_sec = default_timeout_sec.to_i
+        @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
+          acc[verb.to_s] = secs.to_i
+        end
+        @kill_grace_sec = kill_grace_sec.to_i
+        # pid → { project, slug, stage, command, started_at, log_path,
+        #         timeout_sec, terminating_at, killed }
         @running = {}
+      end
+
+      # Resolve the wall-clock timeout (seconds) for a hive verb. A
+      # per-verb override wins over the default; 0 means "no cap".
+      def timeout_for_verb(verb)
+        @verb_timeouts.fetch(verb.to_s, @default_timeout_sec)
+      end
+
+      # Re-read the timeout knobs after a SIGHUP config reload. Only
+      # affects children spawned AFTER the reload — in-flight children
+      # keep the timeout frozen on their running entry at spawn time, so
+      # a reload never retroactively kills (or reprieves) a live run.
+      def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+        @default_timeout_sec = default_timeout_sec.to_i
+        @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
+          acc[verb.to_s] = secs.to_i
+        end
+        @kill_grace_sec = kill_grace_sec.to_i
       end
 
       # Spawn a child process running `command_string`. The string MUST
@@ -61,12 +107,14 @@ module Hive
         # can swap in a fixture path via HIVE_BIN.
         argv[0] = @hive_bin
 
+        timeout_sec = timeout_for_verb(argv_verb(argv))
+
         if effective_dry_run
           @running[next_dry_pid] = {
             project: project, slug: slug, stage: stage,
             command: command_string, state_file_path: state_file_path,
             started_at: Time.now, log_path: nil, dry_run: true,
-            request_id: request_id
+            request_id: request_id, timeout_sec: timeout_sec
           }
           return @running.keys.last
         end
@@ -89,9 +137,44 @@ module Hive
           project: project, slug: slug, stage: stage,
           command: command_string, state_file_path: state_file_path,
           started_at: Time.now, log_path: log_path, dry_run: false,
-          request_id: request_id
+          request_id: request_id, timeout_sec: timeout_sec
         }
         pid
+      end
+
+      # R-02: enforce per-child wall-clock timeouts. Called once per
+      # dispatcher tick. For every live (non-dry-run) child whose
+      # resolved timeout is positive and whose elapsed wall-clock exceeds
+      # it: send SIGTERM to its process group on the first breach, then
+      # SIGKILL once `kill_grace_sec` has elapsed without the child
+      # exiting. Returns an Array<TimeoutAction> describing the signals
+      # sent so the dispatcher can emit `:child_timeout` telemetry. The
+      # actual ChildExit (with the signal-derived exit status) surfaces
+      # on a later `reap_all` once the process dies.
+      def enforce_timeouts(now: Time.now)
+        actions = []
+        @running.each do |pid, entry|
+          next if entry[:dry_run]
+
+          timeout_sec = entry[:timeout_sec].to_i
+          next unless timeout_sec.positive?
+
+          elapsed = now - entry[:started_at]
+          next if elapsed <= timeout_sec
+
+          if entry[:terminating_at].nil?
+            pgid = pgid_for(pid)
+            safe_kill(:TERM, -pgid) if pgid
+            entry[:terminating_at] = now
+            actions << timeout_action(pid, entry, :term, elapsed)
+          elsif !entry[:killed] && (now - entry[:terminating_at]) >= @kill_grace_sec
+            pgid = pgid_for(pid)
+            safe_kill(:KILL, -pgid) if pgid
+            entry[:killed] = true
+            actions << timeout_action(pid, entry, :kill, elapsed)
+          end
+        end
+        actions
       end
 
       # Reap every child that has exited since the last call. Returns an
@@ -188,6 +271,31 @@ module Hive
 
       def parse_command(command_string)
         Shellwords.split(command_string)
+      end
+
+      # The hive verb is argv[1] (argv[0] is the hive binary). Returns
+      # "" when the command has no verb so `timeout_for_verb` falls back
+      # to the default.
+      def argv_verb(argv)
+        argv[1].to_s
+      end
+
+      # Look up a child's process-group id, falling back to the pid
+      # itself when the group is already gone (so the caller still has a
+      # target). Returns nil only on an unexpected lookup failure.
+      def pgid_for(pid)
+        Process.getpgid(pid)
+      rescue Errno::ESRCH
+        pid
+      end
+
+      def timeout_action(pid, entry, action, elapsed)
+        TimeoutAction.new(
+          pid: pid, project: entry[:project], slug: entry[:slug],
+          stage: entry[:stage], command: entry[:command],
+          action: action, elapsed_sec: elapsed.to_i,
+          timeout_sec: entry[:timeout_sec].to_i
+        )
       end
 
       def log_path_for(project:, slug:, hive_state_path:)

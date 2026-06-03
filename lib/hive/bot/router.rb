@@ -3,6 +3,8 @@ require "set"
 require "time"
 require "hive/config"
 require "hive/bot/notification_builders"
+require "hive/bot/idea_draft_store"
+require "hive/bot/idea_attachment_policy"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/handlers/free_text_handler"
@@ -29,6 +31,8 @@ module Hive
         callback_refresh_diagnose
         callback_answer
         callback_idea_project_pick
+        callback_idea_done
+        callback_idea_skip
         callback_path_a_yes
         callback_path_a_just_type
         callback_codex_write_draft
@@ -37,6 +41,8 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        idea_media
+        idea_text_capture
         free_text_answer
         unauthorized
         unknown
@@ -44,25 +50,30 @@ module Hive
 
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                           :project, :slug, :question_n, :answer_text, :mode,
-                          :intent, :alert_reset, :clear_keyboard, :format, keyword_init: true)
+                          :intent, :alert_reset, :clear_keyboard, :format,
+                          :attachment, keyword_init: true)
 
       ALLOWED_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
         write_answer_then_reply start_codex confirm_codex_draft
+        stage_attachment commit_idea
       ].freeze
 
       UNAUTHORIZED_LOG_TTL_SEC = 3600
       PENDING_IDEA_TTL_SEC = 900
 
-      def initialize(bot_config:, logger:, conversation_store:,
+      def initialize(bot_config:, logger:, conversation_store:, idea_draft_store: nil,
                      projects_provider: -> { Hive::Config.registered_projects },
                      now: -> { Time.now },
                      status_snapshot_provider: -> { [] })
         @bot_config = bot_config
         @logger = logger
         @conversation_store = conversation_store
-        @projects_provider = projects_provider
         @now = now
+        @idea_draft_store = idea_draft_store ||
+          Hive::Bot::IdeaDraftStore.new(ttl_sec: bot_config.fetch("idea_draft_ttl_sec", PENDING_IDEA_TTL_SEC),
+                                        now: @now)
+        @projects_provider = projects_provider
         @unauthorized_logged = {}
         @pending_ideas = {}
         @last_project = nil
@@ -72,6 +83,10 @@ module Hive
           pending_ideas: @pending_ideas,
           last_project: -> { @last_project },
           result_class: Result,
+          idea_draft_store: @idea_draft_store,
+          idea_attachment_policy: Hive::Bot::IdeaAttachmentPolicy,
+          max_attachment_bytes: bot_config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024),
+          max_attachment_count: bot_config.fetch("idea_attachment_max_count", 10),
           status_snapshot_provider: status_snapshot_provider
         )
         @callback_handlers = Handlers::CallbackHandlers.new(
@@ -79,6 +94,7 @@ module Hive
           set_last_project: ->(project) { @last_project = project },
           conversation_store: @conversation_store,
           result_class: Result,
+          idea_draft_store: @idea_draft_store,
           logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
@@ -98,7 +114,7 @@ module Hive
           return callback_intent(data)
         end
 
-        text = update.text.to_s.strip
+        text = effective_text(update).to_s.strip
         case text
         when %r{\A/status\b} then :slash_status
         when %r{\A/queue\b} then :slash_queue
@@ -110,7 +126,11 @@ module Hive
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         else
-          @conversation_store.get(chat_id: update.chat_id) || reattach_target(update) ? :free_text_answer : :unknown
+          return :free_text_answer if @conversation_store.get(chat_id: update.chat_id) || reattach_target(update)
+          return :idea_media if update.respond_to?(:media?) && update.media?
+          return :idea_text_capture if @idea_draft_store.get(chat_id: update.chat_id)&.phase == :awaiting_text
+
+          :unknown
         end
       end
 
@@ -154,6 +174,7 @@ module Hive
       end
 
       def prune_pending_ideas!
+        @idea_draft_store.prune! if @idea_draft_store
         cutoff = @now.call - PENDING_IDEA_TTL_SEC
         @pending_ideas.delete_if { |_token, entry| entry.is_a?(Hash) && entry[:created_at] < cutoff }
       end
@@ -174,6 +195,8 @@ module Hive
         when /\Arefresh_diagnose:/ then :callback_refresh_diagnose
         when /\Aanswer:/ then :callback_answer
         when /\Aidea_project:/ then :callback_idea_project_pick
+        when /\Aidea_done:/ then :callback_idea_done
+        when /\Aidea_skip:/ then :callback_idea_skip
         when /\Apath_a_yes:/ then :callback_path_a_yes
         when /\Apath_a_type:/ then :callback_path_a_just_type
         when /\Acodex_write:/ then :callback_codex_write_draft
@@ -194,6 +217,10 @@ module Hive
           reply_text.match(/\AAnswer mode started for (?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\./)
       end
 
+      def effective_text(update)
+        update.respond_to?(:effective_text) ? update.effective_text : update.text
+      end
+
       def dispatch(intent, update)
         case intent
         when :unauthorized then Result.new(action: :noop)
@@ -206,6 +233,8 @@ module Hive
         when :slash_details then @slash_handlers.details(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
+        when :idea_media then @slash_handlers.media(update)
+        when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
         when :unknown then Result.new(action: :reply, text: "I did not understand that. Send /help for commands.")
         else @callback_handlers.handle(intent, update)

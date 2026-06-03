@@ -1,13 +1,28 @@
 require "test_helper"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
+require "hive/bot/idea_draft_store"
 require "hive/bot/notification_builders"
 
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
-                      :intent, :alert_reset, :clear_keyboard, :format, keyword_init: true)
-  Update = Struct.new(:text, :chat_id, keyword_init: true)
+                      :intent, :alert_reset, :clear_keyboard, :format,
+                      :attachment, keyword_init: true)
+  Update = Struct.new(:text, :chat_id, keyword_init: true) do
+    def effective_text = text
+    def media? = false
+  end
+  MediaUpdate = Struct.new(:text, :chat_id, :effective_text, keyword_init: true) do
+    def media? = true
+  end
+  PolicyResult = Struct.new(:status, :file_id, :file_size, :ext, keyword_init: true)
+
+  FakeAttachmentPolicy = Struct.new(:result, keyword_init: true) do
+    def classify(_update, _draft, max_bytes:, max_count:)
+      result
+    end
+  end
 
   def setup
     @handlers = Hive::Bot::Handlers::SlashHandlers.new(
@@ -355,5 +370,134 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_match(/No active brainstorm conversation/, result.text)
+  end
+
+  def test_idea_without_text_and_without_draft_store_replies_usage
+    result = @handlers.idea(Update.new(text: "/idea", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "Use /idea <text> to capture a new idea.", result.text
+  end
+
+  def test_idea_with_text_uses_default_clock_for_legacy_pending_idea
+    pending = {}
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [ "hive" ] },
+      pending_ideas: pending,
+      last_project: -> { nil },
+      result_class: Result
+    )
+
+    result = handlers.idea(Update.new(text: "/idea fix login", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "Pick a project for the idea.", result.text
+    entry = pending.values.fetch(0)
+    assert_equal "fix login", entry.fetch(:text)
+    assert entry.fetch(:created_at).is_a?(Time)
+  end
+
+  def test_capture_idea_text_rejects_blank_and_expired_draft
+    store = Hive::Bot::IdeaDraftStore.new
+    handlers = idea_handlers(draft_store: store)
+
+    blank = handlers.capture_idea_text(Update.new(text: "  ", chat_id: 7))
+    expired = handlers.capture_idea_text(Update.new(text: "fix login", chat_id: 7))
+
+    assert_equal "Send the idea text in your next message.", blank.text
+    assert_equal "That idea draft expired. Send /idea again.", expired.text
+  end
+
+  def test_idea_media_stages_file_and_prompts_for_text
+    store = Hive::Bot::IdeaDraftStore.new
+    handlers = idea_handlers(
+      draft_store: store,
+      policy: FakeAttachmentPolicy.new(
+        result: PolicyResult.new(status: :ok, file_id: "photo-id", file_size: 12, ext: "jpg")
+      )
+    )
+
+    result = handlers.idea(MediaUpdate.new(text: "/idea", chat_id: 9, effective_text: ""))
+
+    assert_equal :stage_attachment, result.action
+    assert_equal "What's the idea for this file?", result.text
+    assert_equal({ chat_id: 9, file_id: "photo-id", file_size: 12, ext: "jpg" }, result.attachment)
+  end
+
+  def test_idea_text_with_media_stages_then_shows_project_picker
+    store = Hive::Bot::IdeaDraftStore.new
+    handlers = idea_handlers(
+      draft_store: store,
+      policy: FakeAttachmentPolicy.new(
+        result: PolicyResult.new(status: :ok, file_id: "doc-id", file_size: 12, ext: "pdf")
+      )
+    )
+
+    result = handlers.idea(MediaUpdate.new(text: "/idea fix login", chat_id: 9, effective_text: "/idea fix login"))
+
+    assert_equal :stage_attachment, result.action
+    assert_equal "Pick a project for the idea.", result.text
+    assert_equal :awaiting_project, store.get(chat_id: 9).phase
+  end
+
+  def test_media_reply_copy_matches_draft_phase
+    %i[awaiting_project collecting_files other].each do |phase|
+      store = Hive::Bot::IdeaDraftStore.new
+      store.start(chat_id: 9, phase: phase, text: "fix", token: "tok")
+      handlers = idea_handlers(
+        draft_store: store,
+        policy: FakeAttachmentPolicy.new(
+          result: PolicyResult.new(status: :ok, file_id: "file-id", file_size: 12, ext: "jpg")
+        )
+      )
+
+      result = handlers.media(MediaUpdate.new(chat_id: 9, effective_text: ""))
+
+      expected = {
+        awaiting_project: "Pick a project for the idea.",
+        collecting_files: "Attached. Send more files, or press Done.",
+        other: "Attached."
+      }.fetch(phase)
+      assert_equal expected, result.text
+    end
+  end
+
+  def test_media_policy_rejection_messages_include_configured_limits
+    {
+      too_large: "under 7 MB",
+      disallowed_type: "Unsupported attachment type",
+      cap_reached: "already has 3 attachments",
+      unknown: "I could not attach that file."
+    }.each do |status, text|
+      store = Hive::Bot::IdeaDraftStore.new
+      handlers = idea_handlers(
+        draft_store: store,
+        policy: FakeAttachmentPolicy.new(result: PolicyResult.new(status: status)),
+        max_attachment_bytes: 7 * 1024 * 1024,
+        max_attachment_count: 3
+      )
+
+      result = handlers.media(MediaUpdate.new(chat_id: 9, effective_text: ""))
+
+      assert_equal :reply, result.action
+      assert_match text, result.text
+      assert_nil store.get(chat_id: 9), "bare rejected media must not leave a phantom draft"
+    end
+  end
+
+  private
+
+  def idea_handlers(draft_store:, policy: FakeAttachmentPolicy.new(result: PolicyResult.new(status: :ok)),
+                    max_attachment_bytes: nil, max_attachment_count: nil)
+    Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [ "hive" ] },
+      pending_ideas: {},
+      last_project: -> { nil },
+      result_class: Result,
+      idea_draft_store: draft_store,
+      idea_attachment_policy: policy,
+      max_attachment_bytes: max_attachment_bytes,
+      max_attachment_count: max_attachment_count
+    )
   end
 end

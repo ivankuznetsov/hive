@@ -1,13 +1,17 @@
 require "json"
 require "fileutils"
+require "stringio"
 require "time"
 require "hive"
 require "hive/config"
+require "hive/commands/new"
 require "hive/bot/logger"
 require "hive/bot/telegram"
 require "hive/bot/status_watcher"
 require "hive/bot/notification_dispatcher"
 require "hive/bot/conversation_store"
+require "hive/bot/idea_draft_store"
+require "hive/bot/idea_attachment_policy"
 require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
@@ -18,13 +22,15 @@ require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/title_formatter"
 require "hive/task"
+require "hive/tui/composer_staging"
+require "hive/tui/text"
 require "hive/update_check/state"
 
 module Hive
   module Bot
     class Supervisor
       BOT_COMMANDS = [
-        { command: "idea",    description: "Capture a new idea" },
+        { command: "idea",    description: "Capture a new idea with optional files" },
         { command: "status",  description: "Show active tasks" },
         { command: "queue",   description: "Show queued and waiting tasks" },
         { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },
@@ -38,7 +44,8 @@ module Hive
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
-                     dispatch_request_writer: nil, dispatch_result_state_home: nil)
+                     dispatch_request_writer: nil, dispatch_result_state_home: nil,
+                     idea_draft_store: nil)
         @config = config
         @dry_run = dry_run
         # ADV-1: where the daemon drops dispatch-result failure notices.
@@ -60,6 +67,8 @@ module Hive
         @status_watcher = status_watcher || Hive::Bot::StatusWatcher.new(logger: @logger)
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
+        @idea_draft_store = idea_draft_store ||
+          Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900))
         @router = router || build_router(config)
         @child_supervisor = child_supervisor ||
           Hive::Bot::ChildSupervisor.new(logger: @logger, dry_run: dry_run)
@@ -197,6 +206,7 @@ module Hive
           bot_config: config,
           logger: @logger,
           conversation_store: @conversation_store,
+          idea_draft_store: @idea_draft_store,
           status_snapshot_provider: -> { latest_status_rows }
         )
       end
@@ -351,7 +361,7 @@ module Hive
 
       ALLOWED_RESULT_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
-        write_answer_then_reply
+        write_answer_then_reply stage_attachment commit_idea
       ].freeze
 
       def execute_result(result, update)
@@ -369,9 +379,118 @@ module Hive
           start_answer(result, update)
         when :write_answer_then_reply
           execute_answer_write(result, update)
+        when :stage_attachment
+          execute_attachment_stage(result, update)
+        when :commit_idea
+          execute_idea_commit(result, update)
         else
           raise "Supervisor cannot execute unknown action #{result.action.inspect}"
         end
+      end
+
+      def execute_attachment_stage(result, update)
+        payload = result.attachment || {}
+        chat_id = payload.fetch(:chat_id, update.chat_id)
+        draft = @idea_draft_store.get(chat_id: chat_id)
+        return safe_send_message(chat_id: update.chat_id, text: "That idea draft expired. Send /idea again.") unless draft
+
+        info = @telegram.get_file(file_id: payload.fetch(:file_id))
+        if remote_file_too_large?(info[:file_size])
+          return safe_send_message(chat_id: update.chat_id, text: "That attachment is too large. Send a file under #{idea_attachment_max_mb} MB.")
+        end
+
+        bytes = @telegram.download_file(file_path: info.fetch(:file_path))
+        number = @idea_draft_store.next_attachment_number(chat_id: chat_id)
+        ext = Hive::Tui::ComposerStaging.normalized_extension(payload[:ext])
+        staging_dir = @idea_draft_store.ensure_staging_dir(chat_id: chat_id)
+        label, staging_path = Hive::Tui::ComposerStaging.next_label_and_path(staging_dir, number, ext: ext)
+        Hive::Tui::ComposerStaging.write_bytes!(staging_path, bytes)
+        @idea_draft_store.append_attachment(
+          chat_id: chat_id,
+          label: label,
+          dest_name: "bug-#{number}.#{ext}",
+          staging_path: staging_path,
+          ext: ext
+        )
+        safe_send_message(chat_id: update.chat_id, text: result.text,
+                          reply_markup: result.reply_markup) if result.text
+      rescue Hive::Bot::Telegram::DownloadError, Hive::Tui::ComposerStaging::WriteError,
+             KeyError, SystemCallError, IOError => e
+        @logger.event(:send_failure, source: "stage_attachment",
+                                      chat_id: update.chat_id,
+                                      error_class: e.class.name,
+                                      message: e.message)
+        safe_send_message(chat_id: update.chat_id,
+                          text: "Couldn't download that attachment - please send it again.")
+      end
+
+      def remote_file_too_large?(file_size)
+        size = file_size.to_i
+        size.positive? && size > idea_attachment_max_bytes
+      end
+
+      def idea_attachment_max_bytes
+        @config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024).to_i
+      end
+
+      def idea_attachment_max_mb
+        (idea_attachment_max_bytes.to_f / (1024 * 1024)).round
+      end
+
+      def execute_idea_commit(result, update)
+        chat_id = result.attachment&.fetch(:chat_id, update.chat_id) || update.chat_id
+        draft = @idea_draft_store.get(chat_id: chat_id)
+        return safe_send_message(chat_id: update.chat_id, text: "That idea draft expired. Send /idea again.") unless draft
+        return safe_send_message(chat_id: update.chat_id, text: "Pick a project before pressing Done.") if draft.project.to_s.empty?
+        return safe_send_message(chat_id: update.chat_id, text: "Send the idea text before pressing Done.") if draft.text.to_s.strip.empty?
+
+        tuples = draft.attachments.map { |attachment| [ attachment.fetch(:staging_path), attachment.fetch(:dest_name) ] }
+        body = tuples.empty? ? nil : idea_body_override(draft)
+        capture_command_io do
+          Hive::Commands::New.new(
+            draft.project,
+            draft.text,
+            body_override: body,
+            attachments: tuples
+          ).call!
+        end
+        @idea_draft_store.clear(chat_id: chat_id)
+        # Clear the Done/Skip keyboard on the tapped message so a re-tap of the
+        # just-captured idea doesn't reply "That idea draft expired" (the draft
+        # is gone by design) — reads like an error for a successful capture.
+        clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
+        safe_send_message(chat_id: update.chat_id,
+                          text: "Captured your idea in #{draft.project}. It's in the inbox - move it to 2-brainstorm to start.")
+      rescue Hive::Error, SystemCallError, IOError => e
+        @logger.event(:send_failure, source: "commit_idea",
+                                      chat_id: update.chat_id,
+                                      error_class: e.class.name,
+                                      message: e.message)
+        safe_send_message(chat_id: update.chat_id,
+                          text: "Couldn't capture that idea (#{Hive::Tui::Text.sanitize(e.message)}). Try Done again.")
+      end
+
+      def idea_body_override(draft)
+        lines = draft.attachments.map do |attachment|
+          dest = attachment.fetch(:dest_name)
+          if Hive::Bot::IdeaAttachmentPolicy.image_extension?(attachment.fetch(:ext))
+            "![](assets/#{dest})"
+          else
+            "[#{dest}](assets/#{dest})"
+          end
+        end
+        ([ draft.text.to_s.strip ] + lines).reject(&:empty?).join("\n\n")
+      end
+
+      def capture_command_io
+        orig_out = $stdout
+        orig_err = $stderr
+        $stdout = StringIO.new
+        $stderr = StringIO.new
+        yield
+      ensure
+        $stdout = orig_out
+        $stderr = orig_err
       end
 
       def dispatch_command_sequence(result, update)

@@ -280,13 +280,14 @@ module Hive
         argv[1].to_s
       end
 
-      # Look up a child's process-group id, falling back to the pid
-      # itself when the group is already gone (so the caller still has a
-      # target). Returns nil only on an unexpected lookup failure.
+      # Look up a child's process-group id. Returns nil when the process
+      # group is already gone (ESRCH) so the caller's `if pgid` guard
+      # short-circuits the kill — signaling `-pid` after ESRCH could hit a
+      # recycled process group on a long-running host (#249).
       def pgid_for(pid)
         Process.getpgid(pid)
       rescue Errno::ESRCH
-        pid
+        nil
       end
 
       def timeout_action(pid, entry, action, elapsed)

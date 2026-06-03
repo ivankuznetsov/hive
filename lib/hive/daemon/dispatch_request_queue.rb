@@ -124,6 +124,34 @@ module Hive
         false
       end
 
+      # Remove a request only if it is still unclaimed — i.e. only the
+      # pending `*.json` file, never a `*.json.claimed` the daemon has since
+      # taken. `queue prune` runs in a separate CLI process with no lock, so
+      # a request can be claimed+dispatched between the prune's `pending`
+      # scan and its removal; deleting the `.claimed` sibling then would drop
+      # a live claim's crash-recovery state (#265). Returns true only when an
+      # unclaimed pending file was actually unlinked, so prune counts reflect
+      # real removals rather than racing claims.
+      def remove_if_unclaimed(request_id, state_home: Hive::Paths.state_home)
+        return false if request_id.to_s.empty?
+
+        dir = directory(state_home: state_home)
+        return false if claimed_request_ids(dir).include?(request_id.to_s)
+
+        removed = false
+        Dir.glob(File.join(dir, "*.json")).each do |path|
+          data = parse_json_hash(path)
+          next unless data && data["request_id"] == request_id.to_s
+
+          File.unlink(path)
+          discard_sequence(request_id, state_home: state_home)
+          removed = true
+        end
+        removed
+      rescue Errno::ENOENT
+        false
+      end
+
       # Mark a request as claimed before spawn. The claimed JSON remains a
       # schema-valid hive-dispatch-request; pid/start metadata lives in a
       # `.claim` sidecar and can be updated after spawn.
@@ -141,6 +169,11 @@ module Hive
           claimed_path = "#{path}#{CLAIMED_SUFFIX}"
           File.rename(path, claimed_path)
           write_claim_metadata(claimed_path, pid: pid, process_start_time: process_start_time, now: now)
+          # The `.claimed` rename is the at-most-once commit point. fsync the
+          # directory so both that rename and the sidecar's rename survive an
+          # unclean shutdown — otherwise a power loss could leave the claim
+          # un-persisted and the request re-dispatchable on restart (#248).
+          fsync_directory(dir)
           return claimed_path
         end
         nil
@@ -187,8 +220,12 @@ module Hive
         false
       end
 
+      # `alive:` is required: it must be a `->(pid, process_start_time)` that
+      # returns whether the claim's owner is still running. A nil/omitted
+      # `alive` would short-circuit `alive && alive.call(...)` to false and
+      # silently reap every non-aged-out claim, including live orphans (#250).
       def recover_claims(state_home: Hive::Paths.state_home, now: Time.now,
-                         alive: nil, expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
+                         alive:, expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
         dir = directory(state_home: state_home)
         removed = 0
         Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each do |path|
@@ -379,6 +416,16 @@ module Hive
         []
       end
 
+      # Persist directory entries (renames/unlinks) so they survive an
+      # unclean shutdown. Best-effort: not every platform/filesystem allows
+      # opening a directory for fsync, and a failure here must not abort the
+      # claim it is hardening.
+      def fsync_directory(dir)
+        File.open(dir) { |d| d.fsync }
+      rescue StandardError
+        nil
+      end
+
       def claim_metadata_path(claimed_path)
         "#{claimed_path}#{CLAIM_META_SUFFIX}"
       end
@@ -442,7 +489,10 @@ module Hive
           return :invalid_slug unless SLUG_RE.match?(slug)
 
           argv = data["argv"]
-          return :invalid_argv unless argv.is_a?(Array)
+          # The schema declares `argv minItems: 2` (argv[0]=hive, argv[1]=verb);
+          # mirror it here so a single-element argv doesn't parse into a row
+          # whose `verb => argv[1]` is nil in `queue list` (#259).
+          return :invalid_argv unless argv.is_a?(Array) && argv.length >= 2
 
           created_at = parse_time(data["created_at"])
           return :invalid_created_at if created_at.nil?

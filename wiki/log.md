@@ -2,6 +2,21 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T18:30:00Z] daemon - PR #244 review follow-ups, batch A (dispatch-queue correctness)
+
+**Action:** Implemented the correctness/durability cluster of the deferred PR #244 `/ce-code-review` issues and refreshed [[modules/daemon]]:
+
+- **#249** `ChildSupervisor#pgid_for` returns `nil` (not the pid) on `ESRCH`, so the timeout-kill callers' `if pgid` guard short-circuits instead of signaling a possibly-recycled `-pid`.
+- **#248** `DispatchRequestQueue.claim` fsyncs the `dispatch_requests/` directory after the `.claimed` rename so the at-most-once commit point is crash-durable (best-effort `fsync_directory`).
+- **#250** `recover_claims(alive:)` is now a required kwarg — the old `alive: nil` default silently reaped every non-aged live claim.
+- **#259** `parse_data` rejects a single-element `argv` (`length >= 2`), mirroring the schema's `argv minItems: 2`, so `queue list` can't emit a nil verb.
+- **#255** the `child_timeout_sec` fetch fallbacks (start, reload, `claim_expiry_sec`) reference `Hive::Config::DEFAULTS.dig("daemon","child_timeout_sec")` instead of a `0` literal (the issue's "7200 default" premise was stale; the real default is `0`/disabled — this is drift-proofing, behavior-preserving).
+- **#265** `hive daemon queue prune` uses the new `remove_if_unclaimed`, which skips any id the daemon has since claimed and counts only files actually unlinked — never deleting a live `.claimed`'s recovery state under the lock-free prune race.
+- **#264** documented the still-alive-orphan auto-advance window (comment + wiki); re-registration in the controller was rejected to avoid a guaranteed multi-hour stuck slot vs. the narrow, `.lock`-backstopped window.
+- **#247** verified by the existing claim test (`refute data.key?("claim")`): the sidecar design already keeps the `.claimed` file schema-valid; the full schema-validation assertion lands in batch B.
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

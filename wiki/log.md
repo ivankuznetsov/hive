@@ -2,6 +2,19 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T19:00:00Z] daemon - PR #244 review follow-ups, batch B (schema & test parity)
+
+**Action:** Implemented the schema/test-parity cluster of the deferred PR #244 `/ce-code-review` issues:
+
+- **#258** `schemas/hive-dispatch-result.v1.json` `chat_id` now machine-checks **non-zero** (`not: {const: 0}`) instead of the issue's literal `minimum: 1` — Telegram group/supergroup/channel chat ids are negative, so `minimum: 1` would wrongly reject a valid group relay target; 0 is the only never-valid id. Documented in [[modules/daemon]].
+- **#256** added `hive-dispatch-result` existence + required-key-drift + producer round-trip tests (validating actual `DispatchResultQueue.write!` output with nil `update_id` and a negative group `chat_id`), and a `hive-daemon-queue` producer round-trip (list/show/prune envelopes via `queue_envelope`/`queue_request_hash`) in `schema_files_test.rb`.
+- **#257** added the missing `WRONG_SUBCOMMAND_FLAG` case to the enroll error-payload round-trip, plus a guard asserting every `EnrollErrorKind::ALL` member is exercised so a future kind can't slip past again.
+- **#260** made `test_recover_dispatch_claims_alive_lambda_paths` deterministic by pinning `Hive::Lock.process_start_time`, so the PID-reuse removal asserts unconditionally instead of being skipped behind `if live` on /proc-less platforms.
+- **#261** tightened weak assertions: `test_recover_dispatch_claims_swallows_errors` now asserts the `:fatal` log event (was zero-assert); the aged-claim recovery test pins `reason == "claim_expired"` via the handler; added an AC-05 two-tick test proving a `needs_input` alert fires exactly once while its marker persists (the property that makes the queue path's no-reset safe).
+- **#247** added a `schema_files_test` assertion that a `.json.claimed` file still validates against `hive-dispatch-request.v1` (no stray `claim` key) — completing the contract pin deferred from batch A.
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

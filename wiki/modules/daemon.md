@@ -365,7 +365,11 @@ The bot drains that directory each `reaper_loop` iteration
 (`Supervisor#drain_dispatch_results`) and relays a `⚠️ <slug>: hive <verb>
 failed (exit N | killed)` message to the originating chat. This is the
 reverse-direction sibling of the dispatch-request queue; schema
-`hive-dispatch-result` v1.
+`hive-dispatch-result` v1. The schema machine-checks `chat_id` as
+**non-zero** (`not: {const: 0}`), not merely a positive integer (#258):
+0 is the only id no Telegram chat ever has, while private chats are
+positive and group/supergroup/channel chats are negative, so a `minimum:
+1` would have wrongly rejected a valid group relay target.
 
 Reliability contract on the consumer side: a notice is removed **only
 after the relay is confirmed sent** — if Telegram is down it stays on

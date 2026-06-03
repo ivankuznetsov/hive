@@ -156,13 +156,18 @@ The fix gates the resume on whether any questions are still unanswered:
   `:wait_for_debounce` outcomes pass through unchanged, so the mtime
   baseline is still seeded and the **editor-bulk-save** path (all answers
   in one save → no unanswered slots) resumes normally.
-- The dispatcher logs the hold as `:skipped reason=answers_pending`.
+- The dispatcher logs the hold as `:skipped reason=answers_pending`, and
+  `hive status --json` carries an `unanswered_questions` count for the
+  row (issue #270) so the hold is observable without tailing the log —
+  see [[commands/status]]. A held brainstorm whose question has no
+  fillable `### A` slot is no longer a dead-end: `BrainstormAnswerWriter`
+  now creates the slot on answer (issue #269), so the operator can always
+  clear the hold (see [[modules/bot]]).
 
 This is surface-agnostic: it holds whether answers arrive incrementally
-via the bot or all at once via a direct edit, and the published
-`hive-status` schema is untouched (the daemon parses the file directly).
-The bot's own "all answered → enqueue a dispatch request" path then just
-races the row-scan to the same gate; the per-slug in-flight gate dedups.
+via the bot or all at once via a direct edit. The bot's own "all
+answered → enqueue a dispatch request" path then just races the row-scan
+to the same gate; the per-slug in-flight gate dedups.
 
 ## Persisted dispatch baselines (restart survival)
 

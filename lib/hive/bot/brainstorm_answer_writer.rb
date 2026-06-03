@@ -104,22 +104,21 @@ module Hive
 
           lines = content.lines
           slot = find_empty_answer_slot(lines, question_n, parsed)
-          # Q{n} is in parsed (the earlier guard verified this), but
-          # no empty A-section is locatable between Q{n} and the next
-          # boundary — either the agent forgot to emit `### A{n}.`,
-          # the answer was already filled and we missed it via the
-          # parsed view, or the file is genuinely malformed. Return a
-          # distinct symbol so the supervisor can render a helpful
-          # message (not "Question N was not found").
-          next :answer_slot_missing unless slot
-
-          newline = newline_for(content)
-          if slot[:answer_line_index] >= 0 && !lines[slot[:answer_line_index]].to_s.end_with?(newline)
-            lines[slot[:answer_line_index]] = "#{lines[slot[:answer_line_index]]}#{newline}"
+          if slot
+            new_lines = fill_answer_slot(lines, slot, answer_text, content)
+          else
+            # Q{n} is unanswered (the earlier guards verified Q{n} is
+            # present and its answer is nil) but has NO `### A{n}.` header
+            # at all — the brainstorm agent emitted the question without a
+            # fillable answer block. Rather than dead-end with
+            # `:answer_slot_missing` (which left the operator unable to
+            # answer and, with the daemon's answers-pending gate, held the
+            # task indefinitely — issue #269), CREATE the slot at the end
+            # of the Q-block and write the answer into it.
+            new_lines = insert_answer_slot(lines, question_n, parsed, answer_text, content)
+            next :answer_slot_missing unless new_lines
           end
 
-          answer_lines = answer_body(answer_text, newline).lines
-          new_lines = lines[0..slot[:answer_line_index]] + answer_lines + lines[slot[:body_end_index]..].to_a
           Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
           :written
         end
@@ -134,6 +133,44 @@ module Hive
         [ :enoent, nil ]
       end
       private_class_method :try_append
+
+      # Write `answer_text` into an existing empty `### A` slot.
+      def fill_answer_slot(lines, slot, answer_text, content)
+        newline = newline_for(content)
+        if slot[:answer_line_index] >= 0 && !lines[slot[:answer_line_index]].to_s.end_with?(newline)
+          lines[slot[:answer_line_index]] = "#{lines[slot[:answer_line_index]]}#{newline}"
+        end
+
+        answer_lines = answer_body(answer_text, newline).lines
+        lines[0..slot[:answer_line_index]] + answer_lines + lines[slot[:body_end_index]..].to_a
+      end
+      private_class_method :fill_answer_slot
+
+      # #269: create a fresh `### A{n}.` slot for a question that has none,
+      # at the end of the Q-block (just before the next Q / Round / marker
+      # boundary, or EOF), and write the answer into it. Uses the parser's
+      # canonical `answer_header` so the format stays in lockstep. Returns
+      # the new lines, or nil when the Q{n} line can't be located (the
+      # earlier guard makes this unreachable in practice; nil routes
+      # `try_append` back to the `:answer_slot_missing` fallback).
+      def insert_answer_slot(lines, question_n, parsed, answer_text, content)
+        q_idx = target_question_line_index(lines, parsed, question_n)
+        return nil unless q_idx
+
+        newline = newline_for(content)
+        insert_idx = q_idx + 1
+        insert_idx += 1 while insert_idx < lines.length && !block_boundary?(lines[insert_idx])
+        # Ensure the preceding line is newline-terminated so the new
+        # header doesn't get glued onto the question's last body line.
+        if insert_idx.positive? && !lines[insert_idx - 1].to_s.end_with?(newline)
+          lines[insert_idx - 1] = "#{lines[insert_idx - 1]}#{newline}"
+        end
+
+        slot_lines = [ "#{Hive::Bot::BrainstormParser.answer_header(question_n)}#{newline}" ] +
+                     answer_body(answer_text, newline).lines
+        lines[0...insert_idx] + slot_lines + lines[insert_idx..].to_a
+      end
+      private_class_method :insert_answer_slot
 
       # Locate the empty A-section to fill for question_n. Q-context-
       # aware: walks forward from the Q{n} header that the parser

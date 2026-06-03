@@ -118,11 +118,11 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  # Q1 present, no A-line at all → answer_slot_missing (NOT
-  # question_not_found, which is now reserved for "Q{n} truly absent").
-  # The supervisor renders a distinct message for this so the operator
-  # knows the question IS in the file and the brainstorm.md needs repair.
-  def test_q_present_no_a_line_returns_answer_slot_missing
+  # #269: Q1 present with NO `### A` line at all — the writer now CREATES
+  # the slot at the end of the Q-block and writes the answer, instead of
+  # dead-ending with :answer_slot_missing (which, with the daemon's
+  # answers-pending gate, held the task indefinitely).
+  def test_q_present_no_a_line_creates_slot_and_writes
     with_brainstorm("## Round 1\n\n### Q1. First?\n") do |path|
       result = Hive::Bot::BrainstormAnswerWriter.append!(
         brainstorm_path: path,
@@ -130,7 +130,10 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         answer_text: "One"
       )
 
-      assert_equal :answer_slot_missing, result
+      assert_equal :written, result
+      assert_includes File.read(path), "### A1."
+      parsed = Hive::Bot::BrainstormParser.parse(path)
+      assert_equal "One", parsed[0].answer, "the created slot must round-trip as Q1's answer"
     end
   end
 
@@ -172,9 +175,10 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  # The by-position fallback must NOT cross block boundaries. If the
-  # next block (Q, round, or marker) appears before any A line, no slot.
-  def test_no_slot_when_next_block_comes_before_any_a_line
+  # #269: when the next block (Q/Round/marker) comes before any A-line,
+  # the writer creates Q1's slot WITHIN Q1's block — i.e. before the next
+  # Q's header — so the answer never leaks into a later question.
+  def test_creates_slot_within_block_when_next_q_comes_first
     with_brainstorm("## Round 1\n\n### Q1. First?\n### Q2. Second?\n### A2.\n") do |path|
       result = Hive::Bot::BrainstormAnswerWriter.append!(
         brainstorm_path: path,
@@ -182,7 +186,13 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         answer_text: "One"
       )
 
-      assert_equal :answer_slot_missing, result
+      assert_equal :written, result
+      after = File.read(path)
+      assert_includes after, "### Q1. First?\n### A1.\nOne\n### Q2. Second?",
+                      "the created A1 slot must sit between Q1 and Q2"
+      parsed = Hive::Bot::BrainstormParser.parse(path)
+      assert_equal "One", parsed[0].answer
+      assert_nil parsed[1].answer, "Q2 must remain unanswered"
     end
   end
 
@@ -302,10 +312,11 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  # Boundary coverage: by-position scan must STOP at a `## Round N`
-  # header before any A-line, because the operator's answer belongs
-  # to the prior round. F6 from PR #239 ce-code-review.
-  def test_round_boundary_stops_scan_before_finding_a_slot
+  # Boundary coverage (#269): the slot-creation scan must STOP at a
+  # `## Round N` header before any A-line — the created A1 slot belongs to
+  # Round 1's Q1, so it is inserted BEFORE the Round 2 boundary, never
+  # routed into Round 2's stray `### A1.`. F6 from PR #239 ce-code-review.
+  def test_round_boundary_keeps_created_slot_in_prior_round
     content = <<~MARKDOWN
       ## Round 1
 
@@ -321,14 +332,15 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         answer_text: "x"
       )
 
-      assert_equal :answer_slot_missing, result,
-                   "## Round boundary between Q and A must yield answer_slot_missing"
+      assert_equal :written, result
+      assert_includes File.read(path), "### Q1. First?\n### A1.\nx\n## Round 2",
+                      "the created A1 slot must sit before the Round 2 boundary"
     end
   end
 
-  # Boundary coverage: a MARKER line (`<!-- WAITING -->`, `<!-- COMPLETE -->`)
-  # between Q and any A-line must also stop the scan. F6 from PR #239.
-  def test_marker_boundary_stops_scan_before_finding_a_slot
+  # Boundary coverage (#269): a MARKER line (`<!-- WAITING -->`) also stops
+  # the scan, so the created slot is inserted before the marker. F6 / #239.
+  def test_marker_boundary_keeps_created_slot_before_marker
     content = "## Round 1\n\n### Q1. First?\n<!-- WAITING -->\n"
 
     with_brainstorm(content) do |path|
@@ -338,8 +350,43 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         answer_text: "x"
       )
 
-      assert_equal :answer_slot_missing, result,
-                   "<!-- WAITING --> marker between Q and A must yield answer_slot_missing"
+      assert_equal :written, result
+      assert_includes File.read(path), "### Q1. First?\n### A1.\nx\n<!-- WAITING -->",
+                      "the created A1 slot must sit before the WAITING marker"
+    end
+  end
+
+  # #269: creating a slot for a Round-2 question (Round 1 fully answered)
+  # must place the new A inside Round 2's block, not Round 1's.
+  def test_creates_slot_for_later_round_question
+    content = "## Round 1\n### Q1. A?\n### A1.\nyes\n## Round 2\n### Q1. B?\n<!-- WAITING -->\n"
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path, question_n: 1, answer_text: "no"
+      )
+
+      assert_equal :written, result
+      parsed = Hive::Bot::BrainstormParser.parse(path)
+      r1 = parsed.find { |q| q.round == 1 && q.n == 1 }
+      r2 = parsed.find { |q| q.round == 2 && q.n == 1 }
+      assert_equal "yes", r1.answer, "Round 1 answer untouched"
+      assert_equal "no", r2.answer, "the created slot belongs to Round 2's Q1"
+    end
+  end
+
+  # #269: creating a slot when the question is the final line with NO
+  # trailing newline — the writer must newline-terminate it first so the
+  # new `### A` header isn't glued onto the question text.
+  def test_creates_slot_when_question_has_no_trailing_newline
+    with_brainstorm("## Round 1\n\n### Q1. First?") do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path, question_n: 1, answer_text: "One"
+      )
+
+      assert_equal :written, result
+      assert_includes File.read(path), "### Q1. First?\n### A1.\nOne\n",
+                      "the question line must be newline-terminated before the created A header"
+      assert_equal "One", Hive::Bot::BrainstormParser.parse(path)[0].answer
     end
   end
 

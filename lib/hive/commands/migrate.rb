@@ -1,11 +1,14 @@
 require "fileutils"
 require "open3"
+require "time"
 require "yaml"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/paths"
 require "hive/stages"
+require "hive/task_counter"
+require "hive/task_meta"
 
 module Hive
   module Commands
@@ -52,14 +55,16 @@ module Hive
         raise Hive::InvalidTaskPath, "not a hive project: #{hive_state}" unless Dir.exist?(stages)
 
         moved = []
+        backfilled_count = 0
         Hive::Lock.with_commit_lock(hive_state) do
           plan = build_migration_plan(stages)
           config_changed = rewrite_legacy_config_keys(hive_state)
           if plan.empty?
             ensure_current_stage_dirs(stages)
-            if config_changed
-              commit_migration(hive_state, moved, config_only: true)
-              puts "hive: migrate rewrote legacy config keys (no task folders to move)"
+            backfilled_count = backfill_task_ids(stages)
+            if config_changed || backfilled_count.positive?
+              commit_migration(hive_state, moved, config_only: config_changed, backfilled_count: backfilled_count)
+              puts migration_no_move_message(config_changed: config_changed, backfilled_count: backfilled_count)
             elsif already_migrated?(stages)
               puts "hive: migrate found nothing to move (target stage directories look already-migrated)"
             else
@@ -75,10 +80,12 @@ module Hive
           plan.each { |op| FileUtils.mv(op[:src], op[:dst]) }
           moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
           ensure_current_stage_dirs(stages)
-          commit_migration(hive_state, moved, config_only: false)
+          backfilled_count = backfill_task_ids(stages)
+          commit_migration(hive_state, moved, config_only: false, backfilled_count: backfilled_count)
         end
 
-        puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved)"
+        puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" \
+             "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''})"
         restart_daemon_if_running!
         moved
       end
@@ -152,13 +159,74 @@ module Hive
         end
       end
 
-      def commit_migration(hive_state, moved, config_only: false)
+      def backfill_task_ids(stages)
+        folders = task_folders(stages)
+        max_id = folders.map { |folder| Hive::TaskMeta.read(folder)[:id] }.compact.max
+        Hive::TaskCounter.seed_at_least!(max_id + 1) if max_id
+
+        targets = folders.select { |folder| Hive::TaskMeta.read(folder)[:id].nil? }
+        targets.sort_by! { |folder| [ idea_created_at(folder) || Time.at(2**31 - 1), File.basename(folder) ] }
+
+        targets.each do |folder|
+          meta = Hive::TaskMeta.read(folder)
+          Hive::TaskMeta.write(
+            folder,
+            id: Hive::TaskCounter.next!,
+            slug: File.basename(folder),
+            display_name: meta[:display_name]
+          )
+        end
+        targets.size
+      end
+
+      def task_folders(stages)
+        return [] unless Dir.exist?(stages)
+
+        Dir.children(stages).sort.flat_map do |stage|
+          stage_dir = File.join(stages, stage)
+          next [] unless File.directory?(stage_dir)
+
+          Dir.children(stage_dir).sort.filter_map do |entry|
+            next unless Hive::Stages.task_slug?(entry)
+
+            folder = File.join(stage_dir, entry)
+            folder if File.directory?(folder)
+          end
+        end
+      end
+
+      def idea_created_at(folder)
+        path = File.join(folder, "idea.md")
+        return nil unless File.exist?(path)
+
+        data = frontmatter(File.read(path))
+        raw = data["created_at"] || data[:created_at]
+        return raw if raw.is_a?(Time)
+
+        Time.parse(raw.to_s)
+      rescue StandardError
+        nil
+      end
+
+      def frontmatter(contents)
+        return {} unless contents.start_with?("---\n")
+
+        body = contents.lines[1..]
+        stop = body&.index { |line| line.match?(/\A---\s*\z/) }
+        return {} unless stop
+
+        YAML.safe_load(body.first(stop).join) || {}
+      rescue StandardError
+        {}
+      end
+
+      def commit_migration(hive_state, moved, config_only: false, backfilled_count: 0)
         ops = Hive::GitOps.new(@project_path)
         ops.run_git!("-C", hive_state, "add", "-A")
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
         return if status.success?
 
-        message = migrate_commit_message(moved, config_only: config_only)
+        message = migrate_commit_message(moved, config_only: config_only, backfilled_count: backfilled_count)
         ops.run_git!("-C", hive_state, "commit", "-m", message)
       rescue Hive::GitError => e
         # The mv operations already succeeded — the on-disk layout is
@@ -172,7 +240,7 @@ module Hive
         # `Migrate#call` (daemon restart, completion message) still
         # runs against the consistent on-disk layout. ce-code-review
         # P2 #21.
-        message = migrate_commit_message(moved, config_only: config_only)
+        message = migrate_commit_message(moved, config_only: config_only, backfilled_count: backfilled_count)
         warn "hive: migrate completed the on-disk mv operations but " \
              "could not commit them to the hive-state git history: " \
              "#{e.class}: #{e.message}"
@@ -180,11 +248,23 @@ module Hive
              "git -C #{hive_state} commit -m '#{message}'"
       end
 
-      def migrate_commit_message(moved, config_only:)
-        if config_only && moved.empty?
+      def migrate_commit_message(moved, config_only:, backfilled_count: 0)
+        if moved.empty? && backfilled_count.positive? && !config_only
+          "hive: migrate task ids (#{backfilled_count} task#{backfilled_count == 1 ? '' : 's'})"
+        elsif config_only && moved.empty?
           "hive: migrate config keys (no tasks moved)"
         else
           "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
+        end
+      end
+
+      def migration_no_move_message(config_changed:, backfilled_count:)
+        if config_changed && backfilled_count.positive?
+          "hive: migrate rewrote legacy config keys and backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
+        elsif config_changed
+          "hive: migrate rewrote legacy config keys (no task folders to move)"
+        else
+          "hive: migrate backfilled #{backfilled_count} task id#{backfilled_count == 1 ? '' : 's'}"
         end
       end
 

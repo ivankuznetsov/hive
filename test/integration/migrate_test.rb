@@ -251,6 +251,79 @@ class MigrateTest < Minitest::Test
       end
     end
   end
+
+  def test_migrate_backfills_task_meta_ids_in_created_at_order
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        later = write_task_folder(stages, "2-brainstorm", "later-task-260603-bbbb", created_at: "2026-06-03T12:00:00Z")
+        earlier = write_task_folder(stages, "2-brainstorm", "early-task-260603-aaaa", created_at: "2026-06-03T11:00:00Z")
+        no_idea = write_task_folder(stages, "2-brainstorm", "no-idea-260603-cccc", idea: false)
+
+        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "backfilled 3 task ids"
+        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil }, Hive::TaskMeta.read(earlier))
+        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil }, Hive::TaskMeta.read(later))
+        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil }, Hive::TaskMeta.read(no_idea))
+        assert_equal 4, Hive::TaskCounter.peek
+      end
+    end
+  end
+
+  def test_migrate_backfill_is_idempotent
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        folder = write_task_folder(stages, "3-plan", "existing-task-260603-aaaa")
+
+        capture_io { Hive::Commands::Migrate.new(dir).call }
+        first = Hive::TaskMeta.read(folder)
+        first_counter = Hive::TaskCounter.peek
+        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "target stage directories look already-migrated"
+        assert_equal first, Hive::TaskMeta.read(folder)
+        assert_equal first_counter, Hive::TaskCounter.peek
+      end
+    end
+  end
+
+  def test_migrate_fills_null_id_and_preserves_display_name
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        folder = write_task_folder(stages, "4-execute", "named-task-260603-aaaa")
+        Hive::TaskMeta.write(folder, id: nil, slug: "named-task-260603-aaaa", display_name: "Named Task")
+
+        capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_equal({ id: 1, slug: "named-task-260603-aaaa", display_name: "Named Task" }, Hive::TaskMeta.read(folder))
+      end
+    end
+  end
+
+  def test_migrate_seeds_counter_above_existing_ids
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        existing = write_task_folder(stages, "3-plan", "existing-id-260603-aaaa")
+        new_task = write_task_folder(stages, "3-plan", "new-id-260603-bbbb")
+        Hive::TaskMeta.write(existing, id: 41, slug: "existing-id-260603-aaaa", display_name: nil)
+
+        capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_equal 41, Hive::TaskMeta.read(existing)[:id]
+        assert_equal 42, Hive::TaskMeta.read(new_task)[:id]
+        assert_equal 43, Hive::TaskCounter.peek
+      end
+    end
+  end
+
   def test_migrate_warns_with_recovery_command_when_git_commit_fails
     fake_ops = Object.new
     fake_ops.define_singleton_method(:run_git!) do |*_args|
@@ -372,5 +445,23 @@ class MigrateTest < Minitest::Test
     migrate.define_singleton_method(:system) { |*_args, **_kwargs| raise Errno::ENOENT }
 
     refute migrate.send(:systemctl_available?)
+  end
+
+  def write_task_folder(stages, stage, slug, created_at: "2026-06-03T10:00:00Z", idea: true)
+    folder = File.join(stages, stage, slug)
+    FileUtils.mkdir_p(folder)
+    if idea
+      File.write(File.join(folder, "idea.md"), <<~MARKDOWN)
+        ---
+        slug: #{slug}
+        created_at: #{created_at}
+        ---
+
+        Test idea
+      MARKDOWN
+    else
+      File.write(File.join(folder, "task.md"), "x\n")
+    end
+    folder
   end
 end

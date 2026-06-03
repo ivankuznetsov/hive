@@ -560,6 +560,9 @@ module Hive
 
         if Time.now - last_sentinel_check >= sentinel_poll_interval
           last_sentinel_check = Time.now
+          gone = tmux_session_gone_marker(task, runner)
+          return gone if gone
+
           marker = marker_from_sentinel_tail(task, runner)
           return marker if marker
         end
@@ -586,6 +589,22 @@ module Hive
 
     def terminal_marker?(marker)
       TERMINAL_MARKERS.include?(marker.name)
+    end
+
+    def tmux_session_gone_marker(task, runner)
+      return nil unless runner.respond_to?(:session_exists?)
+      return nil if runner.session_exists?
+
+      name = runner.respond_to?(:name) ? runner.name : "(unknown)"
+      Hive::Markers.set(task.state_file, :error,
+                        reason: "tmux_session_terminated",
+                        message: "tmux session #{name} terminated before writing a terminal marker")
+      Hive::Markers.current(task.state_file)
+    rescue Hive::TmuxError => e
+      Hive::Markers.set(task.state_file, :error,
+                        reason: "tmux_pane_unreadable",
+                        message: e.message)
+      Hive::Markers.current(task.state_file)
     end
 
     def marker_from_sentinel_tail(task, runner)

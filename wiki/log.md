@@ -2781,6 +2781,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[state-model]]
 - [[dependencies]]
 
+## [2026-06-03T12:09:00Z] brainstorm — fail fast when tmux session disappears before marker
+
+**Action:** `Hive::ClaudeLauncher.wait_for_terminal_marker` now verifies that the managed tmux session still exists while a Claude-backed stage is waiting on an `AGENT_WORKING` marker. If the session disappears before Claude writes `WAITING`, `COMPLETE`, or `ERROR`, Hive stamps `ERROR reason=tmux_session_terminated` immediately instead of polling until the full brainstorm timeout.
+
+**Tests/docs:** Added a unit regression for an `AGENT_WORKING` state with a missing tmux session. Refreshed [[stages/brainstorm]].
+
 ## [2026-05-26T15:08:00Z] forget — add retry-safe --if-exists
 
 **Action:** `hive forget NAME --if-exists` now exits 0 when the registry row is already absent, while the default `hive forget NAME` path still returns `unknown_project` / exit 64 for typo detection. The `hive-forget` success envelope now carries `removed: true` for actual removals and `removed: false` for `--if-exists` no-ops.
@@ -2847,4 +2853,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[modules/bot]]
+
+## [2026-06-03T12:35:00Z] wiki — refresh tmux-session loss coverage
+
+**Action:** Follow-up wiki refresh for commit `71db09c7`. Verified the committed diff against `lib/hive/claude_launcher.rb` and `test/unit/claude_launcher_test.rb`; broadened shared stage coverage to note that marker-owned Claude tmux launches fail fast with `ERROR reason=tmux_session_terminated`, added `claude_launcher_test.rb` to the testing coverage map, and recorded the remaining live-smoke uncertainty for killing a real managed tmux session mid-stage. Page coverage count did not change, so [[index]] needed no structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[stages/index]]
+- [[testing]]
 - [[gaps]]

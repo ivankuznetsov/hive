@@ -3,7 +3,7 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-06-03
 tags: [stage, index]
 ---
 
@@ -21,7 +21,7 @@ tags: [stage, index]
 | 8-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
 | 9-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
 
-All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns; Claude reviewers use one shared tmux session per pass when `claude.mode: tmux`.
+All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. In tmux mode, marker-owned Claude launches wait through `Hive::ClaudeLauncher.wait_for_terminal_marker`; if the managed tmux session disappears before a terminal marker is written, the launcher stamps `ERROR reason=tmux_session_terminated` immediately instead of waiting for the stage timeout. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns; Claude reviewers use one shared tmux session per pass when `claude.mode: tmux`.
 
 ## 6-review phase order
 

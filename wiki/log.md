@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T15:30:00Z] babysitter - tighten gh api dry-run input body guard
+
+**Action:** Updated the babysitter dry-run stub docs after the patrol fix that treats `gh api --input` as a request body even when paired with explicit `--method GET`. Explicit GET field flags still pass as query parameters, but explicit GET with `--input` now skips. Verified with `test/unit/babysitter/dry_run_env_test.rb`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

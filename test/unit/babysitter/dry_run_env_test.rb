@@ -35,6 +35,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       }
 
       assert_stubbed env, "gh", "-R", "owner/repo", "pr", "ready", "42"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "close", "42"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "reopen", "42"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "merge", "42"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "lock", "42"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "unlock", "42"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "edit", "42", "--add-label", "ready"
+      assert_stubbed env, "gh", "--repo=owner/repo", "pr", "edit", "42", "--add-assignee", "@me"
       assert_stubbed env, "gh", "api", "-X", "POST", "repos/owner/repo/dispatches"
       assert_stubbed env, "gh", "workflow", "run", "release.yml"
       assert_stubbed env, "gh", "totally-new-write-command", "arg"
@@ -50,6 +57,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       skipped = File.read(log_path)
       assert_includes skipped, "gh -R owner/repo pr ready 42 skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr close 42 skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr reopen 42 skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr merge 42 skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr lock 42 skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr unlock 42 skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr edit 42 --add-label ready skipped"
+      assert_includes skipped, "gh --repo=owner/repo pr edit 42 --add-assignee @me skipped"
       assert_includes skipped, "gh api -X POST repos/owner/repo/dispatches skipped"
       assert_includes skipped, "gh workflow run release.yml skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"

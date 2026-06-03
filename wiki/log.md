@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T15:25:00Z] babysitter - block GraphQL mutation-shaped dry-run API calls
+
+**Action:** Tightened the babysitter dry-run `gh api` classifier so GraphQL field payloads shaped as `query=mutation...` are skipped even when the caller passes `--method GET`. Added focused coverage in `test/unit/babysitter/dry_run_env_test.rb` while preserving ordinary explicit-GET field passthrough.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[testing]]
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

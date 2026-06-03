@@ -2,6 +2,23 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T10:48:47Z] babysitter - refresh dry-run stub API coverage
+
+**Action:** Refreshed wiki command/API surface coverage after commit `889b0b65` changed the babysitter dry-run `git` and `gh` stub executables from mutating-command blocklists to read-only allowlists. Verified the committed diff and current source for `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/babysitter/gh_ops.rb`, and `test/unit/babysitter/dry_run_env_test.rb`. Expanded the `hive babysit --dry-run` docs with the exact current pass-through surface, refreshed babysitter module metadata, and recorded the remaining live-agent dry-run smoke uncertainty. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+
+## [2026-06-03T10:45:00Z] babysitter - harden dry-run stub command classification
+
+**Action:** Tightened the babysitter dry-run PATH stubs so unknown `git` / `gh` commands are skipped by default and only known read-only commands pass through to the real binaries. This closes the patrol-discovered gap where commands like `gh pr ready`, `gh pr create`, `gh pr close`, `gh workflow run`, `gh api -X POST`, `git commit`, or `git merge` could mutate state despite dry-run. Added direct stub coverage with recording fake binaries for global-option stripping, mutating-command skips, unknown-command skips, and read-only passthrough.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+
 ## [2026-06-03T10:02:12Z] release - correct prepared version to 0.1.11
 
 **Action:** Corrected the prepared release metadata from `0.2.0` to `0.1.11` to match Hive's micro-release versioning convention. Updated `Hive::VERSION`, the lockfile package version, current installer URLs, the newest changelog section, and active release/install wiki references.

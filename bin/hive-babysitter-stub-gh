@@ -10,30 +10,67 @@ end
 
 argv = ARGV.dup
 
-# Strip leading gh global options so the real subcommand is classified
-# correctly. Without this, `gh -R owner/repo pr comment` has argv[0,2] ==
-# ["-R", "owner/repo"] and slips past the subcommand check, execing the
-# real gh and mutating GitHub despite dry_run. `-R`/`--repo` each consume
-# the following token; `--repo=owner/repo` is a single token.
-rest = argv.dup
-loop do
-  case rest.first
-  when "-R", "--repo"
-    rest.shift(2)
-  when /\A-/
-    rest.shift
+def stripped_global_options(argv)
+  rest = argv.dup
+  loop do
+    case rest.first
+    when "-R", "--repo", "--hostname"
+      rest.shift(2)
+    when /\A--repo=/
+      rest.shift
+    when /\A-/
+      rest.shift
+    else
+      break
+    end
+  end
+  rest
+end
+
+def api_read_only?(rest)
+  return false unless rest.first == "api"
+
+  method = nil
+  index = 1
+  while index < rest.length
+    arg = rest[index]
+    case arg
+    when "-X", "--method"
+      method = rest[index + 1]
+      index += 2
+    when /\A--method=(.+)\z/
+      method = Regexp.last_match(1)
+      index += 1
+    else
+      index += 1
+    end
+  end
+
+  method.nil? || method.casecmp("GET").zero?
+end
+
+def read_only?(rest)
+  case rest[0]
+  when "api"
+    api_read_only?(rest)
+  when "auth"
+    rest[1] == "status"
+  when "pr"
+    %w[checks diff list status view].include?(rest[1])
+  when "run"
+    %w[list view watch].include?(rest[1])
+  when "repo"
+    rest[1] == "view"
+  when "workflow"
+    %w[list view].include?(rest[1])
   else
-    break
+    false
   end
 end
 
-mutating =
-  rest[0, 2] == %w[pr comment] ||
-  rest[0, 2] == %w[pr edit] ||
-  rest[0, 2] == %w[pr review] ||
-  rest[0, 2] == %w[run rerun]
+rest = stripped_global_options(argv)
 
-if mutating
+unless read_only?(rest)
   log_skip(argv)
   warn "[dry-run] gh #{argv.join(' ')} skipped"
   exit 0

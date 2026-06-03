@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T14:54:56Z] babysitter - narrow dry-run git remote passthrough
+
+**Action:** Tightened `bin/hive-babysitter-stub-git` so `git remote` is no longer blanket read-only in babysitter dry-run. The stub now passes only listing, `show [-n]`, and `get-url` forms through to the real git binary; mutating forms such as `remote set-url`, `remote add`, and `remote remove` are skipped and logged. Updated `test/unit/babysitter/dry_run_env_test.rb` to pin both the mutating skips and read-only passthrough examples.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

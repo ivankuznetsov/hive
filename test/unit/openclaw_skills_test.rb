@@ -57,6 +57,11 @@ class OpenClawSkillsTest < Minitest::Test
     "rebase-status" => { cli: "rebase_status", command: "hive rebase-status" },
     "doctor" => { cli: "doctor", command: "hive doctor" },
     "daemon" => { cli: "daemon", command: "hive daemon" },
+    "babysit" => {
+      cli: "babysit",
+      description: "Manage the experimental hive-babysitter (start / stop / status / reload / tail / --once)",
+      command: "hive babysit"
+    },
     "bot" => { cli: "bot", command: "hive bot" },
     "init" => { cli: "init", command: "hive init" }
   }.freeze
@@ -136,6 +141,7 @@ class OpenClawSkillsTest < Minitest::Test
 
   def test_dedicated_skills_guard_blocking_and_bypass_paths
     _approve_metadata, approve_body = read_skill("hive-approve")
+    _babysit_metadata, babysit_body = read_skill("babysit")
     _bot_metadata, bot_body = read_skill("bot")
     _daemon_metadata, daemon_body = read_skill("daemon")
     _init_metadata, init_body = read_skill("init")
@@ -148,6 +154,9 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes bot_body, "explicit user confirmation"
 
     assert_includes daemon_body, "start --detach"
+    assert_includes babysit_body, "start --detach"
+    assert_includes babysit_body, "tail"
+    assert_includes babysit_body, "explicit user confirmation"
     assert_includes daemon_body, "foreground `start` without `--detach`"
     assert_includes daemon_body, "streaming `tail`"
 

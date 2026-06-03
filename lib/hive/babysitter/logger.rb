@@ -54,6 +54,11 @@ module Hive
         end
 
         rotate_if_needed!
+        if @stderr_fallback
+          warn line
+          return
+        end
+
         @file.puts(line)
         @file.flush
       end

@@ -19,8 +19,12 @@
     {
       "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",
       "note": "False positive. Open3.capture3 array form in GitOps#commits_behind. `ref` is `origin/<default_branch>` constructed inside Hive::Rebase from `cfg.default_branch || git.default_branch` (the latter from `git symbolic-ref refs/remotes/origin/HEAD`). Not attacker-controlled; passed as a single argv element to execve(2)."
+    },
+    {
+      "fingerprint": "f4e0dcfe7fbb847c09d2b929e3566c2092dbee71a4c34865e8d86248fad239d4",
+      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#pr_diff_stat. base_ref comes from the PR base ref and head_ref is the local literal HEAD in the babysitter context path; the `origin/<base>...HEAD` revspec is passed as one argv element to execve(2), not through a shell."
     }
   ],
-  "updated": "2026-05-26",
+  "updated": "2026-06-03",
   "brakeman_version": "8.0.4"
 }

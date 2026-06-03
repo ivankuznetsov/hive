@@ -532,10 +532,11 @@ module Hive
       # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / claude_mode /
       # claude_permission_mode / development_agent / enabled_reviewers /
-      # triage_bias / budgets / timeouts / daemon_enabled). The single source
-      # of truth for the answers hash is `Prompts#collect`; this binding
-      # never invents defaults of its own — callers always supply
-      # `answers:` (production: from Prompts; tests: explicit hashes).
+      # triage_bias / budgets / timeouts / daemon_enabled /
+      # babysitter_enabled / daemon_autostart). The single source of truth
+      # for the answers hash is `Prompts#collect`; this binding never invents
+      # defaults of its own — callers always supply `answers:` (production:
+      # from Prompts; tests: explicit hashes).
       # Budget and timeout sections are also validated against the full
       # prompt LIMIT_KEYS set so nested prompt/template drift fails fast.
       class ProjectConfigBinding
@@ -552,8 +553,8 @@ module Hive
           @budgets = required_limit_answers(answers.fetch("budgets"), "budgets")
           @timeouts = required_limit_answers(answers.fetch("timeouts"), "timeouts")
           @daemon_enabled = answers.fetch("daemon_enabled")
-          @babysitter_enabled = answers.fetch("babysitter_enabled", true)
-          @daemon_autostart = answers.fetch("daemon_autostart", false)
+          @babysitter_enabled = answers.fetch("babysitter_enabled")
+          @daemon_autostart = answers.fetch("daemon_autostart")
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,

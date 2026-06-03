@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T01:35:11Z] babysitter - review follow-up skill and init drift guard
+
+**Action:** Review follow-up for the experimental PR babysitter branch. Added the dedicated OpenClaw `/babysit` skill plus the planned `hive-babysit` ClawHub row so the Thor command drift guard covers the new lifecycle surface. Tightened `Hive::Commands::Init::ProjectConfigBinding` so `babysitter_enabled` and `daemon_autostart` remain required prompt-answer keys instead of silently defaulting in the ERB binding. Added a Brakeman false-positive ignore for `Gh#pr_diff_stat`: `Hive::Gh.capture3` uses `Process.spawn` argv form, and the Git revspec is a single argv element rather than shell input. The CI coverage gate exposed untested babysitter lifecycle/error branches; added focused coverage-gap tests, included `test/babysitter/**/*_test.rb` in the default Rake suite, and fixed `Hive::Babysitter::Logger#event` so a rotation reopen failure that falls back to stderr does not continue into `@file.puts` with a nil file handle.
+
+**Tests:** `test/unit/openclaw_skills_test.rb` now covers the babysit skill; `test/unit/commands/init_test.rb` continues to require every prompt answer key. `test/unit/babysitter/coverage_gaps_test.rb` pins lifecycle, logger fallback, GitHub operation, and coverage-gate branches.
+
 ## [2026-06-03T20:00:00Z] tui — cursor follows slug across snapshot polls
 
 **Action:** Upgraded `Update.apply_snapshot_arrived` from coord-based reclamping to **slug-identity following**. The prior reclamp (landed 2026-04-28 in the TUI robustness pass) covered drop/truncate snapshot deltas but missed the in-bounds reorder case: when a peer task advanced a stage between two polls, the cursor's `[project_idx, row_idx]` stayed in bounds while a different slug slid under it, so `s` (steer) and Enter dispatched against the row the operator *was* looking at, not the row they thought they were looking at. The fix captures `prior_slug` from the OLD visible snapshot before adopting the new one, then `cursor_for_slug(visible, slug, prior_project_idx)` looks it up in the NEW visible — prior project preferred (slugs are not globally unique across projects), with a global cross-project scan as the fallback so tasks that migrate project boundaries still keep the cursor pinned. When the slug is gone entirely (archived, finalized, filtered out by scope), the helper returns nil and the call chain falls back to the existing `reclamp_cursor` so coords-only behaviour is preserved for non-followable cursors.

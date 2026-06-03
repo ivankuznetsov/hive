@@ -64,6 +64,7 @@ task default: :test
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
 | `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers, signal cleanup, and wrapper argv policy. |
+| `hv_test.rb` | `bin/hv` — refuses unsafe Apache Hive fallback paths (`/usr/bin/hive`, `/opt/hive/bin/hive`) and verifies `HIVE_BIN_OVERRIDE` can point at a custom Hive CLI install path. |
 
 ## Integration suite (`test/integration/`)
 

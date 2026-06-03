@@ -59,6 +59,42 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_skips_draft_prs_before_spawning_agent
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: {
+          "enabled" => true,
+          "labels_ignore" => %w[wip do-not-merge draft],
+          "max_concurrent_prs" => 2
+        }
+      )
+      prs = [
+        { "number" => 10, "isDraft" => true, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 11, "isDraft" => false, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+      called = []
+      logger = make_logger(dir)
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **_kwargs|
+          called << pr["number"]
+          :dry_run
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
+          assert_equal({ total: 1, fixed: 0, untouched: 1, needs_human: 0 }, summary)
+        end
+      end
+
+      assert_equal [ 11 ], called
+      events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
+      assert events.any? { |event| event["action"] == "skipped" && event["outcome"] == "draft_pr" && event["pr"] == 10 }
+    ensure
+      logger&.close
+    end
+  end
+
   def test_gh_error_emits_event_and_does_not_spawn_agent
     with_tmp_dir do |dir|
       project = project_entry(dir)

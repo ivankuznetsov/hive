@@ -53,10 +53,11 @@ babysitter:
 For each enabled project, the babysitter:
 
 1. Runs `gh pr list --state open` through `Hive::Gh.list_open_prs`.
-2. Skips PRs whose labels intersect `labels_ignore` case-insensitively.
-3. Skips PRs already in the in-process in-flight set.
-4. Sorts oldest-updated first and truncates to `max_concurrent_prs`.
-5. Runs `Hive::Babysitter::PrFixer` on each selected PR.
+2. Skips draft PRs before worktree materialization.
+3. Skips PRs whose labels intersect `labels_ignore` case-insensitively.
+4. Skips PRs already in the in-process in-flight set.
+5. Sorts oldest-updated first and truncates to `max_concurrent_prs`.
+6. Runs `Hive::Babysitter::PrFixer` on each selected PR.
 
 `PrFixer` first checks `gh pr view --json mergeable,statusCheckRollup`. If the PR is mergeable and checks are successful or queued, it records a `noop` event and does not spawn an agent. Otherwise it materializes `<project>/.hive-state/babysitter/worktrees/<pr-number>/`, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
 

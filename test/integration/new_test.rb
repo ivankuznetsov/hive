@@ -1,6 +1,8 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/task_counter"
+require "hive/task_meta"
 
 class NewTest < Minitest::Test
   include HiveTestHelper
@@ -29,11 +31,78 @@ class NewTest < Minitest::Test
         idea = File.read(File.join(glob.first, "idea.md"))
         assert_includes idea, "add inbox filter"
         assert_includes idea, "<!-- WAITING -->"
+        meta = Hive::TaskMeta.read(glob.first)
+        assert_equal 1, meta[:id]
+        assert_equal File.basename(glob.first), meta[:slug]
+        assert_nil meta[:display_name]
         refute File.directory?(File.join(glob.first, "assets")),
                "plain CLI-compatible ideas must not create an empty assets directory"
 
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
         assert_match(%r{\Ahive: 1-inbox/add-inbox-filter-\d{6}-[0-9a-f]{4} captured\z}, log)
+        diff_files = run!("git", "-C", File.join(dir, ".hive-state"), "show", "--name-only", "--format=")
+        assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/meta.yml"
+      end
+    end
+  end
+
+  def test_two_new_ideas_receive_distinct_ids
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io { Hive::Commands::New.new(project, "first task").call }
+        capture_io { Hive::Commands::New.new(project, "second task").call }
+
+        ids = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
+              .map { |folder| Hive::TaskMeta.read(folder)[:id] }
+        assert_equal [ 1, 2 ], ids.sort
+      end
+    end
+  end
+
+  def test_counter_failure_writes_null_id_and_still_captures
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        error = Hive::ConcurrentRunError.new("busy", lock_path: "/tmp/counter")
+
+        with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise error }) do
+          capture_io { Hive::Commands::New.new(project, "counter busy").call }
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "counter-busy-*")].first
+        assert_nil Hive::TaskMeta.read(folder)[:id]
+        assert File.exist?(File.join(folder, "idea.md"))
+      end
+    end
+  end
+
+  def test_spawns_name_generator_once_after_commit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        calls = []
+        previous = Hive::Commands::New.instance_variable_get(:@name_generator_spawn)
+        Hive::Commands::New.name_generator_spawn = lambda do |*argv, **opts|
+          calls << [ argv, opts ]
+          12_345
+        end
+
+        capture_io { Hive::Commands::New.new(project, "name me").call }
+
+        assert_equal 1, calls.size
+        argv, opts = calls.first
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "name-me-*")].first
+        assert_equal [ "hive", "generate-name", folder ], argv
+        assert_equal true, opts[:pgroup]
+        assert_equal "a", opts[:out].last
+        assert_equal opts[:out], opts[:err]
+      ensure
+        Hive::Commands::New.name_generator_spawn = previous
       end
     end
   end

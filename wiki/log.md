@@ -2862,3 +2862,29 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[stages/index]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-03T12:35:51Z] new/display-name/resolver — refresh task identity command coverage
+
+**Action:** Refreshed command/API wiki coverage across commits `df87abe5` (`hive new` task-id capture), `c86a74b8` (`hive generate-name` display-name generation), and `41d10785` (numeric task-id target resolution). Verified the committed diffs, `lib/hive/commands/new.rb`, `lib/hive/commands/generate_name.rb`, `lib/hive/display_name/*`, `lib/hive/agent/message_extractor.rb`, `lib/hive/task_meta.rb`, `lib/hive/task_counter.rb`, `lib/hive/task.rb`, `lib/hive/task_resolver.rb`, `lib/hive/cli.rb`, and the new integration/unit tests. Documented the sidecar/counter state model, the display-name command pipeline, and path/slug/id target resolution. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/new]]
+- [[commands/generate-name]]
+- [[state-model]]
+- [[modules/task]]
+- [[modules/task_resolver]]
+- [[cli]]
+- [[stages/inbox]]
+- [[index]]
+- [[gaps]]
+
+## [2026-06-03T13:20:00Z] task identity surfaces — document status, TUI, bot, and migration backfill
+
+**Action:** Extended the task-identity wiki refresh through commits `457c2f16` (`hive status` id/display_name schema v3), `d76be350` (TUI id/name columns), `5daa08c9` (Telegram display titles), and `1a4922c4` (`hive migrate` id backfill). Documented human rendering fallbacks, preserved slug-based callbacks/commands, diagnose schema v2, and migration counter seeding/idempotency. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[commands/tui]]
+- [[commands/migrate]]
+- [[modules/bot]]
+- [[state-model]]

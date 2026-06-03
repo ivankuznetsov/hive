@@ -20,13 +20,18 @@ module Hive
       # daemon-enabled project so the contract still holds).
       def initialize(telegram:, logger:, bot_config:,
                      daemon_enabled: nil, now: -> { Time.now },
-                     alert_store: nil)
+                     alert_store: nil, conversation_store: nil)
         @telegram = telegram
         @logger = logger
         @bot_config = bot_config
         @daemon_enabled = daemon_enabled
         @now = now
         @alert_store = alert_store || AlertStore.new(path: bot_config["alert_state_file"], logger: logger)
+        # Optional: when present, an active answer conversation for a slug
+        # suppresses that slug's proactive "questions waiting" push (the
+        # operator is already answering). nil = no suppression (older
+        # wiring / tests that don't inject it).
+        @conversation_store = conversation_store
       end
 
       def process_rows(rows)
@@ -54,6 +59,7 @@ module Hive
       def current_notifications(rows)
         Array(rows).each_with_object({}) do |row, out|
           next if suppress_ready_action?(row)
+          next if suppress_active_conversation?(row)
 
           notification = NotificationBuilders.build(row, logger: @logger)
           next unless notification
@@ -61,6 +67,19 @@ module Hive
           fingerprint = NotificationBuilders.fingerprint(row)
           out[fingerprint] ||= { row: row, notification: notification }
         end
+      end
+
+      # Suppress the proactive "X is waiting for your input" push for a
+      # slug the operator is actively answering. Only `needs_input` rows
+      # (brainstorm Q&A / review triage) are gated — error / recovery
+      # alerts always fire even mid-answer. The first alert still fires
+      # (no conversation exists until the operator taps "Answer in chat"),
+      # and an abandoned conversation stops suppressing once it TTL-expires.
+      def suppress_active_conversation?(row)
+        return false unless @conversation_store
+        return false unless row.action == "needs_input"
+
+        @conversation_store.active_for_slug?(row.slug)
       end
 
       def immediate_on_fresh_install?(row)

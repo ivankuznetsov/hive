@@ -72,6 +72,19 @@ module Hive
         @states.values.count { |state| state.chat_id == chat_id && state.awaiting_confirm }
       end
 
+      # True when ANY chat has a non-expired answer conversation for
+      # `slug`. The NotificationDispatcher uses this to suppress the
+      # proactive "questions waiting" push while the operator is actively
+      # answering — otherwise a brainstorm that briefly flaps out of
+      # WAITING (e.g. a mid-answer daemon resume) re-fires the alert and
+      # spams someone who is clearly already on it. `prune!` drops
+      # TTL-expired states first, so an abandoned conversation stops
+      # suppressing the alert once it ages out (re-engaging the operator).
+      def active_for_slug?(slug)
+        prune!
+        @states.values.any? { |state| state.slug == slug }
+      end
+
       def prune!
         cutoff = @now.call - @ttl_sec
         @states.delete_if { |_key, state| state.updated_at < cutoff }

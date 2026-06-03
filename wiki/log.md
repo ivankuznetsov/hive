@@ -60,6 +60,20 @@ Append-only log of all wiki operations.
 
 **Tests:** Verified `Hive::VERSION == "0.2.0"`, built `hive-cli-0.2.0.gem` locally, and checked for stale `v0.1.10` installer references outside the historical changelog entry.
 
+## [2026-06-03T02:00:00Z] fix - bot suppresses the "questions waiting" push while the operator is actively answering
+
+**Action:** Fixed the bot re-pushing the proactive "Brainstorm questions are waiting / Tap Answer" alert mid-answer. Root cause: when a brainstorm row briefly flaps out of `WAITING` (e.g. a mid-answer daemon resume re-runs the agent), `NotificationDispatcher#process_recoveries` purges the non-recovery dedup entry immediately (no grace), so the return to `WAITING` re-fires the alert.
+
+- `ConversationStore#active_for_slug?(slug)` - true while any chat has a non-expired answer conversation for the slug (prune-aware).
+- `NotificationDispatcher` now takes an injected `conversation_store` and skips `needs_input` (brainstorm/review "waiting") pushes for a slug being actively answered (`suppress_active_conversation?`). The first alert still fires; error/recovery alerts are never gated; an abandoned conversation stops suppressing once it TTL-expires.
+- Wired through `Supervisor` (initial build + SIGHUP reload).
+
+The deeper cause (the daemon resuming mid-Q&A) is fixed separately by the answers-pending gate (PR #268).
+
+**Tests:** full suite 4438 runs / 0 failures, 100% line coverage, rubocop clean.
+
+**Pages:** updated [[modules/bot]] (`NotificationDispatcher` suppress-while-answering).
+
 ## [2026-06-03T01:35:11Z] babysitter - review follow-up skill and init drift guard
 
 **Action:** Review follow-up for the experimental PR babysitter branch. Added the dedicated OpenClaw `/babysit` skill plus the planned `hive-babysit` ClawHub row so the Thor command drift guard covers the new lifecycle surface. Tightened `Hive::Commands::Init::ProjectConfigBinding` so `babysitter_enabled` and `daemon_autostart` remain required prompt-answer keys instead of silently defaulting in the ERB binding. Added a Brakeman false-positive ignore for `Gh#pr_diff_stat`: `Hive::Gh.capture3` uses `Process.spawn` argv form, and the Git revspec is a single argv element rather than shell input. The CI coverage gate exposed untested babysitter lifecycle/error branches; added focused coverage-gap tests, included `test/babysitter/**/*_test.rb` in the default Rake suite, and fixed `Hive::Babysitter::Logger#event` so a rotation reopen failure that falls back to stderr does not continue into `@file.puts` with a nil file handle.
@@ -2825,4 +2839,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/daemon]]
 - [[modules/bot]]
 - [[index]]
+- [[gaps]]
+
+## [2026-06-03T11:10:53Z] bot/wiki - refresh suppress-while-answering coverage after commit b293c7a3
+
+**Action:** Refreshed wiki coverage after commit `b293c7a3` changed `ConversationStore`, `NotificationDispatcher`, `Supervisor` wiring, and the focused bot tests for suppressing proactive `needs_input` pushes while an operator is actively answering a slug. Verified the committed diff and relevant source/test files, confirmed [[modules/bot]] already described the dispatcher contract, expanded the `ConversationStore` module-map row with the prune-aware `active_for_slug?` role, and recorded the remaining live Telegram/daemon WAITING-flap smoke uncertainty in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/bot]]
 - [[gaps]]

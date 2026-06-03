@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/bot/status_watcher"
 require "hive/bot/notification_dispatcher"
+require "hive/bot/conversation_store"
 
 class HiveBotNotificationDispatcherTest < Minitest::Test
   include HiveTestHelper
@@ -39,7 +40,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   end
 
   def dispatcher(path: nil, now: Time.utc(2026, 5, 25, 10, 0, 0), daemon_enabled: ->(_project) { false },
-                 telegram: self.telegram, fresh_install: false)
+                 telegram: self.telegram, fresh_install: false, conversation_store: nil)
     @clock = now
     d = Hive::Bot::NotificationDispatcher.new(
       telegram: telegram,
@@ -50,7 +51,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
         "recovery_reminder_window_sec" => 28_800
       },
       daemon_enabled: daemon_enabled,
-      now: -> { @clock }
+      now: -> { @clock },
+      conversation_store: conversation_store
     )
     # Most tests assert the FIRST tick alerts. The fresh_install
     # seeding behaviour gets its own focused tests; mark the
@@ -113,6 +115,46 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 12345, telegram.messages.first[:chat_id]
     assert_match(/Brainstorm questions/, telegram.messages.first[:text])
     assert_equal :notification_sent, logger.events.last.first
+  end
+
+  # The operator is actively answering this slug → suppress the proactive
+  # "questions waiting" push (it would re-fire mid-answer when the row
+  # flaps out of and back into WAITING, e.g. a daemon resume).
+  NOW = Time.utc(2026, 5, 25, 10, 0, 0)
+
+  def active_conversation_for(slug)
+    store = Hive::Bot::ConversationStore.new(now: -> { NOW })
+    store.start(chat_id: 12345, slug: slug, question_n: 1)
+    store
+  end
+
+  def test_needs_input_alert_suppressed_while_answering
+    d = dispatcher(now: NOW, conversation_store: active_conversation_for("slug-260514-abcd"))
+
+    d.process_rows([ row ])
+
+    assert_empty telegram.messages,
+                 "no proactive push for a slug with an active answer conversation"
+  end
+
+  def test_needs_input_alert_fires_with_store_but_no_active_conversation
+    d = dispatcher(now: NOW, conversation_store: active_conversation_for("a-different-slug"))
+
+    d.process_rows([ row ])
+
+    assert_equal 1, telegram.messages.size,
+                 "a conversation for another slug must not suppress this slug's alert"
+  end
+
+  # Only needs_input alerts are gated — an error/recovery alert still fires
+  # even while the operator is answering that slug.
+  def test_recovery_alert_not_suppressed_by_active_conversation
+    d = dispatcher(now: NOW, conversation_store: active_conversation_for("slug-260514-abcd"))
+
+    d.process_rows([ recovery_row(slug: "slug-260514-abcd") ])
+
+    assert_equal 1, telegram.messages.size,
+                 "recovery/error alerts must fire even mid-answer"
   end
 
   def test_same_row_twice_sends_one_notification

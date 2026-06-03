@@ -1,0 +1,79 @@
+require "test_helper"
+require "hive/bot/idea_draft_store"
+
+class HiveBotIdeaDraftStoreTest < Minitest::Test
+  include HiveTestHelper
+
+  def setup
+    @now = Time.utc(2026, 6, 3, 12, 0, 0)
+    @store = Hive::Bot::IdeaDraftStore.new(ttl_sec: 900, now: -> { @now })
+  end
+
+  def test_start_and_get_round_trip
+    draft = @store.start(chat_id: 1, phase: :awaiting_text, text: nil, token: "tok")
+
+    assert_equal draft, @store.get(chat_id: 1)
+    assert_equal :awaiting_text, draft.phase
+    assert_equal "tok", draft.token
+    assert_equal [], draft.attachments
+  end
+
+  def test_set_text_and_project_advance_phase
+    @store.start(chat_id: 1, phase: :awaiting_text, token: "tok")
+
+    @store.set_text(chat_id: 1, text: "fix login")
+    @store.set_project(chat_id: 1, project: "hive")
+    @store.enter_collecting(chat_id: 1)
+    draft = @store.get(chat_id: 1)
+
+    assert_equal "fix login", draft.text
+    assert_equal "hive", draft.project
+    assert_equal :collecting_files, draft.phase
+  end
+
+  def test_append_attachments_keeps_monotonic_counter
+    @store.start(chat_id: 1, phase: :collecting_files, token: "tok")
+
+    @store.append_attachment(chat_id: 1, label: "image1", dest_name: "bug-1.jpg",
+                             staging_path: "/tmp/one", ext: "jpg")
+    @store.append_attachment(chat_id: 1, label: "image2", dest_name: "bug-2.pdf",
+                             staging_path: "/tmp/two", ext: "pdf")
+    draft = @store.get(chat_id: 1)
+
+    assert_equal 2, draft.counter
+    assert_equal %w[image1 image2], draft.attachments.map { |a| a.fetch(:label) }
+    assert_equal 3, @store.next_attachment_number(chat_id: 1)
+  end
+
+  def test_ttl_prune_removes_stale_draft
+    @store.start(chat_id: 1, phase: :awaiting_project, text: "fix", token: "tok")
+
+    @now += 901
+    @store.prune!
+
+    assert_nil @store.get(chat_id: 1)
+  end
+
+  def test_second_start_replaces_first_and_cleans_staging_dir
+    with_tmp_dir do
+      @store.start(chat_id: 1, phase: :collecting_files, text: "old", token: "old")
+      dir = @store.ensure_staging_dir(chat_id: 1)
+      File.write(File.join(dir, "file.txt"), "bytes")
+      assert_path_exists dir
+
+      @store.start(chat_id: 1, phase: :awaiting_text, token: "new")
+
+      refute_path_exists dir
+      assert_equal "new", @store.get(chat_id: 1).token
+    end
+  end
+
+  def test_find_by_token_ignores_expired_drafts
+    @store.start(chat_id: 1, phase: :awaiting_project, text: "fix", token: "tok")
+
+    assert_equal 1, @store.find_by_token("tok").chat_id
+    @now += 901
+
+    assert_nil @store.find_by_token("tok")
+  end
+end

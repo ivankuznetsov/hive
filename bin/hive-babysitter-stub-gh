@@ -31,6 +31,7 @@ def api_read_only?(rest)
   return false unless rest.first == "api"
 
   method = nil
+  payload = false
   index = 1
   while index < rest.length
     arg = rest[index]
@@ -41,12 +42,23 @@ def api_read_only?(rest)
     when /\A--method=(.+)\z/
       method = Regexp.last_match(1)
       index += 1
+    when /\A-X=?(.+)\z/
+      method = Regexp.last_match(1)
+      index += 1
+    when "-f", "-F", "--raw-field", "--field", "--input"
+      payload = true
+      index += 2
+    when /\A-f.+\z/, /\A-F.+\z/, /\A--raw-field=.+\z/, /\A--field=.+\z/, /\A--input=.+\z/
+      payload = true
+      index += 1
     else
       index += 1
     end
   end
 
-  method.nil? || method.casecmp("GET").zero?
+  return method.casecmp("GET").zero? if method
+
+  !payload
 end
 
 def read_only?(rest)

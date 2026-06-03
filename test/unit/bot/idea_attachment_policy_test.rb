@@ -76,6 +76,29 @@ class HiveBotIdeaAttachmentPolicyTest < Minitest::Test
     end
   end
 
+  def test_extensionless_unknown_mime_document_is_rejected_not_coerced_to_png
+    # No filename extension AND an unrecognized mime_type resolves ext=nil.
+    # The png DEFAULT_EXTENSION must not silently rescue it onto the allowlist.
+    result = classify(update(document: {
+      file_id: "doc",
+      file_name: "archive",
+      mime_type: "application/zip",
+      file_size: 1
+    }))
+
+    assert_equal :disallowed_type, result.status
+  end
+
+  def test_extensionless_no_mime_document_is_rejected
+    result = classify(update(document: {
+      file_id: "doc",
+      file_name: "",
+      file_size: 1
+    }))
+
+    assert_equal :disallowed_type, result.status
+  end
+
   def test_document_extension_can_fall_back_to_mime_type
     result = classify(update(document: {
       file_id: "doc",

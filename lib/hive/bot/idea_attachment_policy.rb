@@ -24,6 +24,12 @@ module Hive
 
         item = media_item(update)
         ext = item[:ext]
+        # A document with no filename extension and an unrecognized mime_type
+        # resolves ext=nil here. ComposerStaging.normalized_extension would
+        # silently coerce that to the "png" DEFAULT_EXTENSION — which is on the
+        # allowlist — letting arbitrary binaries (zip, executables) through as
+        # bug-N.png. Reject the empty/nil resolved ext before normalizing.
+        return Result.new(status: :disallowed_type) if ext.to_s.strip.empty?
         return Result.new(status: :disallowed_type) unless allowed_extension?(ext)
 
         size = item[:file_size].to_i

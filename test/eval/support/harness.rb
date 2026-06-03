@@ -2,6 +2,7 @@ require "time"
 require "tmpdir"
 require "hive/config"
 require "hive/bot/conversation_store"
+require "hive/bot/idea_draft_store"
 require "hive/bot/notification_dispatcher"
 require "hive/bot/router"
 require "hive/bot/status_watcher"
@@ -25,10 +26,20 @@ module Hive
           Hive::Eval::FakeChildSupervisor.new(logger: @logger, now: -> { current_time })
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: @bot_config.fetch("conversation_ttl_sec"))
+        # Router and Supervisor must share one idea-draft store: the router
+        # opens/updates the draft while classifying, and the supervisor reads
+        # it back to stage attachments and commit on Done. Production wires
+        # this through Supervisor#build_router; the harness injects a router,
+        # so share the instance explicitly or the commit sees no draft.
+        @idea_draft_store = Hive::Bot::IdeaDraftStore.new(
+          ttl_sec: @bot_config.fetch("idea_draft_ttl_sec", 900),
+          now: -> { current_time }
+        )
         @router = Hive::Bot::Router.new(
           bot_config: @bot_config,
           logger: @logger,
-          conversation_store: @conversation_store
+          conversation_store: @conversation_store,
+          idea_draft_store: @idea_draft_store
         )
         @notification_dispatcher = notification_dispatcher ||
           Hive::Bot::NotificationDispatcher.new(
@@ -50,6 +61,7 @@ module Hive
           router: @router,
           child_supervisor: @child_supervisor,
           conversation_store: @conversation_store,
+          idea_draft_store: @idea_draft_store,
           dry_run: false
         )
       end

@@ -32,6 +32,8 @@ module Hive
         slash_idea
         callback_idea_project_pick
         callback_idea_project_new
+        callback_idea_done
+        callback_idea_skip
         callback_open_laptop
         callback_reject
         unknown

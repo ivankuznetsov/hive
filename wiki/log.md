@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T11:05:00Z] babysitter - skip draft PRs explicitly
+
+**Action:** Fixed the babysitter PR selector so GitHub draft PRs are skipped before worktree materialization and agent spawn. The prior label filter treated `draft` as a label, but GitHub exposes draft state as `isDraft`; live babysitter activity showed draft PR #278 being selected despite `labels_ignore: [draft]`. Added the `draft_pr` skipped event outcome and focused ProjectTick coverage.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+
 ## [2026-06-03T10:48:47Z] babysitter - refresh dry-run stub API coverage
 
 **Action:** Refreshed wiki command/API surface coverage after commit `889b0b65` changed the babysitter dry-run `git` and `gh` stub executables from mutating-command blocklists to read-only allowlists. Verified the committed diff and current source for `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/babysitter/gh_ops.rb`, and `test/unit/babysitter/dry_run_env_test.rb`. Expanded the `hive babysit --dry-run` docs with the exact current pass-through surface, refreshed babysitter module metadata, and recorded the remaining live-agent dry-run smoke uncertainty. Did not run `qmd update` or `qmd embed`.

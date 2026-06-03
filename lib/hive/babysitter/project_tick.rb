@@ -90,6 +90,16 @@ module Hive
         limit = cfg.dig("babysitter", "max_concurrent_prs").to_i
         prs.filter_map do |pr|
           number = pr["number"]
+          if pr["isDraft"] == true
+            Hive::Babysitter::Events.emit(
+              project: project_entry,
+              pr: number,
+              action: "skipped",
+              outcome: "draft_pr"
+            )
+            next
+          end
+
           labels = Array(pr["labels"]).filter_map { |entry| entry.is_a?(Hash) ? entry["name"] : entry }
           if (labels.map { |label| label.to_s.downcase } & ignored).any?
             Hive::Babysitter::Events.emit(

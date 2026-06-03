@@ -1,17 +1,19 @@
 ---
 title: CLI Surface
 type: api
-source: bin/hive, lib/hive/cli.rb
+source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
 updated: 2026-06-03
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. `hive tui` is the human-only dashboard over `hive status`; `hive daemon` auto-advances safe rows; `hive babysit` runs the experimental PR babysitter; `hive bot` runs the Telegram mobile surface for human-input gates. `status`, `run`, `approve`, `findings`, `markers`, `metrics`, daemon lifecycle/install/enrollment/queue, and bot lifecycle support `--json` where documented. Process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI through `hive`, plus an `hv` fallback entrypoint for hosts where Apache Hive shadows the `hive` name. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. `hive tui` is the human-only dashboard over `hive status`; `hive daemon` auto-advances safe rows; `hive babysit` runs the experimental PR babysitter; `hive bot` runs the Telegram mobile surface for human-input gates. `status`, `run`, `approve`, `findings`, `markers`, `metrics`, daemon lifecycle/install/enrollment/queue, and bot lifecycle support `--json` where documented. Process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
+
+`bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. See [[operating]] for channel-level `hv` behavior.
 
 ## Command table
 

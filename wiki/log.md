@@ -2889,3 +2889,14 @@ TTL config.
 - [[modules/bot]]
 - [[commands/bot]]
 - [[gaps]]
+
+## [2026-06-03T13:27:55Z] cli/install — refresh hv fallback entrypoint coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after the `hv` fallback change updated `bin/hv` and added `test/unit/hv_test.rb`. Verified the committed diff plus the current `bin/hv`, install/README references, packaging references, [[cli]], [[operating]], and [[testing]]. Documented that `hv` probes only `HIVE_BIN_OVERRIDE`, XDG, Homebrew, and `/usr/local/bin` candidates and intentionally no longer falls through to `/usr/bin/hive` or `/opt/hive/bin/hive`; added unit-test coverage for the override path and recorded the missing live Apache Hive collision smoke evidence. Page coverage count did not change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[operating]]
+- [[testing]]
+- [[index]]
+- [[gaps]]

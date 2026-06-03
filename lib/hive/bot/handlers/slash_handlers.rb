@@ -68,6 +68,7 @@ module Hive
 
         def media(update)
           draft = @idea_draft_store.get(chat_id: update.chat_id)
+          started_here = draft.nil?
           caption = update.effective_text.to_s.strip
           if draft.nil?
             text = caption.empty? || caption.start_with?("/") ? nil : caption
@@ -79,15 +80,27 @@ module Hive
             )
           end
 
-          stage_media_result(update, draft: draft, after_stage: media_after_stage_reply(draft))
+          result = stage_media_result(update, draft: draft, after_stage: media_after_stage_reply(draft))
+          # A bare media message (no existing draft, no /idea) that the policy
+          # rejects must not leave the draft we just opened behind: an
+          # :awaiting_text phantom would hijack the operator's next unrelated
+          # text into idea capture. Clear it when nothing actually staged.
+          @idea_draft_store.clear(chat_id: update.chat_id) if started_here && result.action != :stage_attachment
+          result
         end
 
         private
 
         def start_text_capture(update)
-          @idea_draft_store.start(chat_id: update.chat_id, phase: :awaiting_text,
-                                  token: SecureRandom.hex(4))
-          @result_class.new(action: :reply, text: "Send the idea text in your next message.")
+          draft = @idea_draft_store.start(chat_id: update.chat_id, phase: :awaiting_text,
+                                          token: SecureRandom.hex(4))
+          has_media = update.respond_to?(:media?) && update.media?
+          return @result_class.new(action: :reply, text: "Send the idea text in your next message.") unless has_media
+
+          # `/idea` sent with a photo/document but no caption text lands here.
+          # Stage the file now (parity with start_idea) instead of dropping it
+          # while the draft waits for the idea text.
+          stage_media_result(update, draft: draft, after_stage: media_after_stage_reply(draft))
         end
 
         def start_idea(update, text:, stage_media: false)
@@ -128,6 +141,21 @@ module Hive
           end
         end
 
+        # Both limits are config-driven (idea_attachment_max_bytes /
+        # idea_attachment_max_count); interpolate them into operator copy so
+        # the wording can't drift from an operator override. Fall back to the
+        # documented 20 MB default when the byte limit is unset.
+        def max_attachment_mb
+          bytes = @max_attachment_bytes.to_i
+          bytes = 20 * 1024 * 1024 if bytes <= 0
+          (bytes.to_f / (1024 * 1024)).round
+        end
+
+        def max_attachment_count
+          count = @max_attachment_count.to_i
+          count.positive? ? count : 10
+        end
+
         def stage_media_result(update, draft:, after_stage:)
           policy = @idea_attachment_policy.classify(
             update,
@@ -149,12 +177,13 @@ module Hive
               }
             )
           when :too_large
-            @result_class.new(action: :reply, text: "That attachment is too large. Send a file under 20 MB.")
+            @result_class.new(action: :reply, text: "That attachment is too large. Send a file under #{max_attachment_mb} MB.")
           when :disallowed_type
             @result_class.new(action: :reply,
                               text: "Unsupported attachment type. Send jpg, png, webp, gif, pdf, txt, md, or docx.")
           when :cap_reached
-            @result_class.new(action: :reply, text: "This idea already has 10 attachments. Press Done to capture it.")
+            @result_class.new(action: :reply,
+                              text: "This idea already has #{max_attachment_count} attachments. Press Done to capture it.")
           else
             @result_class.new(action: :reply, text: "I could not attach that file.")
           end

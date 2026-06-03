@@ -396,7 +396,7 @@ module Hive
 
         info = @telegram.get_file(file_id: payload.fetch(:file_id))
         if remote_file_too_large?(info[:file_size])
-          return safe_send_message(chat_id: update.chat_id, text: "That attachment is too large. Send a file under 20 MB.")
+          return safe_send_message(chat_id: update.chat_id, text: "That attachment is too large. Send a file under #{idea_attachment_max_mb} MB.")
         end
 
         bytes = @telegram.download_file(file_path: info.fetch(:file_path))
@@ -426,7 +426,15 @@ module Hive
 
       def remote_file_too_large?(file_size)
         size = file_size.to_i
-        size.positive? && size > @config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024).to_i
+        size.positive? && size > idea_attachment_max_bytes
+      end
+
+      def idea_attachment_max_bytes
+        @config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024).to_i
+      end
+
+      def idea_attachment_max_mb
+        (idea_attachment_max_bytes.to_f / (1024 * 1024)).round
       end
 
       def execute_idea_commit(result, update)
@@ -447,6 +455,10 @@ module Hive
           ).call!
         end
         @idea_draft_store.clear(chat_id: chat_id)
+        # Clear the Done/Skip keyboard on the tapped message so a re-tap of the
+        # just-captured idea doesn't reply "That idea draft expired" (the draft
+        # is gone by design) — reads like an error for a successful capture.
+        clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
         safe_send_message(chat_id: update.chat_id,
                           text: "Captured your idea in #{draft.project}. It's in the inbox - move it to 2-brainstorm to start.")
       rescue Hive::Error, SystemCallError, IOError => e

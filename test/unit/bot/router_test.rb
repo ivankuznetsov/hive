@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/bot/router"
 require "hive/bot/conversation_store"
+require "hive/bot/idea_draft_store"
 require "hive/bot/telegram"
 
 class HiveBotRouterTest < Minitest::Test
@@ -8,6 +9,7 @@ class HiveBotRouterTest < Minitest::Test
   def setup
     @logger = StubLogger.new
     @store = Hive::Bot::ConversationStore.new
+    @draft_store = Hive::Bot::IdeaDraftStore.new
     @projects = [
       { "name" => "hive", "path" => "/tmp/hive", "hive_state_path" => "/tmp/hive/.hive-state" },
       { "name" => "writero", "path" => "/tmp/writero", "hive_state_path" => "/tmp/writero/.hive-state" }
@@ -16,6 +18,7 @@ class HiveBotRouterTest < Minitest::Test
       bot_config: { "chat_id_allowlist" => [ 12345 ] },
       logger: @logger,
       conversation_store: @store,
+      idea_draft_store: @draft_store,
       projects_provider: -> { @projects }
     )
   end
@@ -164,6 +167,14 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_match(/Unsupported attachment type/, result.text)
+    assert_nil @draft_store.get(chat_id: 12345),
+               "A rejected bare media file must not leave a phantom draft that hijacks the next message"
+
+    # The phantom-draft regression: the next ordinary text must NOT be routed
+    # into idea capture (it used to become :idea_text_capture → project picker).
+    followup = @router.handle(update(text: "just chatting"))
+    assert_equal :reply, followup.action
+    assert_match(/did not understand/, followup.text)
   end
 
   def test_idea_text_capture_does_not_hijack_active_brainstorm_conversation

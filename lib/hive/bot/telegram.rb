@@ -109,6 +109,13 @@ module Hive
           file_path: value(file, :file_path),
           file_size: value(file, :file_size)
         }
+      rescue Faraday::Error, ::Telegram::Bot::Exceptions::ResponseError => e
+        # getFile can fail before any byte is downloaded: an expired/invalid
+        # file_id makes Telegram raise ResponseError, and the network leg can
+        # raise any Faraday error. Map both to DownloadError so the staging
+        # path replies "please send it again" (AE-6) instead of letting the
+        # error escape to the poll-loop rescue with no operator feedback.
+        raise DownloadError, e.message
       end
 
       def download_file(file_path:)
@@ -117,7 +124,7 @@ module Hive
         raise DownloadError, "telegram file download returned HTTP #{status}" unless status == 200
 
         value(response, :body).to_s.b
-      rescue Faraday::TimeoutError, Faraday::ConnectionFailed => e
+      rescue Faraday::Error => e
         raise DownloadError, e.message
       end
 

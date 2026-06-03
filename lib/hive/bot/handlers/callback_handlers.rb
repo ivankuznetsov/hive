@@ -177,7 +177,8 @@ module Hive
           draft = @idea_draft_store&.find_by_token(token)
           return @result_class.new(action: :reply, text: "That idea draft expired. Send /idea again.") unless draft
 
-          @result_class.new(action: :commit_idea, project: draft.project, attachment: { chat_id: draft.chat_id })
+          @result_class.new(action: :commit_idea, project: draft.project,
+                            attachment: { chat_id: draft.chat_id }, clear_keyboard: true)
         end
 
         def done_keyboard(token)

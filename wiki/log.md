@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
+
+**Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):
+
+- **#251** added `dispatch_result_state_home:` injection + accessor to `Dispatcher`, used by `notify_dispatch_failure` AND `prune_dispatch_results` (both operate on the result queue). Previously they used `dispatch_request_state_home`, so a test sandboxing only the request queue silently wrote/pruned result notices where the bot never looked. Updated the reap/prune tests to inject the result home; added a focused test asserting notices land in the result home, not the request home.
+- **#252** dropped both `@supervisor.respond_to?(:enforce_timeouts)` / `respond_to?(:update_timeouts)` seams; added `enforce_timeouts(now:)` to every `FakeSupervisor` (six doubles across unit + integration tests) so the dispatcher can call them unconditionally.
+- **#253** extracted `Hive::Daemon::QueueDirectory.directory_for(dirname:, state_home:)` and reused it from both `DispatchRequestQueue#directory` and `DispatchResultQueue#directory`, so the owner-only (0700) invariant lives in one place. Documented in [[modules/daemon]].
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
+
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 
 **Action:** Refreshed command/API, executable-entrypoint, install, and dependency wiki coverage after PR #289 prepared `0.2.0`. Read the required wiki pages first, inspected the release-prep diff, and verified the release claims against `lib/hive.rb`, `Gemfile.lock`, `README.md`, `install.md`, `CHANGELOG.md`, `hive.gemspec`, the babysitter dry-run stubs, `Hive::Babysitter::DryRunEnv`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated stale release/install examples from `v0.1.11` to `v0.2.0`, refreshed dependency rows for `sqlite3`, `minitest`, and `rubocop`, clarified that SQLite is limited to token-usage metrics rather than workflow state, and recorded that no in-tree artifact proves published `v0.2.0` channel verification yet. Did not run `qmd update` or `qmd embed`.

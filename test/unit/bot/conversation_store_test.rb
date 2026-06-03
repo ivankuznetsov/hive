@@ -74,4 +74,16 @@ class HiveBotConversationStoreTest < Minitest::Test
 
     assert_nil store.get(chat_id: 123, slug: "slug")
   end
+
+  def test_active_for_slug_tracks_any_chat_and_respects_ttl
+    refute store.active_for_slug?("slug"), "no conversation yet"
+
+    store.start(chat_id: 999, slug: "slug", question_n: 1)
+    assert store.active_for_slug?("slug"), "active for any chat answering the slug"
+    refute store.active_for_slug?("other-slug")
+
+    # Past the TTL the abandoned conversation no longer suppresses.
+    @now += 61
+    refute store.active_for_slug?("slug"), "a TTL-expired conversation is not active"
+  end
 end

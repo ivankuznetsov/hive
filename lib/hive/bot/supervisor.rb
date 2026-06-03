@@ -72,7 +72,8 @@ module Hive
           Hive::Bot::NotificationDispatcher.new(
             telegram: @telegram,
             logger: @logger,
-            bot_config: config
+            bot_config: config,
+            conversation_store: @conversation_store
           )
         @shutdown = false
         @reload = false
@@ -1102,7 +1103,8 @@ module Hive
         @notification_dispatcher = Hive::Bot::NotificationDispatcher.new(
           telegram: @telegram,
           logger: @logger,
-          bot_config: @config
+          bot_config: @config,
+          conversation_store: @conversation_store
         )
         @conversation_store.update_ttl(@config.fetch("conversation_ttl_sec")) if @conversation_store.respond_to?(:update_ttl)
         # Drop the once-per-process unknown-stage-log cache so SIGHUP can

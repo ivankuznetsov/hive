@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/bot/supervisor"
+require "hive/commands/init"
 
 class HiveBotSupervisorTest < Minitest::Test
   include HiveTestHelper
@@ -58,7 +59,7 @@ class HiveBotSupervisorTest < Minitest::Test
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
                         :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
-                        :intent,
+                        :intent, :attachment,
                         keyword_init: true)
   end
 
@@ -162,6 +163,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @status_watcher = FakeStatusWatcher.new(result: StatusResult.new(ok: true, rows: []))
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
+    @idea_draft_store = Hive::Bot::IdeaDraftStore.new
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
     @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [], sequences: [], discarded_sequences: [])
     # Drive the real constructor so any future invariant added to
@@ -172,7 +174,10 @@ class HiveBotSupervisorTest < Minitest::Test
       "chat_id_allowlist" => [ 42, 43 ],
       "clear_retry_grace_sec" => 1,
       "conversation_ttl_sec" => 60,
-      "poll_interval_sec" => 1
+      "poll_interval_sec" => 1,
+      "idea_attachment_max_bytes" => 20 * 1024 * 1024,
+      "idea_attachment_max_count" => 10,
+      "idea_draft_ttl_sec" => 900
     }
     @supervisor = Hive::Bot::Supervisor.new(
       config: @config,
@@ -184,6 +189,7 @@ class HiveBotSupervisorTest < Minitest::Test
       router: FakeRouter.new,
       child_supervisor: @child_supervisor,
       conversation_store: @conversation_store,
+      idea_draft_store: @idea_draft_store,
       dry_run: false,
       dispatch_request_writer: @dispatch_request_writer
     )
@@ -337,6 +343,89 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_nil failure
     assert_equal "answer_callback_query", failure.fetch(:payload).fetch(:source)
     assert_equal "cbq-7", failure.fetch(:payload).fetch(:callback_query_id)
+  end
+
+  def test_stage_attachment_downloads_and_appends_to_draft
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+    get_file_ids = []
+    download_paths = []
+    @telegram.define_singleton_method(:get_file) do |file_id:|
+      get_file_ids << file_id
+      { file_path: "photos/file.jpg", file_size: 5 }
+    end
+    @telegram.define_singleton_method(:download_file) do |file_path:|
+      download_paths << file_path
+      "bytes".b
+    end
+    result = FakeRouter::Result.new(
+      action: :stage_attachment,
+      text: "Attached.",
+      attachment: { chat_id: 42, file_id: "photo-id", file_size: 5, ext: "jpg" }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    assert_equal [ "photo-id" ], get_file_ids
+    assert_equal [ "photos/file.jpg" ], download_paths
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal 1, draft.attachments.size
+    attachment = draft.attachments.first
+    assert_equal "image1", attachment.fetch(:label)
+    assert_equal "bug-1.jpg", attachment.fetch(:dest_name)
+    assert_equal "bytes", File.binread(attachment.fetch(:staging_path))
+    assert_equal "Attached.", @telegram.messages.last.fetch(:text)
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_stage_attachment_download_failure_preserves_draft
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "photos/file.jpg", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) do |file_path:|
+      raise Hive::Bot::Telegram::DownloadError, "offline"
+    end
+    result = FakeRouter::Result.new(
+      action: :stage_attachment,
+      attachment: { chat_id: 42, file_id: "photo-id", file_size: 5, ext: "jpg" }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    assert_equal [], @idea_draft_store.get(chat_id: 42).attachments
+    assert_match(/please send it again/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_commit_idea_uses_commands_new_with_attachments_and_cleans_draft
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix login", token: "tok")
+        @idea_draft_store.set_project(chat_id: 42, project: project)
+        staging_dir = @idea_draft_store.ensure_staging_dir(chat_id: 42)
+        staging_path = File.join(staging_dir, "image-1.jpg")
+        File.binwrite(staging_path, "image-bytes")
+        @idea_draft_store.append_attachment(
+          chat_id: 42,
+          label: "image1",
+          dest_name: "bug-1.jpg",
+          staging_path: staging_path,
+          ext: "jpg"
+        )
+
+        @supervisor.send(:execute_result,
+                         FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                         Update.new(chat_id: 42, update_id: 1))
+
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "fix-login-*")]
+        assert_equal 1, inbox.size
+        assert_includes File.read(File.join(inbox.first, "idea.md")), "![](assets/bug-1.jpg)"
+        assert_equal "image-bytes", File.binread(File.join(inbox.first, "assets", "bug-1.jpg"))
+        assert_nil @idea_draft_store.get(chat_id: 42)
+        refute_path_exists staging_dir
+        assert_match(/Captured your idea/, @telegram.messages.last.fetch(:text))
+      end
+    end
   end
 
   def test_latest_status_rows_returns_cached_rows_when_status_tick_already_ran

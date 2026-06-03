@@ -49,6 +49,7 @@ module Hive
         update_check_no_result
         update_check_error
         update_nudge_no_command
+        version_drift
         daemon_dispatch_baselines_corrupt
         daemon_dispatch_baselines_lock_error
         daemon_dispatch_baselines_write_error

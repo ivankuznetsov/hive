@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-06-03
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -64,7 +64,9 @@ On success, the babysitter is silent on the PR. On failure, timeout, or budget e
 
 ## Dry Run
 
-`--dry-run` sets the dispatcher dry-run flag. The agent prompt tells the agent to write `.babysitter-dry-run-plan.md` instead of mutating GitHub, and `Hive::Babysitter::DryRunEnv` prepends a PATH overlay where `git` and `gh` point at babysitter stubs. The stubs skip common mutating commands (`git push`, `gh pr comment`, `gh pr edit`, `gh run rerun`, etc.) and append the skipped command to `.babysitter-dry-run-skipped.log`.
+`--dry-run` sets the dispatcher dry-run flag. The agent prompt tells the agent to write `.babysitter-dry-run-plan.md` instead of mutating GitHub, and `Hive::Babysitter::DryRunEnv` prepends a PATH overlay where `git` and `gh` point at babysitter stubs. The stubs are default-deny: they strip leading global options, pass through only known read-only commands, and skip anything mutating or unknown while appending the skipped invocation to `.babysitter-dry-run-skipped.log`.
+
+The current `git` stub read-only allowlist is `branch` (bare, `--show-current`, or `--contains`), `cat-file`, `describe`, `diff`, `grep`, `log`, `ls-files`, `ls-tree`, `merge-base`, `remote`, `rev-list`, `rev-parse`, `show`, `status`, and `config` when paired with `--get`, `--get-all`, or `--list`. The current `gh` stub read-only allowlist is `api` with no method or GET, `auth status`, `pr checks/diff/list/status/view`, `run list/view/watch`, `repo view`, and `workflow list/view`.
 
 The dry-run guard is best-effort: an agent that invokes absolute binary paths can bypass the PATH overlay. Use throwaway repos for destructive validation until a stronger sandbox exists.
 

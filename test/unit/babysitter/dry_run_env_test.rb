@@ -22,4 +22,74 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes log, "gh pr comment 42 --body hi skipped"
     end
   end
+
+  def test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands
+    with_tmp_dir do |dir|
+      real_gh = recording_binary(dir, "real-gh")
+      real_git = recording_binary(dir, "real-git")
+      log_path = File.join(dir, "skipped.log")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_REAL_GIT" => real_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path
+      }
+
+      assert_stubbed env, "gh", "-R", "owner/repo", "pr", "ready", "42"
+      assert_stubbed env, "gh", "api", "-X", "POST", "repos/owner/repo/dispatches"
+      assert_stubbed env, "gh", "workflow", "run", "release.yml"
+      assert_stubbed env, "gh", "totally-new-write-command", "arg"
+      assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
+      assert_passes env, "gh", "api", "repos/owner/repo"
+
+      assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
+      assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
+      assert_stubbed env, "git", "merge", "feature"
+      assert_stubbed env, "git", "unknown-write-command"
+      assert_passes env, "git", "-C", dir, "status", "--short"
+      assert_passes env, "git", "config", "--get", "remote.origin.url"
+
+      skipped = File.read(log_path)
+      assert_includes skipped, "gh -R owner/repo pr ready 42 skipped"
+      assert_includes skipped, "gh api -X POST repos/owner/repo/dispatches skipped"
+      assert_includes skipped, "gh workflow run release.yml skipped"
+      assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
+      assert_includes skipped, "git commit -m dry run must not commit skipped"
+      assert_includes skipped, "git merge feature skipped"
+
+      real_invocations = File.read(File.join(dir, "real.log"))
+      assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
+      assert_includes real_invocations, "real-gh api repos/owner/repo"
+      assert_includes real_invocations, "real-git -C #{dir} status --short"
+      assert_includes real_invocations, "real-git config --get remote.origin.url"
+    end
+  end
+
+  private
+
+  def assert_stubbed(env, binary, *args)
+    _out, err, status = Open3.capture3(env, stub_path(binary), *args)
+    assert status.success?, err
+    assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+  end
+
+  def assert_passes(env, binary, *args)
+    _out, err, status = Open3.capture3(env, stub_path(binary), *args)
+    assert status.success?, err
+  end
+
+  def recording_binary(dir, name)
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
+        file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
+      end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def stub_path(binary)
+    File.expand_path("../../../bin/hive-babysitter-stub-#{binary}", __dir__)
+  end
 end

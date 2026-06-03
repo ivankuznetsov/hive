@@ -10,31 +10,40 @@ end
 
 argv = ARGV.dup
 
-# Strip leading git global options so the real subcommand is classified
-# correctly. Without this, `git -C <wt> push` has ARGV[0] == "-C" and
-# slips past a bare ARGV[0] check, execing the real git and mutating
-# origin despite dry_run. `-C` and `-c` each consume the following token.
-rest = argv.dup
-loop do
-  case rest.first
-  when "-C", "-c"
-    rest.shift(2)
-  when /\A-/
-    rest.shift
+def stripped_global_options(argv)
+  rest = argv.dup
+  loop do
+    case rest.first
+    when "-C", "-c", "--git-dir", "--work-tree"
+      rest.shift(2)
+    when /\A--git-dir=/, /\A--work-tree=/
+      rest.shift
+    when /\A-/
+      rest.shift
+    else
+      break
+    end
+  end
+  rest
+end
+
+def read_only?(rest)
+  case rest.first.to_s
+  when "branch"
+    rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")
+  when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
+       "remote", "rev-list", "rev-parse", "show", "status"
+    true
+  when "config"
+    rest.include?("--get") || rest.include?("--get-all") || rest.include?("--list")
   else
-    break
+    false
   end
 end
 
-subcommand = rest.first.to_s
-mutating =
-  subcommand == "push" ||
-  (subcommand == "commit" && rest.include?("--amend")) ||
-  (subcommand == "reset" && rest.include?("--hard")) ||
-  (subcommand == "rebase" && (rest & %w[--continue --abort --skip]).any?) ||
-  (subcommand == "merge" && (rest & %w[--continue --abort]).any?)
+rest = stripped_global_options(argv)
 
-if mutating
+unless read_only?(rest)
   log_skip(argv)
   warn "[dry-run] git #{argv.join(' ')} skipped"
   exit 0

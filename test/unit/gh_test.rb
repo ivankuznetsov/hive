@@ -345,6 +345,55 @@ def test_terminate_process_ignores_missing_child
   end
 end
 
+def test_list_open_prs_parses_gh_json_array
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  json = '[{"number":42,"headRefName":"feat","labels":[],"updatedAt":"2026-05-26T10:00:00Z"}]'
+  captured = nil
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+    captured = [ cmd, kwargs ]
+    [ json, "", status ]
+  }) do
+    prs = Hive::Gh.list_open_prs("/tmp/repo")
+    assert_equal 42, prs.first.fetch("number")
+  end
+  assert_includes captured.first, "list"
+  assert_equal "/tmp/repo", captured.last.fetch(:chdir)
+end
+
+def test_list_open_prs_raises_on_gh_error
+  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "boom", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.list_open_prs("/tmp/repo") }
+    assert_match(/gh pr list.*failed/, err.message)
+  end
+end
+
+def test_pr_failing_job_logs_tail_clips_each_job
+  calls = []
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  rollup = {
+    "statusCheckRollup" => [
+      { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" },
+      { "name" => "lint", "databaseId" => 12, "conclusion" => "SUCCESS" }
+    ]
+  }
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+    calls << cmd
+    if cmd.include?("pr")
+      [ JSON.generate(rollup), "", status ]
+    else
+      [ "x" * 100, "", status ]
+    end
+  }) do
+    logs = Hive::Gh.pr_failing_job_logs("/tmp/repo", 42, byte_cap: 20)
+    assert_equal 1, logs.size
+    assert_equal "unit", logs.first.fetch("name")
+    assert_operator logs.first.fetch("log").bytesize, :>, 20
+    assert_includes logs.first.fetch("log"), "truncated"
+  end
+  assert calls.any? { |cmd| cmd.include?("--job") && cmd.include?("11") }
+end
+
 private
 
 class FakeCloseIO

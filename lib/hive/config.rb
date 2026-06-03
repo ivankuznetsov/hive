@@ -2,6 +2,7 @@ require "yaml"
 require "fileutils"
 require "securerandom"
 require "hive/agent_profiles"
+require "hive/babysitter/interval"
 require "hive/paths"
 
 module Hive
@@ -281,6 +282,18 @@ module Hive
       "update" => {
         "check" => true,
         "auto" => true
+      },
+      # Experimental PR babysitter. This is intentionally separate
+      # from the pipeline daemon: it polls open GitHub PRs and asks a
+      # development agent to keep them mergeable.
+      "babysitter" => {
+        "enabled" => false,
+        "interval" => "10m",
+        "max_concurrent_prs" => 2,
+        "labels_ignore" => %w[wip do-not-merge draft],
+        "dry_run" => false,
+        "budget_minutes" => 30,
+        "budget_usd" => 50
       },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
@@ -962,6 +975,7 @@ module Hive
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
+      validate_babysitter!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -986,6 +1000,7 @@ module Hive
       review
       agents
       daemon
+      babysitter
       bot
       rebase
     ].freeze
@@ -1442,6 +1457,54 @@ module Hive
                 "daemon.child_verb_timeouts[#{verb.inspect}] in #{describe_source(source_path)} " \
                 "must be an integer >= 0; got #{secs.inspect} (#{secs.class})"
         end
+      end
+    end
+
+    def validate_babysitter!(cfg, source_path)
+      babysitter = cfg["babysitter"]
+      return if babysitter.nil?
+
+      %w[enabled dry_run].each do |key|
+        value = babysitter[key]
+        next if value.nil? || value == true || value == false
+
+        raise ConfigError,
+              "babysitter.#{key} in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{value.inspect} (#{value.class})"
+      end
+
+      interval = babysitter["interval"]
+      unless interval.nil?
+        # Validate via Interval.parse so a zero/negative interval (0, "0m")
+        # is rejected at load time. The bare format check accepted them and
+        # they only blew up later inside the dispatcher tick, turning a
+        # malformed config into a daemon-loop crash instead of a load-time
+        # ConfigError.
+        begin
+          Hive::Babysitter::Interval.parse(interval)
+        rescue ConfigError => e
+          raise ConfigError, "#{e.message} (in #{describe_source(source_path)})"
+        end
+      end
+
+      {
+        "max_concurrent_prs" => babysitter["max_concurrent_prs"],
+        "budget_minutes" => babysitter["budget_minutes"],
+        "budget_usd" => babysitter["budget_usd"]
+      }.each do |key, value|
+        next if value.nil?
+        next if value.is_a?(Integer) && value >= 1
+
+        raise ConfigError,
+              "babysitter.#{key} in #{describe_source(source_path)} must be an integer >= 1; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+
+      labels = babysitter["labels_ignore"]
+      unless labels.is_a?(Array) && labels.all? { |entry| entry.is_a?(String) }
+        raise ConfigError,
+              "babysitter.labels_ignore in #{describe_source(source_path)} must be an Array of Strings; " \
+              "got #{labels.inspect} (#{labels.class})"
       end
     end
 

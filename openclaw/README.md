@@ -92,6 +92,7 @@ The intended published slugs are:
 | `hive-rebase-status` | `/rebase-status` | `hive rebase-status` |
 | `hive-doctor` | `/doctor` | `hive doctor` |
 | `hive-daemon` | `/daemon` | `hive daemon` |
+| `hive-babysit` | `/babysit` | `hive babysit` |
 | `hive-bot` | `/bot` | `hive bot` |
 | `hive-init` | `/init` | `hive init` |
 

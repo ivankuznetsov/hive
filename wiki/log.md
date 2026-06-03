@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T01:35:11Z] babysitter - review follow-up skill and init drift guard
+
+**Action:** Review follow-up for the experimental PR babysitter branch. Added the dedicated OpenClaw `/babysit` skill plus the planned `hive-babysit` ClawHub row so the Thor command drift guard covers the new lifecycle surface. Tightened `Hive::Commands::Init::ProjectConfigBinding` so `babysitter_enabled` and `daemon_autostart` remain required prompt-answer keys instead of silently defaulting in the ERB binding. Added a Brakeman false-positive ignore for `Gh#pr_diff_stat`: `Hive::Gh.capture3` uses `Process.spawn` argv form, and the Git revspec is a single argv element rather than shell input. The CI coverage gate exposed untested babysitter lifecycle/error branches; added focused coverage-gap tests, included `test/babysitter/**/*_test.rb` in the default Rake suite, and fixed `Hive::Babysitter::Logger#event` so a rotation reopen failure that falls back to stderr does not continue into `@file.puts` with a nil file handle.
+
+**Tests:** `test/unit/openclaw_skills_test.rb` now covers the babysit skill; `test/unit/commands/init_test.rb` continues to require every prompt answer key. `test/unit/babysitter/coverage_gaps_test.rb` pins lifecycle, logger fallback, GitHub operation, and coverage-gate branches.
+
 ## [2026-06-03T20:00:00Z] tui — cursor follows slug across snapshot polls
 
 **Action:** Upgraded `Update.apply_snapshot_arrived` from coord-based reclamping to **slug-identity following**. The prior reclamp (landed 2026-04-28 in the TUI robustness pass) covered drop/truncate snapshot deltas but missed the in-bounds reorder case: when a peer task advanced a stage between two polls, the cursor's `[project_idx, row_idx]` stayed in bounds while a different slug slid under it, so `s` (steer) and Enter dispatched against the row the operator *was* looking at, not the row they thought they were looking at. The fix captures `prior_slug` from the OLD visible snapshot before adopting the new one, then `cursor_for_slug(visible, slug, prior_project_idx)` looks it up in the NEW visible — prior project preferred (slugs are not globally unique across projects), with a global cross-project scan as the fallback so tasks that migrate project boundaries still keep the cursor pinned. When the slug is gone entirely (archived, finalized, filtered out by scope), the helper returns nil and the call chain falls back to the existing `reclamp_cursor` so coords-only behaviour is preserved for non-followable cursors.
@@ -480,6 +486,19 @@ redispatch.
 **Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
+
+## [2026-05-26T13:43:04Z] babysitter - experimental open-PR daemon
+
+**Action:** Documented the new experimental `hive babysit` process. The command is separate from `hive daemon`, uses its own PID/log files, polls projects with `babysitter.enabled: true`, filters open PR labels, spawns the development agent in `.hive-state/babysitter/worktrees/<pr>/`, writes per-project babysitter events/status, and supports best-effort dry-run stubs for agent-side `git`/`gh` mutations.
+
+**Refreshed pages:**
+- New: [[commands/babysit]] - CLI lifecycle, one-shot mode, config contract, PR processing, dry-run behavior, and tests.
+- New: [[modules/babysitter]] - module map, wiring, event shape, and v1 boundaries.
+- [[cli]] - command table and JSON-support note.
+- [[commands/init]] - babysitter opt-in prompt and non-TTY summary.
+- [[modules/config]] - defaults and validation for `babysitter`.
+- [[operating]] - dry-run shakedown and kill-switch guidance.
+- [[index]] - added the new pages and bumped the catalog count.
 
 ## [2026-05-26T14:11:12Z] tui - token footer ordering
 
@@ -2608,6 +2627,14 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[stages/review]]
+
+## [2026-05-26T22:10:00Z] babysitter — document out-of-band state layout
+
+**Action:** Recorded the experimental PR-repair daemon's on-disk state in the state model: `<project>/.hive-state/babysitter/` (`events.jsonl`, `status.md`, ephemeral `worktrees/<pr>/`), plus `$HIVE_HOME/.babysitter.pid` and `$HIVE_HOME/logs/babysitter.log`. Confirmed paths against `status_writer.rb`, `events.rb`, `worktree.rb`. Noted the daemon has no marker grammar, stage `mv`, or `worktree.yml` — worktrees are recreated from the PR head each tick. Added a reciprocal `[[state-model]]` backlink to the babysitter module page.
+
+**Refreshed pages:**
+- [[state-model]]
+- [[modules/babysitter]]
 
 ## [2026-05-26T10:05:02Z] bot — load ~/.config/hive/.env on bot start
 

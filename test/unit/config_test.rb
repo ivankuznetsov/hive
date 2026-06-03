@@ -1752,6 +1752,83 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_returns_default_babysitter_disabled_when_key_absent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal(
+        {
+          "enabled" => false,
+          "interval" => "10m",
+          "max_concurrent_prs" => 2,
+          "labels_ignore" => %w[wip do-not-merge draft],
+          "dry_run" => false,
+          "budget_minutes" => 30,
+          "budget_usd" => 50
+        },
+        cfg.fetch("babysitter")
+      )
+    end
+  end
+
+  def test_load_merges_partial_babysitter_config_with_defaults
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        babysitter:
+          enabled: true
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("babysitter", "enabled")
+      assert_equal "10m", cfg.dig("babysitter", "interval")
+      assert_equal 2, cfg.dig("babysitter", "max_concurrent_prs")
+      assert_equal %w[wip do-not-merge draft], cfg.dig("babysitter", "labels_ignore")
+    end
+  end
+
+  def test_load_rejects_non_boolean_babysitter_enabled
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        babysitter:
+          enabled: "yes"
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/babysitter\.enabled.*must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_rejects_invalid_babysitter_interval
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        babysitter:
+          interval: 10x
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/babysitter\.interval/, err.message)
+    end
+  end
+
+  def test_load_rejects_non_string_babysitter_labels
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        babysitter:
+          labels_ignore:
+            - wip
+            - 123
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/babysitter\.labels_ignore.*Array of Strings/, err.message)
+    end
+  end
+
   def test_load_returns_documented_daemon_numeric_defaults
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)

@@ -61,8 +61,8 @@ class InitTest < Minitest::Test
         assert File.exist?(File.join(home, ".config/systemd/user/hive-daemon.service")),
                "init should register the per-user daemon service unit"
         global = YAML.safe_load(File.read(File.join(home, "config.yml")))
-        assert_equal true, global.dig("daemon", "autostart"),
-                     "init registers the daemon service for autostart; project config controls enrollment only"
+        assert_equal false, global.dig("daemon", "autostart"),
+                     "init registers the daemon service unit but leaves autostart off unless requested"
       end
     end
   end
@@ -84,7 +84,7 @@ class InitTest < Minitest::Test
         assert_equal File.join(dir, ".hive-state"), payload.fetch("hive_state_path")
         assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
         assert_equal payload.fetch("answers").fetch("budgets"), payload.fetch("budgets")
-        assert_equal true, payload.fetch("daemon_autostart_requested")
+        assert_equal false, payload.fetch("daemon_autostart_requested")
 
         schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
         errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
@@ -95,10 +95,11 @@ class InitTest < Minitest::Test
 
   def test_init_json_mirrors_non_default_prompt_answers
     # Order: planning, claude_mode, claude_permission_mode, development,
-    # reviewers, triage, then limits, daemon-enable, confirm.
+    # reviewers, triage, then limits, daemon-enable, babysitter-enable,
+    # daemon-autostart, confirm.
     inputs = ([ "codex", "2", "", "pi", "2", "safetyist", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
-              [ "n", "" ]).join("\n") + "\n"
+              [ "n", "", "", "" ]).join("\n") + "\n"
 
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -115,15 +116,16 @@ class InitTest < Minitest::Test
         assert_equal 60, answers.fetch("budgets").fetch("brainstorm")
         assert_equal 120, answers.fetch("timeouts").fetch("brainstorm")
         assert_equal false, answers.fetch("daemon_enabled")
+        assert_equal true, answers.fetch("babysitter_enabled")
+        assert_equal false, answers.fetch("daemon_autostart")
 
         %w[
           planning_agent claude_mode development_agent enabled_reviewers
-          triage_bias budgets timeouts daemon_enabled
+          triage_bias budgets timeouts daemon_enabled babysitter_enabled
         ].each do |key|
           assert_equal answers.fetch(key), payload.fetch(key), "top-level #{key} must mirror answers"
         end
-        assert_equal true, payload.fetch("daemon_autostart_requested"),
-                     "JSON reports global daemon autostart intent, not service-manager outcome"
+        assert_equal false, payload.fetch("daemon_autostart_requested")
       end
     end
   end
@@ -609,7 +611,7 @@ class InitTest < Minitest::Test
     inputs = [
       "codex", "", "", "2", "1,3", "safetyist",
       "", "30,900", "", "", "", "", "", "", "", "",
-      "", ""
+      "", "", "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -635,6 +637,8 @@ class InitTest < Minitest::Test
         # picks up new projects out of the box.
         assert_equal true, cfg.dig("daemon", "enabled"),
                      "blank daemon prompt → enabled true rendered into config"
+        assert_equal true, cfg.dig("babysitter", "enabled"),
+                     "blank babysitter prompt → enabled true rendered into config"
       end
     end
   end
@@ -642,10 +646,10 @@ class InitTest < Minitest::Test
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), claude_permission_mode=blank,
     # dev=blank, reviewers=blank, triage=blank, limit blanks, daemon-enable=blank,
-    # confirm=blank.
+    # babysitter-enable=blank, daemon-autostart=blank, confirm=blank.
     inputs = ([ "", "2", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
-              [ "", "" ]).join("\n") + "\n"
+              [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -665,10 +669,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_claude_permission_mode_auto_writes_matching_config
     # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
-    # dev/reviewers/triage=blank, limits blank, daemon/confirm blank.
+    # dev/reviewers/triage=blank, limits blank, daemon/babysitter/autostart/confirm blank.
     inputs = ([ "", "", "2", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
-              [ "", "" ]).join("\n") + "\n"
+              [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -684,9 +688,10 @@ class InitTest < Minitest::Test
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, triage bias, limits. Then "n" for daemon-enable and blank for confirm.
+    # reviewers, triage bias, limits. Then "n" for daemon-enable and blanks for
+    # babysitter-enable, daemon-autostart, and confirm.
     inputs = (([ "" ] * (6 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
-              [ "n", "" ]).join("\n") + "\n"
+              [ "n", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -702,8 +707,9 @@ class InitTest < Minitest::Test
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, triage bias, limits, daemon-enable.
-    inputs = (([ "" ] * (7 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    # reviewers, triage bias, limits, daemon-enable, babysitter-enable,
+    # daemon-autostart.
+    inputs = (([ "" ] * (9 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

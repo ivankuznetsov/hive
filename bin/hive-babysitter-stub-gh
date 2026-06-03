@@ -1,0 +1,47 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+def log_skip(argv)
+  path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
+  File.open(path, "a") { |file| file.puts("[dry-run] gh #{argv.join(' ')} skipped") }
+rescue SystemCallError
+  nil
+end
+
+argv = ARGV.dup
+
+# Strip leading gh global options so the real subcommand is classified
+# correctly. Without this, `gh -R owner/repo pr comment` has argv[0,2] ==
+# ["-R", "owner/repo"] and slips past the subcommand check, execing the
+# real gh and mutating GitHub despite dry_run. `-R`/`--repo` each consume
+# the following token; `--repo=owner/repo` is a single token.
+rest = argv.dup
+loop do
+  case rest.first
+  when "-R", "--repo"
+    rest.shift(2)
+  when /\A-/
+    rest.shift
+  else
+    break
+  end
+end
+
+mutating =
+  rest[0, 2] == %w[pr comment] ||
+  rest[0, 2] == %w[pr edit] ||
+  rest[0, 2] == %w[pr review] ||
+  rest[0, 2] == %w[run rerun]
+
+if mutating
+  log_skip(argv)
+  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  exit 0
+end
+
+real = ENV["HIVE_BABYSITTER_REAL_GH"].to_s
+if real.empty?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
+  exit 127
+end
+exec(real, *argv)

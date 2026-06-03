@@ -101,6 +101,190 @@ module Hive
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
     end
 
+    def list_open_prs(worktree_path, cfg: nil)
+      fields = %w[
+        number
+        headRefName
+        baseRefName
+        labels
+        isDraft
+        isCrossRepository
+        author
+        headRepository
+        url
+        updatedAt
+      ].join(",")
+      out, err, status = capture3("gh", "pr", "list",
+                                  "--state", "open",
+                                  "--limit", "1000",
+                                  "--json", fields,
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr list` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      list = JSON.parse(out)
+      raise Hive::GhError, "`gh pr list` returned #{list.class}; expected Array" unless list.is_a?(Array)
+
+      list
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr list` returned unparseable JSON: #{e.message}"
+    end
+
+    def pr_status_rollup(worktree_path, number, cfg: nil)
+      out, err, status = capture3("gh", "pr", "view", number.to_s,
+                                  "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid,url",
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{number}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      doc
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
+    end
+
+    def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)
+      rollup = pr_status_rollup(worktree_path, number, cfg: cfg)
+      failing_jobs_with_logs(worktree_path, rollup, cfg: cfg, byte_cap: byte_cap)
+    end
+
+    def failing_jobs_with_logs(worktree_path, rollup, cfg: nil, byte_cap: 50 * 1024)
+      jobs = failing_jobs_from_rollup(rollup)
+      return [] if jobs.empty?
+
+      # Two-pass budget allocation: jobs whose full log fits under an even
+      # share keep their full text, and the bytes they leave unused are
+      # redistributed across the over-cap jobs. A flat `byte_cap / jobs.size`
+      # cap makes short jobs underspend while truncating the large failing
+      # job more aggressively than the budget allows (plan IU-8).
+      raw = jobs.map do |job|
+        job_id = job["databaseId"] || job["id"]
+        { "name" => job["name"].to_s, "job_id" => job_id, "log" => fetch_job_log(worktree_path, job_id, cfg: cfg) }
+      end
+
+      caps = allocate_log_budget(raw.map { |entry| entry["log"].bytesize }, byte_cap)
+      raw.each_with_index.map do |entry, index|
+        entry.merge("log" => tail_clip(entry["log"], caps[index]))
+      end
+    end
+
+    def fetch_job_log(worktree_path, job_id, cfg: nil)
+      return "[hive-babysitter: no job id available, cannot fetch log]" unless job_id
+
+      fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
+      return fetch_result[:log] if fetch_result[:success]
+
+      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
+    end
+
+    # Max-min fair allocation: repeatedly hand out an even share of the
+    # remaining budget; any log that fits under the current share is settled
+    # at full size, freeing its leftover bytes for the rest. Whatever stays
+    # over-cap then splits the leftover budget evenly.
+    def allocate_log_budget(sizes, byte_cap)
+      caps = Array.new(sizes.size)
+      remaining = byte_cap
+      unsettled = (0...sizes.size).to_a
+
+      loop do
+        break if unsettled.empty?
+
+        share = [ remaining / unsettled.size, 1 ].max
+        fits = unsettled.select { |i| sizes[i] <= share }
+        break if fits.empty?
+
+        fits.each do |i|
+          caps[i] = sizes[i]
+          remaining -= sizes[i]
+        end
+        unsettled -= fits
+      end
+
+      unless unsettled.empty?
+        share = [ remaining / unsettled.size, 1 ].max
+        unsettled.each { |i| caps[i] = share }
+      end
+
+      caps
+    end
+
+    def pr_diff_stat(worktree_path, base_ref, head_ref, cfg: nil)
+      capture3("git", "fetch", "origin", base_ref.to_s, chdir: worktree_path, cfg: cfg)
+      out, err, status = capture3("git", "diff", "--stat",
+                                  "origin/#{base_ref}...#{head_ref}",
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`git diff --stat origin/#{base_ref}...#{head_ref}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      out
+    end
+
+    # Base HEAD + merge divergence summary for the babysitter prompt
+    # (plan IU-5): the agent needs the current base tip and how far the PR
+    # branch has diverged to decide between rebase, merge, or leave-alone.
+    # Best-effort — supplementary context, so a git hiccup yields blank
+    # values rather than failing the whole context build.
+    def pr_base_divergence(worktree_path, base_ref, cfg: nil)
+      capture3("git", "fetch", "origin", base_ref.to_s, chdir: worktree_path, cfg: cfg)
+      counts = git_rev(worktree_path, "rev-list", "--left-right", "--count", "origin/#{base_ref}...HEAD", cfg: cfg)
+      behind, ahead = counts.split(/\s+/)
+      {
+        "base_ref" => base_ref.to_s,
+        "base_sha" => git_rev(worktree_path, "rev-parse", "origin/#{base_ref}", cfg: cfg),
+        "merge_base" => git_rev(worktree_path, "merge-base", "origin/#{base_ref}", "HEAD", cfg: cfg),
+        "ahead" => ahead.to_i,
+        "behind" => behind.to_i
+      }
+    end
+
+    def git_rev(worktree_path, *args, cfg: nil)
+      out, _err, status = capture3("git", *args, chdir: worktree_path, cfg: cfg)
+      status.success? ? out.to_s.strip : ""
+    end
+
+    def failing_jobs_from_rollup(rollup)
+      Array(rollup["statusCheckRollup"]).select do |entry|
+        next false unless entry.is_a?(Hash)
+
+        conclusion = entry["conclusion"].to_s.upcase
+        status = entry["status"].to_s.upcase
+        conclusion == "FAILURE" || conclusion == "TIMED_OUT" || conclusion == "CANCELLED" || status == "FAILURE"
+      end
+    end
+
+    def fetch_failed_job_log(worktree_path, job_id, cfg: nil)
+      out, err, status = capture3("gh", "run", "view",
+                                  "--log-failed",
+                                  "--job", job_id.to_s,
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      if status.success?
+        { success: true, log: out, error: nil }
+      else
+        { success: false, log: "", error: err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip }
+      end
+    rescue Hive::GhError => e
+      { success: false, log: "", error: e.message }
+    end
+
+    def tail_clip(text, byte_cap)
+      text = text.to_s
+      return text if text.bytesize <= byte_cap
+
+      elided = text.bytesize - byte_cap
+      tail = text.byteslice(-byte_cap, byte_cap).to_s
+      tail.scrub!("")
+      "\n...[truncated, #{elided} bytes elided]\n#{tail}"
+    end
+
     def lookup_merged_pr(worktree_path, branch, cfg: nil, head_oid: nil)
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find do |p|
         p["state"] == "MERGED" && (head_oid.nil? || p["headRefOid"].to_s == head_oid.to_s)

@@ -48,6 +48,8 @@ module Hive
         6. Triage bias (courageous / safetyist)                  — default courageous
         7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
         8. Daemon enrollment                                     — default enabled
+        9. Hive babysitter enrollment                            — default enabled
+       10. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -57,7 +59,10 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux, claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
+        hive: using defaults — planning=claude, claude_mode=tmux,
+        claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
+        triage=courageous, limits=defaults, daemon=enabled,
+        babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus
@@ -581,6 +586,53 @@ module Hive
         project: options[:project],
         match_attr: options[:match_attr],
         json: options[:json]
+      ).call
+    end
+
+    desc "babysit SUBCOMMAND [PROJECT]", "Manage the experimental PR babysitter"
+    long_desc <<~DESC
+      Subcommands:
+        start [--detach] [--dry-run]      Run the babysitter loop.
+        stop                              Send SIGTERM to the running babysitter.
+        status                            Show running / not-running.
+        reload                            Send SIGHUP to reload config.
+        tail                              Stream babysitter.log.
+
+      One-shot:
+        hive babysit --once PROJECT       Run one babysitter pass for PROJECT.
+        hive babysit --once --all         Run one pass for every enabled project.
+
+      The babysitter is separate from `hive daemon`. It walks open PRs in
+      projects whose `.hive-state/config.yml` has `babysitter.enabled: true`
+      and asks the configured development agent to keep them mergeable.
+    DESC
+    option :once, type: :boolean, default: false,
+                  desc: "run one pass and exit; PROJECT positional required unless --all"
+    option :detach, type: :boolean, default: false, desc: "fork to background after start"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "run with babysitter dry-run side-effect guards"
+    option :all, type: :boolean, default: false,
+                 desc: "with --once, run one pass for every enabled project"
+    def babysit(subcommand = nil, *targets)
+      require "hive/commands/babysit"
+      if options[:once] && Hive::Commands::Babysit::VALID_SUBCOMMANDS.include?(subcommand.to_s)
+        raise Hive::InvalidTaskPath,
+              "hive babysit: --once is a mode, not a modifier for #{subcommand.inspect}; " \
+              "use `hive babysit --once PROJECT`"
+      end
+      if targets.length > 1
+        raise Hive::InvalidTaskPath,
+              "hive babysit #{subcommand}: too many positional arguments #{targets.inspect}; expected one PROJECT"
+      end
+
+      target = options[:once] ? (targets.first || subcommand) : targets.first
+      Hive::Commands::Babysit.new(
+        options[:once] ? nil : subcommand,
+        target,
+        detach: options[:detach],
+        dry_run: options[:dry_run],
+        once: options[:once],
+        all: options[:all]
       ).call
     end
 

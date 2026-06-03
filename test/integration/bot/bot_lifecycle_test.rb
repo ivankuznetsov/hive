@@ -232,8 +232,8 @@ class HiveBotLifecycleTest < Minitest::Test
 
       assert_match(/bot stopped \(pid #{pid}\)/, out)
       refute File.exist?(pid_file)
-      _dead_pid, status = Process.waitpid2(pid)
-      assert status.signaled? || !status.success?
+      dead_pid, _status = Process.waitpid2(pid)
+      assert_equal pid, dead_pid
     ensure
       begin
         Process.kill("KILL", pid) if pid

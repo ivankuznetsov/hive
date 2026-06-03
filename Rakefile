@@ -8,7 +8,7 @@ require_relative "test/support/coverage"
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
+  t.test_files = FileList["test/{unit,integration,babysitter}/**/*_test.rb"]
   t.warning = false
 end
 

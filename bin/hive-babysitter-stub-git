@@ -1,0 +1,48 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+def log_skip(argv)
+  path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
+  File.open(path, "a") { |file| file.puts("[dry-run] git #{argv.join(' ')} skipped") }
+rescue SystemCallError
+  nil
+end
+
+argv = ARGV.dup
+
+# Strip leading git global options so the real subcommand is classified
+# correctly. Without this, `git -C <wt> push` has ARGV[0] == "-C" and
+# slips past a bare ARGV[0] check, execing the real git and mutating
+# origin despite dry_run. `-C` and `-c` each consume the following token.
+rest = argv.dup
+loop do
+  case rest.first
+  when "-C", "-c"
+    rest.shift(2)
+  when /\A-/
+    rest.shift
+  else
+    break
+  end
+end
+
+subcommand = rest.first.to_s
+mutating =
+  subcommand == "push" ||
+  (subcommand == "commit" && rest.include?("--amend")) ||
+  (subcommand == "reset" && rest.include?("--hard")) ||
+  (subcommand == "rebase" && (rest & %w[--continue --abort --skip]).any?) ||
+  (subcommand == "merge" && (rest & %w[--continue --abort]).any?)
+
+if mutating
+  log_skip(argv)
+  warn "[dry-run] git #{argv.join(' ')} skipped"
+  exit 0
+end
+
+real = ENV["HIVE_BABYSITTER_REAL_GIT"].to_s
+if real.empty?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
+  exit 127
+end
+exec(real, *argv)

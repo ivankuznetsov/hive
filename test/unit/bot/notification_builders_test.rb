@@ -6,10 +6,12 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          diagnostic: nil)
+          diagnostic: nil, id: nil, display_name: nil)
     Row.new(
       project: "hive",
       slug: slug,
+      id: id,
+      display_name: display_name,
       stage: stage,
       marker: marker,
       attrs: attrs,
@@ -68,13 +70,22 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def test_ready_to_plan_builds_approval_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "ready_to_plan", marker: "complete")
+      row(action: "ready_to_plan", marker: "complete", id: 42, display_name: "Readable Plan")
     )
 
+    assert_includes notification.text, "#42 Readable Plan — Brainstorm"
     assert_match(/Ready for plan/, notification.text)
     assert_equal "Approve", notification.keyboard.first.first[:text]
     assert_match(/\Aapprove:plan:hive:slug-260514-abcd:2-brainstorm\z/,
                  notification.keyboard.first.first[:callback_data])
+  end
+
+  def test_display_title_handles_name_without_id_and_slug_fallback
+    named = row(action: "needs_input", marker: "waiting", display_name: "Named Only")
+    legacy = row(action: "needs_input", marker: "waiting", slug: "task-260514-abcd")
+
+    assert_equal "Named Only", Hive::Bot::NotificationBuilders.display_title(named)
+    assert_equal "Task…", Hive::Bot::NotificationBuilders.display_title(legacy)
   end
 
   def test_ready_to_open_pr_builds_current_open_pr_keyboard
@@ -234,12 +245,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
         marker: "review_error",
         attrs: { "phase" => "fix", "reason" => "timeout", "exception_class" => "Encoding::CompatibilityError" },
         slug: "we-need-to-improve-this-260522-db23",
+        id: 42,
+        display_name: "Improve Recovery",
         stage: "6-review",
         diagnostic: retry_diagnostic(command: "hive review we-need-to-improve-this-260522-db23 --json")
       )
     )
 
-    assert_includes notification.text, "⚠ Review stuck — \"We need to improve this…\""
+    assert_includes notification.text, "⚠ Review stuck — \"#42 Improve Recovery\""
     assert_includes notification.text, "The review agent crashed before it could finish."
     assert_includes notification.text, "Tap Autofix to retry the stage cleanly."
     refute_includes notification.text, "phase="

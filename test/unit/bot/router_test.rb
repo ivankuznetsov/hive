@@ -20,14 +20,18 @@ class HiveBotRouterTest < Minitest::Test
     )
   end
 
-  def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil)
+  def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil,
+             photo: nil, document: nil, caption: nil)
     Hive::Bot::Telegram::Update.new(
       update_id: 1,
       chat_id: chat_id,
       from_id: chat_id,
       text: text,
       callback_data: callback_data,
-      reply_to_text: reply_to_text
+      reply_to_text: reply_to_text,
+      photo: photo,
+      document: document,
+      caption: caption
     )
   end
 
@@ -85,14 +89,91 @@ class HiveBotRouterTest < Minitest::Test
     assert_match(/\Aidea_project:hive:/, result.reply_markup.first.first[:callback_data])
   end
 
-  def test_idea_project_callback_dispatches_hive_new
+  def test_idea_project_callback_enters_file_collection
     picker = @router.handle(update(text: "/idea fix broken cron"))
     callback = picker.reply_markup.first.first[:callback_data]
 
     result = @router.handle(update(callback_data: callback))
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal [ "hive", "new", "hive", "fix broken cron", "--json" ], result.command_argv
+    assert_equal :reply, result.action
+    assert_match(/Send any files now/, result.text)
+    assert_equal "Done", result.reply_markup.first.first[:text]
+    assert_match(/\Aidea_done:/, result.reply_markup.first.first[:callback_data])
+  end
+
+  def test_idea_done_callback_emits_commit_intent
+    picker = @router.handle(update(text: "/idea fix broken cron"))
+    collect = @router.handle(update(callback_data: picker.reply_markup.first.first[:callback_data]))
+    done_callback = collect.reply_markup.first.first[:callback_data]
+
+    result = @router.handle(update(callback_data: done_callback))
+
+    assert_equal :commit_idea, result.action
+    assert_equal "hive", result.project
+    assert_equal({ chat_id: 12345 }, result.attachment)
+  end
+
+  def test_idea_without_text_awaits_next_message
+    result = @router.handle(update(text: "/idea"))
+
+    assert_equal :reply, result.action
+    assert_match(/Send the idea text/, result.text)
+  end
+
+  def test_free_text_while_awaiting_idea_text_shows_project_picker
+    @router.handle(update(text: "/idea"))
+
+    result = @router.handle(update(text: "fix the login bug"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+  end
+
+  def test_media_without_caption_starts_file_first_draft
+    result = @router.handle(update(document: {
+      file_id: "doc",
+      file_name: "notes.pdf",
+      mime_type: "application/pdf",
+      file_size: 12
+    }))
+
+    assert_equal :stage_attachment, result.action
+    assert_match(/What's the idea/, result.text)
+    assert_equal "doc", result.attachment.fetch(:file_id)
+    assert_equal "pdf", result.attachment.fetch(:ext)
+  end
+
+  def test_media_with_caption_starts_project_picker_and_stage_action
+    result = @router.handle(update(caption: "fix login", photo: {
+      file_id: "photo",
+      file_size: 12
+    }))
+
+    assert_equal :stage_attachment, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal "photo", result.attachment.fetch(:file_id)
+  end
+
+  def test_disallowed_media_replies_without_stage_action
+    result = @router.handle(update(document: {
+      file_id: "doc",
+      file_name: "run.exe",
+      mime_type: "application/octet-stream",
+      file_size: 12
+    }))
+
+    assert_equal :reply, result.action
+    assert_match(/Unsupported attachment type/, result.text)
+  end
+
+  def test_idea_text_capture_does_not_hijack_active_brainstorm_conversation
+    @router.handle(update(text: "/idea"))
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd", question_n: 1)
+
+    result = @router.handle(update(text: "answer body"))
+
+    assert_equal :write_answer_then_reply, result.action
+    assert_equal "answer body", result.answer_text
   end
 
   def test_free_text_inside_active_conversation_writes_current_question
@@ -201,6 +282,8 @@ class HiveBotRouterTest < Minitest::Test
       "details:hive:slug-260514-abcd" => :callback_show_details,
       "refresh_diagnose:hive:slug-260514-abcd:6-review" => :callback_refresh_diagnose,
       "answer:hive:slug-260514-abcd" => :callback_answer,
+      "idea_done:token" => :callback_idea_done,
+      "idea_skip:token" => :callback_idea_skip,
       "path_a_yes:hive:slug-260514-abcd" => :callback_path_a_yes,
       "path_a_type:hive:slug-260514-abcd" => :callback_path_a_just_type,
       "codex_write:hive:slug-260514-abcd:1" => :callback_codex_write_draft,

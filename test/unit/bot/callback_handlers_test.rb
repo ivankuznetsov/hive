@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/bot/handlers/callback_handlers"
+require "hive/bot/idea_draft_store"
 
 # Pins the dispatch shape emitted by CallbackHandlers for callbacks that
 # fan out to `hive` subprocess invocations. The router exposes one Result
@@ -9,7 +10,8 @@ require "hive/bot/handlers/callback_handlers"
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
-                      :intent, :alert_reset, :clear_keyboard, :format, keyword_init: true)
+                      :intent, :alert_reset, :clear_keyboard, :format,
+                      :attachment, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)
       events << { name: name, payload: payload }
@@ -93,6 +95,42 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal "hive", result.project
     assert_equal [ "hive", "new", "hive", "ship the thing", "--json" ], result.command_argv
     refute @pending_ideas.key?("tok")
+  end
+
+  def test_idea_project_with_draft_store_enters_collection
+    store = Hive::Bot::IdeaDraftStore.new
+    draft = store.start(chat_id: 55, phase: :awaiting_project, text: "ship the thing", token: "tok")
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_project_pick, update("idea_project:hive:tok"))
+
+    assert_equal [ "hive" ], @last_projects
+    assert_equal :reply, result.action
+    assert_match(/Send any files now/, result.text)
+    assert_equal :collecting_files, store.get(chat_id: draft.chat_id).phase
+    assert_equal "hive", store.get(chat_id: draft.chat_id).project
+    assert_equal "Done", result.reply_markup.first.first[:text]
+  end
+
+  def test_idea_done_with_draft_store_emits_commit_action
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :collecting_files, text: "ship", token: "tok")
+    store.set_project(chat_id: 55, project: "hive")
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) {},
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_done, update("idea_done:tok"))
+
+    assert_equal :commit_idea, result.action
+    assert_equal "hive", result.project
+    assert_equal({ chat_id: 55 }, result.attachment)
   end
 
   # The Codex draft flow was removed; codex_write callbacks from legacy

@@ -8,10 +8,12 @@ module Hive
       MAX_MESSAGE_CHARS = 4096
 
       Update = Data.define(:update_id, :chat_id, :from_id, :message_id, :text,
-                           :callback_data, :callback_query_id, :entities, :reply_to_text) do
+                           :callback_data, :callback_query_id, :entities, :reply_to_text,
+                           :photo, :document, :caption, :media_group_id) do
         def initialize(update_id:, chat_id:, from_id: nil, message_id: nil,
                        text: nil, callback_data: nil, callback_query_id: nil,
-                       entities: nil, reply_to_text: nil)
+                       entities: nil, reply_to_text: nil, photo: nil,
+                       document: nil, caption: nil, media_group_id: nil)
           super
         end
 
@@ -27,11 +29,25 @@ module Hive
         def callback_query?
           !callback_data.nil?
         end
+
+        def media?
+          !photo.nil? || !document.nil?
+        end
+
+        def effective_text
+          media? ? caption : text
+        end
       end
+
+      class DownloadError < Hive::Error; end
 
       attr_reader :client
 
-      def initialize(token:, logger:, client: nil)
+      def initialize(token:, logger:, client: nil, base_url: "https://api.telegram.org",
+                     http_client: nil)
+        @token = token
+        @base_url = base_url.to_s.delete_suffix("/")
+        @http_client = http_client
         @logger = logger
         @client = client || ::Telegram::Bot::Client.new(token)
         @build_update_error_classes_seen = {}
@@ -87,6 +103,24 @@ module Hive
         client.api.set_my_commands(commands: commands)
       end
 
+      def get_file(file_id:)
+        file = client.api.get_file(file_id: file_id)
+        {
+          file_path: value(file, :file_path),
+          file_size: value(file, :file_size)
+        }
+      end
+
+      def download_file(file_path:)
+        response = http_client.get(file_download_url(file_path))
+        status = value(response, :status).to_i
+        raise DownloadError, "telegram file download returned HTTP #{status}" unless status == 200
+
+        value(response, :body).to_s.b
+      rescue Faraday::TimeoutError, Faraday::ConnectionFailed => e
+        raise DownloadError, e.message
+      end
+
       private
 
       def build_update(raw)
@@ -115,7 +149,11 @@ module Hive
           callback_data: value(callback, :data),
           callback_query_id: value(callback, :id),
           entities: Array(value(message, :entities)),
-          reply_to_text: value(reply_to, :text)
+          reply_to_text: value(reply_to, :text),
+          photo: callback ? nil : extract_photo(message),
+          document: callback ? nil : extract_document(message),
+          caption: callback ? nil : value(message, :caption),
+          media_group_id: callback ? nil : value(message, :media_group_id)
         )
       rescue StandardError => e
         already_seen = @build_update_error_classes_seen.key?(e.class)
@@ -132,6 +170,47 @@ module Hive
         return object.public_send(key) if object.respond_to?(key)
 
         nil
+      end
+
+      def extract_photo(message)
+        variants = Array(value(message, :photo))
+        chosen = variants.max_by do |variant|
+          [
+            value(variant, :file_size).to_i,
+            value(variant, :width).to_i * value(variant, :height).to_i
+          ]
+        end
+        return nil unless chosen
+
+        {
+          file_id: value(chosen, :file_id),
+          file_unique_id: value(chosen, :file_unique_id),
+          file_size: value(chosen, :file_size),
+          width: value(chosen, :width),
+          height: value(chosen, :height)
+        }
+      end
+
+      def extract_document(message)
+        document = value(message, :document)
+        return nil unless document
+
+        {
+          file_id: value(document, :file_id),
+          file_unique_id: value(document, :file_unique_id),
+          file_name: value(document, :file_name),
+          mime_type: value(document, :mime_type),
+          file_size: value(document, :file_size)
+        }
+      end
+
+      def http_client
+        @http_client ||= Faraday.new
+      end
+
+      def file_download_url(file_path)
+        escaped_path = file_path.to_s.split("/").map { |part| Faraday::Utils.escape(part) }.join("/")
+        "#{@base_url}/file/bot#{@token}/#{escaped_path}"
       end
 
       def split_message(text)

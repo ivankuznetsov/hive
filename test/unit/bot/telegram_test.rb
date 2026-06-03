@@ -277,6 +277,18 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal [ :get_file, { file_id: "abc" } ], api.calls.last
   end
 
+  def test_get_file_wraps_faraday_errors
+    api = FakeApi.new
+    api.define_singleton_method(:get_file) do |params|
+      calls << [ :get_file, params ]
+      raise Faraday::TimeoutError, "slow"
+    end
+
+    assert_raises(Hive::Bot::Telegram::DownloadError) do
+      telegram(api).get_file(file_id: "abc")
+    end
+  end
+
   def test_download_file_returns_raw_bytes
     api = FakeApi.new
     http = FakeHttp.new(responses: [ FakeHttpResponse.new(status: 200, body: "bytes") ], calls: [])

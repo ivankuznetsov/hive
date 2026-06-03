@@ -78,6 +78,22 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_match(/out of MVP scope/, result.text)
   end
 
+  def test_idea_project_new_clears_matching_draft_store_entry
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :awaiting_project, text: "build this", token: "tok")
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_project_new, update("idea_project_new:tok"))
+
+    assert_nil store.get(chat_id: 55)
+    assert_equal :reply, result.action
+    assert_match(/out of MVP scope/, result.text)
+  end
+
   def test_idea_project_expired_token_replies_without_dispatch
     result = @handlers.handle(:callback_idea_project_pick, update("idea_project:hive:missing"))
 
@@ -127,6 +143,23 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
 
     result = handlers.handle(:callback_idea_done, update("idea_done:tok"))
+
+    assert_equal :commit_idea, result.action
+    assert_equal "hive", result.project
+    assert_equal({ chat_id: 55 }, result.attachment)
+  end
+
+  def test_idea_skip_with_draft_store_emits_same_commit_action
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :collecting_files, text: "ship", token: "tok")
+    store.set_project(chat_id: 55, project: "hive")
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_skip, update("idea_skip:tok"))
 
     assert_equal :commit_idea, result.action
     assert_equal "hive", result.project

@@ -395,6 +395,35 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/please send it again/, @telegram.messages.last.fetch(:text))
   end
 
+  def test_stage_attachment_replies_when_draft_expired_before_download
+    result = FakeRouter::Result.new(
+      action: :stage_attachment,
+      attachment: { chat_id: 42, file_id: "photo-id", file_size: 5, ext: "jpg" }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/draft expired/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_stage_attachment_rechecks_remote_size_before_download
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+    downloaded = false
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "photos/file.jpg", file_size: 25 * 1024 * 1024 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| downloaded = true }
+    result = FakeRouter::Result.new(
+      action: :stage_attachment,
+      attachment: { chat_id: 42, file_id: "photo-id", file_size: 5, ext: "jpg" }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    refute downloaded
+    assert_match(/too large/, @telegram.messages.last.fetch(:text))
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
   def test_commit_idea_uses_commands_new_with_attachments_and_cleans_draft
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -426,6 +455,56 @@ class HiveBotSupervisorTest < Minitest::Test
         assert_match(/Captured your idea/, @telegram.messages.last.fetch(:text))
       end
     end
+  end
+
+  def test_commit_idea_replies_for_missing_project_and_missing_text
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                     Update.new(chat_id: 42, update_id: 1))
+    assert_match(/Pick a project/, @telegram.messages.last.fetch(:text))
+
+    @idea_draft_store.set_project(chat_id: 42, project: "hive")
+    @idea_draft_store.set_text(chat_id: 42, text: " ")
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                     Update.new(chat_id: 42, update_id: 2))
+    assert_match(/Send the idea text/, @telegram.messages.last.fetch(:text))
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_commit_idea_handles_command_failure_without_clearing_draft
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+    @idea_draft_store.set_project(chat_id: 42, project: "missing-project")
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    refute_nil @idea_draft_store.get(chat_id: 42)
+    assert_match(/Couldn't capture that idea/, @telegram.messages.last.fetch(:text))
+    event = @logger.events.find { |entry| entry.fetch(:name) == :send_failure }
+    assert_equal "commit_idea", event.fetch(:payload).fetch(:source)
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_idea_body_override_renders_documents_as_links
+    draft = Struct.new(:text, :attachments).new(
+      "fix docs",
+      [
+        { ext: "jpg", dest_name: "bug-1.jpg" },
+        { ext: "pdf", dest_name: "bug-2.pdf" }
+      ]
+    )
+
+    body = @supervisor.send(:idea_body_override, draft)
+
+    assert_includes body, "![](assets/bug-1.jpg)"
+    assert_includes body, "[bug-2.pdf](assets/bug-2.pdf)"
   end
 
   def test_latest_status_rows_returns_cached_rows_when_status_tick_already_ran

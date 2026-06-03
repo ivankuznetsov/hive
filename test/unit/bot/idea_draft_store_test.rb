@@ -76,4 +76,29 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
 
     assert_nil @store.find_by_token("tok")
   end
+
+  def test_get_clears_expired_draft_and_staging_dir
+    with_tmp_dir do
+      @store.start(chat_id: 1, phase: :collecting_files, text: "fix", token: "tok")
+      dir = @store.ensure_staging_dir(chat_id: 1)
+      File.write(File.join(dir, "file.txt"), "bytes")
+
+      @now += 901
+
+      assert_nil @store.get(chat_id: 1)
+      refute_path_exists dir
+    end
+  end
+
+  def test_clear_swallows_staging_cleanup_failure
+    @store.start(chat_id: 1, phase: :collecting_files, text: "fix", token: "tok")
+    @store.ensure_staging_dir(chat_id: 1)
+
+    with_replaced_singleton_method(Hive::Tui::ComposerStaging, :cleanup!, ->(*_args, **_kwargs) { raise IOError, "blocked" }) do
+      draft = @store.clear(chat_id: 1)
+
+      refute_nil draft
+      assert_nil @store.get(chat_id: 1)
+    end
+  end
 end

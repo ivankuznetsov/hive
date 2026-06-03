@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T02:45:00Z] release/wiki - refresh 0.2.0 install surface coverage
+
+**Action:** Refreshed wiki command/API surface coverage after commit `7bafcfa1` prepared `0.2.0`. Verified the committed diff (`README.md`, `install.md`, `lib/hive.rb`, `Gemfile.lock`, `CHANGELOG.md`) and the relevant install/update source files. Updated operating and active-area release coverage from stale v0.1.0-era wording to the current v0.2.0 public channels, recorded that AUR/Homebrew are now live surfaces, and narrowed release gaps to tag-trust hardening, macOS x86_64 install support, and external skill/ClawHub publication evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+- [[active-areas]]
+- [[index]]
+
 ## [2026-06-03T02:20:04Z] release - prepare 0.2.0 after merge batch
 
 **Action:** Prepared the next minor release after the merge batch that added the experimental babysitter PR repair daemon, OpenClaw skill bundle, daemon/bot dispatch hardening, TUI slug-following fix, review/autofix dirty-worktree recovery fixes, and llm-wiki hook environment sanitization. Bumped `Hive::VERSION`, synced the lockfile package version, added a newest-first `CHANGELOG.md` section, and updated pinned installer URLs in `README.md` / `install.md` to `v0.2.0`.

@@ -2,6 +2,16 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.2.0
+
+- Added Telegram bot idea capture with photo and document attachments, draft state, project-pick continuation, and configurable attachment limits.
+- Fixed bot `needs_input` notifications so proactive "questions waiting" pushes are suppressed while an operator is actively answering the same task.
+- Fixed brainstorm tmux runs so vanished sessions and unreadable panes fail fast with explicit markers instead of hanging.
+- Fixed patrol and babysitter dry-run guardrails: draft PRs are skipped, mutating `git` / `gh` calls are default-denied, implicit `gh api` POST payloads are blocked, and destructive PR commands are covered by regression tests.
+- Fixed install and shim packaging issues: packaged dry-run stubs are included in the gem, the bash installer's `hv` wrapper delegates through the working Hive wrapper, and `bin/hv` no longer falls through to Apache Hive fallback paths.
+- Added focused regression coverage across bot attachment flows, tmux session loss, patrol dry-run stubs, gem packaging contents, installer wrappers, and `hv` fallback behavior.
+- Updated wiki and install/release documentation for the current bot, babysitter, patrol, and install-channel behavior.
+
 ## 0.1.11
 
 - Added the experimental `hive babysit` PR repair daemon. It can inspect repository projects, classify PR health, run bounded agent repair attempts in PR worktrees, record structured babysitter state/logs, and preserve dry-run and human-handoff paths.

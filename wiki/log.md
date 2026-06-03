@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T02:20:04Z] release - prepare 0.2.0 after merge batch
+
+**Action:** Prepared the next minor release after the merge batch that added the experimental babysitter PR repair daemon, OpenClaw skill bundle, daemon/bot dispatch hardening, TUI slug-following fix, review/autofix dirty-worktree recovery fixes, and llm-wiki hook environment sanitization. Bumped `Hive::VERSION`, synced the lockfile package version, added a newest-first `CHANGELOG.md` section, and updated pinned installer URLs in `README.md` / `install.md` to `v0.2.0`.
+
+**Tests:** Verified `Hive::VERSION == "0.2.0"`, built `hive-cli-0.2.0.gem` locally, and checked for stale `v0.1.10` installer references outside the historical changelog entry.
+
 ## [2026-06-03T01:35:11Z] babysitter - review follow-up skill and init drift guard
 
 **Action:** Review follow-up for the experimental PR babysitter branch. Added the dedicated OpenClaw `/babysit` skill plus the planned `hive-babysit` ClawHub row so the Thor command drift guard covers the new lifecycle surface. Tightened `Hive::Commands::Init::ProjectConfigBinding` so `babysitter_enabled` and `daemon_autostart` remain required prompt-answer keys instead of silently defaulting in the ERB binding. Added a Brakeman false-positive ignore for `Gh#pr_diff_stat`: `Hive::Gh.capture3` uses `Process.spawn` argv form, and the Git revspec is a single argv element rather than shell input. The CI coverage gate exposed untested babysitter lifecycle/error branches; added focused coverage-gap tests, included `test/babysitter/**/*_test.rb` in the default Rake suite, and fixed `Hive::Babysitter::Logger#event` so a rotation reopen failure that falls back to stderr does not continue into `@file.puts` with a nil file handle.

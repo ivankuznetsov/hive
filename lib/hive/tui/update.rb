@@ -153,15 +153,16 @@ module Hive
         model.with(cols: msg.cols, rows: msg.rows)
       end
 
-      # Successful poll → store snapshot, clear last_error so the
-      # stalled banner stops showing. Re-clamps the cursor when the new
-      # snapshot's visible rows make the prior coords invalid: a poll
-      # that drops the last row of the cursor's project, or shrinks the
-      # project list past the cursor's project_idx, would otherwise
-      # leave model.cursor pointing at hidden rows. j/k subsequently
-      # noops because apply_cursor_* refuses to move from an invalid
-      # cursor. Preserve cursor when still valid (avoids snapping the
-      # user's selection on every benign poll).
+      # Successful poll → store snapshot, clear last_error so the stalled
+      # banner stops showing. The cursor follows the selected SLUG across
+      # snapshot reorderings: a benign poll that advances a peer's stage or
+      # archives a row above us would otherwise leave the cursor on
+      # whatever row now sits at the prior [project_idx, row_idx], and the
+      # next `s`/Enter would act on a task the operator wasn't looking at.
+      # When the prior slug is no longer visible (filtered out, archived,
+      # left the project), fall back to `reclamp_cursor`'s coord-based
+      # behaviour — first visible row when out of bounds, prior coords
+      # when still in bounds.
       def apply_snapshot_arrived(model, msg)
         new_model = model.with(snapshot: msg.snapshot, last_error: nil)
         if model.mode == :red_status_detail && model.red_status_detail_state
@@ -171,7 +172,9 @@ module Hive
         visible = visible_snapshot(new_model)
         return new_model if visible.nil?
 
-        new_model.with(cursor: reclamp_cursor(visible, new_model.cursor))
+        prior_slug = visible_snapshot(model)&.row_at(model.cursor)&.slug
+        followed = cursor_for_slug(visible, prior_slug, model.cursor&.first)
+        new_model.with(cursor: followed || reclamp_cursor(visible, new_model.cursor))
       end
 
       def apply_red_status_detail_snapshot(model, state)
@@ -209,6 +212,28 @@ module Hive
         return closed if visible.nil?
 
         closed.with(cursor: reclamp_cursor(visible, closed.cursor))
+      end
+
+      # Find the [project_idx, row_idx] of `slug` in the new visible rows.
+      # Prefers the prior project — slugs aren't globally unique across
+      # projects, so an identically-named row in another project must not
+      # silently steal the cursor. Returns nil when the slug isn't visible
+      # (filtered out, archived, or never present), letting the caller fall
+      # back to coord-based reclamping.
+      def cursor_for_slug(visible, slug, prior_project_idx)
+        return nil if slug.nil? || slug.to_s.empty?
+
+        if prior_project_idx && (project = visible.projects[prior_project_idx])
+          row_idx = project.rows.index { |row| row.slug == slug }
+          return [ prior_project_idx, row_idx ] if row_idx
+        end
+
+        visible.projects.each_with_index do |project, project_idx|
+          row_idx = project.rows.index { |row| row.slug == slug }
+          return [ project_idx, row_idx ] if row_idx
+        end
+
+        nil
       end
 
       # Keep the cursor coords if they still point at an existing row

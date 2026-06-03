@@ -41,6 +41,35 @@ class HiveTuiUpdateTest < Minitest::Test
     Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
   end
 
+  # Compact Snapshot::Row factory for slug-follow tests. Absorbs the 14-field
+  # `Hive::Tui::Snapshot::Row.new` signature so adding a new field there only
+  # touches this one helper instead of every test that builds rows by hand.
+  def build_row(project:, slug:, stage: "1-input", **overrides)
+    defaults = {
+      project_name: project, stage: stage, slug: slug, folder: nil,
+      state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
+      claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
+      action_label: "ready", suggested_command: "hive brainstorm #{slug}",
+      next_action: nil, diagnostic: nil
+    }
+    Hive::Tui::Snapshot::Row.new(**defaults.merge(overrides)).freeze
+  end
+
+  # Build a 2-project snapshot from a `{ alpha: [slug, ...], beta: [slug, ...] }`
+  # spec. Used by the slug-follow tests to compose snapshot variants without
+  # repeating ProjectView/Snapshot wiring.
+  def slug_follow_snapshot(alpha:, beta:)
+    pa = Hive::Tui::Snapshot::ProjectView.new(
+      name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil,
+      rows: alpha.map { |slug| build_row(project: "alpha", slug: slug) }.freeze
+    ).freeze
+    pb = Hive::Tui::Snapshot::ProjectView.new(
+      name: "beta", path: "/b", hive_state_path: "/b/.h", error: nil,
+      rows: beta.map { |slug| build_row(project: "beta", slug: slug) }.freeze
+    ).freeze
+    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ pa, pb ])
+  end
+
   # ---------- WindowSized ----------
 
   def test_window_sized_updates_dimensions
@@ -118,6 +147,110 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     assert_equal [ 0, 0 ], new_model.cursor,
       "first snapshot must seed cursor at first visible row instead of leaving it nil"
+  end
+
+  # The bug that motivated cursor_for_slug: with pure coord-preservation
+  # reclamping, a poll that reorders rows within the cursor's project
+  # leaves the cursor on whatever row now sits at the prior [project_idx,
+  # row_idx]. The user keeps looking at the visually-highlighted row but
+  # the next `s`/Enter dispatches against the row that *was* there — a
+  # different task. The cursor must follow the SELECTED SLUG, not the
+  # coords, so the highlighted row and the dispatched action always agree.
+  def test_snapshot_arrived_cursor_follows_slug_when_rows_reorder_within_project
+    starting = model.with(
+      snapshot: slug_follow_snapshot(alpha: %w[a1 a2 a3], beta: %w[b1 b2 b3]),
+      cursor: [ 1, 1 ] # beta/b2
+    )
+    # New snapshot — beta's rows are reordered so b2 now sits at row 0
+    # (a peer above us advanced a stage, or sort order shifted).
+    reordered = slug_follow_snapshot(alpha: %w[a1 a2 a3], beta: %w[b2 b1 b3])
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: reordered)
+    )
+    assert_equal [ 1, 0 ], new_model.cursor,
+      "cursor must follow slug b2 to its new row when rows reorder, not stay on [1,1] (now b1)"
+  end
+
+  # When a row above the cursor disappears (peer advances, gets archived,
+  # gets dropped by scope filter), the prior coords are still in-bounds
+  # but point at the next task down. Coord-preserving reclamp would
+  # silently shift the selection; slug-follow keeps it on the same task.
+  def test_snapshot_arrived_cursor_follows_slug_when_row_above_disappears
+    starting = model.with(
+      snapshot: slug_follow_snapshot(alpha: %w[a1 a2 a3], beta: %w[b1 b2 b3]),
+      cursor: [ 0, 1 ] # alpha/a2
+    )
+    # a1 disappears — alpha now holds [a2, a3]. Prior coords [0,1] are
+    # still in bounds but now point at a3.
+    snap = slug_follow_snapshot(alpha: %w[a2 a3], beta: %w[b1 b2 b3])
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap)
+    )
+    assert_equal [ 0, 0 ], new_model.cursor,
+      "cursor must follow slug a2 to its new row 0, not stay on [0,1] (which is now a3)"
+  end
+
+  # When a task migrates between projects (the slug appears in a different
+  # project in the new snapshot), `cursor_for_slug`'s prior-project lookup
+  # misses and the global fallback loop must find the slug in its new home
+  # so the cursor follows the task across the project boundary.
+  def test_snapshot_arrived_cursor_follows_slug_across_projects
+    starting = model.with(
+      snapshot: slug_follow_snapshot(alpha: %w[a1 a2 a3], beta: %w[b1 b2 b3]),
+      cursor: [ 0, 1 ] # alpha/a2
+    )
+    # a2 left alpha and now lives in beta as its second row. The prior
+    # project lookup misses; the global scan must find it.
+    snap = slug_follow_snapshot(alpha: %w[a1 a3], beta: %w[b1 a2 b2 b3])
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap)
+    )
+    assert_equal [ 1, 1 ], new_model.cursor,
+      "cursor must follow slug a2 to its new project — global fallback loop must find it in beta"
+  end
+
+  # When the same slug appears in two projects, the cursor must stay
+  # within the prior project. Slugs are not globally unique — two
+  # `add-feature` tasks in different projects must not silently swap
+  # the cursor between projects on a benign poll.
+  def test_snapshot_arrived_cursor_prefers_prior_project_when_slug_is_not_unique
+    snap = slug_follow_snapshot(alpha: %w[shared-slug], beta: %w[shared-slug])
+    starting = model.with(snapshot: snap, cursor: [ 1, 0 ]) # cursor on beta's shared-slug
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap)
+    )
+    assert_equal [ 1, 0 ], new_model.cursor,
+      "duplicate slug across projects must not steal the cursor — prior project_idx wins"
+  end
+
+  # When the selected slug is gone from the new snapshot entirely (the
+  # task was archived, finalized, or filtered out by a scope change),
+  # the cursor falls back to coord-preserving reclamp: keep the coords
+  # if they're still in-bounds, otherwise snap to the first visible row.
+  def test_snapshot_arrived_falls_back_to_reclamp_when_slug_disappears
+    starting = model.with(
+      snapshot: slug_follow_snapshot(alpha: %w[a1 a2 a3], beta: %w[b1 b2 b3]),
+      cursor: [ 0, 1 ] # alpha/a2
+    )
+    # a2 is gone; alpha holds [a1, a3]. The slug cannot be followed, so
+    # reclamp keeps [0,1] (still in bounds, now points at a3) — matching
+    # the pre-existing reclamp behaviour for non-followable cursors.
+    snap = slug_follow_snapshot(alpha: %w[a1 a3], beta: %w[b1 b2 b3])
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap)
+    )
+    assert_equal [ 0, 1 ], new_model.cursor,
+      "lost slug must fall back to coord-preserving reclamp (here: still-in-bounds [0,1])"
   end
 
   def test_open_red_status_detail_enters_mode_with_agent_label

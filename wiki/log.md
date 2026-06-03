@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-03T20:00:00Z] tui — cursor follows slug across snapshot polls
+
+**Action:** Upgraded `Update.apply_snapshot_arrived` from coord-based reclamping to **slug-identity following**. The prior reclamp (landed 2026-04-28 in the TUI robustness pass) covered drop/truncate snapshot deltas but missed the in-bounds reorder case: when a peer task advanced a stage between two polls, the cursor's `[project_idx, row_idx]` stayed in bounds while a different slug slid under it, so `s` (steer) and Enter dispatched against the row the operator *was* looking at, not the row they thought they were looking at. The fix captures `prior_slug` from the OLD visible snapshot before adopting the new one, then `cursor_for_slug(visible, slug, prior_project_idx)` looks it up in the NEW visible — prior project preferred (slugs are not globally unique across projects), with a global cross-project scan as the fallback so tasks that migrate project boundaries still keep the cursor pinned. When the slug is gone entirely (archived, finalized, filtered out by scope), the helper returns nil and the call chain falls back to the existing `reclamp_cursor` so coords-only behaviour is preserved for non-followable cursors.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
 ## [2026-06-03T00:00:00Z] fix — PR #244 queue-claim and recovery-sequence hardening
 
 **Action:** Repaired the PR #244 follow-up branch after rebase onto current `main`. Dispatch-request claims now keep the request JSON schema-valid and store mutable `pid` / `process_start_time` / `claimed_at` fields in a `.claim` sidecar; the daemon preclaims before spawn and releases the claim if spawn fails. Bot recovery sequences now enqueue only the first queue request and persist the retry as a `.sequence` sidecar that the daemon promotes only after the current request exits 0; failed or killed clears discard the retry, and first-request enqueue failures discard the orphan sidecar. Restored `daemon.child_timeout_sec` to `0` by default so existing configs keep historical unbounded children unless operators opt into a cap. Request and claim timestamps now include microseconds. Top-level `hive daemon queue ... --json` argv-shape failures now emit `hive-daemon-queue.v1` (`error_kind=invalid_arguments`) instead of leaking through the enroll schema.

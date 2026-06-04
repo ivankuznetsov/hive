@@ -219,7 +219,7 @@ module Hive
         FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "logs"))
         log_path = File.join(Hive::Paths.state_home, "logs", "display-name.log")
         pid = self.class.name_generator_spawn.call(
-          "hive", "generate-name", task_dir,
+          ENV.fetch("HIVE_BIN", "hive"), "generate-name", task_dir,
           pgroup: true,
           out: [ log_path, "a" ],
           err: [ log_path, "a" ]

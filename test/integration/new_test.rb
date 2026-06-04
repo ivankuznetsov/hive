@@ -87,6 +87,11 @@ class NewTest < Minitest::Test
         project = File.basename(dir)
         calls = []
         previous = Hive::Commands::New.instance_variable_get(:@name_generator_spawn)
+        previous_bin = ENV["HIVE_BIN"]
+        # Pin HIVE_BIN so the spawn argv is deterministic and we verify the
+        # background generator resolves the same bin path the parent used
+        # (matches StatusWatcher / ChildSupervisor), not a hardcoded "hive".
+        ENV["HIVE_BIN"] = "/opt/hive/bin/hv"
         Hive::Commands::New.name_generator_spawn = lambda do |*argv, **opts|
           calls << [ argv, opts ]
           12_345
@@ -97,12 +102,13 @@ class NewTest < Minitest::Test
         assert_equal 1, calls.size
         argv, opts = calls.first
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "name-me-*")].first
-        assert_equal [ "hive", "generate-name", folder ], argv
+        assert_equal [ "/opt/hive/bin/hv", "generate-name", folder ], argv
         assert_equal true, opts[:pgroup]
         assert_equal "a", opts[:out].last
         assert_equal opts[:out], opts[:err]
       ensure
         Hive::Commands::New.name_generator_spawn = previous
+        ENV["HIVE_BIN"] = previous_bin
       end
     end
   end

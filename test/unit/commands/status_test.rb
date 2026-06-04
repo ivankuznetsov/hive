@@ -471,6 +471,53 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_archive_mode_lists_all_done_rows_without_age_cutoff
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "9-done", "old-archived-260604-abcd", marker: "COMPLETE", age_days: 10)
+      create_status_task(hive_state, "9-done", "recent-archived-260604-abcd", marker: "COMPLETE", age_days: 0)
+      create_status_task(hive_state, "4-execute", "active-task-260604-abcd", marker: "EXECUTE_COMPLETE", age_days: 10)
+
+      out, = capture_io do
+        Hive::Commands::Status.new(archive: true).send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "Archived"
+      assert_includes out, "old-archived-260604-abcd"
+      assert_includes out, "recent-archived-260604-abcd"
+      refute_includes out, "active-task-260604-abcd"
+      refute_includes out, "archived >3d ago"
+    end
+  end
+
+  def test_archive_mode_json_filters_to_done_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "9-done", "old-archived-260604-abcd", marker: "COMPLETE", age_days: 10)
+      create_status_task(hive_state, "4-execute", "active-task-260604-abcd", marker: "EXECUTE_COMPLETE", age_days: 10)
+
+      payload = Hive::Commands::Status.new(json: true, archive: true).json_payload([
+        status_project(project_root, hive_state)
+      ])
+      slugs = payload.fetch("projects").first.fetch("tasks").map { |task| task.fetch("slug") }
+
+      assert_equal [ "old-archived-260604-abcd" ], slugs
+    end
+  end
+
+  def test_archive_mode_empty_project_prints_friendly_message
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(File.join(hive_state, "stages"))
+
+      out, = capture_io do
+        Hive::Commands::Status.new(archive: true).send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "no archived tasks"
+    end
+  end
+
   def test_status_private_helpers_cover_error_and_fallback_paths
     cmd = Hive::Commands::Status.new
     assert_equal [], cmd.send(:detect_legacy_stage_dirs, "/tmp/no-such-hive-state")

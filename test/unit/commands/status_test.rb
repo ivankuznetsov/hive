@@ -394,6 +394,83 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_render_project_hides_old_clean_archived_rows_and_prints_summary
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "9-done", "old-archived-260604-abcd", marker: "COMPLETE", age_days: 5)
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      refute_includes out, "old-archived-260604-abcd"
+      assert_includes out, "… and 1 archived >3d ago (hive archive to view)"
+      refute_includes out, "no active tasks"
+    end
+  end
+
+  def test_render_project_keeps_recent_archived_rows_without_summary
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "9-done", "recent-archived-260604-abcd", marker: "COMPLETE", age_days: 1)
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "Archived"
+      assert_includes out, "recent-archived-260604-abcd"
+      refute_includes out, "archived >3d ago"
+    end
+  end
+
+  def test_render_project_keeps_old_archived_rows_with_unresolved_markers
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "9-done", "errored-archived-260604-abcd", marker: "ERROR", age_days: 10)
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "Error"
+      assert_includes out, "errored-archived-260604-abcd"
+      refute_includes out, "archived >3d ago"
+    end
+  end
+
+  def test_render_project_reports_hidden_count_with_mixed_archived_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      12.times do |idx|
+        create_status_task(hive_state, "9-done", "old-archived-#{idx}-260604-abcd", marker: "COMPLETE", age_days: 5)
+      end
+      create_status_task(hive_state, "9-done", "recent-archived-260604-abcd", marker: "COMPLETE", age_days: 1)
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "recent-archived-260604-abcd"
+      refute_includes out, "old-archived-0-260604-abcd"
+      assert_includes out, "… and 12 archived >3d ago (hive archive to view)"
+    end
+  end
+
+  def test_render_project_never_hides_old_non_archived_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "4-execute", "old-execute-260604-abcd", marker: "EXECUTE_COMPLETE", age_days: 99)
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "old-execute-260604-abcd"
+      refute_includes out, "archived >3d ago"
+    end
+  end
+
   def test_status_private_helpers_cover_error_and_fallback_paths
     cmd = Hive::Commands::Status.new
     assert_equal [], cmd.send(:detect_legacy_stage_dirs, "/tmp/no-such-hive-state")
@@ -501,4 +578,19 @@ class CommandsStatusTest < Minitest::Test
   end
 
   private
+
+  def status_project(project_root, hive_state)
+    { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+  end
+
+  def create_status_task(hive_state, stage, slug, marker:, age_days:)
+    folder = File.join(hive_state, "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    state_file = File.join(folder, stage == "9-done" ? "task.md" : "task.md")
+    File.write(state_file, "<!-- #{marker} -->\n")
+    old = Time.now - (age_days * 86_400)
+    File.utime(old, old, state_file)
+    File.utime(old, old, folder)
+    folder
+  end
 end

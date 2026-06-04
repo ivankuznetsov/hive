@@ -5,6 +5,7 @@ require "hive/task"
 require "hive/markers"
 require "hive/lock"
 require "hive/stages"
+require "hive/archive_filter"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -340,16 +341,17 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
+        visible_rows, hidden_rows = rows.partition { |row| !hide_archived_row?(row) }
         legacy = detect_legacy_stage_dirs(hive_state)
         puts project["name"]
         render_legacy_stage_warning(legacy) unless legacy.empty?
-        if rows.empty?
+        if visible_rows.empty? && hidden_rows.empty?
           puts "  no active tasks" if legacy.empty?
           return
         end
 
-        action_labels(rows).each do |label|
-          stage_rows = rows.select { |r| r[:action_label] == label }
+        action_labels(visible_rows).each do |label|
+          stage_rows = visible_rows.select { |r| r[:action_label] == label }
           next if stage_rows.empty?
 
           puts "  #{label}"
@@ -358,6 +360,19 @@ module Hive
             puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
           end
         end
+        render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
+      end
+
+      def hide_archived_row?(row)
+        Hive::ArchiveFilter.hide?(
+          stage: row[:stage],
+          marker_name: row[:marker_name],
+          folder_mtime: row[:folder_mtime]
+        )
+      end
+
+      def render_archived_hidden_summary(hidden_count)
+        puts "  … and #{hidden_count} archived >3d ago (hive archive to view)"
       end
 
       def display_identity(row)

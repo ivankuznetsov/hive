@@ -18,10 +18,6 @@ require "hive/task_meta"
 class LiveGenerateNameSmokeTest < Minitest::Test
   include HiveTestHelper
 
-  def setup
-    skip "claude binary not on PATH" unless system("which claude > /dev/null 2>&1")
-  end
-
   def test_generate_name_populates_display_name_against_real_claude
     # Keep the real HOME so the spawned claude reuses the operator's logged-in
     # session (~/.claude); only HIVE_HOME is isolated. Otherwise claude drops
@@ -57,8 +53,8 @@ class LiveGenerateNameSmokeTest < Minitest::Test
 
   # Point the project's execute-stage agent at the real `claude` CLI (default
   # bin on PATH). U4 generation resolves the `execute` profile, and rendered
-  # templates default it to codex; this test guards on `which claude`, so it
-  # must pin the agent to claude.
+  # templates default it to codex; this smoke test exercises the real claude
+  # agent path, so it must pin the agent to claude.
   def configure_execute_agent(dir, agent)
     config_path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(config_path)) || {}

@@ -22,7 +22,7 @@ RUN bundle install --without development test \
     && gem build hive.gemspec \
     && gem install hive-cli-*.gem
 
-RUN npm install -g @anthropic-ai/claude-code@2.1.118 @openai/codex@0.125.0 @mariozechner/pi@0.70.2 || true
+RUN npm install -g @anthropic-ai/claude-code@2.1.118 @openai/codex@0.125.0 @mariozechner/pi@0.70.2
 
 COPY packaging/docker/entrypoint.sh /usr/local/bin/hivebox-entrypoint
 RUN chmod 0755 /usr/local/bin/hivebox-entrypoint

@@ -18,11 +18,17 @@ module Hive
         FileUtils.mkdir_p(root)
         name = params["name"].to_s.strip
         name = File.basename(url).delete_suffix(".git") if name.empty?
+        # Sanitize: a `name` containing `../` would otherwise escape the
+        # repos root via File.join. File.basename strips any path segments.
+        name = File.basename(name)
+        halt 422, "invalid repo name" if name.empty? || name == "." || name == ".."
         target = File.join(root, name)
         if File.directory?(target)
           Hive::Commands::Init.new(target, force: true, json: false).call
         else
-          out, err, status = Open3.capture3("git", "clone", url, target)
+          # Clone via `gh` so private-repo clones use the box's gh auth (U7),
+          # not just public URLs or a git credential helper.
+          out, err, status = Open3.capture3("gh", "repo", "clone", url, target)
           halt 422, [ out, err ].join("\n") unless status.success?
           Hive::Commands::Init.new(target, force: true, json: false).call
         end

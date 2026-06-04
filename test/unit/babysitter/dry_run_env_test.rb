@@ -52,6 +52,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "totally-new-write-command", "arg"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "api", "repos/owner/repo"
+      assert_passes env, "gh", "api", "-X", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
 
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
@@ -84,6 +85,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
+      assert_includes real_invocations, "real-gh api -X GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-git -C #{dir} status --short"
       assert_includes real_invocations, "real-git config --get remote.origin.url"

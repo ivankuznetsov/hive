@@ -58,6 +58,26 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_emits_folder_mtime_and_keeps_old_archived_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "9-done", "old-archived-260604-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      old = Time.now - (5 * 86_400)
+      File.utime(old, old, folder)
+
+      payload = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ])
+      tasks = payload.fetch("projects").first.fetch("tasks")
+      archived = tasks.find { |task| task.fetch("slug") == "old-archived-260604-abcd" }
+
+      refute_nil archived, "default JSON must keep old archived rows visible to bots and daemons"
+      assert_equal old.utc.iso8601, archived.fetch("folder_mtime")
+    end
+  end
+
   # #270: a held brainstorm exposes its unanswered-question count so a
   # consumer can tell "daemon is holding this" from "broken". Every other
   # row reports 0.

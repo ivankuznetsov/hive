@@ -147,6 +147,7 @@ class SchemaFilesTest < Minitest::Test
       marker_name: :waiting,
       marker_attrs: {},
       mtime: Time.now,
+      folder_mtime: Time.now,
       claude_pid: nil,
       claude_pid_alive: nil,
       action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,

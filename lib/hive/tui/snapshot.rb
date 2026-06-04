@@ -50,6 +50,7 @@ module Hive
         :marker,
         :attrs,
         :mtime,
+        :folder_mtime,
         :age_seconds,
         :claude_pid,
         :claude_pid_alive,
@@ -72,9 +73,12 @@ module Hive
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
         def initialize(id: nil, display_name: nil, worktree_path: nil,
-                       live_task_lock: false, unanswered_questions: 0, **rest)
+                       folder_mtime: nil, live_task_lock: false,
+                       unanswered_questions: 0, **rest)
           super(id: id, display_name: display_name,
-                worktree_path: worktree_path, live_task_lock: live_task_lock,
+                worktree_path: worktree_path,
+                folder_mtime: folder_mtime,
+                live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
         end
       end
@@ -138,6 +142,7 @@ module Hive
           marker: payload["marker"],
           attrs: payload["attrs"],
           mtime: payload["mtime"],
+          folder_mtime: payload["folder_mtime"],
           age_seconds: payload["age_seconds"],
           claude_pid: payload["claude_pid"],
           claude_pid_alive: payload["claude_pid_alive"],

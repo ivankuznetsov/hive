@@ -184,6 +184,7 @@ module Hive
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601,
+          "folder_mtime" => row[:folder_mtime].utc.iso8601,
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
@@ -387,7 +388,8 @@ module Hive
               next
             end
             marker = Hive::Markers.current(task.state_file)
-            mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : File.mtime(entry)
+            folder_mtime = File.mtime(entry)
+            mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
             lock_holder = task_lock_holder(task)
             live_holder = live_task_lock_holder(lock_holder)
             icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
@@ -416,6 +418,7 @@ module Hive
               icon: icon,
               state_label: state_label,
               mtime: mtime,
+              folder_mtime: folder_mtime,
               age: humanise_age(mtime),
               claude_pid: claude_pid,
               claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,

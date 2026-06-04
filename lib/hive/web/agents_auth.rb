@@ -1,19 +1,23 @@
 require "json"
 require "pty"
 require "securerandom"
-require "thread"
 require "fileutils"
 
 module Hive
   module Web
     class AgentsAuth
-      URL_RE = %r{https?://[^\s<>"']+}.freeze
+      # Require a trailing whitespace boundary so the URL is only captured
+      # once the agent CLI has emitted the *whole* line. Matching greedily
+      # without the lookahead grabbed a truncated prefix (e.g. "https://l")
+      # on the first char-read where the pattern matched, surfacing a broken
+      # authorize URL to the operator.
+      URL_RE = %r{https?://[^\s<>"']+(?=\s)}.freeze
       AGENT_COMMANDS = {
         "claude" => %w[claude setup-token],
         "codex" => %w[codex login]
       }.freeze
 
-      Session = Struct.new(:id, :agent, :pid, :io, :output, :url, :done, :error, keyword_init: true)
+      Session = Struct.new(:id, :agent, :pid, :io, :reader, :output, :url, :done, :error, keyword_init: true)
 
       def initialize
         @sessions = {}
@@ -28,9 +32,11 @@ module Hive
 
       def start(agent)
         argv = AGENT_COMMANDS.fetch(agent.to_s)
+        prune_finished_sessions
         session = Session.new(id: SecureRandom.hex(8), agent: agent.to_s, output: +"", done: false)
         reader, writer, pid = PTY.spawn(*argv)
         session.io = writer
+        session.reader = reader
         session.pid = pid
         @mutex.synchronize { @sessions[session.id] = session }
 
@@ -46,6 +52,10 @@ module Hive
             nil
           ensure
             _, status = Process.wait2(pid)
+            # Close both PTY ends so the master/slave fds are reclaimed —
+            # otherwise a long-running box leaks two fds per login attempt.
+            close_io(reader)
+            close_io(writer)
             @mutex.synchronize { session.done = true; session.error = "exit #{status.exitstatus}" unless status.success? }
           end
         end
@@ -78,6 +88,22 @@ module Hive
         path
       rescue JSON::ParserError => e
         raise Hive::Error, "pi token JSON is invalid: #{e.message}"
+      end
+
+      private
+
+      # Drop sessions whose CLI has already exited so @sessions doesn't grow
+      # without bound across the box's lifetime. Finished sessions have had
+      # their fds closed in the reader thread's ensure block, so there is
+      # nothing left to read or relay a code into.
+      def prune_finished_sessions
+        @mutex.synchronize { @sessions.delete_if { |_, s| s.done } }
+      end
+
+      def close_io(io)
+        io.close unless io.nil? || io.closed?
+      rescue IOError
+        nil
       end
     end
   end

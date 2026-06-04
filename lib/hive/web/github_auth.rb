@@ -39,8 +39,19 @@ module Hive
           redirect_uri: callback_url
         )
         res = @http.start(TOKEN_URL.host, TOKEN_URL.port, use_ssl: true) { |http| http.request(req) }
-        token = JSON.parse(res.body).fetch("access_token")
+        raise Hive::Error, "GitHub token exchange failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
+
+        body = JSON.parse(res.body)
+        # GitHub returns 200 with an `error` field on a bad/expired code
+        # rather than a non-2xx status, so check the payload explicitly.
+        raise Hive::Error, "GitHub token exchange failed: #{body["error_description"] || body["error"]}" if body["error"]
+
+        token = body["access_token"]
+        raise Hive::Error, "GitHub token exchange returned no access_token" if token.to_s.empty?
+
         login_for_token(token)
+      rescue JSON::ParserError
+        raise Hive::Error, "GitHub token exchange returned an unparseable response"
       end
 
       def owner?(login)
@@ -58,7 +69,14 @@ module Hive
         req["Accept"] = "application/vnd.github+json"
         req["Authorization"] = "Bearer #{token}"
         res = @http.start(USER_URL.host, USER_URL.port, use_ssl: true) { |http| http.request(req) }
-        JSON.parse(res.body).fetch("login")
+        raise Hive::Error, "GitHub user lookup failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
+
+        login = JSON.parse(res.body)["login"]
+        raise Hive::Error, "GitHub user lookup returned no login" if login.to_s.empty?
+
+        login
+      rescue JSON::ParserError
+        raise Hive::Error, "GitHub user lookup returned an unparseable response"
       end
 
       def client_id

@@ -14,7 +14,6 @@ module Hive
         bind = @bind || cfg.fetch("bind")
         port = (@port || cfg.fetch("port")).to_i
         require "puma"
-        require "rackup"
 
         app = Hive::Web::App
         server = Puma::Server.new(app)

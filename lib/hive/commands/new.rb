@@ -122,7 +122,7 @@ module Hive
         spawn_name_generator(task_dir)
 
         puts "hive: captured #{idea_path}"
-        target_hint = id ? id.to_s : "<task>"
+        target_hint = id ? id.to_s : slug
         puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', '2-brainstorm/')} && hive run #{target_hint}"
       end
 

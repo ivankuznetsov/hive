@@ -20,7 +20,7 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,             # Symbol: :grid / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview / :red_status_detail / :token_stats
+      :mode,             # Symbol: :grid / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview / :red_status_detail / :token_stats / :archive
       :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
       :cursor,           # [project_idx, row_idx] (or nil for empty grid)
       :filter,           # String or nil — committed substring filter

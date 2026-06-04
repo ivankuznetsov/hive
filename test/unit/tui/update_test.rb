@@ -694,6 +694,28 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil new_model.token_stats_state
   end
 
+  def test_close_archive_pane_returns_to_grid
+    starting = model.with(mode: :archive)
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CLOSE_ARCHIVE_PANE)
+
+    assert_equal :grid, new_model.mode
+  end
+
+  def test_open_archive_pane_sets_archive_mode
+    new_model, _cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
+
+    assert_equal :archive, new_model.mode
+  end
+
+  def test_close_archive_pane_from_other_mode_is_noop
+    starting = model.with(mode: :grid)
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CLOSE_ARCHIVE_PANE)
+
+    assert_same starting, new_model
+  end
+
   def test_token_stats_scope_changed_drills_task_to_project_to_all
     state = Hive::Tui::Model::TokenStatsState.new(
       scope_level: :task,

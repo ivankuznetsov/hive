@@ -37,6 +37,7 @@ require "hive/tui/views/idea_preview"
 require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
 require "hive/tui/views/token_stats"
+require "hive/tui/views/archive_pane"
 require "hive/tui/views/usage_footer"
 require "hive/update_check/state"
 
@@ -242,6 +243,7 @@ module Hive
         when :log_tail then Views::LogTail.render(@hive_model)
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :token_stats then token_stats_view
+        when :archive then archive_view
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
         when :idea_preview then compose_idea_preview_view
@@ -1446,6 +1448,11 @@ module Hive
         state = @hive_model.token_stats_state || Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
         aggregate = Hive::UsageDb.aggregate(scope: token_stats_scope(state))
         Views::TokenStats.render(@hive_model.with(token_stats_state: state), aggregate: aggregate)
+      end
+
+      def archive_view
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        Views::ArchivePane.render(@hive_model, width: usable)
       end
 
       def token_stats_scope(state)

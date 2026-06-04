@@ -173,6 +173,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :filter, @model.hive_model.mode
   end
 
+  def test_z_opens_archive_pane
+    km = Bubbletea::KeyMessage.new(key_type: 0, runes: [ "z".ord ])
+    @model.update(km)
+    assert_equal :archive, @model.hive_model.mode
+  end
+
   # F2: full filter happy path through KeyMessage → KeyMap → Update.
   # Open filter, type chars, commit; assert filter committed and mode
   # back to :grid. Pins the regression we found in the /ce-code-review
@@ -673,6 +679,30 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "/tmp/hive/agent.log"
     assert_includes out, "first log line"
     assert_includes out, "stale"
+  end
+
+  def test_view_renders_archive_mode
+    row = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      slug: "archived-row",
+      stage: "9-done",
+      marker: "complete"
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :archive,
+        snapshot: snapshot_with([ row ]),
+        cols: 100,
+        rows: 20
+      ),
+      dispatch: @dispatch
+    )
+
+    out = @model.view
+
+    assert_includes out, "Archive · all done tasks"
+    assert_includes out, "archived-row"
   end
 
   def test_view_renders_red_status_detail_mode

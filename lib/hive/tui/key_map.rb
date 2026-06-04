@@ -87,6 +87,7 @@ module Hive
         when :log_tail then log_tail_message(key: key, row: row)
         when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :token_stats then token_stats_message(key: key, row: row)
+        when :archive then archive_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
         when :idea_preview then idea_preview_message(key: key, row: row)
@@ -152,6 +153,7 @@ module Hive
         return Messages::OPEN_FILTER_PROMPT if key == "/"
         return Messages::OPEN_NEW_IDEA_PROMPT if key == "n"
         return Messages::OPEN_TOKEN_STATS if key == "T"
+        return Messages::OPEN_ARCHIVE_PANE if key == "z"
         return Messages::ProjectScope.new(n: key.to_i) if key.is_a?(String) && key.match?(/\A[0-9]\z/)
 
         nil
@@ -381,6 +383,12 @@ module Hive
         return Messages::TokenStatsScopeChanged.new(direction: :in) if key == :key_right || key == "l"
         return Messages::TokenStatsSelectionMoved.new(direction: :previous) if key == :key_up || key == "k"
         return Messages::TokenStatsSelectionMoved.new(direction: :next) if key == :key_down || key == "j"
+
+        Messages::NOOP
+      end
+
+      def archive_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::CLOSE_ARCHIVE_PANE if ESCAPE_KEYS.include?(key) || key == "q"
 
         Messages::NOOP
       end

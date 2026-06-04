@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-04T21:30:00Z] patrol - default draft_prs to false (open ready PRs)
+
+**Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.
+
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

@@ -24,6 +24,11 @@ module Hive
       def call
         name = generate_name
         return nil unless name
+        # The agent runs detached for ~60s; in the folder-as-agent pipeline the
+        # task may be `mv`'d to the next stage in that window. Bail if the
+        # original folder no longer exists so `update_display_name` (which
+        # mkdir_p's the path) can't resurrect a stale, idea.md-less stub.
+        return nil unless File.directory?(@task.folder)
 
         Hive::TaskMeta.update_display_name(@task.folder, name)
         commit_name

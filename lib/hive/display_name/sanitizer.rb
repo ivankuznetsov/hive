@@ -11,9 +11,7 @@ module Hive
         text = text.gsub(/[`*_#>\[\]]/, " ")
         text = text.tr("\r\n", " ")
         text = text.gsub(/\s+/, " ").strip
-        text = text.gsub(/\A["'“”‘’]+|["'“”‘’]+\z/, "")
-        text = text.gsub(/[[:punct:]]+\z/, "")
-        text = text.strip
+        text = text.gsub(/\A["'“”‘’]+|["'“”‘’]+\z/, "").strip
         text = text.gsub(/[[:punct:]]+\z/, "").strip
         return nil if text.empty?
 

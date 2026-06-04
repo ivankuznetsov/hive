@@ -46,6 +46,20 @@ module Hive
       DIRS[current_array_idx + 1]
     end
 
+    # Directory for the stage *before* the one whose numeric prefix is `idx`.
+    # Returns nil when `idx` is the first stage or when no stage with prefix
+    # `idx` exists. Used by the web reject action to send a task back to its
+    # immediately-prior gate rather than a hardcoded stage. Out-of-range
+    # argument types raise so off-by-one bugs surface at the call site.
+    def prev_dir(idx)
+      raise ArgumentError, "stage index out of range: #{idx.inspect}" unless idx.is_a?(Integer) && idx >= 1
+
+      current_array_idx = DIRS.index { |d| d.start_with?("#{idx}-") }
+      return nil unless current_array_idx && current_array_idx.positive?
+
+      DIRS[current_array_idx - 1]
+    end
+
     # Resolve a user-provided stage string ("3-plan" or "plan") to a
     # canonical DIRS entry, or nil if neither shape matches.
     def resolve(name)

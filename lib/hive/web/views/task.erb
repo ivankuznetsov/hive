@@ -7,6 +7,11 @@
       <input type="hidden" name="from" value="<%= h(@row["stage"]) %>">
       <button type="submit">Approve</button>
     </form>
+    <form method="post" action="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/reject">
+      <%= csrf_tag %>
+      <input type="hidden" name="from" value="<%= h(@row["stage"]) %>">
+      <button type="submit">Reject</button>
+    </form>
     <form method="post" action="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/dispatch">
       <%= csrf_tag %>
       <input type="hidden" name="action" value="<%= h(@row["action"]) %>">

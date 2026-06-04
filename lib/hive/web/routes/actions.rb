@@ -13,11 +13,11 @@ module Hive
       end
 
       post "/tasks/:project/:slug/reject" do
-        settings.dispatcher.approve(
+        settings.dispatcher.reject(
           slug: params["slug"],
           project: params["project"],
-          to: params.fetch("to", "2-brainstorm"),
-          force: true
+          from: params["from"],
+          to: params["to"]
         )
         redirect "/"
       end
@@ -35,9 +35,7 @@ module Hive
       post "/tasks/:project/:slug/intervene" do
         row = task_row(find_project!(params["project"]), params["slug"])
         halt 404, "unknown task" unless row
-        File.open(File.join(row["folder"], "web-interventions.md"), "a") do |f|
-          f.puts "\n## #{Time.now.utc.iso8601}\n\n#{params["message"]}\n"
-        end
+        settings.dispatcher.intervene(folder: row["folder"], message: params["message"])
         redirect "/tasks/#{params["project"]}/#{params["slug"]}"
       end
 

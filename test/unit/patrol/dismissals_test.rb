@@ -37,6 +37,24 @@ class HivePatrolDismissalsTest < Minitest::Test
     end
   end
 
+  # The dismissed entry must carry the finding content forward so the
+  # similarity gate can still recognise a re-worded re-file of it.
+  def test_closed_pr_carries_content_into_dismissed_entry
+    with_tmp_dir do |dir|
+      write_json(File.join(dir, ".hive-state", "patrol", "fingerprints.json"), {
+        "fp1" => { "branch" => "hive-patrol/x", "pr_url" => "https://example.com/pr/1",
+                   "state" => "open", "category" => "security",
+                   "title_tokens" => %w[implicit post mutations] }
+      })
+      gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/1" } ])
+
+      dismissed = Hive::Patrol::Dismissals.new(dir, gh: gh).reconcile(now: Time.utc(2026, 5, 28, 12))
+
+      assert_equal "security", dismissed["fp1"]["category"]
+      assert_equal %w[implicit post mutations], dismissed["fp1"]["title_tokens"]
+    end
+  end
+
   def test_merged_pr_marks_fingerprint_merged
     with_tmp_dir do |dir|
       write_json(File.join(dir, ".hive-state", "patrol", "fingerprints.json"), {

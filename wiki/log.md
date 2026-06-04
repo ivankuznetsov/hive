@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T00:00:00Z] bot - suppress daemon-auto-approved 3-plan pauses (+ fix label)
+
+**Action:** Fixed a spurious-notification bug: a 3-plan `waiting` marker is a plan-draft/approval pause that the daemon's `PlanApproval` auto-approves when `daemon.enabled`, but the bot's status poll raced the daemon and pinged the operator with an unactionable "questions waiting" alert (mislabelled "Brainstorm questions"). Added `NotificationDispatcher#suppress_daemon_plan_pause?` — suppresses `needs_input` + stage `3-plan` + marker `waiting` rows when the daemon is enabled (logging `notification_skipped_daemon_plan_pause`, added to the bot Logger enum + `hive-bot-log.v1.json`), mirroring `suppress_ready_action?`. Also split `NotificationBuilders#needs_input` so a 3-plan `waiting` renders "Plan draft is ready for your review" (daemon-off case) instead of the brainstorm "Answer in chat" text. 100% line coverage, rubocop clean.
+
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

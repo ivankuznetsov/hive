@@ -46,6 +46,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | New idea project picker | `n` from `★ All projects` scope | `Esc` / `q` (cancels) / `Enter` (selects and advances to title prompt) |
 | New idea prompt | `n` (single-project scope), or after picker selection (all-projects scope) | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Info panel | `i` on a selected right-pane task | `q` / `Esc` / `i` |
+| Archive pane | `z` | `q` / `Esc` |
 | Help overlay | `?` | any key |
 
 ## Keybindings (default mode)
@@ -68,6 +69,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `9-done` (or any stage). |
 | `i` | open the focused row's in-TUI info panel — no editor handoff, no marker change, no workflow dispatch. |
 | `s` | steer the focused task manually: open the configured `execute.agent` in the feature worktree with every existing stage folder for that slug passed as agent context, mark the row `MANUAL_STEERING`, and archive the slug under `archived-manual/` when the agent exits |
+| `z` | open the Archive pane, listing all `9-done` tasks across projects with no age cutoff |
 | `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -145,7 +147,9 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
 
-`Hive::Tui::Snapshot::Row` carries `slug`, `id`, and `display_name` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+
+The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops only clean `9-done` rows older than 3 days by folder mtime; done rows with unresolved markers remain visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The footer shows `+N hidden - open Archive pane` when the full snapshot contains hidden rows and no flash is active. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 

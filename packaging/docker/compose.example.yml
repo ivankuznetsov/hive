@@ -1,0 +1,12 @@
+services:
+  hivebox:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    ports:
+      - "4567:4567"
+    volumes:
+      - ./hivebox-data:/data
+    environment:
+      HIVEBOX_GITHUB_CLIENT_SECRET: "${HIVEBOX_GITHUB_CLIENT_SECRET}"
+      HIVEBOX_SESSION_SECRET: "${HIVEBOX_SESSION_SECRET:-}"

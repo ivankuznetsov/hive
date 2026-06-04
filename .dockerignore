@@ -1,0 +1,10 @@
+.git
+.github
+.hive-state
+coverage
+pkg
+tmp
+log
+node_modules
+vendor/bundle
+*.gem

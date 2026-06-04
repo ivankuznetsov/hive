@@ -1,4 +1,6 @@
 require "hive"
+require "time"
+require "hive/archive_filter"
 require "hive/commands/status"
 
 module Hive
@@ -192,6 +194,18 @@ module Hive
         self.class.new(generated_at: @generated_at, projects: filtered)
       end
 
+      def without_old_archived(now: Time.now)
+        filtered = @projects.map do |project|
+          rows = project.rows.reject { |row| old_archived_row?(row, now: now) }
+          project.with(rows: rows.freeze)
+        end
+        self.class.new(generated_at: @generated_at, projects: filtered)
+      end
+
+      def hidden_old_archived_count(now: Time.now)
+        rows.count { |row| old_archived_row?(row, now: now) }
+      end
+
       # `n == 0` is "all projects" (returns self). `n` between 1 and
       # projects.size returns a single-project snapshot (1-indexed). Out
       # of range returns an empty-projects snapshot so the renderer can
@@ -220,6 +234,25 @@ module Hive
         return nil unless row_idx.between?(0, project_rows.size - 1)
 
         project_rows[row_idx]
+      end
+
+      private
+
+      def old_archived_row?(row, now:)
+        Hive::ArchiveFilter.hide?(
+          stage: row.stage,
+          marker_name: row.marker,
+          folder_mtime: parse_folder_mtime(row.folder_mtime),
+          now: now
+        )
+      end
+
+      def parse_folder_mtime(value)
+        return nil if value.nil? || value.to_s.strip.empty?
+
+        Time.iso8601(value.to_s)
+      rescue ArgumentError
+        nil
       end
     end
   end

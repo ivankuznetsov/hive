@@ -131,7 +131,7 @@ module Hive
           snap = model.snapshot
           return nil if snap.nil?
 
-          snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
+          snap.scope_to_project_index(model.scope).filter_by_slug(model.filter).without_old_archived
         end
 
         # Below `inner_width = ICON+ID+STAGE+STATUS+AGE+SEPARATORS+name_min`

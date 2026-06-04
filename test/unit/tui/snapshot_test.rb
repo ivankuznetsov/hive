@@ -391,4 +391,68 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "future-one", "future-two" ], rows[1..2].map(&:slug),
                  "unknown labels keep their JSON order against each other"
   end
+
+  def test_without_old_archived_drops_only_clean_old_archived_rows
+    now = Time.utc(2026, 6, 4, 12, 0, 0)
+    old_archived = sample_task(slug: "old-archived", stage: "9-done", marker: "complete")
+    old_archived["action"] = "archived"
+    old_archived["action_label"] = "Archived"
+    old_archived["folder_mtime"] = (now - (5 * 86_400)).utc.iso8601
+
+    recent_archived = sample_task(slug: "recent-archived", stage: "9-done", marker: "complete")
+    recent_archived["action"] = "archived"
+    recent_archived["action_label"] = "Archived"
+    recent_archived["folder_mtime"] = (now - 86_400).utc.iso8601
+
+    errored_archived = sample_task(slug: "errored-archived", stage: "9-done", marker: "error")
+    errored_archived["action"] = "error"
+    errored_archived["action_label"] = "Error"
+    errored_archived["folder_mtime"] = (now - (10 * 86_400)).utc.iso8601
+
+    old_execute = sample_task(slug: "old-execute", stage: "4-execute", marker: "execute_complete")
+    old_execute["folder_mtime"] = (now - (99 * 86_400)).utc.iso8601
+
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+                                                                 {
+                                                                   "name" => "alpha",
+                                                                   "path" => "/tmp/alpha",
+                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
+                                                                   "tasks" => [
+                                                                     old_archived,
+                                                                     recent_archived,
+                                                                     errored_archived,
+                                                                     old_execute
+                                                                   ]
+                                                                 }
+                                                               ]))
+
+    filtered = snapshot.without_old_archived(now: now)
+
+    refute_includes filtered.rows.map(&:slug), "old-archived"
+    assert_includes filtered.rows.map(&:slug), "recent-archived"
+    assert_includes filtered.rows.map(&:slug), "errored-archived"
+    assert_includes filtered.rows.map(&:slug), "old-execute"
+    assert_equal 1, snapshot.hidden_old_archived_count(now: now)
+  end
+
+  def test_without_old_archived_tolerates_blank_or_invalid_folder_mtime
+    now = Time.utc(2026, 6, 4, 12, 0, 0)
+    blank = sample_task(slug: "blank-mtime", stage: "9-done", marker: "complete")
+    blank["folder_mtime"] = ""
+    invalid = sample_task(slug: "invalid-mtime", stage: "9-done", marker: "complete")
+    invalid["folder_mtime"] = "not-a-time"
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+                                                                 {
+                                                                   "name" => "alpha",
+                                                                   "path" => "/tmp/alpha",
+                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
+                                                                   "tasks" => [ blank, invalid ]
+                                                                 }
+                                                               ]))
+
+    filtered = snapshot.without_old_archived(now: now)
+
+    assert_equal [ "blank-mtime", "invalid-mtime" ], filtered.rows.map(&:slug)
+    assert_equal 0, snapshot.hidden_old_archived_count(now: now)
+  end
 end

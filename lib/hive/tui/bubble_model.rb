@@ -365,7 +365,7 @@ module Hive
         snap = @hive_model.snapshot
         return nil if snap.nil? || @hive_model.cursor.nil?
 
-        visible = snap.scope_to_project_index(@hive_model.scope).filter_by_slug(@hive_model.filter)
+        visible = snap.scope_to_project_index(@hive_model.scope).filter_by_slug(@hive_model.filter).without_old_archived
         visible.row_at(@hive_model.cursor)
       end
 
@@ -3222,11 +3222,19 @@ module Hive
           Hive::Tui::Styles::FLASH.render(line)
         else
           aggregate = usage_footer_aggregate
+          hidden_notice = archive_hidden_notice
           if usable_width && usable_width < 80
+            if hidden_notice
+              line = "#{hidden_notice} · #{Views::UsageFooter.text(aggregate)}"
+              line = Views::Format.truncate(line, usable_width)
+              return Hive::Tui::Styles::HINT.render(line)
+            end
+
             return Views::UsageFooter.render(aggregate: aggregate, width: usable_width)
           end
 
           line = "#{footer_hint} · #{Views::UsageFooter.text(aggregate)}"
+          line = "#{hidden_notice} · #{line}" if hidden_notice
           nudge = update_nudge
           # Prepend so truncation trims the hint tail, not the higher-priority
           # "you're behind" notice.
@@ -3265,6 +3273,13 @@ module Hive
 
       def usage_footer_line(usable_width = nil)
         Views::UsageFooter.render(aggregate: usage_footer_aggregate, width: usable_width)
+      end
+
+      def archive_hidden_notice
+        return nil unless @hive_model.mode == :grid
+
+        count = @hive_model.snapshot&.hidden_old_archived_count.to_i
+        count.positive? ? "+#{count} hidden — open Archive pane" : nil
       end
 
       def usage_footer_aggregate

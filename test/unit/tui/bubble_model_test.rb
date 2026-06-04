@@ -24,11 +24,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
                     marker: "waiting", attrs: {}, folder: nil,
+                    folder_mtime: nil,
                     action_label: "Needs your input", next_action: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
-      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      folder_mtime: folder_mtime, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: action_label,
       suggested_command: suggested_command, next_action: next_action,
       diagnostic: nil
@@ -263,6 +264,29 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
 
     assert_equal [ { project_slug: "demo" } ], scopes
+  end
+
+  def test_current_row_uses_archive_filtered_grid_projection
+    hidden = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      slug: "old-archived",
+      stage: "9-done",
+      marker: "complete",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    visible = make_task_row(action_key: "ready_to_plan", action_label: "Ready to plan", slug: "visible-row")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        snapshot: snapshot_with([ hidden, visible ]),
+        cursor: [ 0, 0 ]
+      ),
+      dispatch: @dispatch
+    )
+
+    row = @model.send(:current_row)
+
+    assert_equal "visible-row", row.slug
   end
 
   def test_usage_footer_defaults_to_all_scope_without_selection
@@ -728,6 +752,65 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "[q] quit"
     assert_operator out.index("[Tab] switch"), :<, out.index("tokens"),
                     "hint block must precede token block at wide width"
+  end
+
+  def test_default_footer_prepends_hidden_archived_notice
+    rows = 12.times.map do |idx|
+      make_task_row(
+        action_key: "archived",
+        action_label: "Archived",
+        slug: "old-archived-#{idx}",
+        stage: "9-done",
+        marker: "complete",
+        folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+      )
+    end
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snapshot_with(rows), mode: :grid),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 180) }
+
+    assert_includes out, "+12 hidden — open Archive pane"
+    assert out.index("+12 hidden") < out.index("[Tab] switch"),
+           "hidden notice must be prepended ahead of key hints"
+  end
+
+  def test_default_footer_omits_hidden_notice_when_none_hidden
+    row = make_task_row(action_key: "ready_to_plan", slug: "active-row")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snapshot_with([ row ]), mode: :grid),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 180) }
+
+    refute_includes out, "hidden — open Archive pane"
+  end
+
+  def test_default_footer_flash_takes_precedence_over_hidden_notice
+    row = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      stage: "9-done",
+      marker: "complete",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        snapshot: snapshot_with([ row ]),
+        mode: :grid,
+        flash: "working",
+        flash_set_at: Time.now
+      ),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 180) }
+
+    assert_includes out, "working"
+    refute_includes out, "hidden — open Archive pane"
   end
 
   def test_default_footer_fits_full_hint_at_exact_boundary_width

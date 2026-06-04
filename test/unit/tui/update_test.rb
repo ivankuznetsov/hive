@@ -870,6 +870,26 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal [ 0, 1 ], new_model.cursor
   end
 
+  def test_cursor_down_uses_archive_filtered_rows
+    hidden = build_row(
+      project: "alpha",
+      slug: "old-archived",
+      stage: "9-done",
+      marker: "complete",
+      action_key: "archived",
+      action_label: "Archived",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    visible = build_row(project: "alpha", slug: "visible-row")
+    snap = snapshot_with_rows(hidden, visible)
+    starting = model.with(snapshot: snap, cursor: [ 0, 0 ])
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+
+    assert_equal [ 0, 0 ], new_model.cursor,
+                 "after filtering the hidden archived row, the only visible row is already selected"
+  end
+
   def test_cursor_down_jumps_to_next_project_at_last_row
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 2 ])
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)

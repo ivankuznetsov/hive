@@ -926,7 +926,7 @@ end
         snap = model.snapshot
         return nil if snap.nil?
 
-        snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
+        snap.scope_to_project_index(model.scope).filter_by_slug(model.filter).without_old_archived
       end
 
       def find_row_for_detail(snapshot, original_row)

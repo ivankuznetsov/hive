@@ -10,6 +10,12 @@ module Hive
       TOKEN_URL = URI("https://github.com/login/oauth/access_token")
       USER_URL = URI("https://api.github.com/user")
 
+      # Bound both legs of every GitHub call. Net::HTTP defaults to a 60s read
+      # timeout; on the box's small Puma pool a hung GitHub would pin a thread
+      # for a full minute (or until the client gives up), so cap it tightly.
+      OPEN_TIMEOUT_SEC = 5
+      READ_TIMEOUT_SEC = 10
+
       def initialize(config:, http: Net::HTTP)
         @config = config
         @http = http
@@ -38,7 +44,7 @@ module Hive
           code: code,
           redirect_uri: callback_url
         )
-        res = @http.start(TOKEN_URL.host, TOKEN_URL.port, use_ssl: true) { |http| http.request(req) }
+        res = @http.start(TOKEN_URL.host, TOKEN_URL.port, **http_timeouts) { |http| http.request(req) }
         raise Hive::Error, "GitHub token exchange failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
 
         body = JSON.parse(res.body)
@@ -64,11 +70,15 @@ module Hive
 
       private
 
+      def http_timeouts
+        { use_ssl: true, open_timeout: OPEN_TIMEOUT_SEC, read_timeout: READ_TIMEOUT_SEC }
+      end
+
       def login_for_token(token)
         req = Net::HTTP::Get.new(USER_URL)
         req["Accept"] = "application/vnd.github+json"
         req["Authorization"] = "Bearer #{token}"
-        res = @http.start(USER_URL.host, USER_URL.port, use_ssl: true) { |http| http.request(req) }
+        res = @http.start(USER_URL.host, USER_URL.port, **http_timeouts) { |http| http.request(req) }
         raise Hive::Error, "GitHub user lookup failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
 
         login = JSON.parse(res.body)["login"]

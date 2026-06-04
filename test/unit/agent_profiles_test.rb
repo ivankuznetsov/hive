@@ -1,8 +1,48 @@
 require "test_helper"
+require "json"
 require "hive/agent_profiles"
 
 class AgentProfilesTest < Minitest::Test
   include HiveTestHelper
+
+  def test_logged_in_false_when_only_a_config_dir_exists_without_credential
+    with_tmp_dir do |home|
+      # Both CLIs create their dir (settings/cache) *before* any login. A bare
+      # non-empty dir must NOT read as logged in.
+      FileUtils.mkdir_p(File.join(home, ".claude"))
+      File.write(File.join(home, ".claude", "settings.json"), "{}")
+      FileUtils.mkdir_p(File.join(home, ".codex"))
+      File.write(File.join(home, ".codex", "history.jsonl"), "noise\n")
+
+      refute Hive::AgentProfiles.logged_in?(:claude, home: home),
+             "a ~/.claude with only settings must not report logged in"
+      refute Hive::AgentProfiles.logged_in?(:codex, home: home),
+             "a ~/.codex with only history must not report logged in"
+    end
+  end
+
+  def test_logged_in_true_when_credential_artifact_present
+    with_tmp_dir do |home|
+      FileUtils.mkdir_p(File.join(home, ".claude"))
+      File.write(File.join(home, ".claude", ".credentials.json"),
+                 JSON.generate("claudeAiOauth" => { "accessToken" => "x" }))
+      FileUtils.mkdir_p(File.join(home, ".codex"))
+      File.write(File.join(home, ".codex", "auth.json"), JSON.generate("OPENAI_API_KEY" => "x"))
+
+      assert Hive::AgentProfiles.logged_in?(:claude, home: home)
+      assert Hive::AgentProfiles.logged_in?(:codex, home: home)
+    end
+  end
+
+  def test_logged_in_false_for_empty_credential_object
+    with_tmp_dir do |home|
+      FileUtils.mkdir_p(File.join(home, ".codex"))
+      File.write(File.join(home, ".codex", "auth.json"), "{}")
+
+      refute Hive::AgentProfiles.logged_in?(:codex, home: home),
+             "an empty {} credential file is not a real credential"
+    end
+  end
 
   def teardown
     # Restore the v1 built-in registrations after any test that mutated the

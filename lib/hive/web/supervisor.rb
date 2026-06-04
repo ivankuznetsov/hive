@@ -114,6 +114,7 @@ module Hive
       end
 
       def terminate_all
+        grace = Hive::Config.load_global_daemon.fetch("shutdown_grace_sec", 60)
         @children.each do |child|
           next unless child.pid
 
@@ -121,16 +122,31 @@ module Hive
         rescue Errno::ESRCH
           nil
         end
-        deadline = Time.now + Hive::Config.load_global_daemon.fetch("shutdown_grace_sec", 60)
-        @children.each do |child|
-          next unless child.pid
+        @children.each { |child| reap_with_escalation(child, grace) if child.pid }
+      end
 
-          begin
-            sleep 0.2 while Time.now < deadline && Process.waitpid(child.pid, Process::WNOHANG).nil?
-          rescue Errno::ECHILD
-            nil
-          end
+      # Give *each* child its own grace window (a shared deadline let the first
+      # slow child consume the whole budget, leaving the rest ~0s), then
+      # SIGKILL the process group of any child that ignored TERM so the
+      # container can't hang on `docker stop` or orphan agent processes.
+      def reap_with_escalation(child, grace)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + grace
+        loop do
+          return if Process.waitpid(child.pid, Process::WNOHANG)
+          break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+          sleep 0.2
         end
+        force_kill(child)
+      rescue Errno::ECHILD
+        nil
+      end
+
+      def force_kill(child)
+        Process.kill("KILL", -child.pid)
+        Process.waitpid(child.pid)
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
       end
     end
   end

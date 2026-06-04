@@ -10,6 +10,8 @@ require "hive/web/status_feed"
 require "hive/web/dispatcher"
 require "hive/web/agents_auth"
 require "hive/web/telegram_validator"
+require "hive/web/telegram_tester"
+require "hive/web/sse_limiter"
 
 module Hive
   module Web
@@ -28,6 +30,10 @@ module Hive
         set :dispatcher, Hive::Web::Dispatcher.new
         set :agents_auth, Hive::Web::AgentsAuth.new
         set :telegram_validator, Hive::Web::TelegramValidator
+        set :telegram_tester, Hive::Web::TelegramTester
+        # Cap concurrent SSE streams so open dashboards can't exhaust Puma's
+        # thread pool (see Hive::Web::SseLimiter).
+        set :sse_limiter, Hive::Web::SseLimiter.new(max: 64)
         # A truthy Hash for `:sessions` both enables Sinatra's session
         # middleware AND carries the cookie options below. Do NOT follow it
         # with `enable :sessions` — that is `set(:sessions, true)`, which
@@ -58,7 +64,11 @@ module Hive
         end
 
         def protected!
-          return if request.path_info == "/health"
+          # `/login` and `/logout` MUST be exempt: gating `/login` behind
+          # `protected!` makes an unauthenticated `GET /login` redirect back
+          # to `/login` forever, so the fresh-box GitHub sign-in flow (U2/U9)
+          # never renders.
+          return if %w[/health /login /logout].include?(request.path_info)
           return if request.path_info.start_with?("/auth/github")
           return if session[:github_login]
 
@@ -123,6 +133,10 @@ module Hive
         login = settings.github_auth.exchange_code(code)
         halt 403, erb(:unauthorized, locals: { message: "#{login} is not allowed" }) unless settings.github_auth.owner?(login)
 
+        # Rotate the session id at the auth boundary. Signed cookies already
+        # blunt fixation today, but renewing here keeps the box safe if a
+        # server-side session store is ever introduced.
+        request.session_options[:renew] = true
         session[:github_login] = login
         redirect "/"
       end

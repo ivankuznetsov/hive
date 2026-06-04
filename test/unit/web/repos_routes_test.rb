@@ -1,6 +1,7 @@
 require "test_helper"
 require_relative "../../support/web_session_helper"
 require "hive/config"
+require "hive/commands/init"
 
 # U7 add-a-repo coverage: the repos list renders, an operator-supplied name
 # cannot escape the repos root (path traversal), and a clone is performed via
@@ -62,7 +63,7 @@ class WebReposRoutesTest < Minitest::Test
       token = csrf_token_from("/repos")
 
       post "/repos",
-           { "url" => "https://example.test/x.git", "name" => "..", "authenticity_token" => token },
+           { "url" => "https://github.com/octo/x.git", "name" => "..", "authenticity_token" => token },
            "HTTP_HOST" => "127.0.0.1"
 
       assert_equal 422, last_response.status, "a `..` name must be rejected outright"
@@ -75,7 +76,7 @@ class WebReposRoutesTest < Minitest::Test
       token = csrf_token_from("/repos")
 
       post "/repos",
-           { "url" => "https://example.test/x.git", "name" => "../../escape", "authenticity_token" => token },
+           { "url" => "https://github.com/octo/x.git", "name" => "../../escape", "authenticity_token" => token },
            "HTTP_HOST" => "127.0.0.1"
 
       assert last_response.redirect?, "a sanitizable name should clone and register"
@@ -83,6 +84,72 @@ class WebReposRoutesTest < Minitest::Test
       assert_equal File.join(root, "escape"), cloned,
                    "File.basename must collapse `../../escape` to a path inside the repos root"
       assert File.directory?(File.join(root, "escape")), "repo must land inside the root"
+    end
+  end
+
+  def test_non_github_url_is_rejected
+    with_box do |_root, log|
+      token = csrf_token_from("/repos")
+
+      post "/repos",
+           { "url" => "https://evil.test/x.git", "name" => "x", "authenticity_token" => token },
+           "HTTP_HOST" => "127.0.0.1"
+
+      assert_equal 422, last_response.status, "a non-github.com host must be rejected"
+      assert_equal "", File.exist?(log) ? File.read(log).strip : "", "no clone should run for a rejected URL"
+    end
+  end
+
+  def test_leading_dash_url_is_rejected
+    with_box do |_root, log|
+      token = csrf_token_from("/repos")
+
+      post "/repos",
+           { "url" => "--upload-pack=evil", "name" => "x", "authenticity_token" => token },
+           "HTTP_HOST" => "127.0.0.1"
+
+      assert_equal 422, last_response.status, "a leading-dash URL (argument injection) must be rejected"
+      assert_equal "", File.exist?(log) ? File.read(log).strip : "", "no clone should run for a rejected URL"
+    end
+  end
+
+  def test_owner_repo_shorthand_is_accepted
+    with_box do |root, log|
+      token = csrf_token_from("/repos")
+
+      post "/repos",
+           { "url" => "octo/widgets", "name" => "widgets", "authenticity_token" => token },
+           "HTTP_HOST" => "127.0.0.1"
+
+      assert last_response.redirect?, "owner/repo gh shorthand should be accepted"
+      assert_equal File.join(root, "widgets"), File.read(log).strip
+    end
+  end
+
+  def test_delete_forgets_named_project_with_csrf
+    with_box do |_root, _log|
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        assert Hive::Config.registered_projects.any? { |p| p["name"] == project }
+
+        token = csrf_token_from("/repos")
+        post "/repos/#{project}/delete",
+             { "authenticity_token" => token },
+             "HTTP_HOST" => "127.0.0.1"
+
+        assert last_response.redirect?, "a CSRF-valid delete should redirect"
+        refute Hive::Config.registered_projects.any? { |p| p["name"] == project },
+               "delete must forget exactly the named project"
+      end
+    end
+  end
+
+  def test_delete_without_csrf_is_rejected
+    with_box do |_root, _log|
+      post "/repos/anything/delete", {}, "HTTP_HOST" => "127.0.0.1"
+
+      assert_equal 403, last_response.status, "a delete without a CSRF token must be rejected"
     end
   end
 end

@@ -69,4 +69,37 @@ class WebTelegramRoutesTest < Minitest::Test
       assert_equal 422, last_response.status
     end
   end
+
+  # A non-Proc stub for the injectable round-trip tester (see FixedValidator).
+  FixedTester = Struct.new(:result) do
+    def call(token:, chat_ids:) = result
+  end
+
+  def test_test_message_round_trip_reports_success
+    with_box do |_home|
+      @app.set :telegram_tester, FixedTester.new({ ok: true, sent: 2 })
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "123:tok") do
+        token = csrf_token_from("/telegram")
+
+        post "/telegram/test", { "authenticity_token" => token }, "HTTP_HOST" => "127.0.0.1"
+
+        assert last_response.ok?, "a successful round-trip re-renders 200"
+        assert_includes last_response.body, "Sent a test message"
+      end
+    end
+  end
+
+  def test_test_message_failure_is_surfaced_inline
+    with_box do |_home|
+      @app.set :telegram_tester, FixedTester.new({ ok: false, error: "getMe failed" })
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "123:tok") do
+        token = csrf_token_from("/telegram")
+
+        post "/telegram/test", { "authenticity_token" => token }, "HTTP_HOST" => "127.0.0.1"
+
+        assert_equal 422, last_response.status
+        assert_includes last_response.body, "Telegram test failed"
+      end
+    end
+  end
 end

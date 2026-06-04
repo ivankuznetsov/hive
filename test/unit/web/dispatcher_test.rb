@@ -82,4 +82,27 @@ class WebDispatcherTest < Minitest::Test
       end
     end
   end
+
+  def test_dispatch_maps_known_action_to_stage_verb
+    with_tmp_global_config do
+      result = Hive::Web::Dispatcher.new.dispatch(
+        slug: "demo-task", project: "demo", action: "ready_for_review", stage: "5-open-pr"
+      )
+
+      assert_equal [ "hive", "review", "demo-task", "--project", "demo", "--from", "5-open-pr" ], result[:argv],
+                   "ready_for_review must map to the `review` verb (a STAGE_VERB_BY_ACTION typo would fail here)"
+    end
+  end
+
+  def test_dispatch_maps_each_gate_action_distinctly
+    with_tmp_global_config do
+      dispatcher = Hive::Web::Dispatcher.new
+
+      plan = dispatcher.dispatch(slug: "demo-task", project: "demo", action: "ready_to_plan")
+      develop = dispatcher.dispatch(slug: "demo-task", project: "demo", action: "ready_to_develop")
+
+      assert_equal "plan", plan[:argv][1], "ready_to_plan must map to `plan`"
+      assert_equal "develop", develop[:argv][1], "ready_to_develop must map to `develop`"
+    end
+  end
 end

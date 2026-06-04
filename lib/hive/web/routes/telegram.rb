@@ -36,8 +36,27 @@ module Hive
         redirect "/telegram"
       end
 
+      # U6 round-trip confirmation: authenticate the saved token (getMe) and
+      # deliver a real test message to every configured chat (sendMessage),
+      # then re-render with an inline notice/error (no JS alert).
       post "/telegram/test" do
-        halt 501, "Telegram round-trip test requires a live bot token and chat"
+        @bot = Hive::Config.load_global_bot
+        @error = nil
+        @notice = nil
+        token = saved_telegram_token
+        if token.to_s.strip.empty?
+          @error = "Save a bot token before sending a test message."
+          halt 422, erb(:telegram)
+        end
+
+        result = settings.telegram_tester.call(token: token, chat_ids: @bot["chat_id_allowlist"])
+        if result[:ok]
+          @notice = "Sent a test message to #{result[:sent]} chat(s)."
+          erb :telegram
+        else
+          @error = "Telegram test failed: #{result[:error]}."
+          halt 422, erb(:telegram)
+        end
       end
 
       helpers do
@@ -52,6 +71,27 @@ module Hive
 
           Process.kill("HUP", pid)
         rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+
+        # Read the persisted bot token: a live `export` wins, otherwise fall
+        # back to the value the wizard wrote into the .env file (the web
+        # process may not have it in its own ENV).
+        def saved_telegram_token
+          live = ENV["HIVE_TELEGRAM_BOT_TOKEN"].to_s
+          return live unless live.strip.empty?
+
+          read_env_value("HIVE_TELEGRAM_BOT_TOKEN")
+        end
+
+        def read_env_value(key)
+          path = Hive::EnvFile::DEFAULT_PATH
+          return nil unless File.exist?(path)
+
+          File.readlines(path, chomp: true).reverse_each do |line|
+            k, v = line.split("=", 2)
+            return Hive::EnvFile.strip_outer_quotes(v) if v && k.to_s.strip == key
+          end
           nil
         end
 

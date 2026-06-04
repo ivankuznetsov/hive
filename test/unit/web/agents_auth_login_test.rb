@@ -88,4 +88,51 @@ class AgentsAuthLoginTest < Minitest::Test
     auth = Hive::Web::AgentsAuth.new
     assert_raises(Hive::InvalidTaskPath) { auth.start("nope") }
   end
+
+  # A `claude` that rejects any code != "good" and exits non-zero — models a
+  # wrong/expired callback code.
+  def install_strict_claude(bin_dir)
+    path = File.join(bin_dir, "claude")
+    File.write(path, <<~SH)
+      #!/usr/bin/env bash
+      echo "Open #{AUTH_URL} to authenticate"
+      read -r code
+      if [ "$code" = "good" ]; then echo "token stored"; exit 0; fi
+      echo "invalid code"
+      exit 7
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
+  def test_complete_with_rejected_code_surfaces_error_not_silent_redirect
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      install_strict_claude(bin_dir)
+      # HOME points at an empty dir so logged_in? can't false-positive off the
+      # developer's real ~/.claude credential.
+      with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR), "HOME" => dir) do
+        auth = Hive::Web::AgentsAuth.new
+        session = auth.start("claude")
+
+        error = assert_raises(Hive::Error) { auth.complete(session.id, "wrong") }
+        assert_match(/login failed|did not accept/, error.message,
+                     "a rejected code must surface a clear error, not a silent redirect")
+      end
+    end
+  end
+
+  def test_complete_on_a_closed_pty_raises_a_friendly_error
+    auth = Hive::Web::AgentsAuth.new
+    closed_io = Object.new
+    def closed_io.write(*) = raise(IOError, "closed stream")
+    session = Hive::Web::AgentsAuth::Session.new(
+      id: "deadbeef", agent: "claude", io: closed_io, output: +"", done: false
+    )
+    auth.instance_variable_get(:@sessions)["deadbeef"] = session
+
+    error = assert_raises(Hive::Error) { auth.complete("deadbeef", "code") }
+    assert_match(/already closed/, error.message,
+                 "a write to a closed PTY must become a friendly 422, not an opaque 500")
+  end
 end

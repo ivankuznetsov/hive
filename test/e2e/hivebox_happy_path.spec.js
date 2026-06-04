@@ -16,6 +16,9 @@ test.describe("hivebox happy path", () => {
     await page.goto(baseURL);
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByRole("link", { name: "Continue with GitHub" })).toBeVisible();
+    // Negative assertion: the status grid must NOT be reachable pre-login — a
+    // redirect to /login that still rendered the grid would be a regression.
+    await expect(page.locator("[data-status-grid]")).toHaveCount(0);
   });
 
   test("authenticated operator can reach setup surfaces", async ({ page }) => {

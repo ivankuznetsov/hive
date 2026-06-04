@@ -15,11 +15,16 @@
     <% end %>
   </div>
   <% if defined?(@session) && @session %>
+    <% if @session_url.nil? && !@session.done %>
+      <%# Native HTML refresh (no JS/Turbo): poll until the authorize URL prints. %>
+      <meta http-equiv="refresh" content="2;url=/agents/<%= h(@session.agent) %>/login/<%= h(@session.id) %>">
+    <% end %>
     <section class="narrow">
       <h2><%= h(@session.agent) %> login</h2>
       <p>Open the provider URL when it appears, then paste the resulting code or callback URL.</p>
-      <pre><%= h(@session.output) %></pre>
-      <% if @session.url %><p><a href="<%= h(@session.url) %>" target="_blank" rel="noreferrer"><%= h(@session.url) %></a></p><% end %>
+      <% if @session_url.nil? && !@session.done %><p>Waiting for the provider URL…</p><% end %>
+      <pre><%= h(@session_output) %></pre>
+      <% if @session_url %><p><a href="<%= h(@session_url) %>" target="_blank" rel="noreferrer"><%= h(@session_url) %></a></p><% end %>
       <form method="post" action="/agents/<%= h(@session.agent) %>/login/complete">
         <%= csrf_tag %>
         <input type="hidden" name="session_id" value="<%= h(@session.id) %>">

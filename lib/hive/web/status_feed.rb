@@ -21,7 +21,12 @@ module Hive
       # a freshly connected client of the emit-on-connect snapshot until the
       # next change. Starting from `nil` guarantees the first iteration
       # always yields (emit on connect).
-      def each_snapshot
+      # `on_idle` fires once per polling tick when the snapshot is unchanged.
+      # The `/events` route uses it to emit an SSE keep-alive comment so a
+      # dead socket raises on the next write instead of parking its thread
+      # indefinitely (a closed tab produces no snapshot change, so without a
+      # heartbeat the only liveness probe — a data write — never happens).
+      def each_snapshot(on_idle: nil)
         last_json = nil
         loop do
           payload = snapshot
@@ -29,6 +34,8 @@ module Hive
           if encoded != last_json
             last_json = encoded
             yield payload
+          else
+            on_idle&.call
           end
           sleep @interval
         end

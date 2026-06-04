@@ -3,10 +3,19 @@
   <% if defined?(@error) && @error %>
     <p class="error"><%= h(@error) %></p>
   <% end %>
+  <% if defined?(@notice) && @notice %>
+    <p class="notice"><%= h(@notice) %></p>
+  <% end %>
   <form method="post" action="/telegram">
     <%= csrf_tag %>
     <label>Bot token <input name="token" type="password" required></label>
     <label>Allowed chat IDs <input name="chat_ids" value="<%= h(Array(@bot["chat_id_allowlist"]).join(", ")) %>"></label>
     <button type="submit">Save</button>
   </form>
+  <% if @bot["enabled"] %>
+    <form method="post" action="/telegram/test">
+      <%= csrf_tag %>
+      <button type="submit">Send test message</button>
+    </form>
+  <% end %>
 </section>

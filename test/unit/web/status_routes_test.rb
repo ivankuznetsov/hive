@@ -52,4 +52,33 @@ class WebStatusRoutesTest < Minitest::Test
       assert_match(%r{/login\z}, last_response["Location"])
     end
   end
+
+  def test_diff_returns_404_when_worktree_missing
+    with_seeded_box do |project, slug, _home|
+      get "/tasks/#{project}/#{slug}/diff", {}, "HTTP_HOST" => "127.0.0.1"
+
+      assert_equal 404, last_response.status, "no worktree on disk for a 1-inbox task → 404"
+      assert_includes last_response.body, "worktree not found"
+    end
+  end
+
+  def test_diff_rejects_malformed_slug_before_filesystem_access
+    with_seeded_box do |project, _slug, _home|
+      # A dotted slug isn't a valid task-folder name; safe_slug! must halt
+      # before any File.join/git runs (path-traversal guard).
+      get "/tasks/#{project}/has.dots/diff", {}, "HTTP_HOST" => "127.0.0.1"
+
+      assert_equal 404, last_response.status
+      assert_includes last_response.body, "unknown task"
+    end
+  end
+
+  def test_logs_rejects_malformed_slug
+    with_seeded_box do |project, _slug, _home|
+      get "/tasks/#{project}/has.dots/logs", {}, "HTTP_HOST" => "127.0.0.1"
+
+      assert_equal 404, last_response.status
+      assert_includes last_response.body, "unknown task"
+    end
+  end
 end

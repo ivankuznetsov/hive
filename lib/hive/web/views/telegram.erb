@@ -1,0 +1,9 @@
+<section class="narrow">
+  <h1>Telegram</h1>
+  <form method="post" action="/telegram">
+    <%= csrf_tag %>
+    <label>Bot token <input name="token" type="password" required></label>
+    <label>Allowed chat IDs <input name="chat_ids" value="<%= h(Array(@bot["chat_id_allowlist"]).join(", ")) %>"></label>
+    <button type="submit">Save</button>
+  </form>
+</section>

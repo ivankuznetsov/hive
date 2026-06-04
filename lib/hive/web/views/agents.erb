@@ -1,0 +1,39 @@
+<section>
+  <h1>Agents</h1>
+  <div class="cards">
+    <% @statuses.each do |agent, status| %>
+      <article class="card">
+        <h2><%= h(agent) %></h2>
+        <p><%= status["logged_in"] ? "Logged in" : "Not logged in" %></p>
+        <% if %w[claude codex].include?(agent) %>
+          <form method="post" action="/agents/<%= h(agent) %>/login/start">
+            <%= csrf_tag %>
+            <button type="submit">Start login</button>
+          </form>
+        <% end %>
+      </article>
+    <% end %>
+  </div>
+  <% if defined?(@session) && @session %>
+    <section class="narrow">
+      <h2><%= h(@session.agent) %> login</h2>
+      <p>Open the provider URL when it appears, then paste the resulting code or callback URL.</p>
+      <pre><%= h(@session.output) %></pre>
+      <% if @session.url %><p><a href="<%= h(@session.url) %>" target="_blank" rel="noreferrer"><%= h(@session.url) %></a></p><% end %>
+      <form method="post" action="/agents/<%= h(@session.agent) %>/login/complete">
+        <%= csrf_tag %>
+        <input type="hidden" name="session_id" value="<%= h(@session.id) %>">
+        <textarea name="code" rows="3" required></textarea>
+        <button type="submit">Complete login</button>
+      </form>
+    </section>
+  <% end %>
+  <section class="narrow">
+    <h2>Pi token</h2>
+    <form method="post" action="/agents/pi/token">
+      <%= csrf_tag %>
+      <textarea name="token_json" rows="6" placeholder='{"provider":"..."}' required></textarea>
+      <button type="submit">Save token</button>
+    </form>
+  </section>
+</section>

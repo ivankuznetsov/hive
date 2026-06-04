@@ -1,0 +1,29 @@
+<section>
+  <h1><%= h(@row["slug"]) %></h1>
+  <p><%= h(@project["name"]) %> · <%= h(@row["stage"]) %> · <%= h(@row["marker"]) %></p>
+  <div class="actions">
+    <form method="post" action="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/approve">
+      <%= csrf_tag %>
+      <input type="hidden" name="from" value="<%= h(@row["stage"]) %>">
+      <button type="submit">Approve</button>
+    </form>
+    <form method="post" action="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/dispatch">
+      <%= csrf_tag %>
+      <input type="hidden" name="action" value="<%= h(@row["action"]) %>">
+      <input type="hidden" name="stage" value="<%= h(@row["stage"]) %>">
+      <button type="submit">Dispatch</button>
+    </form>
+    <a class="button" href="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/diff">Diff</a>
+  </div>
+  <form method="post" action="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/intervene">
+    <%= csrf_tag %>
+    <textarea name="message" rows="4" placeholder="Steer or answer"></textarea>
+    <button type="submit">Send</button>
+  </form>
+  <% @files.each do |name, content| %>
+    <article class="artifact">
+      <h2><%= h(name) %></h2>
+      <pre><%= h(content) %></pre>
+    </article>
+  <% end %>
+</section>

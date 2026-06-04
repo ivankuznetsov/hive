@@ -959,6 +959,14 @@ module Hive
       ).call
     end
 
+    desc "web", "Run the hivebox web UI"
+    option :bind, type: :string, desc: "override web.bind"
+    option :port, type: :numeric, desc: "override web.port"
+    def web
+      require "hive/commands/web"
+      Hive::Commands::Web.new(bind: options[:bind], port: options[:port]).call
+    end
+
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"
     long_desc <<~DESC
       Opens a full-screen Charm bubbletea + lipgloss dashboard over `hive status`.

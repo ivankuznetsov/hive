@@ -53,6 +53,28 @@ module Hive
         @mutex.synchronize { @profiles.keys }
       end
 
+      def logged_in?(name, home: Dir.home)
+        case name.to_sym
+        when :claude
+          dir_has_content?(File.join(home, ".claude"))
+        when :codex
+          dir_has_content?(File.join(home, ".codex"))
+        when :pi
+          pi_auth_path = File.join(home, ".pi", "agent", "auth.json")
+          File.file?(pi_auth_path) && !File.read(pi_auth_path).strip.match?(/\A(?:|\{\s*\})\z/m)
+        else
+          false
+        end
+      rescue SystemCallError, ArgumentError
+        false
+      end
+
+      def dir_has_content?(path)
+        File.directory?(path) && Dir.children(path).any?
+      rescue SystemCallError
+        false
+      end
+
       # Test helper: clear the registry. Used by per-test setup that wants
       # a clean slate; production code never calls this.
       def reset_for_tests!

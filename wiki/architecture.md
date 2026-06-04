@@ -7,7 +7,7 @@ updated: 2026-06-08
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
@@ -225,6 +225,36 @@ literal reply into the next unanswered slot of `brainstorm.md`, then
 sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
+
+## Hivebox web pipeline
+
+`hive web` ([[commands/web]]) is a browser surface over the same command and
+queue contracts rather than a second workflow engine. The command starts a
+Puma-backed Sinatra app; the Docker entrypoint runs
+`Hive::Web::Supervisor`, which starts the daemon, web server, and optionally the
+Telegram bot in one `/data`-backed container.
+
+```
+hive web  →  Hive::Commands::Web
+               └─ Puma::Server(Hive::Web::App)
+                    ├─ GithubAuth → GitHub OAuth owner gate
+                    ├─ StatusFeed → Hive::Commands::Status#json_payload
+                    ├─ Dispatcher
+                    │    ├─ approve/reject → Hive::Commands::Approve
+                    │    ├─ workflow action → DispatchRequestWriter → daemon queue
+                    │    └─ new idea → Hive::Commands::New
+                    ├─ AgentsAuth → PTY relay for Claude/Codex login; Pi token file
+                    └─ routes for task artifacts, diffs, logs, repos, and Telegram config
+```
+
+The auth boundary is owner-only GitHub OAuth plus Rack sessions and per-session
+CSRF tokens for mutations. GitHub provider pages are never proxied under the
+hivebox origin. Claude/Codex login is a paste-the-code relay into the real CLI
+PTY, while Pi stores non-empty JSON in `~/.pi/agent/auth.json`; with
+`HOME=/data/home`, all agent credential directories persist across image
+upgrades. The web routes still share the daemon single-dispatcher invariant from
+ADR-033: state-mutating workflow actions enqueue daemon dispatch requests
+instead of spawning `hive run` directly.
 
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 

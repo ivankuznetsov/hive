@@ -3,11 +3,38 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's paste-the-code agent OAuth relay instead of provider-page proxying.
+
+## ADR-035: Hivebox agent OAuth uses PTY paste-the-code relay, not provider-page proxying
+
+**Status:** Active (shipped with hivebox web UI work on 2026-06-04).
+
+**Context:** Hivebox needs to help an operator authenticate local agent CLIs
+inside a Dockerized `/data` home. Proxying Anthropic/OpenAI provider login pages
+through the hivebox origin would put third-party login HTML under a different
+origin, run against normal phishing defenses, and depend on redirect URI
+assumptions the CLIs do not promise to expose.
+
+**Decision:** For Claude and Codex, hivebox spawns the real CLI login command in
+a PTY (`claude setup-token`, `codex login`), captures output, extracts the first
+`http(s)://` URL, asks the operator to open that provider URL directly, and
+writes the pasted code or callback URL back to the waiting PTY. For Pi, hivebox
+validates that the submitted token JSON is a non-empty object and writes it to
+`~/.pi/agent/auth.json` with mode `0600`. The container sets `HOME=/data/home`,
+so `~/.claude`, `~/.codex`, and `~/.pi` survive image upgrades via the `/data`
+bind mount.
+
+**Consequences:** Hivebox avoids becoming a login-page reverse proxy and keeps
+the credential persistence model aligned with the CLI tools themselves. The UX
+cost is that the operator must copy/paste the returned code or callback URL.
+Callback proxying to a localhost listener remains intentionally unimplemented
+until an agent CLI documents a supported callback-host override. The local design
+note is `docs/notes/hivebox-agent-oauth-relay.md`; route-level behavior is
+covered in [[commands/web]].
 
 ## ADR-033: Single-dispatcher for state-mutating `hive` verbs via file-backed request queue
 

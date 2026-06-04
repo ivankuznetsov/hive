@@ -78,6 +78,11 @@ task default: :test
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, `gh api` implicit-POST payload flag blocking, git executable/write-option skips, env config/command seam skips, hermetic HOME/XDG/local git config passthrough guards, `--textconv` abbreviation and `cat-file --filters` skips, subcommand `-p` passthrough, `grep`/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, and pathspec separator handling. |
 | `openclaw_skills_test.rb` | OpenClaw skill metadata — only the umbrella `hive-cli` listing is published, setup stays visible before the CLI is installed, `/hive` common paths include `wiki compile-log --check`, fragment-first changelog guidance is present, destructive/foreground admin commands require confirmation, and README publish instructions avoid shortcut listings. |
 | `commands/babysit_test.rb` | `Hive::Commands::Babysit` — lifecycle command routing, PID-file ownership handling, stale-runtime status/reload warnings, foreground restart, detached restart re-exec into canonical `start --detach` through the stable invoked wrapper, aborting restart and failing direct stop after a refused stop, clear detached re-exec failure reporting, initial/post-grace ownership-probe clean-exit handling, pre-KILL ownership refusal, bounded PID-lock timeout, guarded stop cleanup that preserves a replacement PID file, and skip-KILL PID-file preservation when ownership becomes unverified. |
+| `web/app_test.rb` | `Hive::Web::App` — public health endpoint and unauthenticated redirect to `/login`. |
+| `web/status_feed_test.rb` | `Hive::Web::StatusFeed` — status snapshots call the registered-project status payload path. |
+| `web/agents_auth_test.rb` | `Hive::Web::AgentsAuth` — Pi token JSON rejection/persistence and `AgentProfiles.logged_in?` integration. |
+| `web/github_auth_test.rb` | `Hive::Web::GithubAuth` — GitHub authorize URL construction and case-insensitive owner matching. |
+| `web/config_test.rb` | Global web config defaults and validation failures. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
 | `stages/review/run_reviewers_test.rb` | `Hive::Stages::Review.run_reviewers` — reviewer list selection for normal vs patrol-sourced tasks, per-reviewer failures, wall-clock deadlines, shared Claude tmux sessions, and GitHub comment mirroring. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
@@ -123,6 +128,13 @@ missing argument errors, top-level version output, command-local help after
 command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, replay path safety, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
+
+`test/e2e/hivebox_happy_path.spec.js` is a manual-gated Playwright contract for
+the Dockerized hivebox web surface. It skips unless `HIVEBOX_URL` is set, checks
+that a fresh box redirects to `/login` and shows the GitHub login link, and
+leaves the authenticated setup surface assertions skipped because real GitHub,
+Claude, Codex, and Telegram provider screens/tokens are intentionally not
+stubbed.
 
 The six starter scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
 

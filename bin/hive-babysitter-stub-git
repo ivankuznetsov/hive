@@ -32,8 +32,12 @@ def read_only?(rest)
   when "branch"
     rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")
   when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
-       "remote", "rev-list", "rev-parse", "show", "status"
+       "rev-list", "rev-parse", "show", "status"
     true
+  when "remote"
+    rest.length == 1 ||
+      (rest.length == 2 && [ "-v", "--verbose" ].include?(rest[1])) ||
+      rest[1] == "get-url"
   when "config"
     rest.include?("--get") || rest.include?("--get-all") || rest.include?("--list")
   else

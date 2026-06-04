@@ -57,8 +57,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
       assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
       assert_stubbed env, "git", "merge", "feature"
+      assert_stubbed env, "git", "remote", "set-url", "origin", "git@example.com:owner/repo.git"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
+      assert_passes env, "git", "remote", "-v"
+      assert_passes env, "git", "remote", "get-url", "origin"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
 
       skipped = File.read(log_path)
@@ -80,12 +83,15 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
+      assert_includes skipped, "git remote set-url origin git@example.com:owner/repo.git skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-git -C #{dir} status --short"
+      assert_includes real_invocations, "real-git remote -v"
+      assert_includes real_invocations, "real-git remote get-url origin"
       assert_includes real_invocations, "real-git config --get remote.origin.url"
     end
   end

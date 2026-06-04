@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-04T23:05:00Z] babysitter - restrict dry-run git remote passthrough
+
+**Action:** Tightened `bin/hive-babysitter-stub-git` so dry-run `git remote` pass-through only covers read-only listing forms (`remote`, `remote -v`, `remote --verbose`) and `remote get-url`; mutating forms such as `remote set-url` now skip and log like other write commands. Added focused regression coverage in `test/unit/babysitter/dry_run_env_test.rb` and refreshed the babysit command dry-run allowlist docs.
+
+**Tests:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`
+
+- [[commands/babysit]]
+
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

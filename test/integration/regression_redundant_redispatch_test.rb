@@ -74,6 +74,7 @@ class HiveRegressionRedundantRedispatchTest < Minitest::Test
 
     def reap_dry_run(now: Time.now) = []
     def terminate_all(grace_sec: 600); end
+    def enforce_timeouts(now:) = [] # #252: dispatcher calls this each tick
     def in_flight_count = @spawned.size
   end
 

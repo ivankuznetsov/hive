@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T09:10:00Z] babysitter - refresh rebased PR-head cache refs
+
+**Action:** Documented the babysitter worktree fix that force-refreshes internal `refs/hive-babysitter/pr-*` cache refs when fetching `pull/<PR>/head`. The refs are Hive-owned cache refs, not user branches, so force-updating them is the correct behavior when a PR branch is rebased or force-pushed; otherwise `git fetch pull/<PR>/head:refs/hive-babysitter/pr-<PR>` can fail with a non-fast-forward reject and leave babysitter unable to inspect that PR. Updated [[modules/babysitter]].
+
 ## [2026-06-05T08:42:50Z] bot/wiki - post-commit refresh for PR #281 follow-up coverage
 
 **Action:** Refreshed wiki coverage after commit `26be3aff` (`fix(bot): address PR #281 review — thread-safe ConversationStore + observability`). Read AGENTS.md, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, the committed diff, current bot source/tests, and `schemas/hive-bot-log.v1.json`; also ran `qmd search` for the bot suppression terms and checked the configured master wiki path. Tightened [[modules/bot]]'s `NotificationDispatcher` row so it now documents project+slug active-conversation suppression, lenient nil-project matching, `notification_skipped_active_conversation` logging, and the no-alert-store-entry behavior that lets a still-waiting task re-alert after the conversation ends. [[gaps]] already recorded the remaining uncertainty: no live Telegram bot plus daemon WAITING-flap smoke artifact was found. No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.

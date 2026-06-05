@@ -1018,8 +1018,13 @@ module Hive
         remaining = max_wall_clock_sec - (Time.now - started_at)
         return Process.clock_gettime(Process::CLOCK_MONOTONIC) if remaining <= 0
 
-        fair_share = remaining / specs_remaining
-        Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ fair_share, 1 ].max
+        # Give each reviewer the FULL remaining wall-clock budget; its own
+        # `timeout_sec` (default 2h) is the real per-reviewer cap. The old
+        # even split (`remaining / specs_remaining`) squeezed each reviewer
+        # to a fraction of the budget and killed thorough 1-2h reviewers
+        # mid-run with "deadline reached", which then tore down the shared
+        # claude session and cascade-failed the rest of the pass.
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) + remaining
       end
 
       def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)

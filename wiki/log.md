@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T02:00:00Z] review - tmux reviewer resilience + room for 1-2h reviewers
+
+**Action:** Fixed `6-review` getting stuck at `reviewer_partial_failure`. The claude-tmux reviewers run sequentially in ONE shared tmux session; when reviewer #1 exhausted its fair-share deadline (or its claude crashed), the shared session closed and every later reviewer failed with "session no longer exists" — cascading the whole pass into `reviewer_partial_failure`, which auto-triage (rightly) won't auto-advance. Three changes:
+
+- **Recover the dead session** (`ClaudeLauncher`): `with_shared_session` exposes a `reestablish` closure on the `SessionHandle`; `send_prompt_and_wait!` self-heals via `reestablish_dead_session!` — a reviewer that finds the session gone restarts claude and proceeds instead of cascade-failing.
+- **Stop the deadline squeeze** (`Stages::Review#reviewer_deadline`): each reviewer now gets the FULL remaining wall-clock budget (its own `timeout_sec` is the real per-reviewer cap), not `remaining / specs_remaining`. The even split killed thorough 1-2h reviewers mid-run.
+- **Room for long reviews**: `Reviewers::Agent::DEFAULT_TIMEOUT_SEC` 3600→7200 (2h), `review.max_wall_clock_sec` default 5400→14400 (4h), and the init template's reviewer `timeout_sec` 3600→7200.
+
+100% line coverage, rubocop clean.
+
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

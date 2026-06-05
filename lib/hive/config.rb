@@ -238,7 +238,13 @@ module Hive
           "max_attempts" => 2
         },
         "max_passes" => 2,
-        "max_wall_clock_sec" => 5400
+        # Outer wall-clock budget for the whole reviewers phase. Sized to
+        # fit a couple of claude-tmux reviewers each running up to their
+        # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
+        # review legitimately takes 1-2h. Each reviewer is bounded by its
+        # own timeout, NOT by an even split of this budget, so this only
+        # needs to cover the sum (raise it if you run more reviewers).
+        "max_wall_clock_sec" => 14_400
       },
       # Hive daemon settings (ADR-024). The daemon polls
       # `hive status --json`, dispatches workflow verbs on tasks the

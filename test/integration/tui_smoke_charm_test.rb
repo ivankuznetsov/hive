@@ -37,6 +37,19 @@ class TuiSmokeCharmTest < Minitest::Test
     end
   end
 
+  def plain_terminal_lines(buffer)
+    text = buffer.dup.force_encoding("UTF-8").scrub
+    text = text
+      .gsub(/\e\[[0-9;?]*[ -\/]*[@-~]/, "")
+      .gsub(/\e\][^\a]*(?:\a|\e\\)/, "")
+      .gsub(/\e[=>]/, "")
+    text.split(/\r?\n/).map { |line| line.delete("\r") }
+  end
+
+  def max_plain_line_width(buffer)
+    plain_terminal_lines(buffer).map(&:length).max || 0
+  end
+
   def wait_for_pid_exit(pid, deadline_seconds:)
     deadline = Time.now + deadline_seconds
     loop do
@@ -46,6 +59,46 @@ class TuiSmokeCharmTest < Minitest::Test
 
       sleep 0.05
     end
+  end
+
+  def test_charm_tui_repaints_after_pty_resize
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "resize probe").call }
+
+        project_prefix = project[0, 12]
+
+        env = { "TERM" => "xterm-256color", "HIVE_TUI_BACKEND" => "charm" }
+        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+          reader.winsize = [ 30, 120 ]
+
+          initial = read_until(reader, deadline_seconds: 10.0) do |buf|
+            buf.include?(project_prefix)
+          end
+          assert_includes initial, project_prefix
+
+          reader.winsize = [ 30, 150 ]
+          Process.kill("WINCH", pid)
+
+          resized = read_until(reader, deadline_seconds: 5.0) do |buf|
+            max_plain_line_width(buf) >= 145
+          end
+          resized_width = max_plain_line_width(resized)
+          assert_operator resized_width, :>=, 145,
+                          "resized frame should expand to the 150-column PTY"
+
+          writer.write("q")
+          writer.flush
+          status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
+          refute_nil status, "charm TUI must exit within 3s of pressing 'q'"
+          assert_equal 0, status.exitstatus, "clean quit exits 0"
+        end
+      end
+    end
+  rescue Errno::EIO
+    raise unless $!.message.include?("Input/output error")
   end
 
   def test_charm_tui_boots_paints_first_frame_and_quits_on_q

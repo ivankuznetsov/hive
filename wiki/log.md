@@ -29,6 +29,10 @@ Append-only log of all wiki operations.
 
 **Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Also flipped the init template + `hive patrol` long_desc to match. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.
 
+## [2026-06-03T20:30:00Z] daemon - PR #244 review follow-up #254 (extract QueueCommand)
+
+**Action:** Extracted the read-only queue-inspection surface from `Commands::Daemon` into `Hive::Commands::Daemon::QueueCommand` (`lib/hive/commands/daemon/queue_command.rb`), mirroring the `ServiceInstaller` extraction (#254). `Commands::Daemon#queue_command` now lazily requires and delegates. The extracted `call` folds forward #262's `Hive::InternalError` wrapping (exit 70 on internal failure) so a later rebase onto a main carrying #297 cannot lose it. Branch stacked on `fix/daemon-queue-244-followups-a` (#294) because the moved `queue_prune` already carries #265's `remove_if_unclaimed`; must merge after #294/#295/#297. Documented in [[modules/daemon]]. 100% line coverage, rubocop clean.
+
 ## [2026-06-03T20:00:00Z] daemon/bot - PR #244 review follow-ups, batch D (docs + security)
 
 **Action:** Implemented the docs + security cluster of the deferred PR #244 `/ce-code-review` issues:

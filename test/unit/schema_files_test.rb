@@ -1701,24 +1701,29 @@ class SchemaFilesTest < Minitest::Test
   # ── hive-daemon-queue: producer round-trip (#256) ───────────────────────
 
   def test_hive_daemon_queue_producer_round_trip_validates_list_show_prune
-    daemon = Hive::Commands::Daemon.new("list", queue_args: [ "list" ])
+    # queue_request_hash / queue_envelope were extracted from Commands::Daemon
+    # into QueueCommand (#254); exercise them on the extracted class.
+    require "hive/commands/daemon/queue_command"
+    queue_cmd = Hive::Commands::Daemon::QueueCommand.new(
+      queue_args: [ "list" ], json: false, hive_home: Dir.mktmpdir
+    )
     req = Hive::Daemon::DispatchRequestQueue::Request.new(
       request_id: "req00001", created_at: Time.utc(2026, 6, 3, 12, 0, 0),
       project: "hive", slug: "my-task", argv: [ "hive", "review", "my-task", "--json" ],
       requestor: "bot", chat_id: 12_345, update_id: nil, trigger: "autofix", path: nil
     )
-    request_hash = daemon.send(:queue_request_hash, req)
+    request_hash = queue_cmd.send(:queue_request_hash, req)
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue"))))
 
-    list = daemon.send(:queue_envelope, action: "list", requests: [ request_hash ], malformed: [])
+    list = queue_cmd.send(:queue_envelope, action: "list", requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(list).to_a,
                  "list envelope (Request with nil update_id) must validate against SuccessPayload"
 
-    show = daemon.send(:queue_envelope, action: "show", request: request_hash)
+    show = queue_cmd.send(:queue_envelope, action: "show", request: request_hash)
     assert_empty schemer.validate(show).to_a, "show envelope must validate"
 
-    prune = daemon.send(:queue_envelope, action: "prune", pruned_count: 1,
-                                         requests: [ request_hash ], malformed: [])
+    prune = queue_cmd.send(:queue_envelope, action: "prune", pruned_count: 1,
+                                            requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
   end
 end

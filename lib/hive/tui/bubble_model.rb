@@ -367,7 +367,7 @@ module Hive
         snap = @hive_model.snapshot
         return nil if snap.nil? || @hive_model.cursor.nil?
 
-        visible = snap.scope_to_project_index(@hive_model.scope).filter_by_slug(@hive_model.filter).without_old_archived
+        visible = snap.visible_projection(scope: @hive_model.scope, filter: @hive_model.filter)
         visible.row_at(@hive_model.cursor)
       end
 

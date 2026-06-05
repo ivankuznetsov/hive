@@ -220,6 +220,17 @@ module Hive
         end
       end
 
+      # The canonical "what the operator can see and act on" projection:
+      # scope to the focused project, apply the slug filter, then drop
+      # old archived rows. Centralised so every cursor/render site shares
+      # one definition — a projection that forgets `.without_old_archived`
+      # would let the cursor act on a hidden row.
+      def visible_projection(scope:, filter:, now: Time.now)
+        scope_to_project_index(scope)
+          .filter_by_slug(filter)
+          .without_old_archived(now: now)
+      end
+
       # `cursor` is `[project_idx, row_idx]` (both 0-based) or nil. Returns
       # nil for any out-of-range coordinate so the renderer can treat
       # "nothing selected" uniformly.

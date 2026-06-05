@@ -880,6 +880,29 @@ class HiveTuiBubbleModelTest < Minitest::Test
     refute_includes out, "[?] help"
   end
 
+  def test_default_footer_narrow_branch_keeps_hidden_notice_with_usage
+    rows = 12.times.map do |idx|
+      make_task_row(
+        action_key: "archived",
+        action_label: "Archived",
+        slug: "old-archived-#{idx}",
+        stage: "9-done",
+        marker: "complete",
+        folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+      )
+    end
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snapshot_with(rows), mode: :grid),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 76) }
+
+    assert_includes out, "+12 hidden", "narrow footer must still surface the hidden-archived notice"
+    assert_includes out, "tokens", "narrow footer must keep the usage block alongside the hidden notice"
+    refute_includes out, "[Tab]", "narrow footer must drop key hints even when a hidden notice is present"
+  end
+
   def test_grid_mode_collapses_to_single_pane_below_min_cols
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",

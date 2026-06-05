@@ -457,6 +457,13 @@ module Hive
         # `record_completion` does not re-fire. The redundancy is
         # intentional — the probe must reap to *learn* whether a full
         # tick is warranted — not a missed dedup.
+        #
+        # Asymmetry: this probe only reaps real children via
+        # `reap_completed`; `reap_dry_run` runs solely inside the full
+        # `tick`. So dry-run pseudo-child completions are not accelerated
+        # by the fast probe and advance only on the `@poll_interval_sec`
+        # backstop. Harmless — dry-run is not the latency path the AC
+        # targets — but noted to prevent future confusion.
         child_exited = reap_completed(now: now)
         state_file_changed = tracked_state_file_mtime_changed?
         child_exited || state_file_changed

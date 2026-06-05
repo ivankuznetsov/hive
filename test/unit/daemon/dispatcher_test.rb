@@ -1203,6 +1203,121 @@ def test_refresh_post_completion_mtime_records_existing_state_file
   end
 end
 
+def test_success_completion_then_followup_tick_does_not_redispatch_same_stage
+  # Plan Unit 1 end-to-end scenario: simulate a SUCCESS where the
+  # post-completion mtime refresh has run, then assert the next
+  # decision does NOT re-dispatch the same completed stage. This is the
+  # single regression that stands in for the deleted SUCCESS cooldown.
+  # Its two halves are proven separately elsewhere — the refresh bumps
+  # the baseline (test_refresh_post_completion_mtime_records_existing_state_file)
+  # and the baseline gates the edit decision (the baseline_recorded /
+  # observe_state_file_mtime tests) — here they run as one flow.
+  folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+  state_file = File.join(folder, "brainstorm.md")
+  File.write(state_file, "## Round 1\n\n<!-- WAITING -->\n")
+  # The agent's post-completion write left the mtime at this value.
+  agent_write = T0 - 1
+  File.utime(agent_write, agent_write, state_file)
+
+  edit_row = row(
+    stage: "2-brainstorm", action: "needs_input", marker: "waiting",
+    command: "hive brainstorm s1 --from 2-brainstorm",
+    mtime: File.mtime(state_file), state_file: state_file, folder: folder
+  )
+  dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: [ edit_row ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  # The daemon dispatched a runner for this stage on an earlier tick;
+  # seed the in-flight entry with a STALE baseline (pre-agent-write).
+  ctrl.record_dispatch(
+    pid: 999, project: "p1", slug: "s1", stage: "2-brainstorm",
+    command: "hive brainstorm s1 --from 2-brainstorm",
+    started_at: T0 - 100, state_file_mtime: T0 - 600
+  )
+
+  # Tick 1 reaps the SUCCESS child. refresh_post_completion_mtime bumps
+  # the baseline from the stale T0-600 to the file's CURRENT
+  # (post-completion) mtime.
+  reaped = false
+  sup.define_singleton_method(:reap_all) do |now:|
+    next [] if reaped
+
+    reaped = true
+    [ ChildExit.new(pid: 999, exit_code: Hive::ExitCodes::SUCCESS,
+                    project: "p1", slug: "s1", stage: "2-brainstorm",
+                    command: "hive brainstorm s1 --from 2-brainstorm",
+                    state_file_path: state_file, started_at: T0 - 100,
+                    finished_at: T0, json_envelope: nil) ]
+  end
+  dispatcher.tick(now: T0)
+
+  assert_equal File.mtime(state_file).to_i,
+               ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1").to_i,
+               "post-completion refresh must seed the baseline to the agent's last write"
+  spawned_after_reap = sup.spawned.size
+
+  # Tick 2 (the follow-up): same row, mtime unchanged. Policy sees
+  # mtime == baseline → :skip. The already-completed stage is NOT
+  # re-dispatched.
+  status.next_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ edit_row ],
+    projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "p1", legacy_stage_dirs: []) ],
+    error: nil
+  )
+  dispatcher.tick(now: T0 + 1)
+
+  assert_equal spawned_after_reap, sup.spawned.size,
+               "follow-up tick must NOT re-dispatch the just-completed stage"
+end
+
+def test_reaped_success_dispatches_successor_within_2s_wall_budget
+  # Plan Unit 2: pin the ≤2s end-to-end latency bound as a single test
+  # with an injected clock. The bound is composed of (a) the fast-poll
+  # probe detecting the child exit within one fast_poll_sec, and (b) the
+  # triggered full tick reaping the SUCCESS and dispatching its
+  # successor in the SAME tick (zero extra wall). fast_poll_sec defaults
+  # to 1, so the worst case is one sleep (~1s) plus a same-instant
+  # dispatch — comfortably inside 2s.
+  fast_poll_sec = 1
+  t_exit = T0
+
+  # A row ready to advance to its successor stage. When the predecessor
+  # child exits, the fast-probe-triggered tick dispatches this.
+  successor = row(stage: "2-brainstorm", action: "ready_to_plan",
+                  command: "hive plan s1 --from 2-brainstorm")
+  dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: [ successor ])
+
+  # Predecessor in-flight; its SUCCESS exit is queued for the next reap.
+  ctrl.record_dispatch(pid: 777, project: "p1", slug: "s1",
+                       stage: "2-brainstorm", command: "hive brainstorm s1",
+                       started_at: t_exit - 100, state_file_mtime: nil)
+  reaped = false
+  sup.define_singleton_method(:reap_all) do |now:|
+    next [] if reaped
+
+    reaped = true
+    [ ChildExit.new(pid: 777, exit_code: Hive::ExitCodes::SUCCESS,
+                    project: "p1", slug: "s1", stage: "2-brainstorm",
+                    command: "hive brainstorm s1", state_file_path: nil,
+                    started_at: t_exit - 100, finished_at: now, json_envelope: nil) ]
+  end
+
+  # Injected clock: the worst-case probe fires one fast_poll_sec after
+  # the child exits (the loop had just slept when the exit landed).
+  t_probe = t_exit + fast_poll_sec
+  assert dispatcher.send(:cheap_probe_requires_full_tick?, now: t_probe),
+         "child-exit must trip the cheap probe within one fast-poll tick"
+
+  # The probe trips a full tick at the same instant; it dispatches the
+  # successor stage.
+  t_dispatch = t_probe
+  dispatcher.tick(now: t_dispatch)
+
+  assert_equal 1, sup.spawned.size, "the reaped SUCCESS must dispatch its successor"
+  assert_operator (t_dispatch - t_exit), :<=, 2.0,
+                  "end-to-end child-exit→successor-dispatch must stay within the 2s wall budget"
+end
+
 def test_resolve_post_completion_path_finds_advanced_stage_state_file
   dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
 

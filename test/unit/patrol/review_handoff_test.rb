@@ -74,4 +74,63 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       assert_includes idea, "`app.rb:1`: puts"
     end
   end
+
+  def finding_with_evidence(evidence)
+    Hive::Patrol::Finding.new(
+      id: "f1", feature_id: "feature", category: "bug", severity: "high",
+      confidence: "medium", title: "Fix bug", description: "bug details",
+      recommendation: "fix it", evidence: evidence, fingerprint: "fp1"
+    )
+  end
+
+  def idea_md_for(evidence)
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding_with_evidence(evidence),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+      return File.read(File.join(folder, "idea.md"))
+    end
+  end
+
+  def test_evidence_section_omitted_when_evidence_is_nil
+    # Finding is a plain Struct enforcing no evidence invariant; a finding
+    # built without evidence: yields nil. enqueue must not raise and must
+    # omit the Evidence heading entirely.
+    idea = idea_md_for(nil)
+    refute_includes idea, "## Evidence"
+  end
+
+  def test_evidence_section_omitted_when_evidence_is_empty
+    idea = idea_md_for([])
+    refute_includes idea, "## Evidence"
+  end
+
+  def test_evidence_entry_without_location_renders_bare_marker
+    idea = idea_md_for([ { "snippet" => "orphan snippet" } ])
+    assert_includes idea, "## Evidence"
+    assert_includes idea, "- evidence: orphan snippet"
+  end
+
+  def test_evidence_entry_without_location_or_snippet_renders_marker_only
+    idea = idea_md_for([ {} ])
+    assert_includes idea, "## Evidence"
+    assert_match(/^- evidence$/, idea)
+  end
+
+  def test_evidence_entry_with_location_but_empty_snippet_omits_colon_suffix
+    idea = idea_md_for([ { "file" => "a.rb", "line" => 3, "snippet" => "" } ])
+    assert_includes idea, "- `a.rb:3`"
+    refute_includes idea, "`a.rb:3`:"
+  end
+
+  def test_evidence_entry_accepts_symbol_keys
+    # Sibling code (fingerprint.rb, pr_opener.rb) tolerates symbol-keyed
+    # evidence; a symbol-keyed entry must render the real location rather
+    # than silently degrading to the bare "- evidence" marker.
+    idea = idea_md_for([ { file: "sym.rb", line: 9, snippet: "code" } ])
+    assert_includes idea, "- `sym.rb:9`: code"
+    refute_includes idea, "- evidence"
+  end
 end

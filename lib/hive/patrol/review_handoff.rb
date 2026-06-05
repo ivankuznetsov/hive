@@ -73,6 +73,7 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
+        text = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -81,11 +82,9 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            "original_text" => idea_text(finding)
+            "original_text" => text
           },
-          <<~MD
-          #{idea_text(finding)}
-        MD
+          "#{text}\n"
         )
       end
 
@@ -165,18 +164,26 @@ module Hive
       end
 
       def idea_text(finding)
+        # `Finding` is a plain Struct that enforces no evidence invariant,
+        # so a finding built without `evidence:` yields nil; `Array(...)`
+        # mirrors Finding.from_h's own guard and keeps this nil-safe.
+        evidence = Array(finding.evidence)
         parts = []
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
-        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
+        parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
         parts.join("\n\n")
       end
 
       def evidence_text(evidence)
         evidence.map do |entry|
-          location = [ entry["file"], entry["line"] ].compact.join(":")
-          snippet = entry["snippet"].to_s.strip
+          # Evidence entries may arrive string- or symbol-keyed depending
+          # on the source; accept both, matching fingerprint.rb / pr_opener.rb.
+          file = entry["file"] || entry[:file]
+          row = entry["line"] || entry[:line]
+          location = [ file, row ].compact.join(":")
+          snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"
           snippet.empty? ? line : "#{line}: #{snippet}"
         end.join("\n")

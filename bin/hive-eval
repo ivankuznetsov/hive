@@ -35,7 +35,18 @@ def scenario_path(root, value)
     raise ArgumentError, "scenario must be a safe basename under test/eval/scenarios"
   end
 
-  File.join(root, "test", "eval", "scenarios", "#{basename}_test.rb")
+  File.join(scenario_root(root), "#{basename}_test.rb")
+end
+
+# The scenarios directory. HIVE_EVAL_SCENARIO_ROOT lets tests point at a
+# throwaway tmpdir so a fixture scenario never has to be written into the
+# real source tree (a SIGKILL between write and cleanup would otherwise
+# leak a `*_test.rb` that a later full eval run would execute). The
+# basename validation in `scenario_path` still applies, so this override
+# cannot be used for path traversal — it only relocates the lookup root.
+def scenario_root(root)
+  env_root = ENV["HIVE_EVAL_SCENARIO_ROOT"].to_s
+  env_root.empty? ? File.join(root, "test", "eval", "scenarios") : env_root
 end
 
 env = {

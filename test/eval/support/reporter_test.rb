@@ -29,9 +29,17 @@ class HiveEvalReporterTest < Minitest::Test
     # failure so we still exercise the reporter's failure path (exit
     # nonzero + report shape + per-scenario "fail" status) without
     # coupling to any specific production bug.
+    #
+    # The fixture scenario lives in a throwaway scenario root
+    # (HIVE_EVAL_SCENARIO_ROOT) inside the tmpdir, never in the real
+    # test/eval/scenarios/ source tree: a SIGKILL between write and
+    # cleanup would otherwise leak a `*_test.rb` that a later full eval
+    # run would execute. Dir.mktmpdir cleans the whole tree regardless.
     Dir.mktmpdir("hive-eval-report") do |dir|
-      scenario_name = "intentional_failure_#{Process.pid}"
-      fixture = File.expand_path("../scenarios/#{scenario_name}_test.rb", __dir__)
+      scenario_root = File.join(dir, "scenarios")
+      FileUtils.mkdir_p(scenario_root)
+      scenario_name = "intentional_failure"
+      fixture = File.join(scenario_root, "#{scenario_name}_test.rb")
       File.write(fixture, <<~RUBY)
         require "eval/eval_helper"
 
@@ -47,7 +55,7 @@ class HiveEvalReporterTest < Minitest::Test
       report = File.join(dir, "failure.json")
 
       _out, _err, status = Open3.capture3(
-        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        { "HIVE_EVAL_NO_JUDGE" => "1", "HIVE_EVAL_SCENARIO_ROOT" => scenario_root },
         "bin/hive-eval", "--scenario", scenario_name, "--no-judge", "--report", report
       )
 
@@ -58,8 +66,6 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal "fail", entry.fetch("status")
       assert_match(/intentional failure for HiveEvalReporterTest fixture/,
                    entry.fetch("failures").join("\n"))
-    ensure
-      FileUtils.rm_f(fixture) if fixture
     end
   end
 
@@ -75,6 +81,44 @@ class HiveEvalReporterTest < Minitest::Test
       refute status.success?
       assert_equal 64, status.exitstatus
       assert_match(/scenario must be a basename/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_scenario_with_backslash_path_separator
+    # The backslash branch of scenario_path raises the same
+    # "must be a basename" error as the slash branch (Windows-style
+    # separators are rejected too), distinct from the safe-basename raise.
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "backslash.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", 'evil\\scenario', "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario must be a basename/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_unsafe_scenario_basename
+    # A separator-free name that still contains characters outside
+    # [\w-] (here a dot) trips the distinct "safe basename" raise, not
+    # the basename/separator one.
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "unsafe.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "s1.status", "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario must be a safe basename/, err)
       refute File.exist?(report)
     end
   end

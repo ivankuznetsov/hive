@@ -25,6 +25,9 @@ Append-only log of all wiki operations.
 - **Room for long reviews**: `Reviewers::Agent::DEFAULT_TIMEOUT_SEC` 3600→7200 (2h), `review.max_wall_clock_sec` default 5400→14400 (4h), and the init template's reviewer `timeout_sec` 3600→7200.
 
 100% line coverage, rubocop clean.
+## [2026-06-04T21:30:00Z] patrol - default draft_prs to false (open ready PRs)
+
+**Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Also flipped the init template + `hive patrol` long_desc to match. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.
 
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 

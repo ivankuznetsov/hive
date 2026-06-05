@@ -20,7 +20,7 @@ tags: [module, patrol, review, worktree, pr]
 | `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | SHA-256 identity for exact dedup PLUS a **similarity gate** (`similar_known?`). The exact SHA is agent-volatile (the same issue is re-filed with a different feature/title/snippet each scan, so it never matches a prior PR), so `record_seen` also stores the finding's `category` + normalized `title_tokens`, and a new finding in the same category whose title-token overlap (Szymkiewicz–Simpson) ≥ `SIMILARITY_THRESHOLD` (0.6) with an open/merged/dismissed finding is skipped as `similar_to_existing` — this is what actually stops patrol re-opening the same PR every cycle. |
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
-| `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a draft PR by default, and records fingerprint-to-PR state. |
+| `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — and records fingerprint-to-PR state. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 

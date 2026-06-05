@@ -26,7 +26,7 @@ patrol:
   agent: claude
   min_confidence_to_fix: medium
   max_prs_per_cycle: 3
-  draft_prs: true
+  draft_prs: false   # default: open ready PRs (the babysitter skips drafts). Set true to open draft PRs.
   commands:
     test: bundle exec rake test
 ```

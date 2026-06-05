@@ -316,7 +316,10 @@ module Hive
         "min_confidence_to_fix" => "medium",
         "max_findings_per_feature" => 10,
         "max_prs_per_cycle" => 3,
-        "draft_prs" => true,
+        # Open ready (non-draft) PRs by default so the babysitter — which
+        # skips draft PRs — picks them up. Set `draft_prs: true` per project
+        # to revert to draft PRs that need a manual "ready" toggle first.
+        "draft_prs" => false,
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {

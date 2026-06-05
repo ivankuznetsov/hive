@@ -10,7 +10,7 @@ class HiveBotTelegramTest < Minitest::Test
 
   class FakeApi
     attr_reader :calls
-    attr_accessor :updates, :raise_on_get_updates
+    attr_accessor :updates, :raise_on_get_updates, :file
 
     def initialize(updates: [])
       @updates = updates
@@ -43,6 +43,22 @@ class HiveBotTelegramTest < Minitest::Test
       @calls << [ :set_my_commands, params ]
       true
     end
+
+    def get_file(params)
+      @calls << [ :get_file, params ]
+      file
+    end
+  end
+
+  FakeHttpResponse = Struct.new(:status, :body, keyword_init: true)
+
+  FakeHttp = Struct.new(:responses, :calls, :raise_on_get, keyword_init: true) do
+    def get(url)
+      calls << url
+      raise raise_on_get if raise_on_get
+
+      responses.shift
+    end
   end
 
   def logger
@@ -51,6 +67,11 @@ class HiveBotTelegramTest < Minitest::Test
 
   def telegram(api)
     Hive::Bot::Telegram.new(token: "token", logger: logger, client: FakeClient.new(api))
+  end
+
+  def telegram_with_http(api, http)
+    Hive::Bot::Telegram.new(token: "token", logger: logger, client: FakeClient.new(api),
+                            base_url: "https://telegram.test", http_client: http)
   end
 
   def fixture(name)
@@ -163,6 +184,137 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal 88, update.message_id
     assert_equal "hello", update.text
     assert_equal [], update.entities
+  end
+
+  def test_poll_updates_parses_largest_photo_caption_and_album_id
+    api = FakeApi.new(updates: [
+      {
+        "update_id" => 3001,
+        "message" => {
+          "message_id" => 42,
+          "chat" => { "id" => 12345 },
+          "from" => { "id" => 54321 },
+          "caption" => "/idea fix login",
+          "media_group_id" => "album-1",
+          "photo" => [
+            { "file_id" => "small", "file_unique_id" => "us", "file_size" => 100, "width" => 90, "height" => 90 },
+            { "file_id" => "large", "file_unique_id" => "ul", "file_size" => 900, "width" => 900, "height" => 900 }
+          ]
+        }
+      }
+    ])
+
+    update = telegram(api).poll_updates(timeout: 25, since_update_id: nil).first
+
+    assert update.media?
+    refute update.text?
+    assert_equal "large", update.photo.fetch(:file_id)
+    assert_nil update.document
+    assert_equal "/idea fix login", update.caption
+    assert_equal "/idea fix login", update.effective_text
+    assert_equal "album-1", update.media_group_id
+  end
+
+  def test_poll_updates_parses_document_metadata
+    api = FakeApi.new(updates: [
+      {
+        "update_id" => 3002,
+        "message" => {
+          "message_id" => 43,
+          "chat" => { "id" => 12345 },
+          "document" => {
+            "file_id" => "doc-file",
+            "file_unique_id" => "doc-unique",
+            "file_name" => "notes.pdf",
+            "mime_type" => "application/pdf",
+            "file_size" => 1234
+          }
+        }
+      }
+    ])
+
+    update = telegram(api).poll_updates(timeout: 25, since_update_id: nil).first
+
+    assert update.media?
+    assert_equal "notes.pdf", update.document.fetch(:file_name)
+    assert_equal "application/pdf", update.document.fetch(:mime_type)
+    assert_equal 1234, update.document.fetch(:file_size)
+    assert_nil update.caption
+  end
+
+  def test_callback_updates_do_not_inherit_media_from_source_message
+    api = FakeApi.new(updates: [
+      {
+        "update_id" => 3003,
+        "callback_query" => {
+          "id" => "cbq-1",
+          "data" => "reject:anything",
+          "from" => { "id" => 54321 },
+          "message" => {
+            "message_id" => 44,
+            "chat" => { "id" => 12345 },
+            "caption" => "caption",
+            "photo" => [ { "file_id" => "photo" } ]
+          }
+        }
+      }
+    ])
+
+    update = telegram(api).poll_updates(timeout: 25, since_update_id: nil).first
+
+    refute update.media?
+    assert_nil update.caption
+    assert_nil update.effective_text
+  end
+
+  def test_get_file_returns_path_and_size
+    api = FakeApi.new
+    api.file = Struct.new(:file_path, :file_size).new("photos/file.jpg", 123)
+
+    result = telegram(api).get_file(file_id: "abc")
+
+    assert_equal({ file_path: "photos/file.jpg", file_size: 123 }, result)
+    assert_equal [ :get_file, { file_id: "abc" } ], api.calls.last
+  end
+
+  def test_get_file_wraps_faraday_errors
+    api = FakeApi.new
+    api.define_singleton_method(:get_file) do |params|
+      calls << [ :get_file, params ]
+      raise Faraday::TimeoutError, "slow"
+    end
+
+    assert_raises(Hive::Bot::Telegram::DownloadError) do
+      telegram(api).get_file(file_id: "abc")
+    end
+  end
+
+  def test_download_file_returns_raw_bytes
+    api = FakeApi.new
+    http = FakeHttp.new(responses: [ FakeHttpResponse.new(status: 200, body: "bytes") ], calls: [])
+
+    bytes = telegram_with_http(api, http).download_file(file_path: "photos/file one.jpg")
+
+    assert_equal "bytes", bytes
+    assert_equal [ "https://telegram.test/file/bottoken/photos/file+one.jpg" ], http.calls
+  end
+
+  def test_download_file_raises_download_error_on_non_200
+    api = FakeApi.new
+    http = FakeHttp.new(responses: [ FakeHttpResponse.new(status: 500, body: "no") ], calls: [])
+
+    assert_raises(Hive::Bot::Telegram::DownloadError) do
+      telegram_with_http(api, http).download_file(file_path: "docs/file.pdf")
+    end
+  end
+
+  def test_download_file_wraps_timeout
+    api = FakeApi.new
+    http = FakeHttp.new(responses: [], calls: [], raise_on_get: Faraday::TimeoutError.new("slow"))
+
+    assert_raises(Hive::Bot::Telegram::DownloadError) do
+      telegram_with_http(api, http).download_file(file_path: "docs/file.pdf")
+    end
   end
 
   def test_poll_updates_logs_build_update_backtrace_once_per_error_class

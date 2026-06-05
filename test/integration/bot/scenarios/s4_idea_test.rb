@@ -4,7 +4,7 @@ require "hive/bot/conversation_store"
 require "hive/bot/telegram"
 
 class HiveBotScenarioIdeaTest < Minitest::Test
-  def test_s4_idea_project_picker_dispatches_hive_new
+  def test_s4_idea_project_picker_collects_then_done_commits
     projects = [
       { "name" => "hive", "path" => "/tmp/hive", "hive_state_path" => "/tmp/hive/.hive-state" },
       { "name" => "writero", "path" => "/tmp/writero", "hive_state_path" => "/tmp/writero/.hive-state" }
@@ -19,10 +19,17 @@ class HiveBotScenarioIdeaTest < Minitest::Test
     picker = router.handle(update(text: "/idea fix the broken cron"))
     hive_button = picker.reply_markup.flatten.detect { |button| button[:text].to_s.include?("hive") }
     refute_nil hive_button, "picker keyboard should expose a 'hive' option"
-    result = router.handle(update(callback_data: hive_button[:callback_data]))
+    collect = router.handle(update(callback_data: hive_button[:callback_data]))
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal [ "hive", "new", "hive", "fix the broken cron", "--json" ], result.command_argv
+    assert_equal :reply, collect.action
+    assert_match(/Send any files now/, collect.text)
+    done_button = collect.reply_markup.flatten.detect { |button| button[:text] == "Done" }
+    refute_nil done_button, "collector keyboard should expose Done"
+
+    result = router.handle(update(callback_data: done_button[:callback_data]))
+
+    assert_equal :commit_idea, result.action
+    assert_equal "hive", result.project
   end
 
   private

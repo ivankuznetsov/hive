@@ -3,15 +3,16 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-05-27
+updated: 2026-06-03
 tags: [command, bot, telegram, mobile, json]
 ---
 
 **TLDR**: `hive bot SUBCOMMAND` runs the Telegram mobile surface for
 human-input gates. It long-polls Telegram, ignores chats outside the
-global allowlist, renders waiting/status rows with inline buttons, and
+global allowlist, renders waiting/status rows with inline buttons,
+captures new ideas including supported Telegram attachments, and
 dispatches the same `hive` workflow verbs the daemon and CLI already
-use. It is a subprocess caller, not a second approval engine.
+use. It is not a second approval engine.
 
 ## Subcommands
 
@@ -39,7 +40,7 @@ hive bot install [--force] [--json]
 |--------------|----------|
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
-| `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>` and, on success, replies `"Captured your idea in <project>. It's in the inbox — move it to 2-brainstorm to start."` The picker token is single-use (consumed on tap); a re-tap of a spent picker replies `"That idea picker expired. Send /idea <text> again."` |
+| `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
@@ -49,6 +50,17 @@ hive bot install [--force] [--json]
 
 Free text outside an active answer conversation is rejected with a
 `/help` hint. Unauthorized chats receive no reply.
+
+Media messages participate in the `/idea` flow. A photo or document with
+a caption starts an idea draft using the caption as the idea text and
+then shows the project picker; media without a caption starts a
+file-first draft and asks for the idea text. While collecting files, each
+accepted media message is staged and replies `"Attached. Send more files,
+or press Done."` Supported types are jpg/jpeg/png/webp/gif/pdf/txt/md/docx.
+The default caps are 20 MB per attachment and 10 attachments per draft;
+oversized, unsupported, and cap-reached media receive explicit refusal
+messages instead of being staged. On final capture, image attachments are
+embedded in `idea.md` and non-images are linked under `assets/`.
 
 The `/status` (and `/queue`) reply lists actionable rows as
 `Title — Stage` text, and attaches an **inline keyboard** with one
@@ -116,6 +128,7 @@ Push notifications use callback data that routes to:
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
 - Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. `ERROR` rows prefer `marker_id=<current>` and use observed reason/exit_code attrs only for legacy markers. Manual-only recovery states show `Open laptop` / `Show details`; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
+- Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -129,6 +142,9 @@ bot:
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
+  idea_draft_ttl_sec: 900
+  idea_attachment_max_bytes: 20971520
+  idea_attachment_max_count: 10
   alert_state_file: ~/.local/state/hive/.bot.alert_state.json
   recovery_reminder_window_sec: 28800
   pid_file: ~/.local/state/hive/.bot.pid

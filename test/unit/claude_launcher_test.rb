@@ -121,6 +121,39 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  # A shared reviewer session whose claude exited (session gone) is
+  # restarted via the reestablish closure so the reviewer proceeds instead
+  # of cascade-failing the pass with "session no longer exists".
+  def test_reestablish_dead_session_restarts_a_gone_session
+    runner = Object.new
+    runner.instance_variable_set(:@alive, false)
+    runner.define_singleton_method(:session_exists?) { @alive }
+    calls = 0
+    reestablish = lambda do
+      calls += 1
+      runner.instance_variable_set(:@alive, true)
+    end
+
+    Hive::ClaudeLauncher.reestablish_dead_session!(runner, reestablish)
+
+    assert_equal 1, calls, "a dead shared session must be restarted"
+    assert runner.session_exists?, "the session is live again after reestablish"
+  end
+
+  def test_reestablish_dead_session_is_a_noop_when_alive_or_unsupported
+    alive = Object.new
+    alive.define_singleton_method(:session_exists?) { true }
+    calls = 0
+    Hive::ClaudeLauncher.reestablish_dead_session!(alive, -> { calls += 1 })
+    assert_equal 0, calls, "a live session is never restarted"
+
+    # nil closure (single-shot path) → no-op even if the session is gone,
+    # preserving the hard-fail for non-shared launches.
+    dead = Object.new
+    dead.define_singleton_method(:session_exists?) { false }
+    assert_nil Hive::ClaudeLauncher.reestablish_dead_session!(dead, nil)
+  end
+
   def test_prepare_claude_session_uses_caller_deadline_before_ready_timeout
     runner = Object.new
     runner.define_singleton_method(:name) { "hive-test-session" }

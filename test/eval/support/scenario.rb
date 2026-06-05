@@ -1,4 +1,5 @@
 require "json"
+require "open3"
 require "tmpdir"
 require "yaml"
 require "hive/bot/status_watcher"
@@ -47,6 +48,11 @@ module Hive
         File.write(File.join(hive_state_path, "config.yml"), {
           "daemon" => { "enabled" => daemon_enabled }
         }.to_yaml)
+        # Real Hive projects are git-backed: `hive new` (the in-process idea
+        # commit) runs `git -C .hive-state add/commit`. Init a repo here so the
+        # /idea Done lifecycle can be exercised end-to-end instead of dying on
+        # "not a git repository".
+        init_hive_state_git(hive_state_path)
         @hive_eval_projects << {
           "name" => name,
           "path" => project_path,
@@ -134,6 +140,14 @@ module Hive
       end
 
       private
+
+      def init_hive_state_git(hive_state_path)
+        env = { "GIT_CONFIG_GLOBAL" => "/dev/null", "GIT_CONFIG_SYSTEM" => "/dev/null" }
+        Open3.capture3(env, "git", "-C", hive_state_path, "init", "--quiet")
+        Open3.capture3(env, "git", "-C", hive_state_path, "config", "user.email", "eval@hive.test")
+        Open3.capture3(env, "git", "-C", hive_state_path, "config", "user.name", "Hive Eval")
+        Open3.capture3(env, "git", "-C", hive_state_path, "config", "commit.gpgsign", "false")
+      end
 
       def write_global_config
         FileUtils.mkdir_p(scenario_home)

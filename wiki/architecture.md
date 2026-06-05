@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-05-27
+updated: 2026-06-03
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. There is still no database; durable state is the filesystem plus global YAML config.
+**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
@@ -186,13 +186,18 @@ hive bot start  →  Hive::Commands::Bot
                               └─ replies when spawned hive commands finish
 ```
 
-The trust boundary matches the daemon: the bot is a subprocess caller,
-not an orchestrator. Stage approvals call workflow verbs with
-`--from <stage> --json`; recovery buttons call `hive markers clear`;
-triage buttons call `hive accept-finding` / `reject-finding`; `/idea`
-calls `hive new`. The one direct write is brainstorm answer insertion,
-which is scoped to `### A<N>.` blocks and protected by
-`Hive::Lock.with_task_lock`.
+The trust boundary matches the daemon: the bot is a thin command/draft
+surface, not an alternate approval engine. Stage approvals call workflow
+verbs with `--from <stage> --json`; recovery buttons call
+`hive markers clear`; triage buttons call `hive accept-finding` /
+`reject-finding`; text-only idea capture calls `hive new`. Two
+in-process writes are intentionally scoped: brainstorm answer insertion,
+which is limited to `### A<N>.` blocks under
+`Hive::Lock.with_task_lock`, and Telegram idea-draft submission with
+attachments, which downloads allowed media into a temp staging dir and
+then calls `Hive::Commands::New#call!` with a body override plus
+`attachments:` tuples. Final task files are still written through the
+same `hive new` command path.
 
 Path A brainstorm help uses Codex as a short-lived subprocess per turn
 through `Hive::Bot::CodexConversation`. Telegram-sourced text is wrapped

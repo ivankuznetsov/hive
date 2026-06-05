@@ -1,7 +1,7 @@
 ---
 title: Operating Hive
 type: operating
-source: lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
+source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
 updated: 2026-06-03
 tags: [operating, daemon, bot, systemd, launchd, install]
@@ -58,7 +58,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.11/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -98,8 +98,14 @@ work.
 
 Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
 bash installer creates `hv` when another `hive` is already earlier on PATH. The
-AUR package does not ship `hv`; its `conflicts=('hive' 'apache-hive')` metadata
-blocks the parallel install before fallback aliasing is possible.
+in-tree `bin/hv` fallback probes only `HIVE_BIN_OVERRIDE`,
+`${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
+and `/usr/local/bin/hive`; it intentionally does not fall through to
+`/usr/bin/hive` or `/opt/hive/bin/hive`, because those are common Apache Hive
+locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. The AUR
+package does not ship the gem's `bin/hv` wrapper; its `conflicts=('hive'
+'apache-hive')` metadata blocks the parallel install before fallback aliasing is
+possible.
 
 Daemon autostart is part of install, not project enrollment. The bash installer
 runs `hive daemon install --json` after installing the gem. Agent-assisted
@@ -156,8 +162,8 @@ the published schemas, and asserts no state leaks outside the prefix.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.1.11
-packaging/verify-release.sh --version=v0.1.11 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.2.0
+packaging/verify-release.sh --version=v0.2.0 --report=json | jq .ok
 ```
 
 Exit codes:

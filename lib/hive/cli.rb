@@ -405,8 +405,9 @@ module Hive
       Maps the registered project's repository into durable feature slices
       under <project>/.hive-state/patrol/, asks the configured patrol
       agent to review each slice, attempts isolated fixes above the
-      confidence gate, validates configured commands, and opens draft PRs
-      for validated fixes. Patrol never writes findings to 1-inbox or any
+      confidence gate, validates configured commands, and opens ready
+      (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
+      draft PRs). Patrol never writes findings to 1-inbox or any
       stage folder; PRs are the only external surface.
 
       Use --dry-run to map and review without creating fix worktrees,

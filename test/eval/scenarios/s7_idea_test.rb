@@ -10,17 +10,21 @@ require "eval/eval_helper"
 #      project plus a "+ new project" row.
 #   2. Tapping a project row:
 #      - fires answerCallbackQuery exactly once (spinner ack)
-#      - dispatches `hive new <project> <text> --json` via FakeChildSupervisor
-#      - emits NO additional Sent message — regression guard for the
-#        "drop dispatch chatter" change in fdebb64e
-#   3. The next /idea invocation starts the previously-picked project
-#      with the ★ marker per `project_keyboard` in slash_handlers.rb:94.
-#   4. /idea with no text body replies with the usage hint and dispatches
-#      nothing.
+#      - does NOT commit yet; it opens the file collector ("Send any files
+#        now, or press Done.") with a Done/Skip keyboard. The commit fires
+#        only when Done/Skip is tapped (plan Risk 1 — commit moved off the
+#        project tap onto the Done/Skip lifecycle).
+#   3. Tapping Done commits the idea (one "Captured your idea in <project>"
+#      Sent message) and dispatches nothing through the child supervisor —
+#      idea capture runs Hive::Commands::New in-process, not as a child.
+#   4. The next /idea invocation starts the previously-picked project
+#      with the ★ marker per `project_keyboard` in slash_handlers.rb.
+#   5. /idea with no text body opens text capture ("Send the idea text in
+#      your next message.") and dispatches nothing.
 class HiveEvalS7IdeaTest < Minitest::Test
   include Hive::Eval::ScenarioSupport
 
-  def test_idea_picker_shows_all_registered_projects_and_dispatches_hive_new
+  def test_idea_picker_shows_all_registered_projects_then_done_commits
     given_project(name: "hive")
     given_project(name: "writero")
 
@@ -41,17 +45,26 @@ class HiveEvalS7IdeaTest < Minitest::Test
 
     when_user_taps(hive_button[:callback_data])
 
-    assert_equal [ "hive", "new", "hive", "fix the broken cron", "--json" ],
-                 harness.child_supervisor.commands.last,
-                 "tapping a project must dispatch hive new <project> <text> --json"
+    assert_empty harness.child_supervisor.commands,
+                 "tapping a project must NOT dispatch a child command — commit waits for Done/Skip"
+
+    collector = harness.last_sent
+    assert_match(/Send any files now/, collector.text,
+                 "tapping a project opens the file collector before commit")
+    done_button = Array(collector.reply_markup).flatten.detect { |button| button[:text] == "Done" }
+    refute_nil done_button, "collector keyboard must expose Done"
+    assert_match(/\Aidea_done:[0-9a-f]{8}\z/, done_button[:callback_data],
+                 "Done callback_data must be idea_done:<token>")
 
     assert_equal 1, harness.telegram.answered_callbacks.length,
                  "every callback_query update must be acked exactly once via answerCallbackQuery"
 
-    # No extra Sent after the tap — this is the regression guard for
-    # "Queued command pid=" / "Command completed" suppression. The picker
-    # message is still the single Sent.
-    assert_sent_count 1
+    when_user_taps(done_button[:callback_data])
+
+    assert_match(/Captured your idea in hive/, harness.last_sent.text,
+                 "tapping Done must commit the idea and confirm capture")
+    assert_empty harness.child_supervisor.commands,
+                 "idea commit runs in-process (Hive::Commands::New), never as a child command"
 
     assert_all_messages_typed
     assert_no_duplicates(window_sec: 300)
@@ -77,16 +90,16 @@ class HiveEvalS7IdeaTest < Minitest::Test
                  "after a pick, the previous project is sorted first and starred"
   end
 
-  def test_idea_without_text_replies_with_usage_hint
+  def test_idea_without_text_starts_text_capture
     given_project(name: "hive")
 
     when_user_sends("/idea")
 
     assert_sent_count 1
-    assert_equal "Use /idea <text> to capture a new idea.", harness.last_sent.text
+    assert_equal "Send the idea text in your next message.", harness.last_sent.text
     assert_nil harness.last_sent.reply_markup,
-               "the usage hint must not carry an inline keyboard"
+               "the text-capture prompt must not carry an inline keyboard"
     assert_empty harness.child_supervisor.commands,
-                 "the usage hint must not dispatch any child command"
+                 "the text-capture prompt must not dispatch any child command"
   end
 end

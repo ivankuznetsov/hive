@@ -238,7 +238,13 @@ module Hive
           "max_attempts" => 2
         },
         "max_passes" => 2,
-        "max_wall_clock_sec" => 5400
+        # Outer wall-clock budget for the whole reviewers phase. Sized to
+        # fit a couple of claude-tmux reviewers each running up to their
+        # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
+        # review legitimately takes 1-2h. Each reviewer is bounded by its
+        # own timeout, NOT by an even split of this budget, so this only
+        # needs to cover the sum (raise it if you run more reviewers).
+        "max_wall_clock_sec" => 14_400
       },
       # Hive daemon settings (ADR-024). The daemon polls
       # `hive status --json`, dispatches workflow verbs on tasks the
@@ -310,7 +316,10 @@ module Hive
         "min_confidence_to_fix" => "medium",
         "max_findings_per_feature" => 10,
         "max_prs_per_cycle" => 3,
-        "draft_prs" => true,
+        # Open ready (non-draft) PRs by default so the babysitter — which
+        # skips draft PRs — picks them up. Set `draft_prs: true` per project
+        # to revert to draft PRs that need a manual "ready" toggle first.
+        "draft_prs" => false,
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
@@ -341,6 +350,9 @@ module Hive
         "recovery_reminder_window_sec" => 28_800,
         "recovery_grace_sec" => 60,
         "conversation_ttl_sec" => 3600,
+        "idea_attachment_max_bytes" => 20 * 1024 * 1024,
+        "idea_attachment_max_count" => 10,
+        "idea_draft_ttl_sec" => 900,
         "codex_budget_usd" => 1,
         "codex_timeout_sec" => 120,
         "shutdown_grace_sec" => 60,
@@ -1644,6 +1656,9 @@ module Hive
       [ "recovery_reminder_window_sec", 3600, 604_800 ],
       [ "recovery_grace_sec", 0, 3600 ],
       [ "conversation_ttl_sec", 60, nil ],
+      [ "idea_attachment_max_bytes", 1, 20 * 1024 * 1024 ],
+      [ "idea_attachment_max_count", 1, 10 ],
+      [ "idea_draft_ttl_sec", 60, nil ],
       [ "codex_budget_usd", 0, nil ],
       [ "codex_timeout_sec", 10, nil ],
       [ "shutdown_grace_sec", 0, nil ],

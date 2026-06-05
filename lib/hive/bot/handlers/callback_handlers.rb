@@ -5,11 +5,13 @@ module Hive
     module Handlers
       class CallbackHandlers
         def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:,
+                       idea_draft_store: nil,
                        logger: nil)
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
           @conversation_store = conversation_store
           @result_class = result_class
+          @idea_draft_store = idea_draft_store
           @logger = logger
         end
 
@@ -25,6 +27,8 @@ module Hive
           when :callback_refresh_diagnose then refresh_diagnose(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
+          when :callback_idea_done then commit_idea(data)
+          when :callback_idea_skip then commit_idea(data)
           # Codex-draft flow is retired (deterministic Q-by-Q answering only).
           # Legacy callbacks still land here from messages sent before the
           # removal; reply with the new path so the operator isn't stuck.
@@ -126,7 +130,12 @@ module Hive
 
         def idea_project_new(data)
           _prefix, token = split_callback(data, 2)
-          @pending_ideas.delete(token)
+          if @idea_draft_store
+            draft = @idea_draft_store.find_by_token(token)
+            @idea_draft_store.clear(chat_id: draft.chat_id) if draft
+          else
+            @pending_ideas.delete(token)
+          end
           @result_class.new(
             action: :reply,
             text: "Registering a new project from the bot is out of MVP scope — run `hive init` on a laptop, then send /idea again."
@@ -135,6 +144,8 @@ module Hive
 
         def idea_project(data)
           _prefix, project, token = split_callback(data, 3)
+          return collect_files_for_draft(project, token) if @idea_draft_store
+
           entry = @pending_ideas.delete(token)
           idea_text = entry.is_a?(Hash) ? entry[:text] : entry
           return @result_class.new(action: :reply, text: "That idea picker expired. Send /idea <text> again.") unless idea_text
@@ -145,6 +156,36 @@ module Hive
             project: project,
             command_argv: [ "hive", "new", project, idea_text, "--json" ]
           )
+        end
+
+        def collect_files_for_draft(project, token)
+          draft = @idea_draft_store.find_by_token(token)
+          return @result_class.new(action: :reply, text: "That idea picker expired. Send /idea again.") unless draft
+
+          @idea_draft_store.set_project(chat_id: draft.chat_id, project: project)
+          @idea_draft_store.enter_collecting(chat_id: draft.chat_id)
+          @set_last_project.call(project)
+          @result_class.new(
+            action: :reply,
+            text: "Send any files now, or press Done.",
+            reply_markup: done_keyboard(token)
+          )
+        end
+
+        def commit_idea(data)
+          _prefix, token = split_callback(data, 2)
+          draft = @idea_draft_store&.find_by_token(token)
+          return @result_class.new(action: :reply, text: "That idea draft expired. Send /idea again.") unless draft
+
+          @result_class.new(action: :commit_idea, project: draft.project,
+                            attachment: { chat_id: draft.chat_id }, clear_keyboard: true)
+        end
+
+        def done_keyboard(token)
+          [
+            [ { text: "Done", callback_data: "idea_done:#{token}" },
+              { text: "Skip", callback_data: "idea_skip:#{token}" } ]
+          ]
         end
 
         def findings_toggle(data, verb)

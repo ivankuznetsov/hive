@@ -8,12 +8,18 @@ module Hive
     module Handlers
       class SlashHandlers
         def initialize(projects_provider:, pending_ideas:, last_project:, result_class:,
+                       idea_draft_store: nil, idea_attachment_policy: nil,
+                       max_attachment_bytes: nil, max_attachment_count: nil,
                        now: -> { Time.now },
                        status_snapshot_provider: -> { [] })
           @projects_provider = projects_provider
           @pending_ideas = pending_ideas
           @last_project = last_project
           @result_class = result_class
+          @idea_draft_store = idea_draft_store
+          @idea_attachment_policy = idea_attachment_policy
+          @max_attachment_bytes = max_attachment_bytes
+          @max_attachment_count = max_attachment_count
           @now = now
           @status_snapshot_provider = status_snapshot_provider
         end
@@ -39,20 +45,151 @@ module Hive
         end
 
         def idea(update)
-          text = update.text.to_s.sub(%r{\A/idea\b}, "").strip
-          return @result_class.new(action: :reply, text: "Use /idea <text> to capture a new idea.") if text.empty?
+          text = update.effective_text.to_s.sub(%r{\A/idea\b}, "").strip
+          if text.empty?
+            return start_text_capture(update) if @idea_draft_store
 
+            return @result_class.new(action: :reply, text: "Use /idea <text> to capture a new idea.")
+          end
+
+          start_idea(update, text: text, stage_media: update.respond_to?(:media?) && update.media?)
+        end
+
+        def capture_idea_text(update)
+          text = update.text.to_s.strip
+          return @result_class.new(action: :reply, text: "Send the idea text in your next message.") if text.empty?
+
+          draft = @idea_draft_store.get(chat_id: update.chat_id)
+          return @result_class.new(action: :reply, text: "That idea draft expired. Send /idea again.") unless draft
+
+          @idea_draft_store.set_text(chat_id: update.chat_id, text: text)
+          project_picker_result(token: draft.token)
+        end
+
+        def media(update)
+          draft = @idea_draft_store.get(chat_id: update.chat_id)
+          started_here = draft.nil?
+          caption = update.effective_text.to_s.strip
+          if draft.nil?
+            text = caption.empty? || caption.start_with?("/") ? nil : caption
+            draft = @idea_draft_store.start(
+              chat_id: update.chat_id,
+              phase: text ? :awaiting_project : :awaiting_text,
+              text: text,
+              token: SecureRandom.hex(4)
+            )
+          end
+
+          result = stage_media_result(update, draft: draft, after_stage: media_after_stage_reply(draft))
+          # A bare media message (no existing draft, no /idea) that the policy
+          # rejects must not leave the draft we just opened behind: an
+          # :awaiting_text phantom would hijack the operator's next unrelated
+          # text into idea capture. Clear it when nothing actually staged.
+          @idea_draft_store.clear(chat_id: update.chat_id) if started_here && result.action != :stage_attachment
+          result
+        end
+
+        private
+
+        def start_text_capture(update)
+          draft = @idea_draft_store.start(chat_id: update.chat_id, phase: :awaiting_text,
+                                          token: SecureRandom.hex(4))
+          has_media = update.respond_to?(:media?) && update.media?
+          return @result_class.new(action: :reply, text: "Send the idea text in your next message.") unless has_media
+
+          # `/idea` sent with a photo/document but no caption text lands here.
+          # Stage the file now (parity with start_idea) instead of dropping it
+          # while the draft waits for the idea text.
+          stage_media_result(update, draft: draft, after_stage: media_after_stage_reply(draft))
+        end
+
+        def start_idea(update, text:, stage_media: false)
           projects = @projects_provider.call
           return @result_class.new(action: :reply, text: "No Hive projects are registered yet.") if projects.empty?
 
           token = SecureRandom.hex(4)
-          @pending_ideas[token] = { text: text, created_at: @now.call }
+          @pending_ideas[token] = { text: text, created_at: @now.call } unless @idea_draft_store
+          draft = @idea_draft_store&.start(chat_id: update.chat_id, phase: :awaiting_project,
+                                           text: text, token: token)
+          result = project_picker_result(token: token)
+          return result unless stage_media
+
+          stage_media_result(update, draft: draft, after_stage: result)
+        end
+
+        def project_picker_result(token:)
+          projects = @projects_provider.call
+          return @result_class.new(action: :reply, text: "No Hive projects are registered yet.") if projects.empty?
+
           @result_class.new(
             action: :reply,
             text: "Pick a project for the idea.",
             reply_markup: project_keyboard(projects, token)
           )
         end
+
+        def media_after_stage_reply(draft)
+          case draft.phase
+          when :awaiting_text
+            @result_class.new(action: :reply, text: "What's the idea for this file?")
+          when :awaiting_project
+            project_picker_result(token: draft.token)
+          when :collecting_files
+            @result_class.new(action: :reply, text: "Attached. Send more files, or press Done.")
+          else
+            @result_class.new(action: :reply, text: "Attached.")
+          end
+        end
+
+        # Both limits are config-driven (idea_attachment_max_bytes /
+        # idea_attachment_max_count); interpolate them into operator copy so
+        # the wording can't drift from an operator override. Fall back to the
+        # documented 20 MB default when the byte limit is unset.
+        def max_attachment_mb
+          bytes = @max_attachment_bytes.to_i
+          bytes = 20 * 1024 * 1024 if bytes <= 0
+          (bytes.to_f / (1024 * 1024)).round
+        end
+
+        def max_attachment_count
+          count = @max_attachment_count.to_i
+          count.positive? ? count : 10
+        end
+
+        def stage_media_result(update, draft:, after_stage:)
+          policy = @idea_attachment_policy.classify(
+            update,
+            draft,
+            max_bytes: @max_attachment_bytes,
+            max_count: @max_attachment_count
+          )
+          case policy.status
+          when :ok
+            @result_class.new(
+              action: :stage_attachment,
+              text: after_stage.text,
+              reply_markup: after_stage.reply_markup,
+              attachment: {
+                chat_id: update.chat_id,
+                file_id: policy.file_id,
+                file_size: policy.file_size,
+                ext: policy.ext
+              }
+            )
+          when :too_large
+            @result_class.new(action: :reply, text: "That attachment is too large. Send a file under #{max_attachment_mb} MB.")
+          when :disallowed_type
+            @result_class.new(action: :reply,
+                              text: "Unsupported attachment type. Send jpg, png, webp, gif, pdf, txt, md, or docx.")
+          when :cap_reached
+            @result_class.new(action: :reply,
+                              text: "This idea already has #{max_attachment_count} attachments. Press Done to capture it.")
+          else
+            @result_class.new(action: :reply, text: "I could not attach that file.")
+          end
+        end
+
+        public
 
         def answer(update, _conversation_store)
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
@@ -90,7 +227,7 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea <text>, /answer <slug>, " \
+            text: "Commands: /status [project], /queue, /idea [text], /answer <slug>, " \
                   "/approve <slug>, /autofix <slug>, /details <slug>, /done, /help"
           )
         end

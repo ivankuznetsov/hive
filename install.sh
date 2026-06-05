@@ -507,7 +507,7 @@ cat > "${gem_home}/bin/hv" <<WRAPPER
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
-exec "${gem_home}/shims/hv" "\$@"
+exec "${gem_home}/bin/hive" "\$@"
 WRAPPER
 chmod +x "${gem_home}/bin/hive" "${gem_home}/bin/hv"
 

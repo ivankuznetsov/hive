@@ -28,6 +28,7 @@ module Hive
         @current = nil
         @current_seen_at = nil
         @last_error = nil
+        @mtime_fingerprint = nil
         @stop = false
         @thread = nil
       end
@@ -77,13 +78,48 @@ module Hive
       end
 
       def refresh_once
+        if @current && @mtime_fingerprint && mtime_fingerprint_unchanged?
+          @current_seen_at = Time.now
+          @last_error = nil
+          return
+        end
+
         payload = Hive::Commands::Status.new.json_payload(Hive::Config.registered_projects)
         snapshot = Snapshot.from_payload(payload)
         @current = snapshot
         @current_seen_at = Time.now
+        @mtime_fingerprint = mtime_fingerprint_for(snapshot)
         @last_error = nil
       rescue StandardError => e
         @last_error = e
+      end
+
+      def mtime_fingerprint_unchanged?
+        return false if @mtime_fingerprint.empty?
+
+        @mtime_fingerprint.all? do |path, previous_mtime|
+          safe_mtime(path) == previous_mtime
+        end
+      end
+
+      def mtime_fingerprint_for(snapshot)
+        paths = []
+        snapshot.projects.each do |project|
+          paths.concat(project_watch_paths(project))
+          project.rows.each { |row| paths << row.state_file }
+        end
+        paths.compact.uniq.to_h { |path| [ path, safe_mtime(path) ] }
+      end
+
+      def project_watch_paths(project)
+        stages_dir = File.join(project.hive_state_path.to_s, "stages")
+        [ stages_dir, *Dir.glob(File.join(stages_dir, "*")) ]
+      end
+
+      def safe_mtime(path)
+        File.mtime(path) if path && File.exist?(path)
+      rescue StandardError
+        nil
       end
 
       # Sleep in 0.05s slices so #stop joins quickly. Reading @stop

@@ -3160,7 +3160,7 @@ TTL config.
 
 ## [2026-06-05T16:25:00Z] patrol/status — review-task idea context and archive age filtering
 
-**Action:** Documented two dogfood fixes: patrol review handoff now writes `idea.md` from the original patrol finding so the TUI idea preview has context, and archive hiding now uses row `mtime` rather than mutable `folder_mtime` so sidecar edits do not make old archived tasks reappear in daily views. Did not run `qmd update` or `qmd embed`.
+**Action:** Documented two dogfood fixes: patrol review handoff now writes `idea.md` from the original patrol finding so the TUI idea preview has context, and archive hiding now prefers row `mtime` (falling back to mutable `folder_mtime` only when `mtime` is absent) so sidecar edits do not make old archived tasks reappear in daily views. Did not run `qmd update` or `qmd embed`.
 
 **Refreshed pages:**
 - [[commands/patrol]]
@@ -3212,3 +3212,20 @@ TTL config.
 - [[cli]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-05T18:35:17Z] wiki — verify residual parse-error documentation commit
+
+**Action:** Refreshed the LLM wiki after commit `6af928c2` touched only wiki pages as a residual 6-review worktree cleanup. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "parse-error JSON envelopes Thor --json bin/hive"` returned no indexed results, so this pass fell back to direct wiki/source reads. Verified the committed diff against current `bin/hive`, `lib/hive.rb` schema helpers, `lib/hive/cli.rb`, and `test/integration/cli_parse_error_test.rb`. The existing [[cli]], [[testing]], and [[gaps]] updates remain source-backed; no new pages or index changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T19:00:00Z] review - fix parse-error envelope contract + archive marker-agnostic dead code (6-review fix pass 01)
+
+**Action:** Applied accepted 6-review findings for the `patrol-command-bin-hive` task. **bin/hive parse-error contract:** stage-action verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`pr`/`review`/`artifacts`/`finalize`/`archive`) now supply the schema-required `verb` extra — the `hive-stage-action.v2` `ErrorPayload` requires it, so the `--json` parse-error envelope was schema-invalid for every workflow verb. `pr` maps to the canonical `open-pr` verb. The unknown-command fallback now emits `error_kind: "usage"` (was the misleading `invalid_task_path`) with the same last-`::`-segment `error_class` form as `ErrorEnvelope.build`. The top-level `ThorUsageError < Hive::InvalidTaskPath` became `Hive::UsageError < Hive::Error` (USAGE/64). The empty `rescue Errno::EPIPE, JSON::GeneratorError` was split so a `JSON::GeneratorError` now warns both the serialisation failure and the original Thor usage text instead of exiting silently with empty stdout. Documented the `daemon` subcommand-group / `command = argv.find` group-name limitation inline. **TUI/archive dead code:** removed the now-vestigial `marker_name:` keyword from `ArchiveFilter.hide?` and both call sites (`status.rb`, `snapshot.rb`), inlined the `parse_folder_mtime` pass-through, and hardened `ReviewHandoff#idea_text` with `Array(finding.evidence)` (a direct `Finding.new`, unlike `from_h`, does not coerce). **Tests:** round-trip schema validation over all 15 parse-error-raising mapped commands, the canonical-verb assertion, the unknown-command fallback, a dedicated `format_test.rb` pinning the wide-grapheme cell boundary, a CJK `display_name` column-alignment render assertion, and `idea_text` sparse-finding branch coverage. Corrected the stale [[commands/status]] "unresolved done markers remain visible" line and noted the marker-agnostic cutoff in [[commands/tui]] and [[cli]]. rubocop clean; touched suites green. **Skipped:** the `pr-review-toolkit` finding to *remove* the `archive` map entry — it conflicts with the accepted claude-ce verb-fix finding, and the entry is now contract-correct rather than schema-invalid, so it was kept as cheap insurance against `archive` gaining a required argument.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[commands/tui]]
+- [[cli]]
+- [[log]]

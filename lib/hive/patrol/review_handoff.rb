@@ -169,7 +169,8 @@ module Hive
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
-        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
+        evidence = Array(finding.evidence)
+        parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
         parts.join("\n\n")
       end
 

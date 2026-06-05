@@ -65,7 +65,7 @@ The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hi
 - Project path missing → `"<name>: missing project path <path>"`.
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
-- Old clean `9-done` rows → hidden from text output with the per-project summary line above; unresolved done markers remain visible.
+- Old `9-done` rows → hidden from text output with the per-project summary line above. The cutoff is purely age-based and **no longer depends on marker state**: a done row older than 3 days is hidden regardless of whether its terminal marker is `:complete` or an unresolved marker (`:error`, etc.). `hive archive` remains the unfiltered view for recovering them.
 - Daily task identity is left-padded to 42 chars; state label to 24 chars; then the suggested command and humanised age. Archive-mode rows left-pad the slug to 36 chars. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.

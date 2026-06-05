@@ -463,6 +463,33 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                  "wide emoji icons must not shift fixed-width columns"
   end
 
+  def test_wide_cjk_display_name_does_not_shift_downstream_columns
+    # A CJK/emoji display_name is double-width per grapheme; because the
+    # name cell is `ljust_cells`-padded to a fixed terminal-cell width, the
+    # stage column after it must begin at the same display-cell offset as a
+    # row with a plain ASCII name. This is the column alignment the
+    # wide-grapheme fix ships — pinned here at the render level, not just via
+    # the Format primitives.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "ascii", id: 101, display_name: "ascii-name", stage: "2-brainstorm"),
+        make_task(slug: "wide", id: 202, display_name: "世界-name", stage: "2-brainstorm")
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    ascii_row = out.lines.find { |line| line.include?("ascii-name") }
+    wide_row  = out.lines.find { |line| line.include?("世界-name") }
+    refute_nil ascii_row, "ASCII-named row must render"
+    refute_nil wide_row,  "CJK-named row must render"
+
+    stage_offsets = [ ascii_row, wide_row ].map do |row|
+      Hive::Tui::Views::Format.display_width(row.split("2-brainstorm", 2).first)
+    end
+    assert_equal stage_offsets.first, stage_offsets.last,
+                 "a wide CJK display_name must not shift the stage column off its fixed cell offset"
+  end
+
   # ---- Sort order ----
 
   def test_rows_sorted_by_action_label_order

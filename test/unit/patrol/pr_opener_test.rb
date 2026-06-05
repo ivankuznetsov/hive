@@ -1,13 +1,16 @@
 require "test_helper"
+require "yaml"
 require "hive/config"
+require "hive/markers"
 require "hive/patrol/pr_opener"
 require "hive/patrol/finding"
+require "hive/task"
 
 class HivePatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
   FakePatch = Struct.new(:finding, :branch, :worktree_path, :validation,
-                         :passed, :diffstat, keyword_init: true)
+                         :passed, :diffstat, :head_sha, keyword_init: true)
 
   class FakeGh
     attr_reader :pushed, :created_args
@@ -42,6 +45,12 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  class FailingReviewHandoff
+    def enqueue(**)
+      raise "disk full"
+    end
+  end
+
   def cfg(draft: true)
     Hive::Config.deep_merge(
       Hive::Config.deep_dup(Hive::Config::DEFAULTS),
@@ -71,11 +80,12 @@ class HivePatrolPrOpenerTest < Minitest::Test
       worktree_path: worktree_path,
       passed: passed,
       validation: { "commands" => [ { "name" => "test", "command" => "rake", "exit_code" => 0 } ] },
-      diffstat: " app.rb | 1 +"
+      diffstat: " app.rb | 1 +",
+      head_sha: "abc123"
     )
   end
 
-  def test_validated_patch_opens_draft_pr_and_records_mapping
+  def test_validated_patch_opens_draft_pr_records_mapping_and_enqueues_review_task
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
@@ -88,6 +98,71 @@ class HivePatrolPrOpenerTest < Minitest::Test
       fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
       assert_equal "https://example.com/pr/2", fingerprints["fp1"]["pr_url"]
       assert_equal "open", fingerprints["fp1"]["state"]
+
+      refute_nil result.review_task_path
+      task = Hive::Task.new(result.review_task_path)
+      assert_equal "review", task.stage_name
+      assert_equal "patrol-feature-fp1", task.slug
+      assert_equal "Patrol: Fix bug", task.display_name
+      assert_equal :none, Hive::Markers.current(task.state_file).name
+      assert File.directory?(task.reviews_dir)
+
+      pointer = YAML.safe_load(File.read(task.worktree_yml_path))
+      assert_equal dir, pointer.fetch("path")
+      assert_equal "hive-patrol/feature-fp1", pointer.fetch("branch")
+      assert_equal "abc123", pointer.fetch("execute_base_head")
+
+      pr_md = File.read(File.join(task.folder, "pr.md"))
+      assert_includes pr_md, "pr_url: https://example.com/pr/2"
+      assert_includes File.read(task.state_file), "# Patrol: Fix bug"
+    end
+  end
+
+  def test_review_handoff_failure_is_visible_and_retryable
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+
+      result = Hive::Patrol::PrOpener.new(
+        dir,
+        cfg: cfg,
+        gh: gh,
+        review_handoff: FailingReviewHandoff.new
+      ).open(finding, patch(worktree_path: dir))
+
+      assert_equal :opened_review_handoff_failed, result.status
+      assert result.opened?
+      assert result.review_handoff_failed?
+      assert_equal "review_handoff_failed", result.reason
+      assert_nil result.review_task_path
+
+      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
+      assert_equal "review_handoff_failed", fingerprints.fetch("fp1").fetch("state")
+      refute Hive::Patrol::Fingerprint.known_active?(fingerprints, "fp1"),
+             "failed review handoff must remain retryable instead of becoming an active PR skip"
+    end
+  end
+
+  def test_review_handoff_frontmatter_handles_yaml_sensitive_values
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      unsafe = finding
+      unsafe.id = "finding: one\nsecond"
+      unsafe.fingerprint = "fp: one\nsecond"
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(unsafe, patch(worktree_path: dir))
+
+      assert result.opened?
+      task = Hive::Task.new(result.review_task_path)
+      task_frontmatter = YAML.safe_load(File.read(task.state_file).match(/\A---\s*\n(.*?)\n---/m)[1])
+      pr_frontmatter = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))
+
+      assert_equal unsafe.id, task_frontmatter.fetch("patrol_finding_id")
+      assert_equal unsafe.fingerprint, task_frontmatter.fetch("patrol_fingerprint")
+      assert_equal "https://example.com/pr/2", pr_frontmatter.fetch("pr_url")
+      assert_equal unsafe.id, pr_frontmatter.fetch("patrol_finding_id")
+      assert_equal unsafe.fingerprint, pr_frontmatter.fetch("patrol_fingerprint")
     end
   end
 
@@ -101,7 +176,63 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
       assert_equal :skipped, result.status
       assert_equal "existing_pr", result.reason
+      refute_nil result.review_task_path
       assert_empty gh.pushed
+    end
+  end
+
+  def test_existing_open_pr_with_failed_handoff_is_skipped_and_retryable
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      gh.prs = [ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ]
+
+      result = Hive::Patrol::PrOpener.new(
+        dir,
+        cfg: cfg,
+        gh: gh,
+        review_handoff: FailingReviewHandoff.new
+      ).open(finding, patch(worktree_path: dir))
+
+      assert_equal :skipped, result.status
+      assert_equal "review_handoff_failed", result.reason
+      assert_nil result.review_task_path
+      assert_empty gh.pushed
+
+      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
+      assert_equal "review_handoff_failed", fingerprints.fetch("fp1").fetch("state")
+      refute Hive::Patrol::Fingerprint.known_active?(fingerprints, "fp1"),
+             "an existing-PR handoff failure must stay retryable, not become an active skip"
+    end
+  end
+
+  def test_existing_merged_pr_does_not_enqueue_review_task
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      gh.prs = [ { "state" => "MERGED", "url" => "https://example.com/pr/1" } ]
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+
+      assert_equal :skipped, result.status
+      assert_equal "existing_pr", result.reason
+      assert_nil result.review_task_path
+      assert_empty gh.pushed
+    end
+  end
+
+  def test_review_handoff_can_be_disabled
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      config = cfg(draft: false)
+      config["patrol"]["review_prs"] = false
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: config, gh: gh).open(finding, patch(worktree_path: dir))
+
+      assert result.opened?
+      assert_nil result.review_task_path
+      refute Dir.exist?(File.join(dir, ".hive-state", "stages", "6-review"))
     end
   end
 

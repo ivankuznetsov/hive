@@ -32,6 +32,7 @@ class ConfigTest < Minitest::Test
       assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
       assert_equal false, cfg.dig("patrol", "draft_prs")
+      assert_equal true, cfg.dig("patrol", "review_prs")
       assert_equal [], cfg.dig("patrol", "include")
       assert_includes cfg.dig("patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("patrol", "commands", "test")
@@ -83,6 +84,7 @@ class ConfigTest < Minitest::Test
     cases = [
       "enabled: maybe",
       "draft_prs: sometimes",
+      "review_prs: sometimes",
       "min_confidence_to_fix: certain",
       "poll_interval_sec: 30",
       "commands: []",

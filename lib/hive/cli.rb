@@ -407,8 +407,9 @@ module Hive
       agent to review each slice, attempts isolated fixes above the
       confidence gate, validates configured commands, and opens ready
       (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
-      draft PRs). Patrol never writes findings to 1-inbox or any
-      stage folder; PRs are the only external surface.
+      draft PRs). By default, each opened patrol PR is also handed to the
+      standard 6-review flow as a visible "Patrol: ..." task; set
+      patrol.review_prs: false to keep PR-only output.
 
       Use --dry-run to map and review without creating fix worktrees,
       pushing branches, or opening PRs. With --json, emits

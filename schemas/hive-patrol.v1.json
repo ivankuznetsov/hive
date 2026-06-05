@@ -25,6 +25,7 @@
         "fixes_validated",
         "prs_opened",
         "pr_urls",
+        "review_handoff_errors",
         "skipped_findings",
         "last_scanned_sha"
       ],
@@ -44,6 +45,18 @@
         "pr_urls": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "review_handoff_errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pr_url", "reason"],
+            "properties": {
+              "pr_url": { "type": "string" },
+              "reason": { "const": "review_handoff_failed" }
+            }
+          }
         },
         "skipped_findings": {
           "type": "array",

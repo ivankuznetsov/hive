@@ -111,10 +111,42 @@ class PatrolCommandTest < Minitest::Test
       assert_equal 1, payload.fetch("fixes_attempted")
       assert_equal 1, payload.fetch("fixes_validated")
       assert_equal [ "https://example.com/pull/7" ], payload.fetch("pr_urls")
+      assert_equal [], payload.fetch("review_handoff_errors")
 
       state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
       assert_equal payload.fetch("last_scanned_sha"), state.fetch("last_scanned_sha")
       refute_empty state.fetch("last_run_at")
+    end
+  end
+
+  def test_patrol_json_reports_review_handoff_failures
+    with_patrol_project do |repo|
+      feature = sample_feature
+      finding = sample_finding
+      patch = sample_patch(repo, finding)
+      pr_result = Hive::Patrol::PrOpener::Result.new(
+        status: :opened_review_handoff_failed,
+        pr_url: "https://example.com/pull/7",
+        reason: "review_handoff_failed"
+      )
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ feature ]),
+          reviewer: FakeReviewer.new([ finding ]),
+          fixer: FakeFixer.new(patch),
+          pr_opener: FakePrOpener.new(pr_result)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      payload = JSON.parse(out)
+      assert patrol_schemer.valid?(payload), patrol_schemer.validate(payload).map { |e| e["error"] }.inspect
+      assert_equal 1, payload.fetch("prs_opened")
+      assert_equal [ "https://example.com/pull/7" ], payload.fetch("pr_urls")
+      assert_equal [
+        { "pr_url" => "https://example.com/pull/7", "reason" => "review_handoff_failed" }
+      ], payload.fetch("review_handoff_errors")
     end
   end
 
@@ -147,11 +179,11 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  # R2 A3/A6 + global E2E rule #10: patrol is PR-only. It must never write
-  # a task into any pipeline stage folder — especially the 1-inbox intake
-  # that `hive add` uses. Everything patrol records lives under
-  # .hive-state/patrol/.
-  def test_patrol_writes_nothing_under_a_stage_folder
+  # Patrol must never write findings to the 1-inbox intake. Opened patrol
+  # PRs may create synthetic 6-review tasks via PrOpener/ReviewHandoff;
+  # this command-level test uses a fake opener, so only patrol's own state
+  # tree is expected.
+  def test_patrol_writes_nothing_under_inbox
     with_patrol_project do |repo|
       feature = sample_feature
       finding = sample_finding
@@ -172,10 +204,8 @@ class PatrolCommandTest < Minitest::Test
 
       assert_empty Dir.glob(File.join(repo, "**", "1-inbox"), File::FNM_DOTMATCH),
                    "patrol must not create any */1-inbox/ stage folder"
-      refute Dir.exist?(File.join(repo, ".hive-state", "stages")),
-             "patrol must not create the pipeline stages tree"
       assert Dir.exist?(File.join(repo, ".hive-state", "patrol")),
-             "patrol records its run under .hive-state/patrol/, not a stage folder"
+             "patrol records scan state under .hive-state/patrol/"
     end
   end
 

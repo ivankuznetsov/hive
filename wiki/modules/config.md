@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers` and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol enrollment and PR handoff). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers` and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -71,6 +71,21 @@ tags: [config, yaml, validation]
     "dry_run" => false,
     "budget_minutes" => 30,
     "budget_usd" => 50
+  },
+  "patrol" => {
+    "enabled" => false,
+    "trigger" => "new_commits",
+    "poll_interval_sec" => 600,
+    "agent" => "claude",
+    "min_confidence_to_fix" => "medium",
+    "max_findings_per_feature" => 10,
+    "max_prs_per_cycle" => 3,
+    "draft_prs" => false,
+    "review_prs" => true,
+    "include" => [],
+    "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
+    "commands" => { "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil },
+    "review" => { "max_context_files" => 24, "max_owned_files" => 12 }
   }
 }
 ```
@@ -120,6 +135,7 @@ Runs after merge so a default value can never trigger a failure — only user in
 5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
 6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 7. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
+8. **`validate_patrol!`** — `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not
@@ -148,6 +164,7 @@ cfg.dig("review", "ci", "agent")
 cfg.dig("review", "reviewers")
 cfg.dig("babysitter", "enabled")
 cfg.dig("babysitter", "max_concurrent_prs")
+cfg.dig("patrol", "review_prs")
 cfg["worktree_root"]
 ```
 
@@ -157,9 +174,9 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 ## Tests
 
-- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, error on malformed YAML, reviewer/agent-name validation, babysitter default/validation coverage.
+- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, error on malformed YAML, reviewer/agent-name validation, babysitter and patrol default/validation coverage.
 
 ## Backlinks
 
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]]
 - [[modules/agent]] · [[state-model]]

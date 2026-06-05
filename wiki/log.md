@@ -10,6 +10,24 @@ Append-only log of all wiki operations.
 - [[commands/patrol]]
 - [[modules/patrol]]
 
+## [2026-06-05T12:57:21Z] patrol/wiki - refresh review-handoff coverage after commit 4d0541d6
+
+**Action:** Refreshed the wiki after commit `4d0541d6` added `Hive::Patrol::ReviewHandoff`, defaulted `patrol.review_prs` to true, and changed `PrOpener` so opened patrol PRs keep their worktree and create synthetic `6-review/patrol-.../` tasks by default. Follow-up hardening documents `review_handoff_failed` retry behavior, `hive patrol --json` `review_handoff_errors`, and YAML-serialized patrol handoff frontmatter. Verified the committed diff and current source/test files, corrected stale PR-only patrol TLDRs, documented the config default/validator, noted the synthetic task/state shape in [[state-model]] and [[stages/review]], refreshed test coverage notes, updated [[index]], and recorded the missing live daemon/TUI smoke evidence in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/patrol]]
+- [[modules/patrol]]
+- [[modules/config]]
+- [[state-model]]
+- [[stages/review]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+
+## [2026-06-05T09:45:00Z] patrol - hand opened PRs to 6-review
+
+**Action:** Documented the new `patrol.review_prs` default: successful patrol PRs now keep their validated worktree and create a synthetic `6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`. This routes patrol-created PRs through the standard review/TUI/daemon flow instead of leaving them as PR-only outputs. Projects can set `patrol.review_prs: false` to keep the previous cleanup-only behavior. Updated [[commands/patrol]] and [[modules/patrol]].
+
 ## [2026-06-05T09:30:00Z] patrol - continuous hybrid trigger
 
 **Action:** Added and documented `patrol.trigger: continuous`, a hybrid daemon scheduling mode that dispatches patrol when either the default branch SHA changed or `poll_interval_sec` elapsed. This keeps large repositories under active patrol between infrequent merges while preserving the `last_scanned_sha` freshness marker after each successful scan. Updated [[commands/patrol]] and [[modules/patrol]].

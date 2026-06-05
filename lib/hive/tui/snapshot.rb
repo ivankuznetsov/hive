@@ -252,17 +252,19 @@ module Hive
       def old_archived_row?(row, now:)
         Hive::ArchiveFilter.hide?(
           stage: row.stage,
-          marker_name: row.marker,
           mtime: parse_time(row.mtime),
-          folder_mtime: parse_folder_mtime(row.folder_mtime),
+          folder_mtime: parse_time(row.folder_mtime),
           now: now
         )
       end
 
-      def parse_folder_mtime(value)
-        parse_time(value)
-      end
-
+      # Intentionally swallows ArgumentError (non-ISO8601 / corrupt
+      # timestamps) and returns nil. The fail direction is safe: a row
+      # with an unparseable mtime simply keeps its archived-at as nil and
+      # stays visible rather than being hidden. We deliberately do not log
+      # here — this runs in the TUI render path, where stderr noise would
+      # corrupt the frame; systemic corruption surfaces via `hive status`
+      # instead.
       def parse_time(value)
         return nil if value.nil? || value.to_s.strip.empty?
 

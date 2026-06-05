@@ -13,8 +13,13 @@ module Hive
       stage_dir == ARCHIVE_STAGE_DIR
     end
 
-    def hide?(stage:, marker_name: nil, mtime: nil, folder_mtime: nil, now: Time.now)
+    def hide?(stage:, mtime: nil, folder_mtime: nil, now: Time.now)
       return false unless archived?(stage)
+      # Precedence: prefer `mtime` (the marker/state-file write time, i.e.
+      # when the task was actually archived) and fall back to
+      # `folder_mtime` only when no `mtime` is available. A caller that
+      # passes only `folder_mtime` gets the coarser folder timestamp; the
+      # snapshot path passes both so the marker time wins.
       archived_at = mtime || folder_mtime
       return false unless archived_at
 

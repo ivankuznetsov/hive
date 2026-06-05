@@ -338,6 +338,74 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_does_not_auto_recover_reviewer_partial_failure_when_errors_file_is_missing
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_reviewer_partial_failure_signature_falls_back_when_errors_file_disappears
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      reviews_dir = File.join(File.dirname(state_file), "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      errors_path = File.join(reviews_dir, "errors-01.md")
+      File.write(
+        errors_path,
+        "- [claude-ce-code-review] reviewer \"claude-ce-code-review\" failed: " \
+        "tmux_session_terminated before writing expected output file: #{File.join(reviews_dir, 'claude.md')}\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      original = File.method(:read)
+      File.define_singleton_method(:read) do |path, *args, **kwargs|
+        raise Errno::ENOENT, path if path == errors_path
+
+        original.call(path, *args, **kwargs)
+      end
+
+      begin
+        heal([ row ])
+      ensure
+        File.define_singleton_method(:read, &original)
+      end
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected auto-recovery event, got: #{@logger.events.inspect}"
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
   def test_auto_recovers_review_error_review_agent_died
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
@@ -425,6 +493,122 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal 1, heals.first[1][:attempt]
       assert_equal 1, heals.first[1][:max_attempts]
     end
+  end
+
+  def test_review_error_auto_recovery_logs_failure_when_marker_clear_raises
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      original = Hive::Markers.method(:clear_current)
+      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+        raise Errno::ENOSPC, "no space left" if path == state_file
+
+        original.call(path, *args)
+      end
+
+      begin
+        heal([ row ])
+      ensure
+        Hive::Markers.define_singleton_method(:clear_current, &original)
+      end
+
+      failure = @logger.events.find { |name, _| name == :marker_heal_failed }
+      assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
+      assert_equal "reviewer_tmux_session_terminated", failure[1][:reason]
+      assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_private_stale_review_helpers_cover_process_and_lock_edges
+    row = make_row("/tmp/missing-task.md", pid_alive: false, live_task_lock: true)
+    assert_nil @healer.send(:task_lock_holder, row)
+    assert_nil @healer.send(:release_task_lock, row)
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+      [ "", "", Struct.new(:exitstatus) { def success? = false }.new(1) ]
+    }) do
+      assert_equal [], @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+      [ "101\nbad\n202\n", "", Struct.new(:exitstatus) { def success? = true }.new(0) ]
+    }) do
+      assert_equal [ 101, 202 ], @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+      [ "", "boom", Struct.new(:exitstatus) { def success? = false }.new(2) ]
+    }) do
+      assert_nil @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise Errno::ENOENT }) do
+      assert_nil @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+      refute @healer.send(:pid_alive?, 12_345)
+    end
+
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+      assert @healer.send(:pid_alive?, 12_345)
+      assert_nil @healer.send(:terminate_lock_holder, { "pid" => 12_345 })
+    end
+
+    assert_nil @healer.send(:terminate_lock_holder, { "pid" => "not-a-pid" })
+  end
+
+  def test_terminate_lock_holder_sends_term_then_stops_when_process_exits
+    signals = []
+    alive_checks = 0
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+      signals << [ signal, pid ]
+      true
+    }) do
+      with_replaced_singleton_method(@healer, :pid_alive?, lambda { |_pid|
+        alive_checks += 1
+        alive_checks < 2
+      }) do
+        with_replaced_singleton_method(@healer, :sleep, ->(_seconds) { }) do
+          @healer.send(:terminate_lock_holder, { "pid" => 12_345 })
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 12_345 ] ], signals
+  end
+
+  def test_terminate_lock_holder_escalates_to_kill_after_deadline
+    signals = []
+    now = Time.utc(2026, 6, 5, 12, 0, 0)
+    times = [ now, now + 2 ]
+
+    with_replaced_singleton_method(Time, :now, -> { times.shift || now + 2 }) do
+      with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+        signals << [ signal, pid ]
+        true
+      }) do
+        with_replaced_singleton_method(@healer, :pid_alive?, ->(_pid) { true }) do
+          @healer.send(:terminate_lock_holder, { "pid" => 12_345 })
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 12_345 ], [ "KILL", 12_345 ] ], signals
   end
 
   def test_disk_failure_during_heal_does_not_crash_tick

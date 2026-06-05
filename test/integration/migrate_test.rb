@@ -419,6 +419,24 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_warns_with_recovery_command_when_display_name_commit_fails
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git!) do |*_args|
+      raise Hive::GitError, "permission denied"
+    end
+    migrate = migrate_command("/tmp/project")
+
+    with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
+      _out, err = capture_io do
+        migrate.send(:commit_display_name_backfill, "/tmp/project/.hive-state", 2)
+      end
+
+      assert_includes err, "could not commit them to the hive-state git history"
+      assert_includes err, "git -C /tmp/project/.hive-state add -A"
+      assert_includes err, "hive: migrate display names (2 tasks)"
+    end
+  end
+
   def test_restart_daemon_uses_systemctl_when_available
     migrate = migrate_command("/tmp/project")
     calls = []

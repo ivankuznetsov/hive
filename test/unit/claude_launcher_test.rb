@@ -779,6 +779,22 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_wait_for_expected_output_treats_tmux_liveness_error_as_dead_session
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      runner = Struct.new(:name) do
+        def session_exists?
+          raise Hive::TmuxError, "server unavailable"
+        end
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+    end
+  end
+
   def test_wait_for_expected_output_rejects_nonempty_output_when_session_dies_without_done_signal
     with_tmp_task do |task|
       output = File.join(task.folder, "result.md")

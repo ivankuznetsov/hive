@@ -56,7 +56,7 @@ class TuiHelpTest < Minitest::Test
   end
 
   def test_modes_are_drawn_from_a_known_set
-    expected_modes = %i[grid triage log_tail red_status_detail token_stats filter idea_preview new_idea_project new_idea].to_set
+    expected_modes = %i[grid triage log_tail red_status_detail token_stats archive filter idea_preview new_idea_project new_idea].to_set
     actual_modes = Hive::Tui::Help::BINDINGS.map { |b| b[:mode] }.to_set
     extra = actual_modes - expected_modes
     assert_empty extra, "unexpected modes in BINDINGS: #{extra.inspect}"
@@ -135,7 +135,7 @@ class TuiHelpTest < Minitest::Test
     known_non_verb_actions = %i[
       cursor_down cursor_up cursor_jump_top cursor_jump_bottom
       open_contextual open_task_folder open_idea_preview open_in_agent
-      filter project_scope help quit token_stats
+      filter project_scope help quit token_stats archive_pane
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
       drop_task
     ]

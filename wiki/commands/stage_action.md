@@ -3,11 +3,11 @@ title: Workflow verbs
 type: command
 source: lib/hive/commands/stage_action.rb, lib/hive/workflows.rb
 created: 2026-04-26
-updated: 2026-05-22
+updated: 2026-06-05
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
-**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive`.
+**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode that delegates to [[commands/status]] archive mode instead of `StageAction`.
 
 ## Usage
 
@@ -20,11 +20,15 @@ hive review <slug>                        # promote 5-open-pr → 6-review, run 
 hive artifacts <slug>                     # promote 6-review → 7-artifacts, collect artifacts
 hive finalize <slug>                      # promote 7-artifacts → 8-finalize, finalize PR
 hive archive <slug>                       # promote 8-finalize → 9-done, run archive
+hive archive                              # list every 9-done task via Status archive mode
+hive archive --json                       # hive-status payload filtered to 9-done rows
 
 hive plan <slug> --from 2-brainstorm      # idempotency assertion for retry
 hive plan <slug> --project NAME           # multi-project disambiguation
 hive plan <slug> --json                   # machine-readable hive-stage-action envelope
 ```
+
+No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.nil?`, it constructs `Hive::Commands::Status.new(json: options[:json], archive: true)` and returns before `StageAction` is involved. Only `hive archive <target>` uses the promote-or-run workflow semantics below.
 
 ## Steps performed (`Hive::Commands::StageAction#call`)
 

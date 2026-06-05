@@ -31,6 +31,24 @@ Append-only log of all wiki operations.
 - [[commands/patrol]]
 - [[modules/patrol]]
 
+## [2026-06-05T12:57:21Z] patrol/wiki - refresh review-handoff coverage after commit 4d0541d6
+
+**Action:** Refreshed the wiki after commit `4d0541d6` added `Hive::Patrol::ReviewHandoff`, defaulted `patrol.review_prs` to true, and changed `PrOpener` so opened patrol PRs keep their worktree and create synthetic `6-review/patrol-.../` tasks by default. Follow-up hardening documents `review_handoff_failed` retry behavior, `hive patrol --json` `review_handoff_errors`, and YAML-serialized patrol handoff frontmatter. Verified the committed diff and current source/test files, corrected stale PR-only patrol TLDRs, documented the config default/validator, noted the synthetic task/state shape in [[state-model]] and [[stages/review]], refreshed test coverage notes, updated [[index]], and recorded the missing live daemon/TUI smoke evidence in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/patrol]]
+- [[modules/patrol]]
+- [[modules/config]]
+- [[state-model]]
+- [[stages/review]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+
+## [2026-06-05T09:45:00Z] patrol - hand opened PRs to 6-review
+
+**Action:** Documented the new `patrol.review_prs` default: successful patrol PRs now keep their validated worktree and create a synthetic `6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`. This routes patrol-created PRs through the standard review/TUI/daemon flow instead of leaving them as PR-only outputs. Projects can set `patrol.review_prs: false` to keep the previous cleanup-only behavior. Updated [[commands/patrol]] and [[modules/patrol]].
+
 ## [2026-06-05T09:30:00Z] patrol - continuous hybrid trigger
 
 **Action:** Added and documented `patrol.trigger: continuous`, a hybrid daemon scheduling mode that dispatches patrol when either the default branch SHA changed or `poll_interval_sec` elapsed. This keeps large repositories under active patrol between infrequent merges while preserving the `last_scanned_sha` freshness marker after each successful scan. Updated [[commands/patrol]] and [[modules/patrol]].
@@ -3128,3 +3146,28 @@ TTL config.
 - [[commands/migrate]]
 - [[modules/bot]]
 - [[state-model]]
+
+## [2026-06-05T14:22:45Z] cli/status — refresh no-target archive listing coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `93fb45fb` changed `hive archive` from a target-required workflow-only command into a split surface: no target lists archived tasks through `Hive::Commands::Status.new(archive: true)`, while `hive archive <target>` still runs the `StageAction` promote-or-run workflow verb. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "archive status command"` found existing workflow/archive wiki context. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, and focused CLI/status tests. Documented no-target text and JSON archive listing, empty archive output, and the CLI overlay boundary. Recorded that live registered-project archive workflow evidence is still missing. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/status]]
+- [[commands/stage_action]]
+- [[commands/tui]]
+- [[state-model]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-04T21:38:00Z] status/tui — archive hiding and archive views
+
+**Action:** Refreshed command/API wiki coverage after commits `6d10e386` through `bfa4b590` added `tasks[].folder_mtime`, `Hive::ArchiveFilter`, default text/TUI hiding for clean old `9-done` rows, an unfiltered TUI Archive pane, and no-arg `hive archive` listing. Verified the committed diffs plus current `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/archive_pane.rb`, `lib/hive/cli.rb`, the status schema, and focused status/TUI/CLI tests. Documented the distinction between state-file `mtime` and task-folder `folder_mtime`, the 3-day resolved-marker-only hide policy, the JSON boundary that keeps default `hive status --json` unfiltered, the explicit archive views, and the missing live registered-project smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[commands/tui]]
+- [[state-model]]
+- [[testing]]
+- [[index]]
+- [[gaps]]

@@ -179,6 +179,23 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::OPEN_TOKEN_STATS, msg
   end
 
+  def test_grid_z_returns_open_archive_pane
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "z", row: nil)
+    assert_same Hive::Tui::Messages::OPEN_ARCHIVE_PANE, msg
+  end
+
+  def test_archive_mode_q_and_escape_close_archive_pane
+    assert_same Hive::Tui::Messages::CLOSE_ARCHIVE_PANE,
+                Hive::Tui::KeyMap.message_for(mode: :archive, key: "q", row: nil)
+    assert_same Hive::Tui::Messages::CLOSE_ARCHIVE_PANE,
+                Hive::Tui::KeyMap.message_for(mode: :archive, key: :key_escape, row: nil)
+  end
+
+  def test_archive_mode_unmapped_keys_are_noop
+    assert_same Hive::Tui::Messages::NOOP,
+                Hive::Tui::KeyMap.message_for(mode: :archive, key: "j", row: nil)
+  end
+
   def test_grid_s_with_row_returns_open_in_agent
     row = make_row(action_key: "ready_to_plan")
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "s", row: row)
@@ -988,6 +1005,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       [ :grid, "q",            nil ],
       [ :grid, "?",            nil ],
       [ :grid, "/",            nil ],
+      [ :grid, "z",            nil ],
       [ :grid, "5",            nil ],
       [ :grid, "j",            make_row(action_key: "ready_to_brainstorm") ],
       [ :grid, "k",            make_row(action_key: "ready_to_brainstorm") ],
@@ -998,6 +1016,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       [ :grid, "Z",            make_row(action_key: "ready_to_brainstorm") ],
       [ :log_tail, "q",        make_row(action_key: "agent_running") ],
       [ :log_tail, :key_escape, make_row(action_key: "agent_running") ],
+      [ :archive, "q",         nil ],
       [ :filter, :key_escape,  nil ],
       [ :idea_preview, "x",    nil ]
     ]

@@ -355,11 +355,26 @@ module Hive
       run_stage_action("finalize", target)
     end
 
-    desc "archive TARGET", "Move a completed finalize task into done, or run an existing done task"
+    desc "archive [TARGET]", "List done tasks, or move a completed finalize task into done"
+    long_desc <<~DESC
+      With no TARGET, lists every task currently in 9-done across registered
+      projects. Pass --json for the same archive-scoped status payload.
+
+      With TARGET, preserves the workflow behavior: move a completed finalize
+      task into done, or run an existing done task.
+    DESC
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def archive(target)
+    def archive(target = nil)
+      if target.nil?
+        if options[:from]
+          warn "hive archive: --from is ignored when listing; it only disambiguates same-slug tasks for `hive archive TARGET`"
+        end
+        require "hive/commands/status"
+        return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
+      end
+
       run_stage_action("archive", target)
     end
 
@@ -407,8 +422,9 @@ module Hive
       agent to review each slice, attempts isolated fixes above the
       confidence gate, validates configured commands, and opens ready
       (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
-      draft PRs). Patrol never writes findings to 1-inbox or any
-      stage folder; PRs are the only external surface.
+      draft PRs). By default, each opened patrol PR is also handed to the
+      standard 6-review flow as a visible "Patrol: ..." task; set
+      patrol.review_prs: false to keep PR-only output.
 
       Use --dry-run to map and review without creating fix worktrees,
       pushing branches, or opening PRs. With --json, emits

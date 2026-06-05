@@ -3,18 +3,18 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-05-28T10:30:00Z
+updated: 2026-06-05
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
-**TLDR**: The autonomous review loop. After 5-open-pr opens a draft PR, `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
+**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, or patrol creates a synthetic `6-review/patrol-.../` task for an opened PR, `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
 
-- **State file**: `task.md` with the same frontmatter that 4-execute wrote (`slug`, `started_at`). The runner does NOT track pass count in frontmatter — it derives the current pass by reading `reviews/<reviewer-name>-<NN>.md` filenames and taking the maximum NN.
-- **Worktree pointer**: `worktree.yml` (carried over from 4-execute; missing → exit 1 with "6-review entered without a worktree.yml").
-- **PR pointer**: `pr.md` (carried over from 5-open-pr). Missing PR metadata only disables GitHub comment mirroring; local review still runs.
-- **Reviews directory**: `reviews/` (carried over). New per-pass files written here: `<reviewer>-NN.md`, `escalations-NN.md`, `ci-blocked.md` (Phase 1 hard-block), `browser-blocked-NN.md` (Phase 5 warned), `fix-guardrail-NN.md` (post-fix tripped).
+- **State file**: `task.md` with frontmatter written by 4-execute (`slug`, `started_at`) or by patrol handoff (`source: patrol`, finding fingerprint, PR URL). The runner does NOT track pass count in frontmatter — it derives the current pass by reading `reviews/<reviewer-name>-<NN>.md` filenames and taking the maximum NN.
+- **Worktree pointer**: `worktree.yml` (carried over from 4-execute or written by `Hive::Patrol::ReviewHandoff`; missing → exit 1 with "6-review entered without a worktree.yml").
+- **PR pointer**: `pr.md` (carried over from 5-open-pr or written by patrol handoff). Missing PR metadata only disables GitHub comment mirroring; local review still runs.
+- **Reviews directory**: `reviews/` (carried over from the normal pipeline or created by patrol handoff). New per-pass files written here: `<reviewer>-NN.md`, `escalations-NN.md`, `ci-blocked.md` (Phase 1 hard-block), `browser-blocked-NN.md` (Phase 5 warned), `fix-guardrail-NN.md` (post-fix tripped).
 
 ## Pre-flight (`Review.run!`)
 
@@ -169,5 +169,6 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 ## Backlinks
 
 - [[stages/open-pr]] · [[stages/finalize]]
+- [[modules/patrol]]
 - [[modules/markers]] · [[modules/agent]] · [[modules/config]]
 - [[state-model]] · [[decisions]] · [[architecture]]

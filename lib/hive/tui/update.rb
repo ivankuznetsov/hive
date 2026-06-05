@@ -73,6 +73,8 @@ module Hive
           [ apply_show_help(model), nil ]
         when Messages::OpenFilterPrompt
           [ apply_open_filter_prompt(model), nil ]
+        when Messages::OpenArchivePane
+          [ model.with(mode: :archive), nil ]
         when Messages::OpenRedStatusDetail
           [ apply_open_red_status_detail(model, message), nil ]
         when Messages::RedStatusDetailScroll
@@ -81,6 +83,8 @@ module Hive
           [ apply_back(model), nil ]
         when Messages::CloseTokenStats
           [ apply_close_token_stats(model), nil ]
+        when Messages::CloseArchivePane
+          [ apply_close_archive_pane(model), nil ]
         when Messages::TokenStatsScopeChanged
           [ apply_token_stats_scope_changed(model, message), nil ]
         when Messages::TokenStatsSelectionMoved
@@ -827,6 +831,12 @@ end
         model.with(mode: :grid, token_stats_state: nil)
       end
 
+      def apply_close_archive_pane(model)
+        return model unless model.mode == :archive
+
+        model.with(mode: :grid)
+      end
+
       def apply_token_stats_scope_changed(model, msg)
         return model unless model.mode == :token_stats
 
@@ -926,7 +936,7 @@ end
         snap = model.snapshot
         return nil if snap.nil?
 
-        snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
+        snap.visible_projection(scope: model.scope, filter: model.filter)
       end
 
       def find_row_for_detail(snapshot, original_row)

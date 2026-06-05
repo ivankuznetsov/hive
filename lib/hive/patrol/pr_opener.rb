@@ -3,6 +3,7 @@ require "time"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/patrol/fingerprint"
+require "hive/patrol/review_handoff"
 require "hive/patrol/state_store"
 require "hive/secret_patterns"
 require "hive/worktree"
@@ -10,17 +11,22 @@ require "hive/worktree"
 module Hive
   module Patrol
     class PrOpener
-      Result = Struct.new(:status, :pr_url, :reason, keyword_init: true) do
+      Result = Struct.new(:status, :pr_url, :reason, :review_task_path, keyword_init: true) do
         def opened?
-          status == :opened
+          %i[opened opened_review_handoff_failed].include?(status)
+        end
+
+        def review_handoff_failed?
+          status == :opened_review_handoff_failed || reason == "review_handoff_failed"
         end
       end
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh, review_handoff: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @gh = gh
+        @review_handoff = review_handoff || ReviewHandoff.new(@project_root, cfg: cfg, state: state)
       end
 
       def open(finding, patch, now: Time.now)
@@ -37,6 +43,30 @@ module Hive
           %w[OPEN MERGED].include?(pr["state"])
         end
         if existing
+          if review_prs_enabled? && existing["state"] == "OPEN"
+            review_task_path = enqueue_review_task(finding, patch, existing["url"], now)
+            unless review_task_path
+              # Same self-heal as the opened path: drop the unowned worktree
+              # so the next cycle can rebuild and retry the handoff against
+              # the still-open PR instead of dead-locking on the existing dir.
+              cleanup_worktree(patch)
+              record_mapping(finding, patch, existing["url"], "review_handoff_failed", now)
+              return Result.new(
+                status: :skipped,
+                pr_url: existing["url"],
+                reason: "review_handoff_failed"
+              )
+            end
+
+            record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
+            return Result.new(
+              status: :skipped,
+              pr_url: existing["url"],
+              reason: "existing_pr",
+              review_task_path: review_task_path
+            )
+          end
+
           record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
           # The branch already has a PR; this validated worktree is now
           # dead weight. Remove it so `.patrol/` doesn't accumulate one
@@ -57,11 +87,29 @@ module Hive
         @gh.push_branch!(patch.worktree_path, patch.branch, cfg: @cfg)
         pr_url = create_pr(patch, body)
         record_mapping(finding, patch, pr_url, "open", now)
-        # The branch is pushed; the local worktree is no longer needed.
-        # Without this every successful PR leaks one worktree, growing
-        # `.patrol/` unboundedly across cycles.
-        cleanup_worktree(patch)
-        Result.new(status: :opened, pr_url: pr_url)
+        review_task_path = enqueue_review_task(finding, patch, pr_url, now)
+        if !review_task_path && review_prs_enabled?
+          # The handoff failed after the PR was opened. Remove the now-
+          # unowned worktree: otherwise it leaks under `.patrol/` AND the
+          # next cycle's fixer can't rebuild the deterministic worktree
+          # path (`git worktree add` rejects an existing dir), so the
+          # finding re-fails forever. The fix is already pushed to the PR
+          # branch, so the existing-PR path re-attempts the handoff on the
+          # next scan against a freshly rebuilt worktree — self-healing.
+          cleanup_worktree(patch)
+          record_mapping(finding, patch, pr_url, "review_handoff_failed", now)
+          return Result.new(
+            status: :opened_review_handoff_failed,
+            pr_url: pr_url,
+            reason: "review_handoff_failed"
+          )
+        end
+        if !review_task_path && !review_prs_enabled?
+          # The branch is pushed; the local worktree is no longer needed
+          # only when patrol is not handing the PR to 6-review.
+          cleanup_worktree(patch)
+        end
+        Result.new(status: :opened, pr_url: pr_url, review_task_path: review_task_path)
       rescue Hive::GhError => e
         # A PR-stage failure after a validated fix would otherwise abort
         # the cycle and leak the passed-fix worktree (only the
@@ -80,6 +128,17 @@ module Hive
         Hive::Worktree.new(@project_root, "patrol-cleanup").remove!(path: patch.worktree_path, force: true)
       rescue StandardError
         nil
+      end
+
+      def enqueue_review_task(finding, patch, pr_url, now)
+        @review_handoff.enqueue(finding: finding, patch: patch, pr_url: pr_url, now: now)
+      rescue StandardError => e
+        warn "hive: patrol opened #{pr_url} but failed to enqueue 6-review task: #{e.class}: #{e.message}"
+        nil
+      end
+
+      def review_prs_enabled?
+        @cfg.dig("patrol", "review_prs") != false
       end
 
       def default_branch

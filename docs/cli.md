@@ -37,7 +37,7 @@ hive reject-finding <slug> --severity nit
 
 ## Patrol
 
-`hive patrol PROJECT [--dry-run] [--json]` runs one repository patrol cycle for a registered project whose `.hive-state/config.yml` has `patrol.enabled: true`. The cycle maps semantic feature slices, reviews each slice with the configured patrol agent, attempts fixes above the confidence gate in isolated worktrees, runs configured validation commands, and opens PRs only for validated fixes. It never writes to `1-inbox/` or any stage folder.
+`hive patrol PROJECT [--dry-run] [--json]` runs one repository patrol cycle for a registered project whose `.hive-state/config.yml` has `patrol.enabled: true`. The cycle maps semantic feature slices, reviews each slice with the configured patrol agent, attempts fixes above the confidence gate in isolated worktrees, runs configured validation commands, and opens PRs only for validated fixes. Successful PRs are handed to the standard `6-review` flow by default as visible `Patrol: ...` tasks; set `patrol.review_prs: false` to keep the old PR-only behavior.
 
 The daemon can schedule patrol automatically through `patrol.trigger` (`continuous` by default — scans on a default-branch change or once per `poll_interval_sec`; `new_commits` restricts scanning to default-branch changes only) and `patrol.poll_interval_sec`, but the command is also useful for a one-off scan:
 
@@ -46,7 +46,7 @@ hive patrol my-project --json
 hive patrol my-project --dry-run --json
 ```
 
-The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix, validation, PR, skip, and `last_scanned_sha` counts. Durable patrol state is stored under `<project>/.hive-state/patrol/`.
+The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix, validation, PR, review handoff, skip, and `last_scanned_sha` counts. Durable patrol state is stored under `<project>/.hive-state/patrol/`.
 
 ## Lower-Level Surface
 

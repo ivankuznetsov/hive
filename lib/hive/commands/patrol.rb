@@ -140,6 +140,9 @@ module Hive
 
       def success_payload(entry, project_root, sha, features, findings, candidates, fixes, pr_results, skipped)
         opened = pr_results.select(&:opened?)
+        handoff_errors = pr_results.select(&:review_handoff_failed?).map do |result|
+          { "pr_url" => result.pr_url, "reason" => result.reason }
+        end
         {
           "schema" => "hive-patrol",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"),
@@ -154,6 +157,7 @@ module Hive
           "fixes_validated" => fixes.count(&:passed),
           "prs_opened" => opened.size,
           "pr_urls" => opened.map(&:pr_url),
+          "review_handoff_errors" => handoff_errors,
           "skipped_findings" => skipped,
           "last_scanned_sha" => sha
         }

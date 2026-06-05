@@ -3,11 +3,11 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-05-28
+updated: 2026-06-05
 tags: [command, patrol, review, pr, json]
 ---
 
-**TLDR**: `hive patrol PROJECT [--dry-run] [--json]` runs one clawpatch-style repository scan cycle for a registered project: map semantic feature slices, review each slice, attempt isolated fixes above the confidence gate, validate configured commands, and open PRs for validated fixes only. Patrol state lives under `<project>/.hive-state/patrol/`; findings never go through `1-inbox/` or the stage pipeline.
+**TLDR**: `hive patrol PROJECT [--dry-run] [--json]` runs one clawpatch-style repository scan cycle for a registered project: map semantic feature slices, review each slice, attempt isolated fixes above the confidence gate, validate configured commands, and open PRs for validated fixes only. Patrol state lives under `<project>/.hive-state/patrol/`; findings never go through `1-inbox/`, and opened PRs now enter the normal `6-review` stage by default through synthetic `Patrol: ...` tasks.
 
 ## Usage
 
@@ -27,6 +27,7 @@ patrol:
   min_confidence_to_fix: medium
   max_prs_per_cycle: 3
   draft_prs: false   # default: open ready PRs (the babysitter skips drafts). Set true to open draft PRs.
+  review_prs: true    # default: enqueue each opened patrol PR into 6-review as "Patrol: ..."
   commands:
     test: bundle exec rake test
 ```
@@ -46,7 +47,8 @@ patrol:
 5. For each remaining finding (in order), create a dedicated `hive-patrol/...` worktree branch and run the fix agent. `max_prs_per_cycle` caps the number of PRs **opened** per scan, not the number of fix candidates: the loop keeps attempting candidates until that many PRs have actually opened, so a failed validation does not waste the budget on an otherwise-fixable later finding.
 6. Run configured validation commands in the fix worktree.
 7. Open a PR only when validation passed and the diff is not blocked by the secret scanner.
-8. Update `.hive-state/patrol/state.json` with `last_run_at` and `last_scanned_sha`.
+8. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up.
+9. Update `.hive-state/patrol/state.json` with `last_run_at` and `last_scanned_sha`.
 
 `--dry-run` stops after map + review + candidate selection. It updates scan state but does not create fix worktrees, push branches, or open PRs.
 
@@ -69,10 +71,13 @@ With `--json`, the command emits a single `hive-patrol.v1` envelope:
   "fixes_validated": 1,
   "prs_opened": 1,
   "pr_urls": ["https://github.com/org/repo/pull/123"],
+  "review_handoff_errors": [],
   "skipped_findings": [],
   "last_scanned_sha": "abc123"
 }
 ```
+
+If patrol opens a PR but cannot create its synthetic `6-review` task, the PR URL appears in `review_handoff_errors` and the finding fingerprint is recorded as `review_handoff_failed` so a later patrol cycle can retry the handoff instead of permanently skipping the finding as already active.
 
 Config errors emit `ok: false`, `error_kind: "config"`, and exit 78.
 

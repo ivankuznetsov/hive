@@ -37,6 +37,7 @@ require "hive/tui/views/idea_preview"
 require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
 require "hive/tui/views/token_stats"
+require "hive/tui/views/archive_pane"
 require "hive/tui/views/usage_footer"
 require "hive/update_check/state"
 
@@ -242,6 +243,7 @@ module Hive
         when :log_tail then Views::LogTail.render(@hive_model)
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :token_stats then token_stats_view
+        when :archive then archive_view
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
         when :idea_preview then compose_idea_preview_view
@@ -365,7 +367,7 @@ module Hive
         snap = @hive_model.snapshot
         return nil if snap.nil? || @hive_model.cursor.nil?
 
-        visible = snap.scope_to_project_index(@hive_model.scope).filter_by_slug(@hive_model.filter)
+        visible = snap.visible_projection(scope: @hive_model.scope, filter: @hive_model.filter)
         visible.row_at(@hive_model.cursor)
       end
 
@@ -1446,6 +1448,11 @@ module Hive
         state = @hive_model.token_stats_state || Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
         aggregate = Hive::UsageDb.aggregate(scope: token_stats_scope(state))
         Views::TokenStats.render(@hive_model.with(token_stats_state: state), aggregate: aggregate)
+      end
+
+      def archive_view
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        Views::ArchivePane.render(@hive_model, width: usable)
       end
 
       def token_stats_scope(state)
@@ -3222,11 +3229,19 @@ module Hive
           Hive::Tui::Styles::FLASH.render(line)
         else
           aggregate = usage_footer_aggregate
+          hidden_notice = archive_hidden_notice
           if usable_width && usable_width < 80
+            if hidden_notice
+              line = "#{hidden_notice} · #{Views::UsageFooter.text(aggregate)}"
+              line = Views::Format.truncate(line, usable_width)
+              return Hive::Tui::Styles::HINT.render(line)
+            end
+
             return Views::UsageFooter.render(aggregate: aggregate, width: usable_width)
           end
 
           line = "#{footer_hint} · #{Views::UsageFooter.text(aggregate)}"
+          line = "#{hidden_notice} · #{line}" if hidden_notice
           nudge = update_nudge
           # Prepend so truncation trims the hint tail, not the higher-priority
           # "you're behind" notice.
@@ -3265,6 +3280,13 @@ module Hive
 
       def usage_footer_line(usable_width = nil)
         Views::UsageFooter.render(aggregate: usage_footer_aggregate, width: usable_width)
+      end
+
+      def archive_hidden_notice
+        return nil unless @hive_model.mode == :grid
+
+        count = @hive_model.snapshot&.hidden_old_archived_count.to_i
+        count.positive? ? "+#{count} hidden — open Archive pane" : nil
       end
 
       def usage_footer_aggregate

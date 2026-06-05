@@ -325,6 +325,7 @@ module Hive
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
         "draft_prs" => false,
+        "review_prs" => true,
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
@@ -1583,6 +1584,13 @@ module Hive
         raise ConfigError,
               "patrol.draft_prs in #{describe_source(source_path)} must be a boolean " \
               "(true / false); got #{draft_prs.inspect} (#{draft_prs.class})"
+      end
+
+      review_prs = patrol["review_prs"]
+      unless review_prs.nil? || review_prs == true || review_prs == false
+        raise ConfigError,
+              "patrol.review_prs in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{review_prs.inspect} (#{review_prs.class})"
       end
 
       trigger = patrol["trigger"]

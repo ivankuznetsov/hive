@@ -22,7 +22,8 @@ module Hive
 
           - Update affected pages when code behavior, architecture, commands, or
             dependencies change.
-          - Append [[log]] after every wiki update.
+          - Add a new `wiki/log.d/<timestamp>-<slug>.md` fragment after every wiki update,
+            but do not edit the compiled `wiki/log.md` in feature PRs.
           - Record uncertainty in [[gaps]] instead of inventing facts.
         MARKDOWN
       end
@@ -31,7 +32,9 @@ module Hive
         <<~MARKDOWN
           # Wiki Changelog
 
-          Append-only log of meaningful wiki updates.
+          Append-only log of meaningful wiki updates. New work is added through
+          `wiki/log.d/*.md` fragments and compiled with `hive wiki compile-log`
+          after merge or when a local checkout needs refreshed aggregate output.
         MARKDOWN
       end
 

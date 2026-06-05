@@ -147,6 +147,7 @@ class InitTest < Minitest::Test
 
           assert File.exist?(File.join(dir, "wiki", "index.md"))
           assert File.exist?(File.join(dir, "wiki", "log.md"))
+          assert File.exist?(File.join(dir, "wiki", "log.d", ".gitkeep"))
           assert File.exist?(File.join(dir, "wiki", "gaps.md"))
           assert File.exist?(File.join(dir, "raw", "notes", ".gitkeep"))
           tracked = `git -C #{dir} ls-files .llm-wiki/config.json .llm-wiki/refresh-wiki.sh AGENTS.md CLAUDE.md wiki/index.md`
@@ -182,6 +183,8 @@ class InitTest < Minitest::Test
           assert_includes File.read(refresh_script), "LLM_WIKI_QMD_TIMEOUT"
           assert_includes File.read(refresh_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
           assert_includes File.read(refresh_script), "Do not run qmd update or qmd embed yourself"
+          assert_includes File.read(refresh_script), "wiki/log.d/<timestamp>-<slug>.md"
+          assert_includes File.read(refresh_script), "without editing compiled wiki/log.md"
           assert_includes File.read(post_commit_script), "LLM_WIKI_CODEX_TIMEOUT"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_TIMEOUT"
           assert_includes File.read(refresh_script), "git rev-parse --local-env-vars"
@@ -197,6 +200,8 @@ class InitTest < Minitest::Test
           end
           assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
           assert_includes File.read(post_commit_script), "Do not run qmd update or qmd embed yourself"
+          assert_includes File.read(post_commit_script), "wiki/log.d/<timestamp>-<slug>.md"
+          assert_includes File.read(post_commit_script), "without editing compiled wiki/log.md"
           refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
           refute_includes File.read(post_commit_script), "QMD_LLAMA_GPU"
           refute_includes File.read(refresh_script), "claude -p"

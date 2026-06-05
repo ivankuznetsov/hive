@@ -10,7 +10,7 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 74
+Page count: 75
 Updated: 2026-06-07
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint; `hive init` now separates normal PR reviewers from narrower patrol PR reviewers, `hive patrol` hands opened PRs into `6-review` by default, and `hive babysit` plus the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
@@ -44,6 +44,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/tui]] — `wiki/commands/tui.md`
 - [[commands/uninstall]] — `wiki/commands/uninstall.md`
 - [[commands/update]] — `wiki/commands/update.md`
+- [[commands/wiki]] — `wiki/commands/wiki.md`
 - [[decisions]] — `wiki/decisions.md`
 - [[dependencies]] — `wiki/dependencies.md`
 - [[e2e]] — `wiki/e2e.md`

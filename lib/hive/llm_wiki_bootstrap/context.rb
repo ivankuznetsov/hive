@@ -29,7 +29,7 @@ module Hive
 
           - Project wiki: `wiki/`
           - Index: `wiki/index.md`
-          - Change log: `wiki/log.md`
+          - Change log: `wiki/log.md` compiled from `wiki/log.d/*.md`
           - Known gaps: `wiki/gaps.md`
           - Raw notes: `raw/notes/`
 
@@ -44,7 +44,7 @@ module Hive
           When code behavior, architecture, commands, or dependencies change:
 
           1. Update affected wiki pages.
-          2. Append `wiki/log.md`.
+          2. Add a new `wiki/log.d/<timestamp>-<slug>.md` fragment; do not edit compiled `wiki/log.md` directly in feature PRs.
           3. Record uncertainty in `wiki/gaps.md`.
 
           Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and

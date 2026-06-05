@@ -6,7 +6,7 @@ PATH
       faraday (>= 2.14.2, < 3.0)
       faraday-multipart (~> 1.0)
       lipgloss (~> 0.2.2)
-      puma (~> 6.6)
+      puma (~> 7.2, >= 7.2.1)
       rack-protection (~> 4.1)
       sinatra (~> 4.1)
       sqlite3 (~> 2.0)
@@ -113,7 +113,7 @@ GEM
       ast (~> 2.4.1)
       racc
     prism (1.9.0)
-    puma (6.6.1)
+    puma (7.2.1)
       nio4r (~> 2.0)
     racc (1.8.1)
     rack (3.2.6)

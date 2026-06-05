@@ -59,7 +59,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
   spec.add_dependency "lipgloss", "~> 0.2.2"
-  spec.add_dependency "puma", "~> 6.6"
+  spec.add_dependency "puma", "~> 7.2", ">= 7.2.1"
   spec.add_dependency "rack-protection", "~> 4.1"
   spec.add_dependency "sinatra", "~> 4.1"
   spec.add_dependency "sqlite3", "~> 2.0"

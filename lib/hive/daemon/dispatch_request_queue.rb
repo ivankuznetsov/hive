@@ -3,6 +3,7 @@ require "fileutils"
 require "securerandom"
 require "time"
 require "hive/paths"
+require "hive/daemon/queue_directory"
 
 module Hive
   module Daemon
@@ -36,11 +37,11 @@ module Hive
       EXPIRY_SEC = 600
       CLAIM_EXPIRY_SEC = 14_400
 
+      # Resolve (and mkdir, mode 0700) the requests directory via the shared
+      # QueueDirectory helper so the owner-only invariant lives in one place
+      # (#253).
       def directory(state_home: Hive::Paths.state_home)
-        path = File.join(state_home, DIRNAME)
-        FileUtils.mkdir_p(path, mode: 0o700)
-        File.chmod(0o700, path) if File.directory?(path)
-        path
+        QueueDirectory.directory_for(dirname: DIRNAME, state_home: state_home)
       end
 
       def generate_request_id

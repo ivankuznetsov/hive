@@ -90,4 +90,66 @@ class HivePatrolFingerprintTest < Minitest::Test
       assert_equal "", Hive::Patrol::Fingerprint.snippet_at(dir, "missing.rb", 1)
     end
   end
+
+  # ── similarity dedup ───────────────────────────────────────────────────
+
+  def titled(title, category: "security")
+    Hive::Patrol::Finding.new(
+      id: "f1", feature_id: "f", category: category, severity: "high",
+      confidence: "high", title: title, description: "d", recommendation: "r",
+      evidence: [ { "file" => "bin/x", "line" => 1, "snippet" => "x" } ]
+    )
+  end
+
+  def recorded(title, category: "security", state: "merged")
+    { "state" => state, "category" => category,
+      "title_tokens" => Hive::Patrol::Fingerprint.title_tokens(titled(title, category: category)) }
+  end
+
+  def test_record_seen_stores_content_when_finding_given
+    fps = {}
+    Hive::Patrol::Fingerprint.record_seen(fps, "fp1", state: "open",
+                                          finding: titled("Dry-run gh allows implicit POST mutations"))
+    assert_equal "security", fps["fp1"]["category"]
+    assert_includes fps["fp1"]["title_tokens"], "implicit"
+  end
+
+  def test_similar_known_matches_reworded_finding_in_same_category
+    # An already-merged finding, re-worded on a later scan, must be skipped.
+    fps = { "old" => recorded("Dry-run gh API stub allows implicit POST mutations") }
+    new_finding = titled("Dry-run gh api allows implicit POST requests")
+
+    assert Hive::Patrol::Fingerprint.similar_known?(fps, {}, new_finding),
+           "a re-worded same-category finding must be recognised as already known"
+  end
+
+  def test_similar_known_also_checks_dismissed
+    dismissed = { "old" => recorded("Dry-run gh dry-run check misses implicit POST requests") }
+    new_finding = titled("Dry-run gh API stub allows implicit POST mutations")
+
+    assert Hive::Patrol::Fingerprint.similar_known?({}, dismissed, new_finding)
+  end
+
+  def test_similar_known_respects_category
+    fps = { "old" => recorded("allows implicit POST requests", category: "bug") }
+    new_finding = titled("allows implicit POST requests", category: "security")
+
+    refute Hive::Patrol::Fingerprint.similar_known?(fps, {}, new_finding),
+           "a different category is a different finding even with identical wording"
+  end
+
+  def test_similar_known_ignores_non_active_states_and_unrelated_titles
+    seen_only = { "x" => recorded("allows implicit POST requests", state: "seen") }
+    refute Hive::Patrol::Fingerprint.similar_known?(seen_only, {}, titled("allows implicit POST requests")),
+           "a merely-seen (never PR'd) finding does not gate"
+
+    unrelated = { "y" => recorded("Sandbox tree leaks the top-level .git directory") }
+    refute Hive::Patrol::Fingerprint.similar_known?(unrelated, {}, titled("allows implicit POST requests"))
+  end
+
+  def test_overlap_coefficient
+    assert_in_delta 1.0, Hive::Patrol::Fingerprint.overlap_coefficient(%w[a b], %w[a b c]), 0.001
+    assert_in_delta 0.5, Hive::Patrol::Fingerprint.overlap_coefficient(%w[a x], %w[a b]), 0.001
+    assert_equal 0.0, Hive::Patrol::Fingerprint.overlap_coefficient([], %w[a])
+  end
 end

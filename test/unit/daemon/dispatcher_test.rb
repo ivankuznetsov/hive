@@ -72,6 +72,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
                     verb_timeouts: verb_timeouts, kill_grace_sec: kill_grace_sec }
     end
 
+    # #252: the dispatcher now calls this unconditionally each tick (the
+    # `respond_to?` seam was removed); the real ChildSupervisor returns the
+    # list of timeout actions taken, the fake has no children to time out.
+    def enforce_timeouts(now:)
+      []
+    end
+
     def in_flight_count
       @spawned.size
     end
@@ -132,7 +139,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
                       with_patrol_scheduler: false, project_enabled: true,
                       dispatch_state: nil, status_result: nil,
-                      dispatch_request_state_home: nil)
+                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -172,7 +179,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       merge_watcher: merge_watcher,
       patrol_scheduler: patrol_scheduler,
       dry_run: dry_run,
-      dispatch_request_state_home: dispatch_request_state_home
+      dispatch_request_state_home: dispatch_request_state_home,
+      dispatch_result_state_home: dispatch_result_state_home
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -1471,7 +1479,8 @@ end
   def test_reap_writes_dispatch_result_notice_on_request_failure
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
-        rows: [], dispatch_request_state_home: state_home
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
       )
       write_request_file(state_home, slug: "s1", request_id: "RF1")
       exited = ChildExit.new(
@@ -1637,7 +1646,8 @@ end
   def test_reap_writes_notice_on_nil_exit_signal_kill
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
-        rows: [], dispatch_request_state_home: state_home
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
       )
       write_request_file(state_home, slug: "s1", request_id: "KILL1")
       exited = ChildExit.new(
@@ -1671,7 +1681,7 @@ end
   # #6: the daemon prunes stale dispatch-result notices each tick.
   def test_prune_dispatch_results_removes_stale
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
-      dispatcher, = make_dispatcher(rows: [], dispatch_request_state_home: state_home)
+      dispatcher, = make_dispatcher(rows: [], dispatch_result_state_home: state_home)
       Hive::Daemon::DispatchResultQueue.write!(
         chat_id: 1, project: "p1", slug: "old", request_id: "r", exit_code: 1,
         command: "hive review old", state_home: state_home, now: T0 - 7200
@@ -1782,6 +1792,32 @@ end
       dispatcher.send(:notify_dispatch_failure, entry, { chat_id: 42 }, now: T0)
     end
     assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("notify_dispatch_failure") })
+  end
+
+  # #251: failure notices go to the dedicated dispatch_result_state_home,
+  # not the (separately injectable) request home — so a test sandboxing
+  # only the request queue can't silently write results where the bot,
+  # reading the real result home, never sees them.
+  def test_notify_dispatch_failure_writes_to_dispatch_result_state_home
+    Dir.mktmpdir("hive-result-home") do |result_home|
+      Dir.mktmpdir("hive-request-home") do |request_home|
+        dispatcher, = make_dispatcher(
+          dispatch_request_state_home: request_home,
+          dispatch_result_state_home: result_home
+        )
+        entry = ChildExit.new(
+          pid: 1, exit_code: 4, project: "p1", slug: "s1", stage: nil,
+          command: "hive review s1", state_file_path: nil, started_at: T0,
+          finished_at: T0, json_envelope: nil, request_id: "R1"
+        )
+        dispatcher.send(:notify_dispatch_failure, entry, { chat_id: 42 }, now: T0)
+
+        assert_equal 1, Dir.glob(File.join(result_home, "dispatch_results", "*.json")).length,
+                     "the failure notice must land in the dispatch_result_state_home"
+        assert_empty Dir.glob(File.join(request_home, "dispatch_results", "*.json")),
+                     "no notice may leak into the dispatch_request_state_home"
+      end
+    end
   end
 
   # C3: startup recovery removes a claim whose owning process is gone,

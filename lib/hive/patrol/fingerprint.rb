@@ -1,9 +1,23 @@
 require "digest"
+require "set"
 
 module Hive
   module Patrol
     module Fingerprint
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
+
+      # The exact fingerprint is agent-volatile: the same underlying issue
+      # is re-filed each scan with a different feature attribution, title
+      # wording, and code snippet, so the SHA never matches a prior PR and
+      # patrol re-opens the same finding forever. The similarity gate is the
+      # real dedup: a new finding in the SAME category whose normalized
+      # title tokens overlap an already-PR'd/dismissed finding by at least
+      # this coefficient (intersection / smaller-set) is treated as the same
+      # issue and skipped. 0.6 catches the observed re-words (e.g. "allows
+      # implicit POST mutations" vs "allows implicit POST requests" vs
+      # "dry-run check misses implicit POST") without collapsing unrelated
+      # findings.
+      SIMILARITY_THRESHOLD = 0.6
 
       module_function
 
@@ -33,13 +47,62 @@ module Hive
         dismissed.key?(fingerprint)
       end
 
-      def record_seen(fingerprints, fingerprint, branch: nil, pr_url: nil, state: "seen", now: Time.now)
+      def record_seen(fingerprints, fingerprint, branch: nil, pr_url: nil, state: "seen",
+                      finding: nil, now: Time.now)
         entry = fingerprints[fingerprint] ||= { "first_seen" => now.utc.iso8601 }
         entry["last_seen"] = now.utc.iso8601
         entry["branch"] = branch if branch
         entry["pr_url"] = pr_url if pr_url
         entry["state"] = state
+        # Persist the finding's category + normalized title tokens so the
+        # similarity gate can recognise a re-worded re-file of this issue
+        # on a later scan even though its exact fingerprint will differ.
+        if finding
+          entry["category"] = finding.category.to_s
+          entry["title_tokens"] = title_tokens(finding)
+        end
         fingerprints
+      end
+
+      # Normalized word list of a finding's title, used as the similarity
+      # signal (titles are the most stable semantic handle the agent emits,
+      # even though the exact wording drifts run-to-run).
+      def title_tokens(finding)
+        normalize_token(finding.title).split
+      end
+
+      # True when `finding` is the same issue as one already PR'd
+      # (open/merged) or dismissed — judged by same category + title-token
+      # overlap coefficient >= SIMILARITY_THRESHOLD. Only entries that
+      # carry stored content (recorded since this feature shipped) can
+      # match; older content-less entries are skipped (their exact
+      # fingerprint still guards them via known_active?/dismissed?).
+      def similar_known?(fingerprints, dismissed, finding)
+        tokens = title_tokens(finding)
+        return false if tokens.empty?
+
+        category = finding.category.to_s
+        active = fingerprints.values.select { |e| %w[open merged resolved].include?(e["state"]) }
+        (active + dismissed.values).any? do |entry|
+          next false unless entry["category"].to_s == category
+
+          other = Array(entry["title_tokens"]).map(&:to_s)
+          next false if other.empty?
+
+          overlap_coefficient(tokens, other) >= SIMILARITY_THRESHOLD
+        end
+      end
+
+      # Szymkiewicz–Simpson overlap: |A ∩ B| / min(|A|, |B|). More robust
+      # than Jaccard for catching a re-worded title that adds/drops a few
+      # tokens around a shared core.
+      def overlap_coefficient(tokens_a, tokens_b)
+        set_a = tokens_a.to_set
+        set_b = tokens_b.to_set
+        smaller = [ set_a.size, set_b.size ].min
+        return 0.0 if smaller.zero?
+
+        (set_a & set_b).size.to_f / smaller
       end
 
       def normalized_path(path)

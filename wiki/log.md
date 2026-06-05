@@ -2942,3 +2942,10 @@ TTL config.
 - [[modules/daemon]]
 - [[commands/tui]]
 - [[index]]
+
+## [2026-06-05T10:09:45Z] wiki — audit daemon/tui latency refresh coverage
+
+**Action:** Audited commit `68d9245f` after it refreshed daemon/TUI latency wiki pages. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search` had no indexed hits for this exact latency work, so verification used the committed diff plus direct source reads. Checked commits `0f4d9373`, `c1a63370`, and `7375c51d` against `lib/hive/daemon/concurrency_controller.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/config.rb`, `lib/hive/tui/state_source.rb`, and focused tests. Confirmed existing daemon/TUI pages matched the code and added the missing live-smoke uncertainty to [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]

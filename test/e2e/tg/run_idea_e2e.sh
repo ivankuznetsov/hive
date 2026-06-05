@@ -16,6 +16,14 @@ set +a
 export HIVE_TEST_ALLOWLIST="$TG_DRIVER_ID"
 export TG_BOT_USERNAME="Testivanshive_bot"
 export TG_CAPTURE_PROJECT="${TG_CAPTURE_PROJECT:-shipped}"
+export TG_IDEA_MODE="${TG_IDEA_MODE:-text}"
+export TG_VOICE_EXPECT="${TG_VOICE_EXPECT:-voice idea}"
+if [ "$TG_IDEA_MODE" = "voice" ]; then
+  export TG_VOICE_FIXTURE="${TG_VOICE_FIXTURE:-$REPO/test/fixtures/voice/voice-idea.oga}"
+  if [ -z "${HIVE_WHISPER_API_KEY:-}" ]; then
+    echo "voice E2E requested but HIVE_WHISPER_API_KEY is unset; driver will skip voice mode"
+  fi
+fi
 
 # Resolve the scratch project's state repo. The `&.` guards an unregistered
 # project (find_project -> nil): without it, an empty STATE_REPO would make the

@@ -9,18 +9,23 @@ Expects a bot already polling the test token (run_idea_e2e.sh owns that).
 The shared send -> tap -> assert sequence lives in _drive.py.
 
 Env: TG_API_ID, TG_API_HASH, TG_BOT_USERNAME, TG_CAPTURE_PROJECT (default shipped).
+Set TG_IDEA_MODE=voice with TG_VOICE_FIXTURE and HIVE_WHISPER_API_KEY for the
+real voice-note transcription path.
 """
 import os
 import sys
 
 from telethon.sync import TelegramClient
 
-from _drive import drive
+from _drive import drive, drive_voice
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 BOT = os.environ["TG_BOT_USERNAME"]
 PROJECT = os.environ.get("TG_CAPTURE_PROJECT", "shipped")
+MODE = os.environ.get("TG_IDEA_MODE", "text")
+VOICE_FIXTURE = os.environ.get("TG_VOICE_FIXTURE")
+VOICE_EXPECT = os.environ.get("TG_VOICE_EXPECT", "voice idea")
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION = os.path.join(HERE, "hive_e2e")
 
@@ -29,6 +34,14 @@ def main():
     client = TelegramClient(SESSION, API_ID, API_HASH)
     client.connect()
     try:
+        if MODE == "voice":
+            if not os.environ.get("HIVE_WHISPER_API_KEY"):
+                print("SKIP voice mode requires HIVE_WHISPER_API_KEY")
+                return 0
+            if not VOICE_FIXTURE or not os.path.exists(VOICE_FIXTURE):
+                print("SKIP voice mode requires TG_VOICE_FIXTURE pointing at an audio file")
+                return 0
+            return drive_voice(client, BOT, PROJECT, VOICE_FIXTURE, VOICE_EXPECT)
         return drive(client, BOT, PROJECT)
     finally:
         client.disconnect()

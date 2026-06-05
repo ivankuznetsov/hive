@@ -1714,40 +1714,46 @@ end
   def test_recover_dispatch_claims_alive_lambda_paths
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, = make_dispatcher(rows: [], dispatch_request_state_home: state_home)
-      live = Hive::Lock.process_start_time(Process.pid)
+      # #260: pin the live start_time so the PID-reuse removal is asserted
+      # unconditionally. The real `process_start_time(Process.pid)` returns
+      # nil on /proc-less platforms (macOS CI, stripped containers), which
+      # made the lambda treat the mismatch as "unverifiable → kept" and the
+      # killme01 assertion was previously skipped behind `if live`.
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { "100" }) do
+        # Owner alive + start_time matches → kept.
+        write_request_file(state_home, slug: "s1", request_id: "keepme01")
+        Q.claim("keepme01", pid: Process.pid, process_start_time: "100", now: T0, state_home: state_home)
+        # Owner alive + start_time recorded nil → unverifiable → kept.
+        write_request_file(state_home, slug: "s2", request_id: "nilstart")
+        Q.claim("nilstart", pid: Process.pid, process_start_time: nil, now: T0, state_home: state_home)
+        # Owner alive + start_time mismatch → PID reused → removed.
+        write_request_file(state_home, slug: "s3", request_id: "killme01")
+        Q.claim("killme01", pid: Process.pid, process_start_time: "999",
+                now: T0, state_home: state_home)
 
-      # Owner alive + start_time matches → kept.
-      write_request_file(state_home, slug: "s1", request_id: "keepme01")
-      Q.claim("keepme01", pid: Process.pid, process_start_time: live, now: T0, state_home: state_home)
-      # Owner alive + start_time recorded nil → unverifiable → kept.
-      write_request_file(state_home, slug: "s2", request_id: "nilstart")
-      Q.claim("nilstart", pid: Process.pid, process_start_time: nil, now: T0, state_home: state_home)
-      # Owner alive + start_time mismatch → PID reused → removed.
-      write_request_file(state_home, slug: "s3", request_id: "killme01")
-      Q.claim("killme01", pid: Process.pid, process_start_time: "#{live}-different",
-              now: T0, state_home: state_home)
-
-      dispatcher.send(:recover_dispatch_claims, now: T0 + 5)
+        dispatcher.send(:recover_dispatch_claims, now: T0 + 5)
+      end
 
       remaining = Dir.glob(File.join(state_home, "dispatch_requests", "*#{Q::CLAIMED_SUFFIX}"))
                      .map { |p| File.read(p) }.join
       assert_includes remaining, "keepme01", "matching start_time claim is kept"
       assert_includes remaining, "nilstart", "nil-start-time claim is kept (unverifiable)"
-      if live
-        refute_includes remaining, "killme01", "mismatched start_time (PID reused) claim is removed"
-      end
+      refute_includes remaining, "killme01", "mismatched start_time (PID reused) claim is removed"
     end
   end
 
   def test_recover_dispatch_claims_swallows_errors
-    dispatcher, = make_dispatcher
+    dispatcher, _sup, _ctrl, logger = make_dispatcher
     with_replaced_singleton_method(
       Hive::Daemon::DispatchRequestQueue, :recover_claims,
       ->(**_kw) { raise "boom" }
     ) do
       dispatcher.send(:recover_dispatch_claims, now: T0)
     end
-    # Asserted by not raising; the rescue logs :fatal.
+    # Not raising isn't enough (#261): prove the rescue logged :fatal with
+    # the failing method name, like the other *_swallows_errors tests.
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("recover_dispatch_claims") },
+           "the swallowed error must surface as a :fatal log event")
   end
 
   def test_preclaim_dispatch_request_raises_on_claim_failure

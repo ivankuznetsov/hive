@@ -90,6 +90,26 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
            "legacy-stage warning must dedupe while the project remains legacy-dirty")
   end
 
+  # AC-05 (#261): the bot's queue dispatch path deliberately does NOT reset
+  # the alert at enqueue time — the daemon clears the marker later. The
+  # supervisor test pins "reset_task not called"; this pins the property
+  # that makes that safe. While a needs_input marker persists across status
+  # ticks, the alert fires EXACTLY ONCE — the persistent fingerprint dedupes
+  # the repeat, so the duplicate-alert race an early reset would open stays
+  # closed.
+  def test_needs_input_alert_fires_once_while_marker_persists
+    d = dispatcher
+    waiting = row(action: "needs_input", marker: "waiting")
+
+    d.process_rows([ waiting ]) # tick 1: marker present → alert
+    d.process_rows([ waiting ]) # tick 2: marker still present → dedupe
+
+    assert_equal 1, telegram.messages.size,
+                 "the alert must fire exactly once while the marker persists (AC-05)"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_dedupe },
+           "the repeat tick must dedupe via the persistent fingerprint, not re-alert")
+  end
+
   def test_fresh_install_still_alerts_legacy_stage_dirs
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")

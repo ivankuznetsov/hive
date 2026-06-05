@@ -21,6 +21,16 @@ Append-only log of all wiki operations.
 - **#251** added `dispatch_result_state_home:` injection + accessor to `Dispatcher`, used by `notify_dispatch_failure` AND `prune_dispatch_results` (both operate on the result queue). Previously they used `dispatch_request_state_home`, so a test sandboxing only the request queue silently wrote/pruned result notices where the bot never looked. Updated the reap/prune tests to inject the result home; added a focused test asserting notices land in the result home, not the request home.
 - **#252** dropped both `@supervisor.respond_to?(:enforce_timeouts)` / `respond_to?(:update_timeouts)` seams; added `enforce_timeouts(now:)` to every `FakeSupervisor` (six doubles across unit + integration tests) so the dispatcher can call them unconditionally.
 - **#253** extracted `Hive::Daemon::QueueDirectory.directory_for(dirname:, state_home:)` and reused it from both `DispatchRequestQueue#directory` and `DispatchResultQueue#directory`, so the owner-only (0700) invariant lives in one place. Documented in [[modules/daemon]].
+## [2026-06-03T19:00:00Z] daemon - PR #244 review follow-ups, batch B (schema & test parity)
+
+**Action:** Implemented the schema/test-parity cluster of the deferred PR #244 `/ce-code-review` issues:
+
+- **#258** `schemas/hive-dispatch-result.v1.json` `chat_id` now machine-checks **non-zero** (`not: {const: 0}`) instead of the issue's literal `minimum: 1` — Telegram group/supergroup/channel chat ids are negative, so `minimum: 1` would wrongly reject a valid group relay target; 0 is the only never-valid id. Documented in [[modules/daemon]].
+- **#256** added `hive-dispatch-result` existence + required-key-drift + producer round-trip tests (validating actual `DispatchResultQueue.write!` output with nil `update_id` and a negative group `chat_id`), and a `hive-daemon-queue` producer round-trip (list/show/prune envelopes via `queue_envelope`/`queue_request_hash`) in `schema_files_test.rb`.
+- **#257** added the missing `WRONG_SUBCOMMAND_FLAG` case to the enroll error-payload round-trip, plus a guard asserting every `EnrollErrorKind::ALL` member is exercised so a future kind can't slip past again.
+- **#260** made `test_recover_dispatch_claims_alive_lambda_paths` deterministic by pinning `Hive::Lock.process_start_time`, so the PID-reuse removal asserts unconditionally instead of being skipped behind `if live` on /proc-less platforms.
+- **#261** tightened weak assertions: `test_recover_dispatch_claims_swallows_errors` now asserts the `:fatal` log event (was zero-assert); the aged-claim recovery test pins `reason == "claim_expired"` via the handler; added an AC-05 two-tick test proving a `needs_input` alert fires exactly once while its marker persists (the property that makes the queue path's no-reset safe).
+- **#247** added a `schema_files_test` assertion that a `.json.claimed` file still validates against `hive-dispatch-request.v1` (no stray `claim` key) — completing the contract pin deferred from batch A.
 
 100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
 

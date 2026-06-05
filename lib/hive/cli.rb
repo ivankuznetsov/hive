@@ -368,6 +368,9 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def archive(target = nil)
       if target.nil?
+        if options[:from]
+          warn "hive archive: --from is ignored when listing; it only disambiguates same-slug tasks for `hive archive TARGET`"
+        end
         require "hive/commands/status"
         return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end

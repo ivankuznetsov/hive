@@ -580,6 +580,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "no tasks"
   end
 
+  def test_height_clips_task_rows_but_keeps_cursor_visible
+    tasks = 15.times.map { |idx| make_task(slug: "task-#{idx}", id: idx) }
+    snap = make_snapshot([ { "name" => "hive", "tasks" => tasks } ])
+
+    out = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, cursor: [ 0, 14 ]), width: 100, height: 8
+    )
+
+    assert_equal 8, out.lines.count
+    assert_includes out, "task-14", "task viewport must follow the selected cursor"
+    refute_includes out, "task-0", "offscreen tasks must be clipped instead of overflowing the pane"
+  end
+
   # ---- compute_layout adaptive column dropping ----
   # The full 6-column layout needs ~53 inner cells (icon=2, id=4,
   # stage=12, status=18, age=4, separators=5, name_min=8). Below that, columns

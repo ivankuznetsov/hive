@@ -3159,20 +3159,23 @@ module Hive
       # isn't lost.
       def compose_two_pane_view(footer: nil)
         cols = @hive_model.cols.to_i
+        rows = @hive_model.rows.to_i
         # Reserve a 1-cell right margin across every section so no row
         # ever lands a glyph in the terminal's last column. Header and
         # footer strips are width-aware — the fixed hint footer was
         # 75 chars regardless of terminal width and overflowed at
         # cols<76 before this clamp.
         usable = [ cols - 1, 1 ].max
-        sections = [ header_strip(usable) ]
+        footer ||= default_footer(usable)
+        sections = []
         sections << stalled_banner(usable) if stalled?
+        pane_height = pane_height_for(rows: rows, fixed_sections: sections, footer: footer)
         if cols < TWO_PANE_MIN_COLS
-          sections << Views::TasksPane.render(@hive_model, width: usable)
+          sections << Views::TasksPane.render(@hive_model, width: usable, height: pane_height)
         else
-          sections << join_panes(cols)
+          sections << join_panes(cols, height: pane_height)
         end
-        sections << (footer || default_footer(usable))
+        sections << footer
         sections.join("\n")
       end
 
@@ -3229,19 +3232,11 @@ module Hive
           Hive::Tui::Styles::FLASH.render(line)
         else
           aggregate = usage_footer_aggregate
-          hidden_notice = archive_hidden_notice
           if usable_width && usable_width < 80
-            if hidden_notice
-              line = "#{hidden_notice} · #{Views::UsageFooter.text(aggregate)}"
-              line = Views::Format.truncate(line, usable_width)
-              return Hive::Tui::Styles::HINT.render(line)
-            end
-
             return Views::UsageFooter.render(aggregate: aggregate, width: usable_width)
           end
 
           line = "#{footer_hint} · #{Views::UsageFooter.text(aggregate)}"
-          line = "#{hidden_notice} · #{line}" if hidden_notice
           nudge = update_nudge
           # Prepend so truncation trims the hint tail, not the higher-priority
           # "you're behind" notice.
@@ -3280,13 +3275,6 @@ module Hive
 
       def usage_footer_line(usable_width = nil)
         Views::UsageFooter.render(aggregate: usage_footer_aggregate, width: usable_width)
-      end
-
-      def archive_hidden_notice
-        return nil unless @hive_model.mode == :grid
-
-        count = @hive_model.snapshot&.hidden_old_archived_count.to_i
-        count.positive? ? "+#{count} hidden — open Archive pane" : nil
       end
 
       def usage_footer_aggregate
@@ -3330,14 +3318,24 @@ module Hive
       # to [18, 28] cells with a soft preference for cols * 0.25 — wide
       # enough for typical project names ("myapp", "appcrawl"),
       # narrow enough not to crowd the tasks table on standard terminals.
-      def join_panes(cols)
+      def join_panes(cols, height: nil)
         left_width = pane_widths(cols).first
         right_width = pane_widths(cols).last
         Lipgloss.join_horizontal(
           Lipgloss::TOP,
-          Views::ProjectsPane.render(@hive_model, width: left_width),
-          Views::TasksPane.render(@hive_model, width: right_width)
+          Views::ProjectsPane.render(@hive_model, width: left_width, height: height),
+          Views::TasksPane.render(@hive_model, width: right_width, height: height)
         )
+      end
+
+      def pane_height_for(rows:, fixed_sections:, footer:)
+        fixed_lines = fixed_sections.sum { |section| rendered_line_count(section) }
+        footer_lines = rendered_line_count(footer)
+        [ rows - fixed_lines - footer_lines, 1 ].max
+      end
+
+      def rendered_line_count(section)
+        section.to_s.lines.count
       end
 
       # Visible for tests so the width formula stays inspectable without

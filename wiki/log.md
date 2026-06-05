@@ -3224,6 +3224,13 @@ TTL config.
 **Refreshed pages:**
 - [[state-model]]
 
+## [2026-06-05T20:05:00Z] tui — vertical resize viewport and reduced dashboard chrome
+
+**Action:** Made the grid composer height-aware: it subtracts footer/stalled-banner rows from `model.rows`, passes the remaining budget into `ProjectsPane` and `TasksPane`, and each pane clips/pads with a cursor-following viewport. Removed the persistent grid metadata strip and hidden-archive footer prefix so the first frame prioritizes panes and the footer stays visible under vertical terminal resize. Added focused pane viewport tests plus a PTY Charm smoke that performs a real vertical `winsize` + `SIGWINCH` resize and verifies the footer remains visible.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
 ## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
 
 **Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.

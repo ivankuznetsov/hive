@@ -113,6 +113,29 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_name_generator_spawn_failure_is_swallowed
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        previous = Hive::Commands::New.instance_variable_get(:@name_generator_spawn)
+        Hive::Commands::New.name_generator_spawn = lambda do |*_argv, **_opts|
+          raise Errno::ENOENT, "hive binary missing"
+        end
+
+        # A failure to spawn the background namer must not blow up `new`:
+        # the task folder is still created and committed.
+        capture_io { Hive::Commands::New.new(project, "spawn boom").call }
+
+        glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "spawn-boom-*")]
+        assert_equal 1, glob.size, "task must be created even when the name generator fails to spawn"
+        assert File.exist?(File.join(glob.first, "idea.md")), "idea.md must be written despite spawn failure"
+      ensure
+        Hive::Commands::New.name_generator_spawn = previous
+      end
+    end
+  end
+
   def test_unicode_text_falls_back_to_task_slug
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -26,6 +26,18 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_read_coerces_numeric_string_id_and_drops_unparseable_id
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "meta.yml"), "id: '42'\nslug: from-string-id\n")
+      # A YAML-quoted numeric string id is coerced to an Integer via Integer().
+      assert_equal({ id: 42, slug: "from-string-id", display_name: nil }, Hive::TaskMeta.read(dir))
+
+      File.write(File.join(dir, "meta.yml"), "id: not-a-number\nslug: bad-id\n")
+      # An unparseable, non-empty id falls back to nil (ArgumentError rescue).
+      assert_equal({ id: nil, slug: "bad-id", display_name: nil }, Hive::TaskMeta.read(dir))
+    end
+  end
+
   def test_update_display_name_preserves_id_and_slug
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 7, slug: "keep-slug", display_name: nil)

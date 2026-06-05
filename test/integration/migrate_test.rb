@@ -252,6 +252,29 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  # When legacy config keys are rewritten AND task ids are backfilled in the
+  # same run (with no stage folders to move), the no-move message reports both.
+  def test_migrate_no_move_message_reports_config_rewrite_and_backfill
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        cfg = YAML.safe_load(File.read(cfg_path))
+        cfg["budget_usd"] ||= {}
+        cfg["budget_usd"].delete("finalize")
+        cfg["budget_usd"]["pr"] = 77
+        File.write(cfg_path, cfg.to_yaml)
+        stages = File.join(dir, ".hive-state", "stages")
+        write_task_folder(stages, "2-brainstorm", "needs-id-260603-aaaa")
+
+        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "rewrote legacy config keys and backfilled 1 task id",
+                         "combined config-rewrite + backfill no-move message must report both"
+      end
+    end
+  end
+
   def test_migrate_backfills_task_meta_ids_in_created_at_order
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

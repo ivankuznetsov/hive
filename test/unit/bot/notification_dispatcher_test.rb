@@ -137,6 +137,46 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal :notification_sent, logger.events.last.first
   end
 
+  # A 3-plan `waiting` marker is a plan approval pause the daemon's
+  # PlanApproval auto-approves. With the daemon enabled, the bot must NOT
+  # race it with an unactionable "questions waiting" push (the operator
+  # can't approve a plan from the `/answer` flow) — suppress + log it.
+  def test_plan_pause_suppressed_when_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+
+    d.process_rows([ row(stage: "3-plan", marker: "waiting", action: "needs_input") ])
+
+    assert_empty telegram.messages,
+                 "a daemon-auto-approved 3-plan pause must not page the operator"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_daemon_plan_pause },
+           "the suppressed plan pause must be logged for an audit trail")
+  end
+
+  # With the daemon OFF, the plan pause does need the operator — but it is
+  # a plan draft to review, NOT a brainstorm Q&A round, so it must be
+  # labelled as such (the previous code mislabelled every `waiting` marker
+  # as "Brainstorm questions").
+  def test_plan_pause_notifies_with_plan_label_when_daemon_disabled
+    dispatcher.process_rows([ row(stage: "3-plan", marker: "waiting", action: "needs_input") ])
+
+    assert_equal 1, telegram.messages.size
+    text = telegram.messages.first[:text]
+    assert_match(/Plan draft is ready/, text)
+    refute_match(/Brainstorm questions/, text, "a 3-plan pause must not be labelled a brainstorm question")
+  end
+
+  # The plan-pause gate is scoped to 3-plan only: a genuine 2-brainstorm
+  # question still pages the operator even with the daemon enabled (the
+  # daemon does not answer brainstorm questions).
+  def test_brainstorm_question_still_notifies_when_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+
+    d.process_rows([ row(stage: "2-brainstorm", marker: "waiting", action: "needs_input") ])
+
+    assert_equal 1, telegram.messages.size
+    assert_match(/Brainstorm questions/, telegram.messages.first[:text])
+  end
+
   # The operator is actively answering this slug → suppress the proactive
   # "questions waiting" push (it would re-fire mid-answer when the row
   # flaps out of and back into WAITING, e.g. a daemon resume).

@@ -1,3 +1,4 @@
+require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
 
 module Hive
@@ -196,7 +197,7 @@ module Hive
           @result_class.new(
             action: :reply,
             text: "Pick a project for the idea.",
-            reply_markup: project_keyboard(projects, token)
+            reply_markup: Hive::Bot::IdeaKeyboards.project_keyboard(projects, token, last_project: @last_project.call)
           )
         end
 
@@ -221,16 +222,6 @@ module Hive
             [ { text: "Done", callback_data: "idea_done:#{token}" },
               { text: "Skip", callback_data: "idea_skip:#{token}" } ]
           ]
-        end
-
-        def project_keyboard(projects, token)
-          sorted = projects.sort_by { |project| project["name"] == @last_project.call ? 0 : 1 }
-          rows = sorted.map do |project|
-            label = project["name"] == @last_project.call ? "★ #{project['name']}" : project["name"]
-            [ { text: label, callback_data: "idea_project:#{project['name']}:#{token}" } ]
-          end
-          rows << [ { text: "+ new project", callback_data: "idea_project_new:#{token}" } ]
-          rows
         end
 
         def findings_toggle(data, verb)

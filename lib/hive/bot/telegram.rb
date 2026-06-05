@@ -30,6 +30,10 @@ module Hive
           !callback_data.nil?
         end
 
+        # Intentionally excludes voice: a voice note carries no operator
+        # caption to treat as idea text, so it must NOT flip effective_text to
+        # `caption`. Voice is routed separately via voice?. Do not "fix" this
+        # to include voice — it would break the voice-note idea flow.
         def media?
           !photo.nil? || !document.nil?
         end

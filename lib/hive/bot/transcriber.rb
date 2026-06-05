@@ -2,23 +2,48 @@ require "json"
 require "stringio"
 require "faraday"
 require "faraday/multipart"
+require "hive/config"
 
 module Hive
   module Bot
     class Transcriber
-      DEFAULT_CONFIG = {
-        "endpoint" => "https://api.openai.com/v1/audio/transcriptions",
-        "model" => "whisper-1",
-        "api_key_env" => "HIVE_WHISPER_API_KEY",
-        "max_retries" => 3,
-        "retry_backoff_sec" => 2,
-        "timeout_sec" => 120,
-        "no_speech_threshold" => 0.6,
-        "supported_languages" => %w[en ru]
+      # Single source of truth for transcription defaults: the global bot
+      # config block. Deriving from Hive::Config::DEFAULTS keeps this fallback
+      # from drifting away from config.rb key-for-key. In production the
+      # supervisor injects the full merged config, so this only fills gaps for
+      # partial configs and tests. The extra "enabled" key it carries is
+      # ignored here (the supervisor owns the enabled gate).
+      DEFAULT_CONFIG = Hive::Config::DEFAULTS.fetch("bot").fetch("transcription").dup.freeze
+
+      STATUSES = %i[ok no_speech unsupported_language failed].freeze
+
+      # Whisper's verbose_json reports `language` as a full English name
+      # ("english", "russian"), not an ISO code, while operators configure
+      # supported_languages as ISO codes ("en", "ru"). Normalize both sides
+      # through this map so the gate accepts either form. Unmapped tokens
+      # compare lowercased and as-is, so a config written with full names
+      # (or an exotic language) still works.
+      LANGUAGE_NAME_TO_ISO = {
+        "english" => "en", "russian" => "ru", "spanish" => "es", "french" => "fr",
+        "german" => "de", "italian" => "it", "portuguese" => "pt", "dutch" => "nl",
+        "polish" => "pl", "ukrainian" => "uk", "turkish" => "tr", "arabic" => "ar",
+        "chinese" => "zh", "japanese" => "ja", "korean" => "ko", "hindi" => "hi"
       }.freeze
+
+      # Raised when a 5xx response should be retried through the transient
+      # path. Declared up top so its raise (in #call) and rescue read in
+      # source order.
+      class TransientHttpError < StandardError; end
 
       Result = Data.define(:status, :text, :language, :error_class, :message) do
         def initialize(status:, text: nil, language: nil, error_class: nil, message: nil)
+          unless STATUSES.include?(status)
+            raise ArgumentError, "unknown transcription status #{status.inspect}"
+          end
+          if status == :ok && text.to_s.strip.empty?
+            raise ArgumentError, ":ok transcription requires non-empty text"
+          end
+
           super
         end
       end
@@ -43,18 +68,26 @@ module Hive
           attempts += 1
           response = post(bytes, filename: filename, content_type: content_type)
           return parse_response(response) if success?(response)
+          # 4xx (bad key, rate-limit, too-large) is not retried and must stay
+          # distinct from a transient 5xx. The default client no longer raises
+          # on status (no :raise_error middleware), so this branch runs in
+          # production exactly as it does under the injected test client.
           return failed("HTTPError", "transcription returned HTTP #{status(response)}") unless transient_status?(response)
 
           raise TransientHttpError, "transcription returned HTTP #{status(response)}"
         rescue *TRANSIENT_ERRORS, TransientHttpError => e
-          retry if retry_after?(attempts)
+          if retry?(attempts)
+            sleep_before_retry
+            retry
+          end
 
-          log_failure(e)
+          log_failure(e, attempts: attempts)
           Result.new(status: :failed, error_class: e.class.name, message: e.message)
-        rescue JSON::ParserError => e
-          log_failure(e)
-          Result.new(status: :failed, error_class: e.class.name, message: e.message)
-        rescue StandardError => e
+        rescue Faraday::Error, JSON::ParserError => e
+          # Expected transport/parse failures only. A programmer error
+          # (NoMethodError, ArgumentError) is intentionally NOT rescued here so
+          # genuine defects surface as a crash instead of a user-facing
+          # "Couldn't transcribe".
           log_failure(e)
           Result.new(status: :failed, error_class: e.class.name, message: e.message)
         end
@@ -62,12 +95,12 @@ module Hive
 
       private
 
-      class TransientHttpError < StandardError; end
-
       def post(bytes, filename:, content_type:)
         client.post(endpoint) do |req|
           req.headers["Authorization"] = "Bearer #{api_key}"
-          req.headers["Content-Type"] = "multipart/form-data"
+          # No manual Content-Type header: the :multipart middleware sets it
+          # with the boundary the server needs. A hand-set value here would be
+          # overwritten anyway.
           req.options.timeout = timeout_sec if req.respond_to?(:options) && req.options.respond_to?(:timeout=)
           req.body = {
             file: Faraday::Multipart::FilePart.new(StringIO.new(bytes.to_s.b), content_type, filename),
@@ -80,16 +113,18 @@ module Hive
       def client
         @http_client ||= Faraday.new do |faraday|
           faraday.request :multipart
-          faraday.response :raise_error
+          # Intentionally NO `response :raise_error`: #call inspects the status
+          # directly so the 4xx-vs-5xx handling tested with the fake client is
+          # the same code that runs in production.
         end
       end
 
       def parse_response(response)
         data = JSON.parse(body(response).to_s)
         text = data["text"].to_s.strip
-        return Result.new(status: :no_speech, text: text, language: data["language"]) if no_speech?(data, text)
-
         language = data["language"].to_s.strip
+        return Result.new(status: :no_speech, text: text, language: language) if no_speech?(data, text)
+
         if unsupported_language?(language)
           return Result.new(status: :unsupported_language, text: text, language: language)
         end
@@ -100,28 +135,52 @@ module Hive
       def no_speech?(data, text)
         return true if text.empty?
 
-        probs = Array(data["segments"]).filter_map do |segment|
-          next unless segment.is_a?(Hash) && segment.key?("no_speech_prob")
-
-          Float(segment["no_speech_prob"])
-        rescue ArgumentError, TypeError
-          nil
-        end
+        # Unweighted mean of per-segment no_speech_prob: every segment counts
+        # equally regardless of its duration, so a short silent segment can
+        # weigh as much as a long spoken one. A clip with a few very-high-prob
+        # segments but a low mean won't trip the threshold — that's the
+        # intended, threshold-tunable (no_speech_threshold) heuristic; revisit
+        # with duration weighting only if misclassification shows up.
+        probs = Array(data["segments"]).filter_map { |segment| segment_no_speech_prob(segment) }
         return false if probs.empty?
 
         (probs.sum / probs.length) >= no_speech_threshold
       end
 
-      def unsupported_language?(language)
-        supported = Array(@config["supported_languages"]).map(&:to_s).reject(&:empty?)
-        !supported.empty? && !supported.include?(language)
+      def segment_no_speech_prob(segment)
+        return nil unless segment.is_a?(Hash) && segment.key?("no_speech_prob")
+
+        Float(segment["no_speech_prob"])
+      rescue ArgumentError, TypeError
+        # A malformed prob is dropped from the mean rather than crashing the
+        # whole transcript. Log it so an all-malformed clip (which then reads
+        # as speech via the empty-probs return) is debuggable.
+        @logger&.event(:send_failure, source: "transcribe_voice",
+                                      error_class: "MalformedSegment",
+                                      message: "non-numeric no_speech_prob: #{segment["no_speech_prob"].inspect}")
+        nil
       end
 
-      def retry_after?(attempts)
-        return false if attempts > max_retries
+      def unsupported_language?(language)
+        supported = Array(@config["supported_languages"]).filter_map { |entry| normalize_language(entry) }
+        return false if supported.empty?
 
+        !supported.include?(normalize_language(language))
+      end
+
+      def normalize_language(language)
+        token = language.to_s.strip.downcase
+        return nil if token.empty?
+
+        LANGUAGE_NAME_TO_ISO.fetch(token, token)
+      end
+
+      def retry?(attempts)
+        attempts <= max_retries
+      end
+
+      def sleep_before_retry
         @sleep_proc.call(retry_backoff_sec) if retry_backoff_sec.positive?
-        true
       end
 
       def success?(response)
@@ -155,10 +214,13 @@ module Hive
         Result.new(status: :failed, error_class: error_class, message: message)
       end
 
-      def log_failure(error)
-        @logger&.event(:send_failure, source: "transcribe_voice",
-                                      error_class: error.class.name,
-                                      message: error.message)
+      def log_failure(error, attempts: nil)
+        attrs = { source: "transcribe_voice", error_class: error.class.name, message: error.message }
+        # On retry exhaustion record how many attempts were burned, so a
+        # one-shot failure is distinguishable from one that spent
+        # max_retries × backoff.
+        attrs[:attempts] = attempts if attempts
+        @logger&.event(:send_failure, **attrs)
       end
 
       def endpoint = @config.fetch("endpoint")

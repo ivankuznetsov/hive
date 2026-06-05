@@ -8,6 +8,14 @@ module Hive
     class IdeaDraftStore
       DEFAULT_TTL_SEC = 900
 
+      # The Draft is a mutable Struct handed live to callers, so the
+      # phase/origin contract is enforced at the transition methods rather
+      # than by the type. PHASES enumerates every legal phase; ORIGINS the
+      # legal non-nil origins (nil = a plain typed/media draft). A typo'd
+      # symbol raises at the transition rather than silently mis-routing.
+      PHASES = %i[awaiting_text awaiting_project awaiting_transcript_confirm collecting_files].freeze
+      ORIGINS = %i[voice].freeze
+
       Draft = Struct.new(:chat_id, :phase, :text, :project, :token, :attachments,
                          :counter, :staging_dir, :staging_tmp_root,
                          :origin, :created_at, :updated_at, keyword_init: true)
@@ -19,6 +27,8 @@ module Hive
       end
 
       def start(chat_id:, phase:, text: nil, token: nil, origin: nil)
+        validate_phase!(phase)
+        validate_origin!(origin)
         clear(chat_id: chat_id)
         now = @now.call
         draft = Draft.new(
@@ -51,25 +61,25 @@ module Hive
       def set_text(chat_id:, text:)
         update(chat_id: chat_id) do |draft|
           draft.text = text
-          draft.phase = :awaiting_project
+          assign_phase!(draft, :awaiting_project)
         end
       end
 
       def set_transcript(chat_id:, text:)
         update(chat_id: chat_id) do |draft|
           draft.text = text
-          draft.phase = :awaiting_transcript_confirm
+          assign_phase!(draft, :awaiting_transcript_confirm)
         end
       end
 
       def confirm_transcript(chat_id:)
-        update(chat_id: chat_id) { |draft| draft.phase = :awaiting_project }
+        update(chat_id: chat_id) { |draft| assign_phase!(draft, :awaiting_project) }
       end
 
       def await_text(chat_id:)
         update(chat_id: chat_id) do |draft|
           draft.text = nil
-          draft.phase = :awaiting_text
+          assign_phase!(draft, :awaiting_text)
         end
       end
 
@@ -78,7 +88,7 @@ module Hive
       end
 
       def enter_collecting(chat_id:)
-        update(chat_id: chat_id) { |draft| draft.phase = :collecting_files }
+        update(chat_id: chat_id) { |draft| assign_phase!(draft, :collecting_files) }
       end
 
       def ensure_staging_dir(chat_id:)
@@ -124,6 +134,23 @@ module Hive
       end
 
       private
+
+      def assign_phase!(draft, phase)
+        validate_phase!(phase)
+        draft.phase = phase
+      end
+
+      def validate_phase!(phase)
+        return if PHASES.include?(phase)
+
+        raise ArgumentError, "unknown idea draft phase #{phase.inspect} (valid: #{PHASES.inspect})"
+      end
+
+      def validate_origin!(origin)
+        return if origin.nil? || ORIGINS.include?(origin)
+
+        raise ArgumentError, "unknown idea draft origin #{origin.inspect} (valid: nil, #{ORIGINS.inspect})"
+      end
 
       def update(chat_id:)
         draft = get(chat_id: chat_id)

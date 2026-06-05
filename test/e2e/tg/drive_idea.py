@@ -36,11 +36,21 @@ def main():
     try:
         if MODE == "voice":
             if not os.environ.get("HIVE_WHISPER_API_KEY"):
+                # Skip ONLY when the Whisper secret is absent — same convention
+                # as the other secret-gated E2Es (HIVE_TEST_BOT_TOKEN). A
+                # secret-less CI run legitimately cannot exercise the real
+                # transcription path.
                 print("SKIP voice mode requires HIVE_WHISPER_API_KEY")
                 return 0
             if not VOICE_FIXTURE or not os.path.exists(VOICE_FIXTURE):
-                print("SKIP voice mode requires TG_VOICE_FIXTURE pointing at an audio file")
-                return 0
+                # The secret IS set, so the voice path MUST run. A missing
+                # fixture is a hard FAILURE, not a skip: U8 requires a
+                # checked-in speech sample, and silently returning 0 here would
+                # let the unimplemented path masquerade as passing.
+                print(f"FAIL voice fixture not found at {VOICE_FIXTURE!r}; "
+                      "U8 requires a checked-in speech sample saying "
+                      f"{VOICE_EXPECT!r} (default test/fixtures/voice/voice-idea.oga)")
+                return 1
             return drive_voice(client, BOT, PROJECT, VOICE_FIXTURE, VOICE_EXPECT)
         return drive(client, BOT, PROJECT)
     finally:

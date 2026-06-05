@@ -41,7 +41,7 @@ hive bot install [--force] [--json]
 |--------------|----------|
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
-| `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note, shows a transcript confirmation keyboard, then asks for the project. |
+| `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
@@ -201,6 +201,18 @@ audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.
 `supported_languages: []` disables the language filter. The same
 `idea_attachment_max_bytes` cap gates the Telegram download before
 transcription.
+
+**Why OpenAI, not OpenRouter (plan Q1 / Risk 1):** the default
+`endpoint`/`api_key_env` deliberately point at OpenAI's
+`/v1/audio/transcriptions` (Whisper), not the project-standard OpenRouter.
+OpenRouter is a chat/completions gateway and exposes **no
+audio-transcription endpoint**, so the brainstorm's "Whisper" decision (A2)
+requires an OpenAI-compatible audio API. The endpoint is config-overridable
+to any OpenAI-compatible Whisper deployment (e.g. a self-hosted
+`whisper.cpp` server), but it is not routed through OpenRouter. The
+language gate normalizes Whisper's full-name `language` output ("english")
+against ISO-code `supported_languages` ("en"), so either form works in
+config.
 
 `hive bot start` also loads `~/.config/hive/.env` (next to `config.yml`)
 into `ENV` at startup so operators don't have to wire the token into a

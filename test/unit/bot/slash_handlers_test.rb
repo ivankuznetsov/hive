@@ -441,7 +441,9 @@ class HiveBotSlashHandlersTest < Minitest::Test
   end
 
   def test_media_reply_copy_matches_draft_phase
-    %i[awaiting_project collecting_files other].each do |phase|
+    # awaiting_transcript_confirm is a valid phase that media_after_stage_reply
+    # does not special-case, so it exercises the generic "Attached." fallback.
+    %i[awaiting_project collecting_files awaiting_transcript_confirm].each do |phase|
       store = Hive::Bot::IdeaDraftStore.new
       store.start(chat_id: 9, phase: phase, text: "fix", token: "tok")
       handlers = idea_handlers(
@@ -456,7 +458,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       expected = {
         awaiting_project: "Pick a project for the idea.",
         collecting_files: "Attached. Send more files, or press Done.",
-        other: "Attached."
+        awaiting_transcript_confirm: "Attached."
       }.fetch(phase)
       assert_equal expected, result.text
     end

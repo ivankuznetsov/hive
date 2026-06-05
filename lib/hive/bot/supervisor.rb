@@ -9,6 +9,7 @@ require "hive/commands/new"
 require "hive/bot/logger"
 require "hive/bot/telegram"
 require "hive/bot/transcriber"
+require "hive/bot/idea_keyboards"
 require "hive/bot/status_watcher"
 require "hive/bot/notification_dispatcher"
 require "hive/bot/conversation_store"
@@ -31,6 +32,16 @@ require "hive/update_check/state"
 module Hive
   module Bot
     class Supervisor
+      # ISO code → human name for the unsupported-language hint. Unmapped
+      # tokens (including full names already written in config) fall back to
+      # a capitalized form, so the hint reads naturally for any config.
+      LANGUAGE_DISPLAY = {
+        "en" => "English", "ru" => "Russian", "es" => "Spanish", "fr" => "French",
+        "de" => "German", "it" => "Italian", "pt" => "Portuguese", "nl" => "Dutch",
+        "pl" => "Polish", "uk" => "Ukrainian", "tr" => "Turkish", "ar" => "Arabic",
+        "zh" => "Chinese", "ja" => "Japanese", "ko" => "Korean", "hi" => "Hindi"
+      }.freeze
+
       BOT_COMMANDS = [
         { command: "idea",    description: "Capture a new idea with optional files" },
         { command: "status",  description: "Show active tasks" },
@@ -449,52 +460,92 @@ module Hive
       end
 
       def execute_transcribe_voice(result, update)
-        unless @config.fetch("transcription", {}).fetch("enabled", true)
+        unless transcription_config.fetch("enabled", true)
           return safe_send_message(chat_id: update.chat_id,
                                    text: "Voice transcription is disabled. Send /idea <text> instead.")
         end
 
         payload = result.attachment || {}
         chat_id = payload.fetch(:chat_id, update.chat_id)
-        info = @telegram.get_file(file_id: payload.fetch(:file_id))
-        if remote_file_too_large?(info[:file_size])
-          return safe_send_message(chat_id: update.chat_id,
-                                   text: "That voice note is too large to download. Send a recording under #{idea_attachment_max_mb} MB.")
+        # Guard on the size Telegram advertised in the message payload BEFORE
+        # the getFile round-trip. The payload's voice.file_size is authoritative;
+        # getFile's info[:file_size] is sometimes omitted (yielding a missed
+        # cap), so the post-getFile check below is a secondary defense only.
+        if remote_file_too_large?(payload[:file_size])
+          return reply_voice_too_large(update)
         end
+
+        info = @telegram.get_file(file_id: payload.fetch(:file_id))
+        return reply_voice_too_large(update) if remote_file_too_large?(info[:file_size])
 
         bytes = @telegram.download_file(file_path: info.fetch(:file_path))
         transcription = @transcriber.call(bytes, filename: "voice.oga", content_type: "audio/ogg")
-        case transcription.status
-        when :ok
-          draft = ensure_voice_draft(chat_id: chat_id)
-          @idea_draft_store.set_transcript(chat_id: chat_id, text: transcription.text)
-          safe_send_message(chat_id: update.chat_id,
-                            text: transcript_preview_text(transcription.text),
-                            reply_markup: voice_confirm_keyboard(draft.token))
-        when :no_speech
-          @idea_draft_store.clear(chat_id: chat_id)
-          safe_send_message(chat_id: update.chat_id,
-                            text: "I couldn't hear any speech - try recording again.")
-        when :unsupported_language
-          @idea_draft_store.clear(chat_id: chat_id)
-          safe_send_message(chat_id: update.chat_id,
-                            text: "That voice note uses an unsupported language. Try English or Russian.")
-        else
-          draft = ensure_voice_draft(chat_id: chat_id)
-          @idea_draft_store.await_text(chat_id: chat_id)
-          stage_voice_fallback(chat_id: chat_id, bytes: bytes)
-          safe_send_message(chat_id: update.chat_id,
-                            text: "Couldn't transcribe; I saved the audio - what's the idea?")
-          draft
-        end
-      rescue Hive::Bot::Telegram::DownloadError, Hive::Tui::ComposerStaging::WriteError,
-             KeyError, SystemCallError, IOError => e
+        handle_transcription(transcription, update: update, chat_id: chat_id, bytes: bytes)
+      rescue Hive::Bot::Telegram::DownloadError, KeyError => e
+        # Download phase only (getFile / file download / payload key). Staging
+        # failures are handled inside handle_failed_transcription so they can't
+        # masquerade as a download failure here.
         @logger.event(:send_failure, source: "transcribe_voice",
                                       chat_id: update.chat_id,
                                       error_class: e.class.name,
                                       message: e.message)
         safe_send_message(chat_id: update.chat_id,
                           text: "Couldn't download that voice note - please send it again.")
+      end
+
+      def handle_transcription(transcription, update:, chat_id:, bytes:)
+        case transcription.status
+        when :ok
+          draft = ensure_voice_draft(chat_id: chat_id)
+          @idea_draft_store.set_transcript(chat_id: chat_id, text: transcription.text)
+          safe_send_message(chat_id: update.chat_id,
+                            text: Hive::Bot::IdeaKeyboards.transcript_preview_text(transcription.text),
+                            reply_markup: Hive::Bot::IdeaKeyboards.voice_confirm_keyboard(draft.token))
+        when :no_speech
+          clear_voice_draft(chat_id: chat_id)
+          safe_send_message(chat_id: update.chat_id,
+                            text: "I couldn't hear any speech - try recording again.")
+        when :unsupported_language
+          clear_voice_draft(chat_id: chat_id)
+          safe_send_message(chat_id: update.chat_id, text: unsupported_language_text)
+        else
+          handle_failed_transcription(transcription, update: update, chat_id: chat_id, bytes: bytes)
+        end
+      end
+
+      def handle_failed_transcription(transcription, update:, chat_id:, bytes:)
+        # Surface the transcriber's failure WITH chat context so a user's
+        # failure is debuggable from bot.log alone, without cross-correlating
+        # two log files by timestamp.
+        @logger.event(:send_failure, source: "transcribe_voice",
+                                      chat_id: update.chat_id,
+                                      error_class: transcription.error_class,
+                                      message: transcription.message)
+        draft = ensure_voice_draft(chat_id: chat_id)
+        @idea_draft_store.await_text(chat_id: chat_id)
+        begin
+          stage_voice_fallback(chat_id: chat_id, bytes: bytes)
+        rescue Hive::Tui::ComposerStaging::WriteError, SystemCallError, IOError => e
+          # Download + transcription attempt succeeded; only saving the audio
+          # failed. Tear down the half-created :awaiting_text draft so the
+          # operator's next unrelated text isn't captured against an orphan,
+          # and report accurately (NOT "couldn't download").
+          @logger.event(:send_failure, source: "transcribe_voice",
+                                        chat_id: update.chat_id,
+                                        error_class: e.class.name,
+                                        message: e.message)
+          @idea_draft_store.clear(chat_id: chat_id)
+          return safe_send_message(chat_id: update.chat_id,
+                                   text: "Couldn't save that voice note - please send it again.")
+        end
+        safe_send_message(chat_id: update.chat_id,
+                          text: "Couldn't transcribe; I saved the audio - what's the idea?")
+        draft
+      end
+
+      def reply_voice_too_large(update)
+        safe_send_message(chat_id: update.chat_id,
+                          text: "That voice note is too large to download. Send a recording under #{idea_attachment_max_mb} MB.")
       end
 
       def remote_file_too_large?(file_size)
@@ -510,10 +561,24 @@ module Hive
         (idea_attachment_max_bytes.to_f / (1024 * 1024)).round
       end
 
+      # Reuse an existing draft ONLY when it is voice-origin. A voice note
+      # arriving mid-text/-media draft must not overwrite the operator's typed
+      # text or merge into their media draft, so for any non-voice draft we
+      # start a fresh voice draft instead of clobbering that work in place.
       def ensure_voice_draft(chat_id:)
-        @idea_draft_store.get(chat_id: chat_id) ||
-          @idea_draft_store.start(chat_id: chat_id, phase: :awaiting_transcript_confirm,
-                                  token: SecureRandom.hex(4), origin: :voice)
+        existing = @idea_draft_store.get(chat_id: chat_id)
+        return existing if existing&.origin == :voice
+
+        @idea_draft_store.start(chat_id: chat_id, phase: :awaiting_transcript_confirm,
+                                token: SecureRandom.hex(4), origin: :voice)
+      end
+
+      # Clear only a voice-origin draft. A :no_speech / :unsupported_language
+      # voice note must not wipe an unrelated in-progress text/media draft (and
+      # its staging dir) the operator was building.
+      def clear_voice_draft(chat_id:)
+        draft = @idea_draft_store.get(chat_id: chat_id)
+        @idea_draft_store.clear(chat_id: chat_id) if draft&.origin == :voice
       end
 
       def stage_voice_fallback(chat_id:, bytes:)
@@ -530,15 +595,32 @@ module Hive
         )
       end
 
-      def transcript_preview_text(text)
-        "Transcript:\n\n#{text}\n\nConfirm or send corrected text / a new voice note."
+      def transcription_config
+        @config.fetch("transcription", {})
       end
 
-      def voice_confirm_keyboard(token)
-        [
-          [ { text: "Confirm", callback_data: "idea_voice_confirm:#{token}" },
-            { text: "Discard", callback_data: "idea_voice_discard:#{token}" } ]
-        ]
+      # Derive the unsupported-language hint from supported_languages so the
+      # wording can't drift from an operator override (the previous hardcoded
+      # "Try English or Russian." lied whenever the list was reconfigured).
+      def unsupported_language_text
+        hint = supported_language_hint
+        suffix = hint.empty? ? "" : " Try #{hint}."
+        "That voice note uses an unsupported language.#{suffix}"
+      end
+
+      def supported_language_hint
+        names = Array(transcription_config["supported_languages"])
+                .map { |token| humanize_language(token) }.reject(&:empty?)
+        case names.length
+        when 0 then ""
+        when 1 then names.first
+        else "#{names[0..-2].join(', ')} or #{names[-1]}"
+        end
+      end
+
+      def humanize_language(token)
+        normalized = token.to_s.strip.downcase
+        LANGUAGE_DISPLAY[normalized] || (normalized.empty? ? "" : normalized.capitalize)
       end
 
       def execute_idea_commit(result, update)

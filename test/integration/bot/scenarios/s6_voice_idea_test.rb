@@ -5,7 +5,7 @@ require "hive/commands/init"
 class HiveBotScenarioVoiceIdeaTest < Minitest::Test
   include HiveTestHelper
 
-  TranscriptionResult = Struct.new(:status, :text, :language, keyword_init: true)
+  TranscriptionResult = Struct.new(:status, :text, :language, :error_class, :message, keyword_init: true)
 
   FakeTranscriber = Struct.new(:results, :calls, keyword_init: true) do
     def call(bytes, filename:, content_type:)

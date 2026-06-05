@@ -136,7 +136,7 @@ module Hive
           transcript_draft = @idea_draft_store.get(chat_id: update.chat_id)
           if transcript_draft&.phase == :awaiting_transcript_confirm
             return :idea_voice if update.respond_to?(:voice?) && update.voice?
-            return :idea_voice_edit_text if update.text?
+            return :idea_voice_edit_text if update.respond_to?(:text?) && update.text?
           end
           return :idea_voice if update.respond_to?(:voice?) && update.voice?
           return :idea_media if update.respond_to?(:media?) && update.media?
@@ -247,7 +247,7 @@ module Hive
         when :slash_details then @slash_handlers.details(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
-        when :idea_voice then @slash_handlers.voice(update, edit: @idea_draft_store.get(chat_id: update.chat_id)&.phase == :awaiting_transcript_confirm)
+        when :idea_voice then @slash_handlers.voice(update)
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)

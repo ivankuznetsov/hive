@@ -142,7 +142,6 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :transcribe_voice, result.action
     assert_equal "voice-file", result.attachment.fetch(:file_id)
     assert_equal 1234, result.attachment.fetch(:file_size)
-    assert_equal false, result.attachment.fetch(:edit)
   end
 
   def test_text_while_awaiting_transcript_confirm_replaces_transcript
@@ -158,7 +157,7 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "corrected transcript", @draft_store.get(chat_id: draft.chat_id).text
   end
 
-  def test_voice_while_awaiting_transcript_confirm_retranscribes_as_edit
+  def test_voice_while_awaiting_transcript_confirm_retranscribes
     @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
                        text: "old", token: "tok", origin: :voice)
 
@@ -167,9 +166,25 @@ class HiveBotRouterTest < Minitest::Test
       file_size: 222
     }))
 
+    # Re-transcribe is handled transparently by ensure_voice_draft (it reuses
+    # the existing voice draft), so a replacement voice note routes to the
+    # same :transcribe_voice action — no separate edit flag is carried.
     assert_equal :transcribe_voice, result.action
     assert_equal "voice-two", result.attachment.fetch(:file_id)
-    assert_equal true, result.attachment.fetch(:edit)
+  end
+
+  def test_text_while_awaiting_text_after_voice_fallback_routes_to_capture
+    # After a transcription failure the supervisor leaves a voice-origin draft
+    # in :awaiting_text. Plain text must route to idea text capture, not the
+    # unknown/help fallback — otherwise the operator's idea is dropped.
+    @draft_store.start(chat_id: 12345, phase: :awaiting_text, token: "tok", origin: :voice)
+
+    assert_equal :idea_text_capture, @router.classify(update(text: "the actual idea"))
+
+    result = @router.handle(update(text: "the actual idea"))
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal "the actual idea", @draft_store.get(chat_id: 12345).text
   end
 
   def test_active_brainstorm_conversation_wins_for_plain_text_while_transcript_awaits_confirm

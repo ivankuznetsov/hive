@@ -78,7 +78,7 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  TranscriptionResult = Struct.new(:status, :text, :language, keyword_init: true)
+  TranscriptionResult = Struct.new(:status, :text, :language, :error_class, :message, keyword_init: true)
   FakeTranscriber = Struct.new(:results, :calls, keyword_init: true) do
     def call(bytes, filename:, content_type:)
       calls << { bytes: bytes, filename: filename, content_type: content_type }
@@ -441,7 +441,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
     result = FakeRouter::Result.new(
       action: :transcribe_voice,
-      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5, edit: false }
+      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5 }
     )
 
     @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
@@ -464,7 +464,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
     result = FakeRouter::Result.new(
       action: :transcribe_voice,
-      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5, edit: true }
+      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5 }
     )
 
     @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
@@ -543,6 +543,38 @@ class HiveBotSupervisorTest < Minitest::Test
     refute downloaded
     assert_match(/voice note is too large/, @telegram.messages.last.fetch(:text))
     assert_nil @idea_draft_store.get(chat_id: 42)
+  end
+
+  def test_transcribe_voice_disabled_replies_without_transcribing
+    disabled = Hive::Bot::Supervisor.new(
+      config: @config.merge("transcription" => { "enabled" => false }),
+      token: "test-token",
+      logger: @logger,
+      telegram: @telegram,
+      status_watcher: @status_watcher,
+      notification_dispatcher: @notification_dispatcher,
+      router: FakeRouter.new,
+      child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store,
+      idea_draft_store: @idea_draft_store,
+      transcriber: @transcriber,
+      dry_run: false,
+      dispatch_request_writer: @dispatch_request_writer
+    )
+    get_file_called = false
+    @telegram.define_singleton_method(:get_file) do |file_id:|
+      get_file_called = true
+      { file_path: "voice/file.oga", file_size: 1 }
+    end
+
+    disabled.send(:execute_result,
+                  FakeRouter::Result.new(action: :transcribe_voice,
+                                         attachment: { chat_id: 42, file_id: "voice-id" }),
+                  Update.new(chat_id: 42, update_id: 1))
+
+    refute get_file_called, "disabled transcription must not reach getFile"
+    assert_empty @transcriber.calls, "disabled transcription must not call the transcriber"
+    assert_match(/transcription is disabled/, @telegram.messages.last.fetch(:text))
   end
 
   def test_commit_voice_idea_uses_transcript_without_assets

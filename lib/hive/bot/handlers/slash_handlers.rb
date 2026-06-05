@@ -1,6 +1,7 @@
 require "securerandom"
 require "time"
 require "hive/bot/notification_builders"
+require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
 
 module Hive
@@ -66,15 +67,14 @@ module Hive
           project_picker_result(token: draft.token)
         end
 
-        def voice(update, edit: false)
+        def voice(update)
           voice = update.voice || {}
           @result_class.new(
             action: :transcribe_voice,
             attachment: {
               chat_id: update.chat_id,
               file_id: voice.fetch(:file_id),
-              file_size: voice[:file_size],
-              edit: edit
+              file_size: voice[:file_size]
             }
           )
         end
@@ -89,8 +89,8 @@ module Hive
           @idea_draft_store.set_transcript(chat_id: update.chat_id, text: text)
           @result_class.new(
             action: :reply,
-            text: transcript_preview_text(text),
-            reply_markup: voice_confirm_keyboard(draft.token)
+            text: Hive::Bot::IdeaKeyboards.transcript_preview_text(text),
+            reply_markup: Hive::Bot::IdeaKeyboards.voice_confirm_keyboard(draft.token)
           )
         end
 
@@ -152,7 +152,7 @@ module Hive
           @result_class.new(
             action: :reply,
             text: "Pick a project for the idea.",
-            reply_markup: project_keyboard(projects, token)
+            reply_markup: Hive::Bot::IdeaKeyboards.project_keyboard(projects, token, last_project: @last_project.call)
           )
         end
 
@@ -353,27 +353,6 @@ module Hive
           # (an escape here would skip write_last_seen and let Telegram
           # redeliver the update). Degrade to a soft retry hint instead.
           [ nil, "Status lookup failed — try again in a moment." ]
-        end
-
-        def project_keyboard(projects, token)
-          sorted = projects.sort_by { |project| project["name"] == @last_project.call ? 0 : 1 }
-          rows = sorted.map do |project|
-            label = project["name"] == @last_project.call ? "★ #{project['name']}" : project["name"]
-            [ { text: label, callback_data: "idea_project:#{project['name']}:#{token}" } ]
-          end
-          rows << [ { text: "+ new project", callback_data: "idea_project_new:#{token}" } ]
-          rows
-        end
-
-        def transcript_preview_text(text)
-          "Transcript:\n\n#{text}\n\nConfirm or send corrected text / a new voice note."
-        end
-
-        def voice_confirm_keyboard(token)
-          [
-            [ { text: "Confirm", callback_data: "idea_voice_confirm:#{token}" },
-              { text: "Discard", callback_data: "idea_voice_discard:#{token}" } ]
-          ]
         end
       end
     end

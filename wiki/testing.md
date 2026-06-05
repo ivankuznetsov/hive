@@ -68,8 +68,10 @@ task default: :test
 | `gemspec_test.rb`, `install_script_test.rb` | RubyGem/install packaging — `hv` stays out of `spec.executables` so RubyGems does not create a broken Ruby binstub for the bash launcher; the bash installer writes its own `hv` wrapper and does not expect a gem-installed `hv` shim. |
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, and `gh api` implicit-POST payload flag blocking. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
+| `patrol/review_handoff_test.rb` | `Hive::Patrol::ReviewHandoff` — slug uniqueness across stages, patrol-sourced `idea.md` frontmatter/body rendering, evidence formatting branches, and nil-evidence tolerance. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives are hidden from daily text/grid views by row `mtime`, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
 | `tui/app_test.rb` | `Hive::Tui::App` — charm-only backend selection, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, and signal-handler restore failure tolerance. |
+| `tui/views/format_test.rb` | `Hive::Tui::Views::Format` — display-cell truncation for wide grapheme clusters, hard-cut behavior when there is no ellipsis room, and right-padding helpers used by table/pane renderers. |
 
 ## Integration suite (`test/integration/`)
 

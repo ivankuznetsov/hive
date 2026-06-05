@@ -110,6 +110,8 @@ v2 anchors on a Charm-modern palette with rounded borders and semantic color:
 
 Cursor highlight is reverse-video (works on monochrome terminals). Lipgloss strips ANSI when stdout isn't a tty, so the ANSI escapes don't leak into pipelines or test snapshots.
 
+Project-pane rows use the same `Hive::Tui::Views::Format.ljust_cells` helper as the task table, so warning icons and other wide labels are padded by terminal display cells rather than Ruby string length. This keeps left-pane labels aligned with the fixed pane width even when a project row starts with `⚠`.
+
 ## Verb refusal on agent_running rows
 
 Pressing a verb key on an `action_key == "agent_running"` row whose `claude_pid_alive` is true flashes a one-line hint instead of dispatching — the verb would acquire-then-fail the per-task lock with `ConcurrentRunError` (exit 75). Pressing `Enter` on the same row opens the live log tail.
@@ -233,7 +235,7 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 
 - `test/integration/tui_command_test.rb` — Thor help-text registration, `--json` rejection, non-tty boundary check.
 - `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
-- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `IdeaPreview`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
+- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `IdeaPreview`, `NewIdeaPrompt`) plus the shared `Views::Format` display-cell helpers. Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
 - `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0, and the charm smoke resizes a running PTY from 120 to 150 columns, sends `SIGWINCH`, and asserts the next frame expands.
 

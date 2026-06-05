@@ -29,7 +29,8 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by external callers (today: the Telegram bot via `Hive::Bot::DispatchRequestWriter`) and consumed by the dispatcher's tick loop. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: the bot writes, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
-| `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. |
+| `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
+| `Hive::Commands::Daemon::QueueCommand` | `lib/hive/commands/daemon/queue_command.rb` | Extracted read-only queue-inspection surface (`hive daemon queue list/show/prune`) — touches only `queue_args`/`json`/`hive_home`, orthogonal to the daemon lifecycle, mirroring the `ServiceInstaller` extraction (#254). Internal IO/parse failures are wrapped in `Hive::InternalError` (exit 70). |
 
 ## Wiring
 
@@ -336,6 +337,41 @@ left by a prior process via `DispatchRequestQueue.recover_claims`:
 
 Each removal logs `:dispatch_request_recovered request_id=… reason=owner_gone|claim_expired|malformed_claim`.
 
+**Crash-durability (#248).** `claim` fsyncs the `dispatch_requests/`
+directory after the `.claimed` rename and sidecar write, so the
+at-most-once commit point survives an unclean shutdown rather than
+silently un-persisting and re-dispatching on restart. The directory
+fsync is best-effort (swallowed on platforms that won't open a
+directory for fsync) so it never aborts the claim it hardens.
+
+**Still-alive orphan window (#264).** When `recover_dispatch_claims`
+keeps a still-alive orphan's claim (correct — the restarted daemon
+can't reap a process it didn't spawn), it does **not** re-register that
+`(project, slug)` in the fresh `ConcurrencyController`. For the interval
+until the orphan exits (or its claim ages out), the per-row auto-advance
+path — gated only by the now-empty `running_task?` — could dispatch an
+advance for the same slug. The task `.lock` is the backstop that still
+prevents two live runs of the same task; it is a narrower guarantee than
+an in-flight controller slot but holds across the restart. Re-registering
+the orphan was deliberately rejected: with no supervised child to reap,
+the slot would only free on claim age-out (up to `CLAIM_EXPIRY_SEC`),
+trading a narrow already-backstopped window for a guaranteed multi-hour
+stuck slot.
+
+**Prune is claim-safe (#265).** `hive daemon queue prune` runs in a
+separate CLI process with no lock. A request can be claimed+dispatched by
+the daemon between prune's `pending` scan and its removal; prune uses
+`remove_if_unclaimed`, which re-checks the claimed set and removes only
+the pending `*.json` (never a `*.json.claimed`'s crash-recovery state),
+counting only files actually unlinked. Reported prune counts are
+therefore advisory under concurrency but never delete a live claim or
+over-report a removal a racing claim turned into a no-op.
+
+`ChildSupervisor#pgid_for` returns **nil** (not the pid) on `ESRCH`
+(#249), so the timeout-kill callers' `if pgid` guard short-circuits
+rather than signaling `-pid` — which could hit a recycled process group
+on a long-running host.
+
 ### Per-child wall-clock timeout (R-02)
 
 `ChildSupervisor` enforces a per-child timeout so a wedged `hive run`
@@ -348,7 +384,18 @@ calls `ChildSupervisor#enforce_timeouts`: a child past its deadline gets
 SIGTERM, then SIGKILL after `daemon.child_kill_grace_sec` (default 30s),
 each logged as `:child_timeout action=term|kill elapsed_sec=… timeout_sec=…`.
 The killed child surfaces as a normal `ChildExit` on a later reap. See
-[[config]] for the knobs.
+[[config]] for the knobs. The in-code `fetch` fallbacks for
+`child_timeout_sec` reference `Hive::Config::DEFAULTS.dig("daemon",
+"child_timeout_sec")` rather than a hardcoded literal, so an un-merged
+daemon block can never silently drift from the canonical default (#255).
+
+`child_kill_grace_sec` is a **minimum, not a precise timer** (#266):
+`enforce_timeouts` runs once per `poll_interval_sec` tick (default 30s),
+so the actual SIGKILL can arrive up to one poll interval after the grace
+window nominally elapses, and `child_kill_grace_sec: 0` does NOT mean
+immediate KILL — it means "KILL on the next tick after the TERM".
+Operators tuning the grace for a hard real-time bound should account for
+the poll interval.
 
 ### Queue sequence continuations
 
@@ -374,7 +421,11 @@ The bot drains that directory each `reaper_loop` iteration
 (`Supervisor#drain_dispatch_results`) and relays a `⚠️ <slug>: hive <verb>
 failed (exit N | killed)` message to the originating chat. This is the
 reverse-direction sibling of the dispatch-request queue; schema
-`hive-dispatch-result` v1.
+`hive-dispatch-result` v1. The schema machine-checks `chat_id` as
+**non-zero** (`not: {const: 0}`), not merely a positive integer (#258):
+0 is the only id no Telegram chat ever has, while private chats are
+positive and group/supergroup/channel chats are negative, so a `minimum:
+1` would have wrongly rejected a valid group relay target.
 
 Reliability contract on the consumer side: a notice is removed **only
 after the relay is confirmed sent** — if Telegram is down it stays on

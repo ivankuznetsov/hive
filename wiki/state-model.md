@@ -4,7 +4,7 @@ type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*
 created: 2026-04-25
 updated: 2026-06-03
-tags: [state, filesystem, model, architecture, review]
+tags: [state, filesystem, model, architecture, review, task-id]
 ---
 
 **TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. The workflow "data model" is the directory layout, marker grammar, and YAML schemas described below.
@@ -27,7 +27,9 @@ Per project, every task is a folder in exactly one stage subdirectory. Stage = l
 │   ├── 7-artifacts/<slug>/
 │   ├── 8-finalize/<slug>/
 │   └── 9-done/<slug>/
-└── logs/<slug>/<stage>-<UTC-ts>.log
+└── logs/
+    ├── <slug>/<stage>-<UTC-ts>.log
+    └── display-name.log      # best-effort `hive generate-name` output
 ```
 
 The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]] and [[stages/review]].
@@ -51,6 +53,26 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `9-done` | `task.md` | reused from `4-execute` |
 
 Mapping is encoded in `Hive::Task::STATE_FILES` (`lib/hive/task.rb:6`).
+
+## Task metadata sidecar
+
+Every new task captured by `hive new` gets `<task>/meta.yml`, read and written by `Hive::TaskMeta` (`lib/hive/task_meta.rb`):
+
+```yaml
+id: 1
+slug: add-foo-260603-abcd
+display_name:
+```
+
+`Hive::Task#id`, `#display_name`, and `#display_label` are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil}`; `display_label` then falls back to the folder slug. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserving any existing display name and leaving legacy names null.
+
+Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
+
+```yaml
+next_id: 2
+```
+
+`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. `hive new` treats counter lock contention as fail-soft: it writes `meta.yml` with `id: null` and still captures the task. `hive migrate` seeds the counter above existing sidecar ids before assigning new ones.
 
 ## Slug grammar
 

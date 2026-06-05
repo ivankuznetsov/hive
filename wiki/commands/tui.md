@@ -4,10 +4,10 @@ type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
 updated: 2026-06-05
-tags: [command, tui, observability, interactive, diagnostics]
+tags: [command, tui, observability, interactive, diagnostics, task-id]
 ---
 
-**TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing the scoped tasks as a 5-column compact table — icon · slug · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+**TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
 
 ## Backend
 
@@ -23,9 +23,9 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │  ProjectsPane   │  TasksPane                                             │
 │  (left, 18-28)  │  (right, cols - left)                                  │
 │                 │                                                        │
-│  ★ All projects │  ▶  fix-cache-…   2-brainstorm  Ready to plan      2h │
-│  hive           │  🤖 metrics-…     4-execute     Agent running       1m │
-│  myapp          │  ⚠  oauth-…       6-review      Needs recovery      1h │
+│  ★ All projects │  ▶   42  Fix cache       2-brainstorm  Ready to plan 2h │
+│  hive           │  🤖  43  Metrics pass    4-execute     Agent running 1m │
+│  myapp          │  ⚠   —  oauth-…          6-review      Needs recov.  1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
 │ Footer: [Tab] ... [q] quit · today ... • 7d ... • all ... • tokens       │
@@ -144,6 +144,8 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `Hive::Tui::App.start_snapshot_poller` wakes every 0.5s and dispatches a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
+
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, and `display_name` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 

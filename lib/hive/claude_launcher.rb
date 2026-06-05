@@ -98,7 +98,7 @@ module Hive
       /\Atmux \S+ below minimum/
     ].freeze
 
-    SessionHandle = Struct.new(:task, :runner, keyword_init: true) do
+    SessionHandle = Struct.new(:task, :runner, :reestablish, keyword_init: true) do
       def send_and_wait!(prompt:, expected_output: nil, timeout_sec:,
                          status_mode: nil, log_label: nil, deadline: nil)
         Hive::ClaudeLauncher.send_prompt_and_wait!(
@@ -109,7 +109,8 @@ module Hive
           timeout_sec: timeout_sec,
           status_mode: status_mode,
           log_label: log_label,
-          deadline: deadline
+          deadline: deadline,
+          reestablish: reestablish
         )
       end
     end
@@ -193,19 +194,25 @@ module Hive
           stage_dir: task.folder,
           extra_dirs: [ cwd ]
         ))
-        runner.start_detached(
-          command: wrapper_command(
-            cwd: cwd,
-            add_dirs: add_dirs,
-            profile: profile,
-            allowed_tools: allowed_tools,
-            permission_mode: permission_mode
-          )
+        launch_command = wrapper_command(
+          cwd: cwd,
+          add_dirs: add_dirs,
+          profile: profile,
+          allowed_tools: allowed_tools,
+          permission_mode: permission_mode
         )
-        wait_until_session_exists!(runner)
-        record_claude_pid(task, runner)
+        # (Re)establish the shared claude session. Reused as the handle's
+        # `reestablish` closure so a reviewer that finds the session dead
+        # (a prior reviewer's claude exited/crashed, closing the tmux
+        # session) can restart it instead of cascade-failing the pass.
+        establish = lambda do
+          runner.start_detached(command: launch_command)
+          wait_until_session_exists!(runner)
+          record_claude_pid(task, runner)
+        end
+        establish.call
         prepare_claude_session!(runner)
-        yield SessionHandle.new(task: task, runner: runner)
+        yield SessionHandle.new(task: task, runner: runner, reestablish: establish)
       ensure
         # Send `/quit` to claude inside the pane and give it a brief
         # window to exit cleanly before SIGKILL'ing the tmux session.
@@ -225,9 +232,10 @@ module Hive
 
     def send_prompt_and_wait!(task:, runner:, prompt:, timeout_sec:,
                               expected_output: nil, status_mode: nil,
-                              log_label: nil, deadline: nil)
+                              log_label: nil, deadline: nil, reestablish: nil)
       reset_signal_files(task)
       cleanup_expected_output(expected_output)
+      reestablish_dead_session!(runner, reestablish)
       prepare_claude_session!(runner, deadline: deadline)
       effective_timeout_sec = timeout_sec
       if deadline
@@ -459,6 +467,21 @@ module Hive
       # signal instead of discovering it later via a stuck process.
       warn "[hive] failed to capture claude pane pid for #{File.basename(task.folder.to_s)}: #{e.message}"
       nil
+    end
+
+    # Self-heal a dead shared reviewer session. In `with_shared_session`
+    # the claude-tmux reviewers run sequentially in one session; if a prior
+    # reviewer's claude exited or crashed, the tmux session closes and the
+    # next reviewer would raise "session no longer exists", cascade-failing
+    # the whole pass into `reviewer_partial_failure`. When a `reestablish`
+    # closure is supplied (shared-session path only) and the session is
+    # gone, restart claude so this reviewer proceeds. No-op for the
+    # single-shot path (`reestablish` nil), preserving the hard-fail there.
+    def reestablish_dead_session!(runner, reestablish)
+      return unless reestablish
+      return unless runner.respond_to?(:session_exists?) && !runner.session_exists?
+
+      reestablish.call
     end
 
     # `deadline:` is an optional CLOCK_MONOTONIC timestamp supplied by

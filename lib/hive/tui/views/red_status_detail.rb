@@ -60,7 +60,7 @@ module Hive
         def composed_content_lines(state, inner_width, inner_body_height)
           row = state.row
           body_lines = []
-          body_lines << Styles::HEADER.render(truncate("Task needs attention · #{safe(row.slug)}", inner_width))
+          body_lines << Styles::HEADER.render(truncate("Task needs attention · #{identity_label(row)}", inner_width))
           body_lines << ""
           body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
           body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
@@ -150,7 +150,7 @@ module Hive
         def header_bar(row, width)
           prefix = "RED · "
           project_stage = "#{safe(row.project_name)}/#{safe(row.stage)}"
-          slug = safe(row.slug)
+          slug = identity_label(row)
           path = safe(row.worktree_path || row.folder)
 
           line = header_line(prefix, project_stage, slug, path, width)
@@ -224,6 +224,12 @@ module Hive
           return missing_summary_fallback if summary.match?(MARKER_SUMMARY_PATTERN)
 
           summary
+        end
+
+        def identity_label(row)
+          name = safe(row.display_name).strip
+          name = safe(row.slug) if name.empty?
+          row.id ? "##{row.id} #{name} (#{safe(row.slug)})" : "#{name} (#{safe(row.slug)})"
         end
 
         def missing_summary_fallback

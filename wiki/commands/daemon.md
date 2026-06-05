@@ -173,6 +173,11 @@ new events are caught at CI rather than logged silently.
 | `reload`   | 1    | Daemon is not running |
 | `tail`     | 0    | Stream ended via Ctrl-C |
 | `tail`     | 1    | Log file does not exist |
+| `queue list` / `queue prune` | 0 | Always (lists / prunes; empty is still success) |
+| `queue show <id>` | 0 | Request found |
+| `queue show <id>` | 1 | Request not found (GENERIC) |
+| `queue` (any)     | 64 | Unknown queue action, or `show` with a missing REQUEST_ID (USAGE) |
+| `queue` (any)     | 70 | Internal IO/parse error (SOFTWARE) — wrapped so the exit code matches the `--json` envelope's `error_kind:"internal"` (#262) |
 | (any)      | 64   | Unknown subcommand |
 
 ## Backlinks

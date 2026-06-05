@@ -31,7 +31,7 @@ class ConfigTest < Minitest::Test
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
       assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
-      assert_equal true, cfg.dig("patrol", "draft_prs")
+      assert_equal false, cfg.dig("patrol", "draft_prs")
       assert_equal [], cfg.dig("patrol", "include")
       assert_includes cfg.dig("patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("patrol", "commands", "test")
@@ -1329,7 +1329,7 @@ class ConfigTest < Minitest::Test
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
       assert_equal 2,         cfg.dig("review", "max_passes")
-      assert_equal 5400,      cfg.dig("review", "max_wall_clock_sec")
+      assert_equal 14_400,    cfg.dig("review", "max_wall_clock_sec")
       assert_equal "claude",  cfg.dig("agents", "claude", "bin")
       assert_equal "codex",   cfg.dig("agents", "codex", "bin")
       assert_equal "pi",      cfg.dig("agents", "pi", "bin")

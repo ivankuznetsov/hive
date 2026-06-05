@@ -309,6 +309,22 @@ module Hive
           true
         end
 
+        # Defense-in-depth (#263): the chat_id round-trips from the on-disk
+        # request file through the daemon with no re-validation, so re-check
+        # the allowlist before relaying — drop+remove a notice for a chat
+        # removed from the allowlist while its request was in flight, or a
+        # notice forged in the 0700 dir with an arbitrary chat_id. Mirrors
+        # the allowlist filtering on the nudge/reconnect push paths.
+        allowed = chat_ids
+        fresh = fresh.reject do |notice|
+          next false if allowed.include?(notice.chat_id)
+
+          @logger.event(:dispatch_result_rejected_unauthorized,
+                        chat_id: notice.chat_id, result_id: notice.result_id, slug: notice.slug)
+          remove_dispatch_result(notice)
+          true
+        end
+
         fresh.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
           sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_failure_text(notice))
           remove_dispatch_result(notice) if sent
@@ -1037,7 +1053,7 @@ module Hive
         return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
+          "#{Hive::Bot::NotificationBuilders.display_title(row)} — " \
             "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
@@ -1076,7 +1092,7 @@ module Hive
       # Labels carry the task title so the operator can tell rows apart.
       def status_action_button(row)
         nb = Hive::Bot::NotificationBuilders
-        title = Hive::Bot::TitleFormatter.title_from_slug(row.slug)
+        title = nb.display_title(row)
         action = row.action.to_s
 
         if action == "needs_input" && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
@@ -1100,7 +1116,7 @@ module Hive
         attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
                    .map { |key, value| "#{key}=#{value}" }
         [
-          "#{row.project}/#{row.slug} (#{row.stage})",
+          "#{Hive::Bot::NotificationBuilders.display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
           "Action: #{row.action_label || row.action}",
           "Marker: #{row.marker || 'none'}",
           ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)

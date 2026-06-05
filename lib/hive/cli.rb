@@ -250,6 +250,20 @@ module Hive
     end
     map "new" => :new_task
 
+    desc "generate-name TARGET", "Generate a human-readable display name for TARGET"
+    option :project, type: :string, desc: "scope lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope lookup to one stage (full '1-inbox' or short 'inbox')"
+    def generate_name(target)
+      require "hive/commands/generate_name"
+      Hive::Commands::GenerateName.new(
+        target,
+        project: options[:project],
+        stage: options[:stage]
+      ).call
+    end
+    map "generate-name" => :generate_name
+
     desc "run TARGET", "Run the stage agent for TARGET (slug or task folder)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string, enum: APPROVE_TO_ENUM,
@@ -391,8 +405,9 @@ module Hive
       Maps the registered project's repository into durable feature slices
       under <project>/.hive-state/patrol/, asks the configured patrol
       agent to review each slice, attempts isolated fixes above the
-      confidence gate, validates configured commands, and opens draft PRs
-      for validated fixes. Patrol never writes findings to 1-inbox or any
+      confidence gate, validates configured commands, and opens ready
+      (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
+      draft PRs). Patrol never writes findings to 1-inbox or any
       stage folder; PRs are the only external surface.
 
       Use --dry-run to map and review without creating fix worktrees,
@@ -715,6 +730,12 @@ module Hive
       errors; 75 (TEMPFAIL) when `start` finds an existing live daemon;
       78 (CONFIG) when `enable`/`disable` reads malformed config.yml or
       rejects an inline-flow / non-2-space-indented `daemon:` block.
+
+      `queue` exit codes: `list` and `prune` exit 0; `show <id>` exits 0
+      when the request is found and 1 when it isn't; any `queue` action
+      exits 64 (USAGE) on an unknown action or a missing `show` REQUEST_ID,
+      and 70 (SOFTWARE) on an internal IO/parse error (the `--json`
+      hive-daemon-queue.v1 error envelope carries the same `error_kind`).
 
       See `wiki/commands/daemon.md`, `wiki/operating.md`, and ADR-024.
     DESC

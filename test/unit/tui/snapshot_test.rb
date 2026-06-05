@@ -12,6 +12,8 @@ class TuiSnapshotTest < Minitest::Test
     {
       "stage" => stage,
       "slug" => slug,
+      "id" => 42,
+      "display_name" => "First Task",
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
       "marker" => marker,
@@ -59,6 +61,8 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "alpha", first.project_name
     assert_equal "1-inbox", first.stage
     assert_equal "first-task", first.slug
+    assert_equal 42, first.id
+    assert_equal "First Task", first.display_name
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
     assert_equal "waiting", first.marker
@@ -125,6 +129,27 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal 2, filtered.rows.size, "case-insensitive substring match"
     slugs = filtered.rows.map(&:slug).sort
     assert_equal [ "AUTH-renew", "auth-fix" ], slugs
+  end
+
+  def test_filter_by_slug_matches_display_name_and_id
+    first = sample_task(slug: "slug-a")
+    first["id"] = 17
+    first["display_name"] = "Readable Alpha"
+    second = sample_task(slug: "slug-b")
+    second["id"] = 23
+    second["display_name"] = "Other Beta"
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ first, second ]
+                               }
+                             ])
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+
+    assert_equal [ "slug-a" ], snapshot.filter_by_slug("readable").rows.map(&:slug)
+    assert_equal [ "slug-b" ], snapshot.filter_by_slug("23").rows.map(&:slug)
   end
 
   def test_filter_by_slug_with_empty_substring_returns_self

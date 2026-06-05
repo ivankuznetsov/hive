@@ -8,10 +8,13 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   Row = Hive::Bot::StatusWatcher::Row
 
-  def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm")
+  def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
+          id: nil, display_name: nil)
     Row.new(
       project: "hive",
       slug: slug,
+      id: id,
+      display_name: display_name,
       stage: stage,
       marker: marker,
       attrs: attrs,
@@ -35,8 +38,10 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     )
   end
 
-  def recovery_row(attrs: { "pass" => "1" }, slug: "stuck-task-260525-abcd", stage: "6-review")
-    row(action: "recover_review", marker: "review_error", attrs: attrs, slug: slug, stage: stage)
+  def recovery_row(attrs: { "pass" => "1" }, slug: "stuck-task-260525-abcd", stage: "6-review",
+                   id: nil, display_name: nil)
+    row(action: "recover_review", marker: "review_error", attrs: attrs, slug: slug, stage: stage,
+        id: id, display_name: display_name)
   end
 
   def dispatcher(path: nil, now: Time.utc(2026, 5, 25, 10, 0, 0), daemon_enabled: ->(_project) { false },
@@ -90,6 +95,26 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
            "legacy-stage warning must dedupe while the project remains legacy-dirty")
   end
 
+  # AC-05 (#261): the bot's queue dispatch path deliberately does NOT reset
+  # the alert at enqueue time — the daemon clears the marker later. The
+  # supervisor test pins "reset_task not called"; this pins the property
+  # that makes that safe. While a needs_input marker persists across status
+  # ticks, the alert fires EXACTLY ONCE — the persistent fingerprint dedupes
+  # the repeat, so the duplicate-alert race an early reset would open stays
+  # closed.
+  def test_needs_input_alert_fires_once_while_marker_persists
+    d = dispatcher
+    waiting = row(action: "needs_input", marker: "waiting")
+
+    d.process_rows([ waiting ]) # tick 1: marker present → alert
+    d.process_rows([ waiting ]) # tick 2: marker still present → dedupe
+
+    assert_equal 1, telegram.messages.size,
+                 "the alert must fire exactly once while the marker persists (AC-05)"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_dedupe },
+           "the repeat tick must dedupe via the persistent fingerprint, not re-alert")
+  end
+
   def test_fresh_install_still_alerts_legacy_stage_dirs
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
@@ -117,6 +142,46 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal :notification_sent, logger.events.last.first
   end
 
+  # A 3-plan `waiting` marker is a plan approval pause the daemon's
+  # PlanApproval auto-approves. With the daemon enabled, the bot must NOT
+  # race it with an unactionable "questions waiting" push (the operator
+  # can't approve a plan from the `/answer` flow) — suppress + log it.
+  def test_plan_pause_suppressed_when_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+
+    d.process_rows([ row(stage: "3-plan", marker: "waiting", action: "needs_input") ])
+
+    assert_empty telegram.messages,
+                 "a daemon-auto-approved 3-plan pause must not page the operator"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_daemon_plan_pause },
+           "the suppressed plan pause must be logged for an audit trail")
+  end
+
+  # With the daemon OFF, the plan pause does need the operator — but it is
+  # a plan draft to review, NOT a brainstorm Q&A round, so it must be
+  # labelled as such (the previous code mislabelled every `waiting` marker
+  # as "Brainstorm questions").
+  def test_plan_pause_notifies_with_plan_label_when_daemon_disabled
+    dispatcher.process_rows([ row(stage: "3-plan", marker: "waiting", action: "needs_input") ])
+
+    assert_equal 1, telegram.messages.size
+    text = telegram.messages.first[:text]
+    assert_match(/Plan draft is ready/, text)
+    refute_match(/Brainstorm questions/, text, "a 3-plan pause must not be labelled a brainstorm question")
+  end
+
+  # The plan-pause gate is scoped to 3-plan only: a genuine 2-brainstorm
+  # question still pages the operator even with the daemon enabled (the
+  # daemon does not answer brainstorm questions).
+  def test_brainstorm_question_still_notifies_when_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+
+    d.process_rows([ row(stage: "2-brainstorm", marker: "waiting", action: "needs_input") ])
+
+    assert_equal 1, telegram.messages.size
+    assert_match(/Brainstorm questions/, telegram.messages.first[:text])
+  end
+
   # The operator is actively answering this slug → suppress the proactive
   # "questions waiting" push (it would re-fire mid-answer when the row
   # flaps out of and back into WAITING, e.g. a daemon resume).
@@ -135,6 +200,51 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
     assert_empty telegram.messages,
                  "no proactive push for a slug with an active answer conversation"
+    # The suppressed row never enters the alert pipeline, so no dedup
+    # entry is written — keeping it would block the eventual re-alert.
+    assert_nil alert_store_via(d).entry(Hive::Bot::NotificationBuilders.fingerprint(row)),
+               "a suppressed alert must not leave a dedup entry"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_active_conversation },
+           "the suppression must be logged for audit")
+  end
+
+  # The single most important regression guard: fire → suppress while
+  # answering → RE-FIRE once the conversation ends and the row is still
+  # WAITING. A bug that left a stale dedup entry would silence the re-alert.
+  def test_alert_refires_after_conversation_ends
+    store = Hive::Bot::ConversationStore.new(now: -> { NOW })
+    d = dispatcher(now: NOW, conversation_store: store)
+
+    d.process_rows([ row ])
+    assert_equal 1, telegram.messages.size, "first alert fires (no conversation yet)"
+
+    store.start(chat_id: 12345, slug: "slug-260514-abcd", question_n: 1)
+    d.process_rows([ row ])
+    assert_equal 1, telegram.messages.size, "no new push while answering"
+
+    store.clear(chat_id: 12345, slug: "slug-260514-abcd")
+    d.process_rows([ row ])
+    assert_equal 2, telegram.messages.size,
+                 "re-engages with a fresh alert once the conversation ends"
+  end
+
+  def test_review_waiting_alert_suppressed_while_answering
+    d = dispatcher(now: NOW, conversation_store: active_conversation_for("slug-260514-abcd"))
+
+    d.process_rows([ row(action: "needs_input", marker: "review_waiting", stage: "5-review") ])
+
+    assert_empty telegram.messages, "review-triage waiting is also gated by an active conversation"
+  end
+
+  def test_needs_input_alert_fires_with_empty_store_or_nil_store
+    d_empty = dispatcher(now: NOW, conversation_store: Hive::Bot::ConversationStore.new(now: -> { NOW }))
+    d_empty.process_rows([ row ])
+    assert_equal 1, telegram.messages.size, "an empty store suppresses nothing"
+
+    # Default wiring (no store) must also fire — the nil guard path.
+    d_nil = dispatcher(now: NOW)
+    d_nil.process_rows([ row ])
+    assert_equal 2, telegram.messages.size, "no conversation store → no suppression"
   end
 
   def test_needs_input_alert_fires_with_store_but_no_active_conversation
@@ -170,7 +280,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
       d = dispatcher(path: path)
-      d.process_rows([ recovery_row ])
+      named = recovery_row(id: 42, display_name: "Readable Recovery")
+      d.process_rows([ named ])
 
       # First absence tick — within grace, no Recovered fires yet.
       d.process_rows([])
@@ -182,9 +293,9 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d.process_rows([])
 
       assert_equal 2, telegram.messages.size
-      assert_equal "✅ Recovered: \"Stuck task…\" — Review", telegram.messages.last[:text]
+      assert_equal "✅ Recovered: \"#42 Readable Recovery\" — Review", telegram.messages.last[:text]
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(
-        Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
+        Hive::Bot::NotificationBuilders.fingerprint(named)
       )
     end
   end
@@ -330,7 +441,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   def test_transient_row_absence_within_grace_does_not_fire_recovered
     d = dispatcher
-    d.process_rows([ recovery_row ])
+    d.process_rows([ recovery_row(id: 42, display_name: "Readable Recovery") ])
     d.process_rows([])               # tick 2: row absent → mark_absent, no Recovered
     d.process_rows([ recovery_row ]) # tick 3: row re-appears within grace
 
@@ -391,14 +502,15 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   def test_eight_hour_reminder_fires_exactly_once
     d = dispatcher
-    d.process_rows([ recovery_row ])
+    named = recovery_row(id: 42, display_name: "Readable Recovery")
+    d.process_rows([ named ])
     @clock += 28_800
-    d.process_rows([ recovery_row ])
+    d.process_rows([ named ])
     @clock += 28_800
-    d.process_rows([ recovery_row ])
+    d.process_rows([ named ])
 
     assert_equal 2, telegram.messages.size
-    assert_match(/\A⚠ Still stuck \(8 h\) — "Stuck task…" — Review/, telegram.messages.last[:text])
+    assert_match(/\A⚠ Still stuck \(8 h\) — "#42 Readable Recovery" — Review/, telegram.messages.last[:text])
   end
 
   def test_reminder_send_failure_applies_backoff

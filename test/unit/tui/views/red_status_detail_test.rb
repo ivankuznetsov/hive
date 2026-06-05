@@ -6,10 +6,11 @@ require "hive/tui/views/red_status_detail"
 class HiveTuiViewsRedStatusDetailTest < Minitest::Test
   def row(diagnostic: nil, action_key: "recover_review", stage: "6-review",
           marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
-          folder: nil, slug: "red-task", worktree_path: "/tmp/red-task-worktree")
+          folder: nil, slug: "red-task", id: 42, display_name: "Red Task",
+          worktree_path: "/tmp/red-task-worktree")
     folder ||= "/tmp/demo/.hive-state/stages/#{stage}/#{slug}"
     Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: stage, slug: slug, folder: folder,
+      project_name: "alpha", stage: stage, slug: slug, id: id, display_name: display_name, folder: folder,
       worktree_path: worktree_path,
       state_file: File.join(folder, "task.md"), marker: marker,
       attrs: attrs, mtime: nil, age_seconds: 0,
@@ -57,7 +58,7 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: diagnostic)))
 
     assert_includes output, "Task needs attention"
-    assert_includes output, "red-task"
+    assert_includes output, "#42 Red Task (red-task)"
     assert_includes output, "Project: alpha"
     assert_includes output, "Stage: 6-review"
     assert_includes output, "The review fixer stopped before tests completed."
@@ -85,7 +86,7 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
     header = output.lines.first.to_s.chomp
 
-    assert_includes header, "RED · alpha/6-review · red-task · /tmp/red-task-worktree"
+    assert_includes header, "RED · alpha/6-review · #42 Red Task (red-task) · /tmp/red-task-worktree"
     assert_equal 1, header.lines.size
   end
 
@@ -96,7 +97,7 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
 
     assert_operator header.length, :<=, 39
-    assert_includes header, "RED · alpha/6-review · red-task · "
+    assert_includes header, "RED · alpha/6-review · #42 Red Task"
     assert_includes header, "…"
   end
 

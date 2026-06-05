@@ -238,7 +238,13 @@ module Hive
           "max_attempts" => 2
         },
         "max_passes" => 2,
-        "max_wall_clock_sec" => 5400
+        # Outer wall-clock budget for the whole reviewers phase. Sized to
+        # fit a couple of claude-tmux reviewers each running up to their
+        # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
+        # review legitimately takes 1-2h. Each reviewer is bounded by its
+        # own timeout, NOT by an even split of this budget, so this only
+        # needs to cover the sum (raise it if you run more reviewers).
+        "max_wall_clock_sec" => 14_400
       },
       # Hive daemon settings (ADR-024). The daemon polls
       # `hive status --json`, dispatches workflow verbs on tasks the
@@ -270,7 +276,11 @@ module Hive
         # set a project/global cap when they want the daemon to reap genuinely
         # wedged children. `child_verb_timeouts` overrides the default per hive verb
         # (e.g. {"review" => 10800}). `child_kill_grace_sec` is the
-        # SIGTERM→SIGKILL escalation window.
+        # SIGTERM→SIGKILL escalation window — a MINIMUM, not a precise
+        # timer: timeouts are enforced once per `poll_interval_sec` tick, so
+        # the actual SIGKILL can land up to one poll interval late, and
+        # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
+        # "KILL on the next tick after TERM"). (#266)
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
         "child_verb_timeouts" => {},
@@ -311,7 +321,10 @@ module Hive
         "min_confidence_to_fix" => "medium",
         "max_findings_per_feature" => 10,
         "max_prs_per_cycle" => 3,
-        "draft_prs" => true,
+        # Open ready (non-draft) PRs by default so the babysitter — which
+        # skips draft PRs — picks them up. Set `draft_prs: true` per project
+        # to revert to draft PRs that need a manual "ready" toggle first.
+        "draft_prs" => false,
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
@@ -1436,7 +1449,7 @@ module Hive
       [ "transient_retry_backoff_sec", 1 ],
       [ "shutdown_grace_sec", 0 ],
       # child_timeout_sec >= 0  — 0 disables the per-child wall-clock cap
-      # child_kill_grace_sec >= 0 — 0 means "SIGKILL immediately after TERM"
+      # child_kill_grace_sec >= 0 — 0 means "SIGKILL on the next timeout tick after TERM"
       [ "child_timeout_sec", 0 ],
       [ "child_kill_grace_sec", 0 ],
       [ "log_max_bytes", 1024 ],

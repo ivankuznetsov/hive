@@ -3,25 +3,25 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-05-26
-tags: [command, status, observability, json, diagnostics, legacy-dirs]
+updated: 2026-06-03
+tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker, and prints slugs grouped by the next useful action. Normal status is read-only and takes no args. Pass `--json` for a single machine-readable document on stdout (schema `hive-status`, version per `Hive::SCHEMA_VERSIONS`). Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal status is read-only and takes no args. Pass `--json` for a single machine-readable document on stdout (schema `hive-status`, version per `Hive::SCHEMA_VERSIONS`). Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
 
 ## Output shape
 
 ```
 <project_name>
   Ready to brainstorm
-    ⏸ add-inbox-filter-260424-7a3b   waiting                  hive brainstorm add-inbox-filter-260424-7a3b 2h ago
+    ⏸ #42 Add inbox filter             waiting                  hive brainstorm add-inbox-filter-260424-7a3b 2h ago
   Ready to develop
-    ✓ refactor-auth-260423-1c2d      complete                 hive develop refactor-auth-260423-1c2d 1d ago
+    ✓ #43 Refactor auth flow           complete                 hive develop refactor-auth-260423-1c2d 1d ago
   Agent running
-    🤖 add-cache-260424-9a8b          agent_working pid=1234   - 5m ago
+    🤖 — add-cache-260424-9a8b          agent_working pid=1234   - 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken — additive field, no `SCHEMA_VERSIONS` bump (same policy as `live_task_lock`).
+`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). The human identity column renders `#id display_name` when available, falls back to `#id slug`, and uses `— slug` when pre-migration/counter-failed tasks have no id. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 
@@ -37,7 +37,7 @@ When the field is non-empty, the text output prints a warning under the project 
 
 The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
-The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hive:schema:status:v2` (see [[schemas]] and the policy comment in `lib/hive.rb` — additive optional fields do **not** bump `SCHEMA_VERSIONS["hive-status"]`).
+The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hive:schema:status:v2`. Task `id` / `display_name` fields bumped the status schema to v3 and the diagnose schema to v2.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -57,7 +57,7 @@ The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hiv
 - Project path missing → `"<name>: missing project path <path>"`.
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
-- Slug is left-padded to 36 chars; state label to 24 chars; then the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
+- Task identity is left-padded to 36 chars; state label to 24 chars; then the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.
 
@@ -99,7 +99,7 @@ Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and
 
 With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (`execute.agent` via `Hive::Stages::Base.stage_profile`) to produce a concise markdown diagnosis, then atomically writes `<task>/diagnostics/red-status.md`. Defaults are `timeout_sec.diagnose || 600` and `budget_usd.diagnose || 5`. The agent gets the task folder as an add-dir and runs from the task worktree when one exists, otherwise the project root. The worktree pointer is validated against the configured worktree root before it is used as cwd. Custom execute profiles are rejected for diagnose unless their `generated_by` value has first been added to `Hive::Schemas::DIAGNOSTIC_GENERATORS` and the published schemas. The command does not claim the task lock and does not write workflow markers.
 
-JSON output uses schema `hive-status-diagnose`, version `1`, and returns `slug`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
+JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
 
 ## Read-only
 

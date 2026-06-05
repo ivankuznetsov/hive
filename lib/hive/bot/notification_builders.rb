@@ -105,7 +105,12 @@ module Hive
       def needs_input(row)
         case row.marker
         when "waiting"
-          brainstorm_waiting(row)
+          # A `waiting` marker is used by BOTH 2-brainstorm (genuine
+          # operator questions) and 3-plan (a plan-draft/approval pause).
+          # Label them distinctly so a plan pause isn't mis-announced as
+          # "Brainstorm questions" (it isn't, and the daemon usually
+          # auto-approves it — see suppress_daemon_plan_pause?).
+          row.stage.to_s == "3-plan" ? plan_waiting(row) : brainstorm_waiting(row)
         when "review_waiting"
           review_waiting(row)
         else
@@ -125,6 +130,21 @@ module Hive
                 "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
           keyboard: [
             [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ]
+          ]
+        )
+      end
+
+      # A 3-plan `waiting` marker is a plan-draft/approval pause, not a
+      # brainstorm Q&A round. When the daemon is enabled it auto-approves
+      # this and the bot suppresses the push entirely
+      # (`suppress_daemon_plan_pause?`); this notification is for the
+      # daemon-OFF case, where the operator reviews the draft and advances
+      # it from the CLI — so it points at the plan, not the `/answer` flow.
+      def plan_waiting(row)
+        Notification.new(
+          text: header(row) + "\nPlan draft is ready for your review.",
+          keyboard: [
+            [ button("Show details", details_callback(row)) ]
           ]
         )
       end
@@ -156,7 +176,7 @@ module Hive
         retryable = retryable_recovery?(row)
         Notification.new(
           text: [
-            "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
+            "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{display_title(row)}\"",
             cause_sentence_for(row),
             retryable ? "Tap Autofix to retry the stage cleanly." :
               "Tap Show details to see what needs manual intervention."
@@ -285,7 +305,19 @@ module Hive
       end
 
       def header(row)
-        "#{row.project}/#{row.slug} (#{row.stage})"
+        "#{display_title(row)} — #{TitleFormatter.stage_label(row.stage)}"
+      end
+
+      def display_title(row)
+        name = row.respond_to?(:display_name) ? row.display_name.to_s.strip : ""
+        id = row.respond_to?(:id) ? row.id : nil
+        if !name.empty? && id
+          "##{id} #{name}"
+        elsif !name.empty?
+          name
+        else
+          TitleFormatter.title_from_slug(row.slug)
+        end
       end
 
       def marker_with_attrs(row)

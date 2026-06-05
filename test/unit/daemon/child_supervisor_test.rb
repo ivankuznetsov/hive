@@ -397,11 +397,14 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal 5, sup.timeout_for_verb("review")
   end
 
-  def test_pgid_for_falls_back_to_pid_when_group_gone
+  def test_pgid_for_returns_nil_when_group_gone
     sup = make
     # A pid with no process group → Process.getpgid raises ESRCH → the
-    # helper falls back to the pid itself so the caller still has a target.
-    assert_equal 2**30, sup.send(:pgid_for, 2**30)
+    # helper returns nil so the caller's `if pgid` guard skips the kill,
+    # rather than signaling `-pid` (which could hit a recycled process
+    # group on a long-running host) (#249).
+    assert_nil sup.send(:pgid_for, 2**30),
+               "pgid_for must return nil on ESRCH so the kill is skipped, not retargeted at -pid"
   end
 
   def test_enforce_timeouts_kills_real_sleeping_child

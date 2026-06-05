@@ -31,6 +31,8 @@ module Hive
         callback_refresh_diagnose
         callback_answer
         callback_idea_project_pick
+        callback_idea_voice_confirm
+        callback_idea_voice_discard
         callback_idea_done
         callback_idea_skip
         callback_path_a_yes
@@ -41,6 +43,8 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        idea_voice
+        idea_voice_edit_text
         idea_media
         idea_text_capture
         free_text_answer
@@ -56,7 +60,7 @@ module Hive
       ALLOWED_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
         write_answer_then_reply start_codex confirm_codex_draft
-        stage_attachment commit_idea
+        stage_attachment transcribe_voice commit_idea
       ].freeze
 
       UNAUTHORIZED_LOG_TTL_SEC = 3600
@@ -95,6 +99,8 @@ module Hive
           conversation_store: @conversation_store,
           result_class: Result,
           idea_draft_store: @idea_draft_store,
+          projects_provider: @projects_provider,
+          last_project: -> { @last_project },
           logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
@@ -127,6 +133,12 @@ module Hive
         when %r{\A/help\b} then :slash_help
         else
           return :free_text_answer if @conversation_store.get(chat_id: update.chat_id) || reattach_target(update)
+          transcript_draft = @idea_draft_store.get(chat_id: update.chat_id)
+          if transcript_draft&.phase == :awaiting_transcript_confirm
+            return :idea_voice if update.respond_to?(:voice?) && update.voice?
+            return :idea_voice_edit_text if update.text?
+          end
+          return :idea_voice if update.respond_to?(:voice?) && update.voice?
           return :idea_media if update.respond_to?(:media?) && update.media?
           return :idea_text_capture if @idea_draft_store.get(chat_id: update.chat_id)&.phase == :awaiting_text
 
@@ -195,6 +207,8 @@ module Hive
         when /\Arefresh_diagnose:/ then :callback_refresh_diagnose
         when /\Aanswer:/ then :callback_answer
         when /\Aidea_project:/ then :callback_idea_project_pick
+        when /\Aidea_voice_confirm:/ then :callback_idea_voice_confirm
+        when /\Aidea_voice_discard:/ then :callback_idea_voice_discard
         when /\Aidea_done:/ then :callback_idea_done
         when /\Aidea_skip:/ then :callback_idea_skip
         when /\Apath_a_yes:/ then :callback_path_a_yes
@@ -233,6 +247,8 @@ module Hive
         when :slash_details then @slash_handlers.details(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
+        when :idea_voice then @slash_handlers.voice(update, edit: @idea_draft_store.get(chat_id: update.chat_id)&.phase == :awaiting_transcript_confirm)
+        when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)

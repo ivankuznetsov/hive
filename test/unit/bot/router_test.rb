@@ -24,7 +24,7 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil,
-             photo: nil, document: nil, caption: nil)
+             photo: nil, document: nil, voice: nil, caption: nil)
     Hive::Bot::Telegram::Update.new(
       update_id: 1,
       chat_id: chat_id,
@@ -34,6 +34,7 @@ class HiveBotRouterTest < Minitest::Test
       reply_to_text: reply_to_text,
       photo: photo,
       document: document,
+      voice: voice,
       caption: caption
     )
   end
@@ -130,6 +131,57 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_match(/Pick a project/, result.text)
+  end
+
+  def test_voice_update_emits_transcribe_action
+    result = @router.handle(update(voice: {
+      file_id: "voice-file",
+      file_size: 1234
+    }))
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "voice-file", result.attachment.fetch(:file_id)
+    assert_equal 1234, result.attachment.fetch(:file_size)
+    assert_equal false, result.attachment.fetch(:edit)
+  end
+
+  def test_text_while_awaiting_transcript_confirm_replaces_transcript
+    draft = @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
+                               text: "old", token: "tok", origin: :voice)
+
+    result = @router.handle(update(text: "corrected transcript"))
+
+    assert_equal :reply, result.action
+    assert_match(/corrected transcript/, result.text)
+    assert_equal "Confirm", result.reply_markup.first.first[:text]
+    assert_equal "idea_voice_confirm:tok", result.reply_markup.first.first[:callback_data]
+    assert_equal "corrected transcript", @draft_store.get(chat_id: draft.chat_id).text
+  end
+
+  def test_voice_while_awaiting_transcript_confirm_retranscribes_as_edit
+    @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
+                       text: "old", token: "tok", origin: :voice)
+
+    result = @router.handle(update(voice: {
+      file_id: "voice-two",
+      file_size: 222
+    }))
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "voice-two", result.attachment.fetch(:file_id)
+    assert_equal true, result.attachment.fetch(:edit)
+  end
+
+  def test_active_brainstorm_conversation_wins_for_plain_text_while_transcript_awaits_confirm
+    @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
+                       text: "old", token: "tok", origin: :voice)
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd", question_n: 1)
+
+    result = @router.handle(update(text: "answer body"))
+
+    assert_equal :write_answer_then_reply, result.action
+    assert_equal "answer body", result.answer_text
+    assert_equal "old", @draft_store.get(chat_id: 12345).text
   end
 
   def test_media_without_caption_starts_file_first_draft
@@ -293,6 +345,8 @@ class HiveBotRouterTest < Minitest::Test
       "details:hive:slug-260514-abcd" => :callback_show_details,
       "refresh_diagnose:hive:slug-260514-abcd:6-review" => :callback_refresh_diagnose,
       "answer:hive:slug-260514-abcd" => :callback_answer,
+      "idea_voice_confirm:token" => :callback_idea_voice_confirm,
+      "idea_voice_discard:token" => :callback_idea_voice_discard,
       "idea_done:token" => :callback_idea_done,
       "idea_skip:token" => :callback_idea_skip,
       "path_a_yes:hive:slug-260514-abcd" => :callback_path_a_yes,

@@ -132,6 +132,61 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal "Done", result.reply_markup.first.first[:text]
   end
 
+  def test_voice_confirm_moves_to_project_picker
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :awaiting_transcript_confirm,
+                text: "ship by voice", token: "tok", origin: :voice)
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store,
+      projects_provider: -> { [ { "name" => "hive" } ] }
+    )
+
+    result = handlers.handle(:callback_idea_voice_confirm, update("idea_voice_confirm:tok"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal :awaiting_project, store.get(chat_id: 55).phase
+    assert_equal "idea_project:hive:tok", result.reply_markup.first.first[:callback_data]
+  end
+
+  def test_voice_discard_clears_draft
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :awaiting_transcript_confirm,
+                text: "ship by voice", token: "tok", origin: :voice)
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_voice_discard, update("idea_voice_discard:tok"))
+
+    assert_equal :reply, result.action
+    assert_match(/Discarded/, result.text)
+    assert_nil store.get(chat_id: 55)
+  end
+
+  def test_voice_project_pick_commits_without_file_collection
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :awaiting_project,
+                text: "ship by voice", token: "tok", origin: :voice)
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_project_pick, update("idea_project:hive:tok"))
+
+    assert_equal [ "hive" ], @last_projects
+    assert_equal :commit_idea, result.action
+    assert_equal "hive", result.project
+    assert_equal({ chat_id: 55 }, result.attachment)
+    assert_equal :awaiting_project, store.get(chat_id: 55).phase
+  end
+
   def test_idea_done_with_draft_store_emits_commit_action
     store = Hive::Bot::IdeaDraftStore.new
     store.start(chat_id: 55, phase: :collecting_files, text: "ship", token: "tok")

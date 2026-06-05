@@ -66,6 +66,34 @@ module Hive
           project_picker_result(token: draft.token)
         end
 
+        def voice(update, edit: false)
+          voice = update.voice || {}
+          @result_class.new(
+            action: :transcribe_voice,
+            attachment: {
+              chat_id: update.chat_id,
+              file_id: voice.fetch(:file_id),
+              file_size: voice[:file_size],
+              edit: edit
+            }
+          )
+        end
+
+        def edit_transcript_text(update)
+          text = update.text.to_s.strip
+          return @result_class.new(action: :reply, text: "Send corrected transcript text, or a new voice note.") if text.empty?
+
+          draft = @idea_draft_store.get(chat_id: update.chat_id)
+          return @result_class.new(action: :reply, text: "That voice idea draft expired. Send the voice note again.") unless draft
+
+          @idea_draft_store.set_transcript(chat_id: update.chat_id, text: text)
+          @result_class.new(
+            action: :reply,
+            text: transcript_preview_text(text),
+            reply_markup: voice_confirm_keyboard(draft.token)
+          )
+        end
+
         def media(update)
           draft = @idea_draft_store.get(chat_id: update.chat_id)
           started_here = draft.nil?
@@ -335,6 +363,17 @@ module Hive
           end
           rows << [ { text: "+ new project", callback_data: "idea_project_new:#{token}" } ]
           rows
+        end
+
+        def transcript_preview_text(text)
+          "Transcript:\n\n#{text}\n\nConfirm or send corrected text / a new voice note."
+        end
+
+        def voice_confirm_keyboard(token)
+          [
+            [ { text: "Confirm", callback_data: "idea_voice_confirm:#{token}" },
+              { text: "Discard", callback_data: "idea_voice_discard:#{token}" } ]
+          ]
         end
       end
     end

@@ -106,7 +106,16 @@ stage does not move and no workflow verb fires from either path.
    the stale `REVIEW_WORKING` marker, terminates that holder, and deletes
    the task `.lock`, so the daemon sees the row as ready and retries the
    interrupted review phase. If child inspection fails, or children still
-   exist, it leaves the row alone.
+   exist, it leaves the row alone. It also auto-clears retryable
+   review errors with no live task lock: `REVIEW_ERROR reason=review_agent_died`,
+   and `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` when the
+   pass-specific `reviews/errors-NN.md` contains only
+   `tmux_session_terminated before writing expected output file` reviewer
+   failures. These convert common Claude/tmux crash-before-artifact cases into
+   daemon retries instead of per-task manual recovery clicks. The auto-clear is
+   bounded per daemon process by failure signature (default 3 clears); repeated
+   identical failures stay red after the budget is exhausted so a persistent
+   Claude/tmux break cannot churn forever.
    Heal/skip events are logged as `marker_healed` / `marker_heal_failed`.
 
 ## External liveness and capacity

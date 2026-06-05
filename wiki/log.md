@@ -3223,3 +3223,13 @@ TTL config.
 
 **Refreshed pages:**
 - [[state-model]]
+
+## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
+
+**Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[modules/daemon]]
+- [[state-model]]
+- [[testing]]

@@ -1,3 +1,4 @@
+require "digest"
 require "open3"
 require "yaml"
 require "hive/lock"
@@ -44,12 +45,21 @@ module Hive
       # ERROR markers. Consumers (TaskAction's synthetic diagnostic,
       # bot/notification rendering, future docs) can reference this
       # constant instead of hard-coding the literal strings.
-      REASONS = %i[agent_died agent_orphaned review_agent_died].freeze
+      REASONS = %i[
+        agent_died
+        agent_orphaned
+        review_agent_died
+        reviewer_tmux_session_terminated
+      ].freeze
+      REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
 
-      def initialize(controller:, logger:, grace_sec: 300)
+      def initialize(controller:, logger:, grace_sec: 300,
+                     review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT)
         @controller = controller
         @logger = logger
         @grace_sec = grace_sec
+        @review_error_auto_recovery_limit = review_error_auto_recovery_limit
+        @review_error_auto_recoveries = Hash.new(0)
       end
 
       # Walk the row set, heal stale agent_working markers in place.
@@ -71,6 +81,11 @@ module Hive
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
+          if row.marker.to_s == "review_error"
+            heal_review_error_if_auto_recoverable(row)
+            next
+          end
+
           if row.marker.to_s == "review_working"
             heal_review_row_if_stale(row)
             next
@@ -91,6 +106,103 @@ module Hive
       end
 
       private
+
+      def heal_review_error_if_auto_recoverable(row)
+        return if row.live_task_lock == true
+        return unless auto_recoverable_review_error?(row)
+
+        reason = auto_recoverable_review_error_reason(row)
+        marker_attrs = review_marker_attrs(row)
+        marker_attrs["reason"] = reason
+        recovery_key = review_error_auto_recovery_key(row, reason: reason)
+        attempts = @review_error_auto_recoveries[recovery_key]
+        return if attempts >= @review_error_auto_recovery_limit
+
+        return unless Hive::Markers.clear_current(
+          row.state_file,
+          expected_name: :review_error,
+          match_attrs: marker_attrs
+        )
+
+        attempts += 1
+        @review_error_auto_recoveries[recovery_key] = attempts
+        @logger.event(:marker_healed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      prior_marker: row.marker,
+                      reason: reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated",
+                      state_file: row.state_file,
+                      phase: marker_attrs["phase"],
+                      pass: marker_attrs["pass"],
+                      errors_path: reviewer_errors_path(row),
+                      attempt: attempts,
+                      max_attempts: @review_error_auto_recovery_limit)
+      rescue StandardError => e
+        @logger.event(:marker_heal_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      reason: "reviewer_tmux_session_terminated",
+                      error: "#{e.class}: #{e.message}")
+      end
+
+      def auto_recoverable_review_error_reason(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        attrs["reason"].to_s
+      end
+
+      def review_error_auto_recovery_key(row, reason:)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        [
+          row.project.to_s,
+          row.slug.to_s,
+          reason.to_s,
+          attrs["phase"].to_s,
+          attrs["pass"].to_s,
+          review_error_signature(row, reason: reason)
+        ]
+      end
+
+      def review_error_signature(row, reason:)
+        return reason.to_s unless reason.to_s == "reviewer_partial_failure"
+
+        path = reviewer_errors_path(row)
+        return reason.to_s unless path
+
+        Digest::SHA256.hexdigest(File.read(path))
+      rescue SystemCallError
+        reason.to_s
+      end
+
+      def auto_recoverable_review_error?(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        return true if attrs["reason"].to_s == "review_agent_died"
+
+        return false unless attrs["phase"].to_s == "reviewers"
+        return false unless attrs["reason"].to_s == "reviewer_partial_failure"
+        return false if attrs["pass"].to_s.empty?
+
+        path = reviewer_errors_path(row)
+        return false unless path
+
+        lines = File.readlines(path, chomp: true).grep(/\A- \[/)
+        return false if lines.empty?
+
+        lines.all? do |line|
+          line.include?("tmux_session_terminated before writing expected output file")
+        end
+      rescue SystemCallError
+        false
+      end
+
+      def reviewer_errors_path(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        pass = Integer(attrs["pass"], exception: false)
+        return nil unless pass
+
+        File.join(row.folder.to_s, "reviews", "errors-#{format('%02d', pass)}.md")
+      end
 
       def heal_review_row_if_stale(row)
         return unless row.live_task_lock == true

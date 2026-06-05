@@ -762,6 +762,55 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_wait_for_expected_output_fails_fast_when_session_dies_before_output
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { flunk "must not wait to timeout" }) do
+        result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+        assert_equal :error, result.fetch(:status)
+        assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+        assert_match(/missing\.md/, result.fetch(:error_message))
+      end
+    end
+  end
+
+  def test_wait_for_expected_output_rejects_nonempty_output_when_session_dies_without_done_signal
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+      assert_equal "review findings", File.read(output)
+    end
+  end
+
+  def test_wait_for_expected_output_accepts_nonempty_output_and_done_when_session_dies_after_write
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal({ status: :ok, log_label: "review" }, result)
+      assert_equal "review findings", File.read(output)
+    end
+  end
+
   def test_wait_for_expected_output_times_out_when_file_missing
     with_tmp_task do |task|
       runner = Struct.new(:tail) do

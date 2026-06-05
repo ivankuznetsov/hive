@@ -269,6 +269,164 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_auto_recovers_reviewer_partial_failure_when_errors_are_tmux_session_terminated
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      reviews_dir = File.join(File.dirname(state_file), "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(
+        File.join(reviews_dir, "errors-01.md"),
+        "# Reviewer infra errors for pass 01\n\n" \
+        "- [claude-ce-code-review] reviewer \"claude-ce-code-review\" failed: " \
+        "tmux_session_terminated before writing expected output file: " \
+        "#{File.join(reviews_dir, 'claude-ce-code-review-01.md')} after 2 attempt(s)\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "reviewer_tmux_session_terminated", heal_event[1][:reason]
+      refute_match(/REVIEW_ERROR/, File.read(state_file),
+                   "auto-recoverable reviewer tmux death should clear the marker so daemon can retry")
+    end
+  end
+
+  def test_does_not_auto_recover_reviewer_partial_failure_with_mixed_error_causes
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      reviews_dir = File.join(File.dirname(state_file), "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(
+        File.join(reviews_dir, "errors-01.md"),
+        "# Reviewer infra errors for pass 01\n\n" \
+        "- [claude-ce-code-review] reviewer \"claude-ce-code-review\" failed: " \
+        "tmux_session_terminated before writing expected output file: #{File.join(reviews_dir, 'claude.md')}\n" \
+        "- [codex-ce-code-review] reviewer \"codex-ce-code-review\" failed: quota exhausted\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_review_error_review_agent_died
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected review_agent_died auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "review_agent_died", heal_event[1][:reason]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_review_error_review_agent_died_with_live_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: true
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recoverable_review_error_stays_red_after_retry_budget_is_exhausted
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      review_error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      heal([ row ])
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      heal([ row ])
+
+      assert_match(/REVIEW_ERROR/, File.read(state_file),
+                   "same auto-recoverable review error must stay red after budget exhaustion")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal 1, heals.first[1][:attempt]
+      assert_equal 1, heals.first[1][:max_attempts]
+    end
+  end
+
   def test_disk_failure_during_heal_does_not_crash_tick
     # Force Markers.set to raise on a row, and confirm the healer logs
     # and continues to the next row (the next row would otherwise heal).

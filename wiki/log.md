@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
+
+**Action:** Applied accepted `/ce-code-review` findings on the TUI/daemon latency-reduction work:
+
+- **TUI mtime gate** (`Hive::Tui::StateSource`): the cached-snapshot gate could mask state indefinitely because the fingerprint only watches file mtimes. Added `LIVENESS_REPARSE_FALLBACK_SECONDS` (3s) time-bounded fallback so liveness-derived fields (`live_task_lock`, `claude_pid_alive`) that flip without touching a file still self-heal, and added the global project registry (`Hive::Config.global_config_path`) to the fingerprint so `hive init`/`forget` changes reflect within the latency budget.
+- **Daemon run loop**: gated `version_drift_detected?` (which hashes the schema file via `Digest::SHA256.file`) behind `full_tick_due?` so the hash runs at the ~30s poll cadence instead of every ~1s fast probe (Unit 2 cheap-only intent).
+- **`refresh_tracked_state_file_mtimes`**: dropped the `|| row.state_file_mtime` fallback so an absent tracked file stores `nil` consistently, avoiding a perpetual full-tick loop from `nil != <Time>` comparisons.
+- Added clarifying comments documenting the benign double-`reap_all` on the child-exit path and the expected post-dispatch redundant full tick.
+
+Refreshed [[commands/tui]] and [[modules/daemon]]. Tests + rubocop clean. Did not run `qmd update` or `qmd embed`.
+
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

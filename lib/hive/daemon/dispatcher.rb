@@ -294,7 +294,16 @@ module Hive
         recover_dispatch_claims(now: Time.now)
 
         until @shutdown
-          if version_drift_detected?
+          now = Time.now
+          full_tick = full_tick_due?(now)
+
+          # Schema-drift detection hashes the schema file (Digest::SHA256.file),
+          # so it is full-tick-only work. Running it every fast_poll_sec (~1s)
+          # would execute the hash ~30x more often on the idle path and fight
+          # the near-zero idle-CPU goal (Unit 2: the per-second probe is meant
+          # to be cheap waitpid + stat only). The drift it guards against only
+          # matters at the poll-interval (~30s) cadence.
+          if full_tick && version_drift_detected?
             new_fingerprint = compute_code_fingerprint
             @logger.event(:version_drift,
                           old_fingerprint: @code_fingerprint,
@@ -309,8 +318,7 @@ module Hive
             reload_config!
             @reload = false
           end
-          now = Time.now
-          if full_tick_due?(now)
+          if full_tick
             tick(now: now)
           elsif cheap_probe_requires_full_tick?(now: now)
             tick(now: Time.now) unless @shutdown || @reload
@@ -442,6 +450,13 @@ module Hive
       end
 
       def cheap_probe_requires_full_tick?(now:)
+        # When this returns true via `child_exited`, the follow-up `tick`
+        # calls `reap_completed` again. That second sweep is a benign
+        # waitpid no-op: the children were already reaped (and their
+        # completions recorded) here, so `reap_all` finds nothing and
+        # `record_completion` does not re-fire. The redundancy is
+        # intentional — the probe must reap to *learn* whether a full
+        # tick is warranted — not a missed dedup.
         child_exited = reap_completed(now: now)
         state_file_changed = tracked_state_file_mtime_changed?
         child_exited || state_file_changed
@@ -507,12 +522,27 @@ module Hive
         entries.any?
       end
 
+      # Snapshot each tracked state file's on-disk mtime so the next fast
+      # probe can detect a write. Store the raw `safe_mtime` (which is nil
+      # when the file is absent) rather than falling back to the status
+      # row's mtime: `tracked_state_file_mtime_changed?` re-stats with the
+      # same `safe_mtime`, so a `nil` baseline compares stable against a
+      # `nil` re-stat. Falling back to `row.state_file_mtime` (a Time) for
+      # an absent file made every probe see `Time != nil` and fire a full
+      # tick every second until a full tick re-baselined.
+      #
+      # NOTE: these mtimes are captured POST-dispatch, so a slug freshly
+      # spawned this tick has its pre-dispatch mtime recorded here. When
+      # the spawned agent writes its AGENT_WORKING marker (~1s later) the
+      # next probe sees the bump and forces one redundant full tick. That
+      # re-evaluation is correct (the marker really did change) and
+      # low-frequency, so it's left as-is rather than special-cased.
       def refresh_tracked_state_file_mtimes(rows)
         @tracked_state_file_mtimes = {}
         rows.each do |row|
           next if row.state_file.nil? || row.state_file.empty?
 
-          @tracked_state_file_mtimes[row.state_file] = safe_mtime(row.state_file) || row.state_file_mtime
+          @tracked_state_file_mtimes[row.state_file] = safe_mtime(row.state_file)
         end
       end
 

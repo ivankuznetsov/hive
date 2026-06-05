@@ -398,8 +398,11 @@ were logged between PR #78 on 2026-05-15 and the next restart on
 2026-05-20).
 
 At startup the dispatcher captures a SHA-256 fingerprint of `lib/hive.rb`
-(the file holding `SCHEMA_VERSIONS`). On every tick it rehashes the
-file and compares. On mismatch it logs `version_drift` with the old
+(the file holding `SCHEMA_VERSIONS`). On every **full** tick (the
+`poll_interval_sec` ~30s cadence, not the `fast_poll_sec` ~1s cheap
+probe) it rehashes the file and compares — gating the hash behind
+`full_tick_due?` keeps the per-second idle path to cheap waitpid + stat
+work (Unit 2). On mismatch it logs `version_drift` with the old
 and new digests, sets `reexec_requested?`, and breaks the run loop.
 `Hive::Commands::Daemon#start_daemon` then `Kernel#exec`-replaces the
 process with a fresh `hive daemon start` invocation — same PID, fresh

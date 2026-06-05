@@ -46,13 +46,17 @@ def read_only_remote?(rest)
   end
 end
 
+def no_write_options?(rest)
+  rest.none? { |arg| arg == "--output" || arg.start_with?("--output=") }
+end
+
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
     rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")
   when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
        "rev-list", "rev-parse", "show", "status"
-    true
+    no_write_options?(rest)
   when "remote"
     read_only_remote?(rest)
   when "config"

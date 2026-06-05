@@ -9,11 +9,11 @@ module Hive
 
       Update = Data.define(:update_id, :chat_id, :from_id, :message_id, :text,
                            :callback_data, :callback_query_id, :entities, :reply_to_text,
-                           :photo, :document, :caption, :media_group_id) do
+                           :photo, :document, :voice, :caption, :media_group_id) do
         def initialize(update_id:, chat_id:, from_id: nil, message_id: nil,
                        text: nil, callback_data: nil, callback_query_id: nil,
                        entities: nil, reply_to_text: nil, photo: nil,
-                       document: nil, caption: nil, media_group_id: nil)
+                       document: nil, voice: nil, caption: nil, media_group_id: nil)
           super
         end
 
@@ -32,6 +32,10 @@ module Hive
 
         def media?
           !photo.nil? || !document.nil?
+        end
+
+        def voice?
+          !voice.nil?
         end
 
         def effective_text
@@ -159,6 +163,7 @@ module Hive
           reply_to_text: value(reply_to, :text),
           photo: callback ? nil : extract_photo(message),
           document: callback ? nil : extract_document(message),
+          voice: callback ? nil : extract_voice(message),
           caption: callback ? nil : value(message, :caption),
           media_group_id: callback ? nil : value(message, :media_group_id)
         )
@@ -208,6 +213,19 @@ module Hive
           file_name: value(document, :file_name),
           mime_type: value(document, :mime_type),
           file_size: value(document, :file_size)
+        }
+      end
+
+      def extract_voice(message)
+        voice = value(message, :voice)
+        return nil unless voice
+
+        {
+          file_id: value(voice, :file_id),
+          file_unique_id: value(voice, :file_unique_id),
+          duration: value(voice, :duration),
+          mime_type: value(voice, :mime_type),
+          file_size: value(voice, :file_size)
         }
       end
 

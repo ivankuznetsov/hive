@@ -121,7 +121,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 2,
+    assert_equal 3,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
@@ -140,6 +140,8 @@ class SchemaFilesTest < Minitest::Test
     row = {
       stage: "1-inbox",
       slug: "probe",
+      id: 42,
+      display_name: "Probe",
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       marker_name: :waiting,
@@ -150,7 +152,11 @@ class SchemaFilesTest < Minitest::Test
       action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
       action_label: "Ready to brainstorm",
       suggested_command: "hive brainstorm probe --from 1-inbox",
-      diagnostic: nil
+      diagnostic: nil,
+      worktree_path: nil,
+      live_task_lock: false,
+      unanswered_questions: 0,
+      next_action: nil
     }
     producer_keys = Hive::Commands::Status.new.task_payload(row).keys.sort
     schema_task_required = doc.dig("$defs", "Task", "required").sort
@@ -228,7 +234,7 @@ class SchemaFilesTest < Minitest::Test
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
     payload = {
       "schema" => "hive-status",
-      "schema_version" => 2,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => "2026-05-19T00:00:00Z",
       "projects" => [
@@ -270,7 +276,7 @@ class SchemaFilesTest < Minitest::Test
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
     payload = {
       "schema" => "hive-status",
-      "schema_version" => 2,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => "2026-05-19T00:00:00Z",
       "projects" => [
@@ -295,7 +301,7 @@ class SchemaFilesTest < Minitest::Test
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
     base = {
       "schema" => "hive-status",
-      "schema_version" => 2,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => "2026-05-19T00:00:00Z",
       "projects" => [
@@ -322,7 +328,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status-diagnose",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
@@ -340,9 +346,11 @@ class SchemaFilesTest < Minitest::Test
     # ref doesn't resolve inside the file, schemer.validate raises.
     payload = {
       "schema" => "hive-status-diagnose",
-      "schema_version" => 1,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status-diagnose"),
       "ok" => true,
       "slug" => "probe",
+      "id" => 42,
+      "display_name" => "Probe",
       "task_folder" => "/tmp/probe",
       "path" => nil,
       "diagnostic" => {
@@ -371,9 +379,11 @@ class SchemaFilesTest < Minitest::Test
     )
     payload = {
       "schema" => "hive-status-diagnose",
-      "schema_version" => 1,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status-diagnose"),
       "ok" => true,
       "slug" => "probe",
+      "id" => nil,
+      "display_name" => nil,
       "task_folder" => "/tmp/probe",
       "diagnostic" => nil,
       "path" => nil
@@ -1691,24 +1701,29 @@ class SchemaFilesTest < Minitest::Test
   # ── hive-daemon-queue: producer round-trip (#256) ───────────────────────
 
   def test_hive_daemon_queue_producer_round_trip_validates_list_show_prune
-    daemon = Hive::Commands::Daemon.new("list", queue_args: [ "list" ])
+    # queue_request_hash / queue_envelope were extracted from Commands::Daemon
+    # into QueueCommand (#254); exercise them on the extracted class.
+    require "hive/commands/daemon/queue_command"
+    queue_cmd = Hive::Commands::Daemon::QueueCommand.new(
+      queue_args: [ "list" ], json: false, hive_home: Dir.mktmpdir
+    )
     req = Hive::Daemon::DispatchRequestQueue::Request.new(
       request_id: "req00001", created_at: Time.utc(2026, 6, 3, 12, 0, 0),
       project: "hive", slug: "my-task", argv: [ "hive", "review", "my-task", "--json" ],
       requestor: "bot", chat_id: 12_345, update_id: nil, trigger: "autofix", path: nil
     )
-    request_hash = daemon.send(:queue_request_hash, req)
+    request_hash = queue_cmd.send(:queue_request_hash, req)
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-queue"))))
 
-    list = daemon.send(:queue_envelope, action: "list", requests: [ request_hash ], malformed: [])
+    list = queue_cmd.send(:queue_envelope, action: "list", requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(list).to_a,
                  "list envelope (Request with nil update_id) must validate against SuccessPayload"
 
-    show = daemon.send(:queue_envelope, action: "show", request: request_hash)
+    show = queue_cmd.send(:queue_envelope, action: "show", request: request_hash)
     assert_empty schemer.validate(show).to_a, "show envelope must validate"
 
-    prune = daemon.send(:queue_envelope, action: "prune", pruned_count: 1,
-                                         requests: [ request_hash ], malformed: [])
+    prune = queue_cmd.send(:queue_envelope, action: "prune", pruned_count: 1,
+                                            requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
   end
 end

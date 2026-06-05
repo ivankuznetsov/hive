@@ -4,6 +4,7 @@ require "open3"
 require "tempfile"
 require "time"
 require "hive/agent_profiles"
+require "hive/agent/message_extractor"
 require "hive/events"
 require "hive/lock"
 
@@ -140,7 +141,7 @@ module Hive
             log.write("\n") unless line.end_with?("\n")
             log.flush
             json = parse_json_line(line)
-            if json && (message = extract_final_message(json))
+            if json && (message = Hive::Agent::MessageExtractor.extract(json))
               final_message = message
               final_message_source = :structured
             elsif json.nil?
@@ -394,51 +395,11 @@ module Hive
     end
 
     def extract_final_message(data)
-      data = parse_json_line(data) if data.is_a?(String)
-      return nil unless data.is_a?(Hash)
-
-      case data["type"]
-      when "result"
-        text_value(data["result"])
-      when "item.completed"
-        item = data["item"]
-        return nil unless item.is_a?(Hash)
-        return nil unless %w[agent_message message].include?(item["type"])
-
-        text_value(item["text"]) || text_value(item["message"]) || text_from_content(item["content"])
-      when "agent_message"
-        text_value(data["text"]) || text_value(data["message"]) || text_from_content(data["content"])
-      when "assistant"
-        message = data["message"]
-        return nil unless message.is_a?(Hash)
-
-        text_value(message["text"]) || text_from_content(message["content"])
-      else
-        nil
-      end
-    end
-
-    def text_from_content(content)
-      return text_value(content) if content.is_a?(String)
-      return nil unless content.is_a?(Array)
-
-      text = content.filter_map do |item|
-        next unless item.is_a?(Hash)
-
-        text_value(item["text"]) if %w[text output_text].include?(item["type"])
-      end.join("\n\n")
-      text.empty? ? nil : text
-    end
-
-    def text_value(value)
-      text = value.to_s.strip
-      text.empty? ? nil : text
+      Hive::Agent::MessageExtractor.extract(data)
     end
 
     def parse_json_line(line)
-      JSON.parse(line)
-    rescue JSON::ParserError
-      nil
+      Hive::Agent::MessageExtractor.parse_json_line(line)
     end
 
     def log_path

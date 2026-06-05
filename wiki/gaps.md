@@ -14,7 +14,7 @@ tags: [gap, todo]
 | Area / file set | Page |
 |-----------------|------|
 | `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] |
-| `lib/hive/commands/*.rb` | ✓ `wiki/commands/*` pages cover the active command surface, including daemon, bot, init, status, run, stage-action, markers, migrate, findings, metrics, update, uninstall, and rebase-status. |
+| `lib/hive/commands/*.rb` | ✓ `wiki/commands/*` pages cover the active command surface, including daemon, bot, init, new, generate-name, status, run, stage-action, markers, migrate, findings, metrics, update, uninstall, and rebase-status. |
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |

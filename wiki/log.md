@@ -33,6 +33,19 @@ Append-only log of all wiki operations.
 
 **Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Also flipped the init template + `hive patrol` long_desc to match. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.
 
+## [2026-06-03T20:30:00Z] daemon - PR #244 review follow-up #254 (extract QueueCommand)
+
+**Action:** Extracted the read-only queue-inspection surface from `Commands::Daemon` into `Hive::Commands::Daemon::QueueCommand` (`lib/hive/commands/daemon/queue_command.rb`), mirroring the `ServiceInstaller` extraction (#254). `Commands::Daemon#queue_command` now lazily requires and delegates. The extracted `call` folds forward #262's `Hive::InternalError` wrapping (exit 70 on internal failure) so a later rebase onto a main carrying #297 cannot lose it. Branch stacked on `fix/daemon-queue-244-followups-a` (#294) because the moved `queue_prune` already carries #265's `remove_if_unclaimed`; must merge after #294/#295/#297. Documented in [[modules/daemon]]. 100% line coverage, rubocop clean.
+
+## [2026-06-03T20:00:00Z] daemon/bot - PR #244 review follow-ups, batch D (docs + security)
+
+**Action:** Implemented the docs + security cluster of the deferred PR #244 `/ce-code-review` issues:
+
+- **#263** (security) `Supervisor#drain_dispatch_results` now re-checks each notice's `chat_id` against `chat_id_allowlist` before relaying — a chat removed from the allowlist mid-flight, or a notice forged in the 0700 dir, is dropped + removed (logging the new `:dispatch_result_rejected_unauthorized` bot event, added to the logger enum + `hive-bot-log.v1.json`) instead of relayed. Documented in [[modules/bot]].
+- **#262** (docs) documented the `hive daemon queue` exit codes in the `daemon` `long_desc` ([[cli]]) and the [[commands/daemon]] exit-codes table: `list`/`prune` → 0; `show` → 0 found / 1 not-found; unknown action or missing REQUEST_ID → 64 (USAGE); internal error → 70 (SOFTWARE). The issue's "70 on internal error" was NOT true of the code — a bare `StandardError` re-raise exited 1 — so `queue_command` now wraps internal failures in `Hive::InternalError` so the exit code matches the `--json` envelope's `error_kind:"internal"`.
+- **#266** (docs) documented `child_kill_grace_sec` as a tick-jittered **minimum**, not a precise timer (enforced once per `poll_interval_sec`; `0` ≠ immediate KILL) in the config knob comment and [[modules/daemon]].
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):
@@ -3022,3 +3035,29 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-03T12:35:51Z] new/display-name/resolver — refresh task identity command coverage
+
+**Action:** Refreshed command/API wiki coverage across commits `df87abe5` (`hive new` task-id capture), `c86a74b8` (`hive generate-name` display-name generation), and `41d10785` (numeric task-id target resolution). Verified the committed diffs, `lib/hive/commands/new.rb`, `lib/hive/commands/generate_name.rb`, `lib/hive/display_name/*`, `lib/hive/agent/message_extractor.rb`, `lib/hive/task_meta.rb`, `lib/hive/task_counter.rb`, `lib/hive/task.rb`, `lib/hive/task_resolver.rb`, `lib/hive/cli.rb`, and the new integration/unit tests. Documented the sidecar/counter state model, the display-name command pipeline, and path/slug/id target resolution. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/new]]
+- [[commands/generate-name]]
+- [[state-model]]
+- [[modules/task]]
+- [[modules/task_resolver]]
+- [[cli]]
+- [[stages/inbox]]
+- [[index]]
+- [[gaps]]
+
+## [2026-06-03T13:20:00Z] task identity surfaces — document status, TUI, bot, and migration backfill
+
+**Action:** Extended the task-identity wiki refresh through commits `457c2f16` (`hive status` id/display_name schema v3), `d76be350` (TUI id/name columns), `5daa08c9` (Telegram display titles), and `1a4922c4` (`hive migrate` id backfill). Documented human rendering fallbacks, preserved slug-based callbacks/commands, diagnose schema v2, and migration counter seeding/idempotency. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[commands/tui]]
+- [[commands/migrate]]
+- [[modules/bot]]
+- [[state-model]]

@@ -23,7 +23,7 @@ and subprocess I/O.
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. |
 | `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
 | `IdeaAttachmentPolicy` | `lib/hive/bot/idea_attachment_policy.rb` | Pure classifier for Telegram photo/document attachments. Allows jpg/jpeg/png/webp/gif/pdf/txt/md/docx, enforces count/byte caps, and normalizes extensions through `Hive::Tui::ComposerStaging`. |
-| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows plus project-level legacy-stage warnings. |
+| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows carrying slug/id/display_name plus project-level legacy-stage warnings. |
 | `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery rows, daemon-disabled ready approvals, and project-level legacy-stage warnings through a persistent alert lifecycle store. Ready notifications are suppressed when the daemon is enabled for that project; recovery rows get one confirmation when they leave the active set, same-task recovery fingerprint changes are treated as superseded rather than recovered, and unchanged recovery rows get one reminder. **`needs_input` (brainstorm/review "waiting") pushes are suppressed for a project+slug with an active answer conversation** (`ConversationStore#active_for_slug?(slug, project:)`, injected): the operator is already answering, so a row that briefly flaps out of and back into `WAITING` (e.g. a mid-answer daemon resume) won't re-fire the "questions waiting" push. Suppression is lenient when either side lacks a project, but two fully resolved different projects sharing a slug do not cross-suppress. The first alert still fires (no conversation exists until the operator taps **Answer in chat**), error/recovery alerts are never gated this way, and a TTL-expired/abandoned conversation stops suppressing (re-engaging the operator). Suppressed rows are logged as `notification_skipped_active_conversation` and never enter the alert store, so ending the conversation can re-alert if the task is still waiting. |
 | `AlertStore` | `lib/hive/bot/alert_store.rb` | JSON sidecar for alert fingerprints, first-seen timestamps, reminder timestamps, and row snapshots. Corrupt files are renamed aside so the bot keeps running. |
 | `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Marker/action-specific text and inline keyboards. Recovery alerts are human-readable; Autofix is exposed only when the diagnostic `suggested_next_action.kind` is `retry`, while manual-only states show laptop/details actions. Fingerprints include project, slug, stage, marker, and marker attrs. |
@@ -49,6 +49,8 @@ hive bot start
             └─ reaper loop: ChildSupervisor.reap_all → Telegram reply
 ```
 
+Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <display_name>` when both are present, plain `display_name` when only the name is available, and `TitleFormatter.title_from_slug(slug)` as the legacy fallback. Human text and `/status`/queue/detail rows use that title, but callback data and slash-command arguments remain slug-based.
+
 `Router::Result` is the handoff API between pure routing and side
 effects. The normal command actions remain `reply`,
 `dispatch_then_reply`, `dispatch_commands`, `start_answer`, and
@@ -69,8 +71,8 @@ available, so stale Telegram buttons cannot clear a newer marker. For
 observed `reason`/`exit_code` attrs for legacy markers. The dispatcher
 clears the persisted alert entry for that task before
 spawning the retry sequence. `/status [project]` is an explicit pull
-surface and renders actionable rows as `Title… — Stage` without inline
-buttons.
+surface and renders actionable rows as `#id Title… — Stage` without inline
+buttons when task metadata is available.
 
 Legacy stage-directory warnings are proactive as project-level notifications. `StatusWatcher` converts non-empty `legacy_stage_dirs` project payloads into synthetic notification inputs, `Supervisor#status_tick` feeds them through the same `NotificationDispatcher` as task rows, and `NotificationBuilders` renders a message like `Project P has N tasks hidden in legacy stage dirs (...) - run hive migrate <project_path>`. The same warning appears in `/status` and `/queue` replies. The alert-store fingerprint is project-level rather than count-level, so the warning dedupes while the project remains legacy-dirty, drops when the project returns clean, and alerts again on a later clean-to-legacy transition. Fresh alert-store seeding still suppresses historical task backlog, but legacy-stage warnings alert immediately because first bot startup after an upgrade is when operators need the migration prompt.
 
@@ -137,6 +139,13 @@ bot-originated daemon child exits non-zero or with a nil exit status
 `Supervisor#reaper_loop` calls `drain_dispatch_results`, which relays
 those notices back to the originating chat as
 `<slug>: hive <verb> failed (exit N)` or `killed (signal/timeout)`.
+Before relaying, `drain_dispatch_results` re-checks each notice's
+`chat_id` against `chat_id_allowlist` (defense-in-depth, #263): the
+chat_id round-trips from the on-disk request file through the daemon with
+no re-validation, so a chat removed from the allowlist while a request
+was in flight — or a notice forged in the 0700 dir — is dropped +
+removed (logging `:dispatch_result_rejected_unauthorized`) instead of
+relayed, mirroring the allowlist filtering on the nudge/reconnect paths.
 
 The consumer side is deliberately retry-safe. `Supervisor` removes a
 notice only after `safe_send_message` returns a sent result, so a

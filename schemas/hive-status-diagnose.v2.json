@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:status-diagnose:v2",
+  "title": "hive status --diagnose output (v2)",
+  "description": "Emitted by `hive status --diagnose <slug> [--write] --json`. Either a SuccessPayload (local diagnostic plus optional artifact path) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`. v2 adds task id and display_name fields.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "slug",
+        "id",
+        "display_name",
+        "task_folder",
+        "diagnostic",
+        "path"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-status-diagnose"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": true
+        },
+        "slug": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_folder": {
+          "type": "string"
+        },
+        "diagnostic": {
+          "description": "Mirrors the Diagnostic shape under hive-status.v2 `tasks[].diagnostic`. Inlined here so the schema validates standalone (JSONSchemer + most validators reject external URN refs without a registry).",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "Set only when `--write` was passed and the headless diagnose agent wrote diagnostics/red-status.md. Null otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "description": "Emitted by the top-level rescue in Hive::Commands::Status#call when --diagnose fails (unknown slug, ambiguous slug, agent profile misconfigured, headless agent failed/timed out).",
+      "properties": {
+        "schema": {
+          "const": "hive-status-diagnose"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "config",
+            "internal",
+            "error",
+            "stale_marker",
+            "in_flight",
+            "slug_not_found",
+            "ambiguous_slug"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "message": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": [
+              "project",
+              "stage",
+              "folder"
+            ],
+            "properties": {
+              "project": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "detail",
+        "source",
+        "source_path",
+        "artifact_paths",
+        "generated_by",
+        "marker_signature",
+        "suggested_next_action",
+        "updated_at"
+      ],
+      "properties": {
+        "summary": {
+          "description": "Single-line operator summary. Producer caps at 120 chars (TaskAction::DIAGNOSTIC_SUMMARY_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 120
+        },
+        "detail": {
+          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "marker",
+            "artifact"
+          ]
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "generated_by": {
+          "type": "string",
+          "enum": [
+            "local",
+            "claude",
+            "codex",
+            "pi"
+          ]
+        },
+        "marker_signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "suggested_next_action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "retry",
+                    "clear_marker",
+                    "manual_fix"
+                  ]
+                },
+                "command": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

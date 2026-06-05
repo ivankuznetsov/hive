@@ -14,6 +14,7 @@ module Hive
         poll_failure
         update_received
         update_rejected_unauthorized
+        dispatch_result_rejected_unauthorized
         notification_sent
         notification_skipped_dedupe
         notification_skipped_backoff

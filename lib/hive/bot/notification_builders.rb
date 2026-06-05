@@ -176,7 +176,7 @@ module Hive
         retryable = retryable_recovery?(row)
         Notification.new(
           text: [
-            "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
+            "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{display_title(row)}\"",
             cause_sentence_for(row),
             retryable ? "Tap Autofix to retry the stage cleanly." :
               "Tap Show details to see what needs manual intervention."
@@ -305,7 +305,19 @@ module Hive
       end
 
       def header(row)
-        "#{row.project}/#{row.slug} (#{row.stage})"
+        "#{display_title(row)} — #{TitleFormatter.stage_label(row.stage)}"
+      end
+
+      def display_title(row)
+        name = row.respond_to?(:display_name) ? row.display_name.to_s.strip : ""
+        id = row.respond_to?(:id) ? row.id : nil
+        if !name.empty? && id
+          "##{id} #{name}"
+        elsif !name.empty?
+          name
+        else
+          TitleFormatter.title_from_slug(row.slug)
+        end
       end
 
       def marker_with_attrs(row)

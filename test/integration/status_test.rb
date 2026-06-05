@@ -3,6 +3,7 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/status"
 require "hive/events"
+require "hive/task_meta"
 
 class StatusTest < Minitest::Test
   include HiveTestHelper
@@ -37,7 +38,47 @@ class StatusTest < Minitest::Test
         assert_includes out, "Ready to brainstorm"
         assert_includes out, "Needs your input"
         assert_includes out, "hive brainstorm"
+        assert_includes out, "#1"
+        assert_includes out, "#2"
         assert_includes out, "⏸"
+      end
+    end
+  end
+
+  def test_status_json_includes_slug_id_and_display_name
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "named status row").call }
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "named-status-row-*")].first
+        Hive::TaskMeta.update_display_name(folder, "Named Status Row")
+
+        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+        row = JSON.parse(out).dig("projects", 0, "tasks", 0)
+
+        assert_equal File.basename(folder), row["slug"]
+        assert_equal 1, row["id"]
+        assert_equal "Named Status Row", row["display_name"]
+      end
+    end
+  end
+
+  def test_status_text_uses_display_name_and_slug_fallback
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "pretty row").call }
+        capture_io { Hive::Commands::New.new(project, "fallback row").call }
+        pretty = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "pretty-row-*")].first
+        fallback = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "fallback-row-*")].first
+        Hive::TaskMeta.update_display_name(pretty, "Pretty Row")
+
+        out, = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, "#1 Pretty Row"
+        assert_includes out, "#2 #{File.basename(fallback)}"
       end
     end
   end

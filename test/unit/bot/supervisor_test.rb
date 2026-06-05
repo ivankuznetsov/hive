@@ -1345,6 +1345,30 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  # #263: a notice whose chat_id is not in the allowlist (chat removed
+  # while a request was in-flight, or a notice forged in the 0700 dir) is
+  # dropped + removed without relaying — defense-in-depth re-validation.
+  def test_drain_dispatch_results_drops_notice_for_unauthorized_chat
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 999, project: "hive", slug: "stuck-task",
+        request_id: "rq000099", exit_code: 4,
+        command: "hive markers clear stuck-task", state_home: home
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_empty @telegram.messages,
+                   "a notice for a non-allowlisted chat must not be relayed"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "the unauthorized notice must be removed, not left to retry forever"
+      rejected = @logger.events.find { |e| e[:name] == :dispatch_result_rejected_unauthorized }
+      refute_nil rejected, "the drop must be logged for an audit trail"
+      assert_equal 999, rejected[:payload][:chat_id]
+    end
+  end
+
   def test_drain_dispatch_results_removes_malformed_notice
     Dir.mktmpdir("hive-dispatch-result") do |home|
       @supervisor.instance_variable_set(:@dispatch_result_state_home, home)

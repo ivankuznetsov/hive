@@ -3,14 +3,15 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [command, bot, telegram, mobile, json]
 ---
 
 **TLDR**: `hive bot SUBCOMMAND` runs the Telegram mobile surface for
 human-input gates. It long-polls Telegram, ignores chats outside the
 global allowlist, renders waiting/status rows with inline buttons,
-captures new ideas including supported Telegram attachments, and
+captures new ideas including supported Telegram attachments and voice
+notes, and
 dispatches the same `hive` workflow verbs the daemon and CLI already
 use. It is not a second approval engine.
 
@@ -40,7 +41,7 @@ hive bot install [--force] [--json]
 |--------------|----------|
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
-| `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. |
+| `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note, shows a transcript confirmation keyboard, then asks for the project. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
@@ -61,6 +62,22 @@ The default caps are 20 MB per attachment and 10 attachments per draft;
 oversized, unsupported, and cap-reached media receive explicit refusal
 messages instead of being staged. On final capture, image attachments are
 embedded in `idea.md` and non-images are linked under `assets/`.
+
+Telegram voice notes are a parallel idea-capture input, not a slash
+command. `Telegram::Update#voice?` routes bare voice messages to
+`Router` intent `:idea_voice`, which returns a `transcribe_voice`
+descriptor for `Supervisor#execute_transcribe_voice`. The supervisor
+downloads the file through `getFile` + file download, sends the bytes to
+`Hive::Bot::Transcriber`, and stores the transcript in
+`IdeaDraftStore` with `origin: :voice` and phase
+`:awaiting_transcript_confirm`. The operator can tap `Confirm`, tap
+`Discard`, send corrected text, or send a replacement voice note. After
+confirmation, the normal project picker appears; if the voice draft has
+no attachments, choosing a project commits immediately without the
+file-collection `Done` step. If transcription is disabled, the bot asks
+for `/idea <text>` instead. If transcription fails after download, Hive
+stages the original `.oga` as an idea attachment and asks for the idea
+text, preserving the audio handoff.
 
 The `/status` (and `/queue`) reply lists actionable rows as
 `Title — Stage` text, and attaches an **inline keyboard** with one
@@ -145,6 +162,16 @@ bot:
   idea_draft_ttl_sec: 900
   idea_attachment_max_bytes: 20971520
   idea_attachment_max_count: 10
+  transcription:
+    enabled: true
+    endpoint: https://api.openai.com/v1/audio/transcriptions
+    model: whisper-1
+    api_key_env: HIVE_WHISPER_API_KEY
+    max_retries: 3
+    retry_backoff_sec: 2
+    timeout_sec: 120
+    no_speech_threshold: 0.6
+    supported_languages: [en, ru]
   alert_state_file: ~/.local/state/hive/.bot.alert_state.json
   recovery_reminder_window_sec: 28800
   pid_file: ~/.local/state/hive/.bot.pid
@@ -169,6 +196,12 @@ token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
 (exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
 silently.
 
+Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
+audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.
+`supported_languages: []` disables the language filter. The same
+`idea_attachment_max_bytes` cap gates the Telegram download before
+transcription.
+
 `hive bot start` also loads `~/.config/hive/.env` (next to `config.yml`)
 into `ENV` at startup so operators don't have to wire the token into a
 shell rc file. Format is the conventional `KEY=value` per line; outer
@@ -180,6 +213,7 @@ Example `~/.config/hive/.env`:
 
 ```
 HIVE_TELEGRAM_BOT_TOKEN=123456789:AAAAa-BBBb-CCCC
+HIVE_WHISPER_API_KEY=sk-...
 ```
 
 The file is read once at `hive bot start` time; `hive bot reload`

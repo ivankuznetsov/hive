@@ -3192,3 +3192,15 @@ TTL config.
 
 **Refreshed pages:**
 - [[commands/tui]]
+
+## [2026-06-05T22:45:00Z] bot — refresh voice idea command/API coverage
+
+**Action:** Refreshed command/API wiki coverage after the voice-idea implementation series (`e96e024b`, `1e61c1ff`, `9a79198a`, `a740bab7`, `21813bb2`, `b09a18db`, `6f7aa97b`, `89937845`) added Telegram voice metadata parsing, an OpenAI-compatible transcriber, transcription config validation, transcript-confirm draft state, router/callback confirm-edit-discard handling, supervisor transcription execution, transcript-only capture integration coverage, fallback audio retention, fake Telegram voice injection, and opt-in live Telegram voice E2E hooks. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "telegram voice idea confirmation bot router callback slash handlers"` returned no indexed hits, so verification used direct wiki/source reads. Inspected the committed diffs plus `lib/hive/bot/router.rb`, `lib/hive/bot/handlers/slash_handlers.rb`, `lib/hive/bot/handlers/callback_handlers.rb`, `lib/hive/bot/supervisor.rb`, `lib/hive/bot/transcriber.rb`, `lib/hive/bot/telegram.rb`, `lib/hive/bot/idea_draft_store.rb`, `lib/hive/config.rb`, `test/integration/bot/scenarios/s6_voice_idea_test.rb`, `test/eval/support/fake_telegram.rb`, and `test/e2e/tg/drive_idea.py`. Documented bare voice-note idea capture, transcript confirm/discard/edit/re-record callbacks, immediate commit after project selection for voice-only drafts, failed-transcription audio fallback, transcription config validation, Faraday multipart usage, env-only `HIVE_WHISPER_API_KEY`, and secret-gated E2E behavior. Recorded that live Telegram download and live OpenAI transcription smoke evidence is still missing unless the opt-in E2E is run with a real fixture/key. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[modules/config]]
+- [[architecture]]
+- [[dependencies]]
+- [[gaps]]

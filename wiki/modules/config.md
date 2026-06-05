@@ -7,7 +7,7 @@ updated: 2026-06-05
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol enrollment and PR handoff). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers` and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects and bot settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol enrollment and PR handoff). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -86,6 +86,22 @@ tags: [config, yaml, validation]
     "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
     "commands" => { "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil },
     "review" => { "max_context_files" => 24, "max_owned_files" => 12 }
+  },
+  "bot" => {
+    "idea_attachment_max_bytes" => 20 * 1024 * 1024,
+    "idea_attachment_max_count" => 10,
+    "idea_draft_ttl_sec" => 900,
+    "transcription" => {
+      "enabled" => true,
+      "endpoint" => "https://api.openai.com/v1/audio/transcriptions",
+      "model" => "whisper-1",
+      "api_key_env" => "HIVE_WHISPER_API_KEY",
+      "max_retries" => 3,
+      "retry_backoff_sec" => 2,
+      "timeout_sec" => 120,
+      "no_speech_threshold" => 0.6,
+      "supported_languages" => %w[en ru]
+    }
   }
 }
 ```
@@ -139,8 +155,16 @@ Runs after merge so a default value can never trigger a failure — only user in
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not
-exceed Telegram's hosted Bot API file-download cap, `bot.idea_attachment_max_count`
-defaults to 10, and `bot.idea_draft_ttl_sec` defaults to 900 seconds. See
+exceed Telegram's hosted Bot API file-download cap,
+`bot.idea_attachment_max_count` defaults to 10, and
+`bot.idea_draft_ttl_sec` defaults to 900 seconds. Voice transcription
+settings live under `bot.transcription`: the block must be a Hash;
+`enabled` must be boolean when present; `endpoint`, `model`, and
+`api_key_env` must be non-empty strings; `max_retries`,
+`retry_backoff_sec`, and `timeout_sec` must be integers >= 0;
+`no_speech_threshold` must be a number between 0 and 1; and
+`supported_languages` must be an array of non-empty strings. An empty
+language array is accepted and means "do not filter language". See
 [[commands/bot]] and [[modules/bot]].
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].

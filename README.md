@@ -167,6 +167,8 @@ hive bot stop        # stop the background bot
 
 If the bot stays silent, check `hive bot tail`, confirm the allowlist contains the numeric chat id, and send a fresh Telegram message before rerunning `getUpdates`. A Telegram `404 Not Found` usually means the token is missing or mistyped. If a token leaks, rotate it in `@BotFather` with `/revoke` and restart `hive bot`.
 
+Voice-note idea capture also needs an OpenAI-compatible transcription key. Put it in the same env file as the Telegram token, for example `HIVE_WHISPER_API_KEY=...`; the key is read from the environment and is never written into Hive config.
+
 ## Drive Hive From Your Coding Agent
 
 Hive's other primary surface is a coding agent — Claude Code, Codex, Gemini, Pi, or anything that can read terminal output and run shell commands. You describe intent in natural language ("brainstorm the bookmark service idea", "run review on the failing task and report the findings"), the agent translates that into `hive <verb>` calls, and you watch the result in the TUI or read the markdown artefacts directly. Every workflow verb supports `--json` and emits a typed envelope (schemas under [schemas/](schemas/), contract in [docs/cli.md#json-output](docs/cli.md#json-output)), so agent-side parsing is structured rather than scraped.

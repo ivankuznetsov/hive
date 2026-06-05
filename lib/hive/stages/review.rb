@@ -402,21 +402,21 @@ module Hive
             # the all-clean signal from the surviving reviewers is
             # NOT proof that the worktree is clean — it only proves
             # the reviewers that ran found nothing. Surface as a
-            # REVIEW_WAITING reason=reviewer_partial_failure so the
-            # user decides whether to (a) re-run hoping the failed
-            # reviewer recovers, (b) accept the partial coverage by
-            # clearing the marker, or (c) edit the reviewer config.
+            # recoverable REVIEW_ERROR rather than REVIEW_WAITING:
+            # no user answer is required; the right default action is
+            # clearing the error marker and rerunning reviewers.
             errors_path = File.join(
               ctx_pass.task_folder,
               "reviews",
               "errors-#{format('%02d', pass)}.md"
             )
             if File.exist?(errors_path)
-              Hive::Markers.set(task.state_file, :review_waiting,
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :reviewers,
                                 reason: "reviewer_partial_failure",
                                 pass: pass)
-              return { commit: "review_waiting_reviewer_partial_failure_pass_#{format('%02d', pass)}",
-                       status: :review_waiting }
+              return { commit: "review_error_reviewer_partial_failure_pass_#{format('%02d', pass)}",
+                       status: :review_error }
             end
 
             # Phase 2 produced zero findings → skip Phase 4, jump to Phase 5.
@@ -798,9 +798,11 @@ module Hive
       #                         the operator has not edited escalations
       #                         since; the runner moved past pass N cleanly.
       #   :triage_incomplete  — reviewer files for pass N exist but no
-      #                         `escalations-NN.md`. Triage never ran.
-      #                         Retry runs Phase 2/3 to re-derive
-      #                         escalations from existing reviewer files.
+      #                         `escalations-NN.md`, or
+      #                         `errors-NN.md` records reviewer infra
+      #                         failures for the pass. Retry runs Phase
+      #                         2/3 so failed reviewers get a fresh
+      #                         attempt and stale errors are cleared.
       #   :fix_incomplete     — reviewer files AND escalations-NN.md
       #                         exist, but neither the fix-success
       #                         sentinel nor any pass-N+1 reviewer file
@@ -824,6 +826,9 @@ module Hive
         return :complete if reviewer_files.empty?
 
         escalations_path = File.join(reviews_dir, "escalations-#{pass_suffix}.md")
+        errors_path = File.join(reviews_dir, "errors-#{pass_suffix}.md")
+        return :triage_incomplete if File.exist?(errors_path)
+
         unless File.exist?(escalations_path)
           return :triage_incomplete
         end

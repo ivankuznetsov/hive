@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T13:30:00Z] review - classify partial reviewer failure as recovery
+
+**Action:** Changed mixed reviewer success/failure with no findings from `REVIEW_WAITING reason=reviewer_partial_failure` to `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure`. This keeps the safety invariant that partial reviewer coverage must not auto-complete, but classifies the task as recoverable review infrastructure failure instead of user input. Status diagnostics already include `reviews/errors-NN.md`, so retry/autofix flows can clear `REVIEW_ERROR` and rerun reviewers.
+
+**Refreshed pages:**
+- [[stages/review]]
+- [[commands/run]]
+- [[modules/markers]]
+
 ## [2026-06-05T13:30:00Z] patrol - make `continuous` the default trigger
 
 **Action:** Flipped the default `patrol.trigger` from `new_commits` to `continuous` so patrol keeps mining existing feature slices on the `poll_interval_sec` timer (in addition to default-branch SHA changes) out of the box. Changed `Config::DEFAULTS["patrol"]["trigger"]`, the `PatrolScheduler#due?` fetch fallback, the init template (`templates/project_config.yml.erb`, with an inline mode comment), and the `config_test` default assertion. Refreshed [[commands/patrol]], [[modules/patrol]], and `docs/cli.md` to mark `continuous` as the default. `new_commits` / `timer` remain opt-in.
@@ -157,7 +166,6 @@ Refreshed [[commands/tui]] and [[modules/daemon]]. Tests + rubocop clean. Did no
 - **Tests:** Coverage includes the multi-tick re-fire lifecycle, suppressed rows leaving no dedup entry, logged suppression, `review_waiting`, nil/empty store, partial expiry across chats, project scoping, and concurrent access.
 
 **Pages:** [[modules/bot]]
-
 ## [2026-06-03T11:05:00Z] babysitter - skip draft PRs explicitly
 
 **Action:** Fixed the babysitter PR selector so GitHub draft PRs are skipped before worktree materialization and agent spawn. The prior label filter treated `draft` as a label, but GitHub exposes draft state as `isDraft`; live babysitter activity showed draft PR #278 being selected despite `labels_ignore: [draft]`. Added the `draft_pr` skipped event outcome and focused ProjectTick coverage.

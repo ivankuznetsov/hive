@@ -1467,7 +1467,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_reviewer_partial_failure_with_no_findings_yields_review_waiting
+  def test_reviewer_partial_failure_with_no_findings_yields_review_error
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
@@ -1486,14 +1486,52 @@ class RunReviewTest < Minitest::Test
               status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
             )
           }) do
-            capture_io { Hive::Commands::Run.new(folder).call }
+            _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+            assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
           end
         end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_waiting, marker.name
+        assert_equal :review_error, marker.name
+        assert_equal "reviewers", marker.attrs["phase"]
         assert_equal "reviewer_partial_failure", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_cleared_reviewer_partial_failure_retries_reviewers
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        reviews = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews)
+        File.write(File.join(reviews, "stub-reviewer-01.md"), "# Clean\n")
+        File.write(File.join(reviews, "errors-01.md"), "# Reviewer infra errors for pass 01\n")
+        File.write(File.join(reviews, "escalations-01.md"), "# Escalations for pass 01\n")
+
+        calls = 0
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **_kwargs|
+          calls += 1
+          File.write(File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md"), "# Clean retry\n")
+          FileUtils.rm_f(File.join(ctx.task_folder, "reviews", "errors-01.md"))
+          :ok
+        }) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+            escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
+            File.write(escalations, "# Escalations for pass 01\n")
+            Hive::Stages::Review::Triage::Result.new(
+              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
+            )
+          }) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        assert_equal 1, calls
+        refute File.exist?(File.join(reviews, "errors-01.md"))
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
       end
     end
   end

@@ -139,6 +139,13 @@ bot-originated daemon child exits non-zero or with a nil exit status
 `Supervisor#reaper_loop` calls `drain_dispatch_results`, which relays
 those notices back to the originating chat as
 `<slug>: hive <verb> failed (exit N)` or `killed (signal/timeout)`.
+Before relaying, `drain_dispatch_results` re-checks each notice's
+`chat_id` against `chat_id_allowlist` (defense-in-depth, #263): the
+chat_id round-trips from the on-disk request file through the daemon with
+no re-validation, so a chat removed from the allowlist while a request
+was in flight — or a notice forged in the 0700 dir — is dropped +
+removed (logging `:dispatch_result_rejected_unauthorized`) instead of
+relayed, mirroring the allowlist filtering on the nudge/reconnect paths.
 
 The consumer side is deliberately retry-safe. `Supervisor` removes a
 notice only after `safe_send_message` returns a sent result, so a

@@ -731,6 +731,12 @@ module Hive
       78 (CONFIG) when `enable`/`disable` reads malformed config.yml or
       rejects an inline-flow / non-2-space-indented `daemon:` block.
 
+      `queue` exit codes: `list` and `prune` exit 0; `show <id>` exits 0
+      when the request is found and 1 when it isn't; any `queue` action
+      exits 64 (USAGE) on an unknown action or a missing `show` REQUEST_ID,
+      and 70 (SOFTWARE) on an internal IO/parse error (the `--json`
+      hive-daemon-queue.v1 error envelope carries the same `error_kind`).
+
       See `wiki/commands/daemon.md`, `wiki/operating.md`, and ADR-024.
     DESC
     option :detach, type: :boolean, default: false, desc: "fork to background after start"

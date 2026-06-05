@@ -3591,3 +3591,12 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[e2e]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-05T16:25:44Z] wiki/e2e — audit residual e2e wiki refresh commit
+
+**Action:** Audited commit `654e25cd` after it committed residual wiki refresh changes for the `bin/hive-e2e` usage-exit contract. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e usage exit-code e2e testing gaps"` returned no indexed hits, so verification used the committed wiki diff plus direct reads of `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], and [[testing]]. Confirmed page coverage did not change, kept [[index]] unchanged, and added the current human-mode stderr prefix expectation (`hive-e2e:`). Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[log]]

@@ -110,6 +110,52 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_continuous_mode_dispatches_when_default_branch_changes_even_before_timer
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "continuous",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 599).utc.iso8601, "last_scanned_sha" => "old")
+      git = FakeGit.new(sha: "new")
+
+      dispatches = scheduler(project_entry(dir), cfg, git: git).tick(now: T0)
+
+      assert_equal 1, dispatches.size
+    end
+  end
+
+  def test_continuous_mode_dispatches_when_timer_elapses_without_new_commits
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "continuous",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 600).utc.iso8601, "last_scanned_sha" => "same")
+      git = FakeGit.new(sha: "same")
+
+      dispatches = scheduler(project_entry(dir), cfg, git: git).tick(now: T0)
+
+      assert_equal 1, dispatches.size
+    end
+  end
+
+  def test_continuous_mode_waits_when_timer_and_sha_are_unchanged
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("patrol" => {
+        "enabled" => true,
+        "trigger" => "continuous",
+        "poll_interval_sec" => 600
+      })
+      write_state(dir, "last_run_at" => (T0 - 599).utc.iso8601, "last_scanned_sha" => "same")
+      git = FakeGit.new(sha: "same")
+
+      assert_empty scheduler(project_entry(dir), cfg, git: git).tick(now: T0)
+    end
+  end
+
   def test_disabled_project_never_dispatches
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => { "enabled" => false })

@@ -162,7 +162,7 @@ daemon:
 
 patrol:
   enabled: false
-  trigger: new_commits       # or `timer`
+  trigger: continuous        # or `new_commits` / `timer`
   poll_interval_sec: 600
   agent: claude
   min_confidence_to_fix: medium

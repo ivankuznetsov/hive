@@ -1555,7 +1555,7 @@ module Hive
       end
     end
 
-    PATROL_TRIGGERS = %w[new_commits timer].freeze
+    PATROL_TRIGGERS = %w[new_commits timer continuous].freeze
     PATROL_CONFIDENCE_LEVELS = %w[low medium high].freeze
     PATROL_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 60 ],

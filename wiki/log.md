@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T09:30:00Z] patrol - continuous hybrid trigger
+
+**Action:** Added and documented `patrol.trigger: continuous`, a hybrid daemon scheduling mode that dispatches patrol when either the default branch SHA changed or `poll_interval_sec` elapsed. This keeps large repositories under active patrol between infrequent merges while preserving the `last_scanned_sha` freshness marker after each successful scan. Updated [[commands/patrol]] and [[modules/patrol]].
+
 ## [2026-06-05T09:10:00Z] babysitter - refresh rebased PR-head cache refs
 
 **Action:** Documented the babysitter worktree fix that force-refreshes internal `refs/hive-babysitter/pr-*` cache refs when fetching `pull/<PR>/head`. The refs are Hive-owned cache refs, not user branches, so force-updating them is the correct behavior when a PR branch is rebased or force-pushed; otherwise `git fetch pull/<PR>/head:refs/hive-babysitter/pr-<PR>` can fail with a non-fast-forward reject and leave babysitter unable to inspect that PR. Updated [[modules/babysitter]].

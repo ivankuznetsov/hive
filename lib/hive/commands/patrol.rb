@@ -119,6 +119,11 @@ module Hive
       def skip_reason(finding, fingerprints, dismissed, cfg)
         return "dismissed" if Hive::Patrol::Fingerprint.dismissed?(dismissed, finding.fingerprint)
         return "existing_pr" if Hive::Patrol::Fingerprint.known_active?(fingerprints, finding.fingerprint)
+        # The exact fingerprint above only catches byte-identical re-files.
+        # The similarity gate catches the common case: the agent re-words
+        # the same issue (different feature/title/snippet) each scan, so its
+        # fingerprint differs and it would otherwise be re-opened forever.
+        return "similar_to_existing" if Hive::Patrol::Fingerprint.similar_known?(fingerprints, dismissed, finding)
         return "low_confidence" unless Hive::Patrol::Fingerprint.fixable_confidence?(finding, cfg.dig("patrol", "min_confidence_to_fix"))
         return "low_severity" unless FIXABLE_SEVERITIES.include?(finding.severity.to_s)
 

@@ -66,6 +66,8 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
 
     def terminate_all(grace_sec: 600); end
 
+    def enforce_timeouts(now:) = [] # #252: dispatcher calls this each tick
+
     def in_flight_count
       @spawned.size
     end

@@ -147,11 +147,11 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
-  # R2 A3/A6 + global E2E rule #10: patrol is PR-only. It must never write
-  # a task into any pipeline stage folder — especially the 1-inbox intake
-  # that `hive add` uses. Everything patrol records lives under
-  # .hive-state/patrol/.
-  def test_patrol_writes_nothing_under_a_stage_folder
+  # Patrol must never write findings to the 1-inbox intake. Opened patrol
+  # PRs may create synthetic 6-review tasks via PrOpener/ReviewHandoff;
+  # this command-level test uses a fake opener, so only patrol's own state
+  # tree is expected.
+  def test_patrol_writes_nothing_under_inbox
     with_patrol_project do |repo|
       feature = sample_feature
       finding = sample_finding
@@ -172,10 +172,8 @@ class PatrolCommandTest < Minitest::Test
 
       assert_empty Dir.glob(File.join(repo, "**", "1-inbox"), File::FNM_DOTMATCH),
                    "patrol must not create any */1-inbox/ stage folder"
-      refute Dir.exist?(File.join(repo, ".hive-state", "stages")),
-             "patrol must not create the pipeline stages tree"
       assert Dir.exist?(File.join(repo, ".hive-state", "patrol")),
-             "patrol records its run under .hive-state/patrol/, not a stage folder"
+             "patrol records scan state under .hive-state/patrol/"
     end
   end
 

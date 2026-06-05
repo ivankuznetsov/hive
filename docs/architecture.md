@@ -168,7 +168,8 @@ patrol:
   min_confidence_to_fix: medium
   max_findings_per_feature: 10
   max_prs_per_cycle: 3
-  draft_prs: true
+  draft_prs: false
+  review_prs: true
   commands:
     format: null
     lint: null

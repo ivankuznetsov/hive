@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T09:45:00Z] patrol - hand opened PRs to 6-review
+
+**Action:** Documented the new `patrol.review_prs` default: successful patrol PRs now keep their validated worktree and create a synthetic `6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`. This routes patrol-created PRs through the standard review/TUI/daemon flow instead of leaving them as PR-only outputs. Projects can set `patrol.review_prs: false` to keep the previous cleanup-only behavior. Updated [[commands/patrol]] and [[modules/patrol]].
+
 ## [2026-06-05T09:10:00Z] babysitter - refresh rebased PR-head cache refs
 
 **Action:** Documented the babysitter worktree fix that force-refreshes internal `refs/hive-babysitter/pr-*` cache refs when fetching `pull/<PR>/head`. The refs are Hive-owned cache refs, not user branches, so force-updating them is the correct behavior when a PR branch is rebased or force-pushed; otherwise `git fetch pull/<PR>/head:refs/hive-babysitter/pr-<PR>` can fail with a non-fast-forward reject and leave babysitter unable to inspect that PR. Updated [[modules/babysitter]].

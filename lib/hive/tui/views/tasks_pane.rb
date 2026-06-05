@@ -86,7 +86,7 @@ module Hive
 
         def build_body(model, inner_width)
           lines = []
-          lines << Styles::HEADER.render(truncate(title_for(model), inner_width))
+          lines << Styles::HEADER.render(Format.truncate(title_for(model), inner_width))
           lines << ""
 
           if model.snapshot.nil?
@@ -234,13 +234,6 @@ module Hive
           return "ERROR #{reason}" unless reason.empty?
 
           row.action_label.to_s
-        end
-
-        # Local alias so call sites in this module keep their concise
-        # `truncate(...)` shape; delegates to the shared Format helper
-        # so ProjectsPane and TasksPane never drift on truncation rules.
-        def truncate(label, max_width)
-          Format.truncate(label, max_width)
         end
 
         # Predicate exposed for unit tests because lipgloss-ruby strips

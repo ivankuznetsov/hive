@@ -70,7 +70,7 @@ class HiveBotTranscriberTest < Minitest::Test
       logger: @logger,
       http_client: http,
       env: @env,
-      sleep_proc: ->(_sec) {}
+      sleep_proc: ->(_sec) { }
     )
   end
 

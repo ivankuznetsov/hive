@@ -3220,3 +3220,13 @@ TTL config.
 - [[testing]]
 - [[active-areas]]
 - [[gaps]]
+
+## [2026-06-05T21:01:57Z] patrol — document review handoff evidence rendering
+
+**Action:** Refreshed command/API wiki coverage after commit `789e9148` hardened `Hive::Patrol::ReviewHandoff` evidence rendering and DRY'd synthetic `idea.md` text generation. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured master wiki index first; `qmd search "patrol review handoff evidence idea.md"` returned no indexed results. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/finding.rb`, sibling evidence handling in `fingerprint.rb` / `pr_opener.rb`, and `test/unit/patrol/review_handoff_test.rb`. Documented that patrol-originated synthetic review tasks seed `idea.md` from one computed finding body, tolerate nil/empty evidence, render no-location fallback evidence rows, and preserve symbol-keyed evidence locations. Extended the existing live-smoke gap for patrol-to-review handoff. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/patrol]]
+- [[commands/patrol]]
+- [[testing]]
+- [[gaps]]

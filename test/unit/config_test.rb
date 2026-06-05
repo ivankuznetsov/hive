@@ -1919,6 +1919,7 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
       assert_equal 30,    cfg.dig("daemon", "poll_interval_sec")
+      assert_equal 1,     cfg.dig("daemon", "fast_poll_sec")
       assert_equal 30,    cfg.dig("daemon", "edit_debounce_sec")
       assert_equal 300,   cfg.dig("daemon", "pr_merge_poll_interval_sec")
       assert_equal 3,     cfg.dig("daemon", "max_concurrent_runs")
@@ -1996,6 +1997,7 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg.dig("daemon", "enabled")
       # Other daemon defaults should still come from DEFAULTS via deep-merge.
       assert_equal 30, cfg.dig("daemon", "poll_interval_sec")
+      assert_equal 1, cfg.dig("daemon", "fast_poll_sec")
     end
   end
 
@@ -2038,6 +2040,18 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/daemon.poll_interval_sec.*>= 5/, err.message)
+    end
+  end
+
+  def test_load_rejects_too_small_daemon_fast_poll
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          fast_poll_sec: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.fast_poll_sec.*>= 1/, err.message)
     end
   end
 
@@ -2126,6 +2140,7 @@ class ConfigTest < Minitest::Test
       File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
       cfg = Hive::Config.load_global_daemon
       assert_equal 30, cfg["poll_interval_sec"]
+      assert_equal 1, cfg["fast_poll_sec"]
       assert_equal 3, cfg["max_concurrent_runs"]
       assert_equal 50, cfg["max_runs_per_day_per_project"]
     end
@@ -2137,11 +2152,13 @@ class ConfigTest < Minitest::Test
         registered_projects: []
         daemon:
           poll_interval_sec: 60
+          fast_poll_sec: 2
           max_concurrent_runs: 8
           log_max_bytes: 524288
       YAML
       cfg = Hive::Config.load_global_daemon
       assert_equal 60,     cfg["poll_interval_sec"]
+      assert_equal 2,      cfg["fast_poll_sec"]
       assert_equal 8,      cfg["max_concurrent_runs"]
       assert_equal 524_288, cfg["log_max_bytes"]
       # Unspecified keys still pull from defaults
@@ -2159,6 +2176,18 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
       assert_match(/daemon.poll_interval_sec.*>= 5/, err.message)
+    end
+  end
+
+  def test_load_global_daemon_validates_fast_poll
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        daemon:
+          fast_poll_sec: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+      assert_match(/daemon.fast_poll_sec.*>= 1/, err.message)
     end
   end
 
@@ -2181,6 +2210,7 @@ class ConfigTest < Minitest::Test
       ENV["HIVE_HOME"] = dir
       cfg = Hive::Config.load_global_daemon
       assert_equal 30, cfg["poll_interval_sec"]
+      assert_equal 1, cfg["fast_poll_sec"]
     ensure
       ENV["HIVE_HOME"] = old
     end

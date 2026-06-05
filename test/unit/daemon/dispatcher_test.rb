@@ -30,8 +30,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # ── fakes ─────────────────────────────────────────────────────────────
 
   class FakeStatusConsumer
+    attr_reader :fetch_count
     attr_writer :next_result
+
+    def initialize
+      @fetch_count = 0
+    end
+
     def fetch
+      @fetch_count += 1
       @next_result || Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [], error: nil)
     end
   end
@@ -1068,7 +1075,7 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   dispatcher.define_singleton_method(:install_signal_handlers!) { true }
   dispatcher.define_singleton_method(:reload_config!) { reloads += 1 }
   dispatcher.define_singleton_method(:interruptible_sleep) { |seconds| sleeps << seconds }
-  dispatcher.define_singleton_method(:tick) do
+  dispatcher.define_singleton_method(:tick) do |now: Time.now|
     ticks += 1
     request_reload! if ticks == 1
     request_shutdown! if ticks == 2
@@ -1078,10 +1085,123 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
 
   assert_equal 2, ticks
   assert_equal 1, reloads
-  assert_equal [ 30, 30 ], sleeps
+  assert_equal [ 1, 1 ], sleeps
   assert events_include?(logger, :dispatcher_started)
   assert events_include?(logger, :dispatcher_stopping)
   assert_equal 0, supervisor.spawned.size
+end
+
+def test_run_forever_escalates_to_full_tick_when_cheap_probe_detects_change
+  # Drive the fast-poll escalation branch in run_forever (dispatcher.rb
+  # 323-324): on a fast poll where no full tick is due, a cheap probe
+  # that detects a change must run a full `tick`. The full tick is
+  # observable via the real per-row dispatch spawning a child.
+  rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+  dispatcher, supervisor, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:recover_dispatch_claims) { |now:| nil }
+
+  # No full tick is due on this iteration; the cheap probe says a change
+  # was detected, so the elsif branch must fire a full tick.
+  dispatcher.define_singleton_method(:full_tick_due?) { |_now| false }
+  probe_calls = 0
+  dispatcher.define_singleton_method(:cheap_probe_requires_full_tick?) do |now:|
+    probe_calls += 1
+    true
+  end
+  # Stop after the single escalated tick so the loop terminates.
+  dispatcher.define_singleton_method(:interruptible_sleep) do |_seconds|
+    request_shutdown!
+  end
+
+  dispatcher.run_forever
+
+  assert_equal 1, probe_calls, "the cheap probe must be consulted on the fast-poll iteration"
+  assert_equal 1, supervisor.spawned.size,
+               "a cheap probe detecting a change must escalate to a full tick that dispatches"
+  assert_equal "hive plan s1 --from 2-brainstorm", supervisor.spawned.first[:command]
+  assert events_include?(logger, :dispatched)
+end
+
+def test_run_forever_skips_escalated_tick_when_shutdown_requested_mid_probe
+  # The escalated tick is guarded by `unless @shutdown || @reload`
+  # (dispatcher.rb 324): if shutdown is requested while the cheap probe
+  # runs, the full tick must NOT fire.
+  rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+  dispatcher, supervisor, _ctrl, _logger, _mw = make_dispatcher(rows: rows)
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:recover_dispatch_claims) { |now:| nil }
+  dispatcher.define_singleton_method(:full_tick_due?) { |_now| false }
+  dispatcher.define_singleton_method(:cheap_probe_requires_full_tick?) do |now:|
+    # Simulate a shutdown signal landing while the probe runs.
+    request_shutdown!
+    true
+  end
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+  dispatcher.run_forever
+
+  assert_equal 0, supervisor.spawned.size,
+               "shutdown mid-probe must suppress the escalated full tick"
+end
+
+def test_fast_probe_does_not_fetch_status_when_idle_and_mtimes_unchanged
+  folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+  state_file = File.join(folder, "brainstorm.md")
+  File.write(state_file, "WAITING\n")
+  status_row = row(
+    stage: "2-brainstorm", action: "needs_input", command: "hive brainstorm s1",
+    folder: folder, state_file: state_file, mtime: File.mtime(state_file)
+  )
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher(rows: [ status_row ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  dispatcher.tick(now: T0)
+  assert_equal 1, status.fetch_count
+
+  refute dispatcher.send(:cheap_probe_requires_full_tick?, now: T0 + 1)
+  assert_equal 1, status.fetch_count, "fast probe must not run the expensive status scan"
+end
+
+def test_fast_probe_requests_full_tick_when_tracked_state_file_mtime_changes
+  folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+  state_file = File.join(folder, "brainstorm.md")
+  File.write(state_file, "WAITING\n")
+  status_row = row(
+    stage: "2-brainstorm", action: "needs_input", command: "hive brainstorm s1",
+    folder: folder, state_file: state_file, mtime: File.mtime(state_file)
+  )
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher(rows: [ status_row ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  dispatcher.tick(now: T0)
+  File.utime(Time.now + 5, Time.now + 5, state_file)
+
+  assert dispatcher.send(:cheap_probe_requires_full_tick?, now: T0 + 1)
+  assert_equal 1, status.fetch_count, "mtime probe should request a full tick without fetching itself"
+end
+
+def test_fast_probe_reaps_child_exit_before_requesting_full_tick
+  dispatcher, sup, controller, logger, _mw = make_dispatcher(rows: [])
+  dispatch_time = T0 - 10
+  controller.record_dispatch(
+    pid: 123, project: "p1", slug: "s1", stage: "4-execute",
+    command: "hive develop s1", started_at: dispatch_time, state_file_mtime: nil
+  )
+  exited = ChildExit.new(
+    pid: 123, exit_code: Hive::ExitCodes::SUCCESS, project: "p1", slug: "s1",
+    stage: "4-execute", command: "hive develop s1", state_file_path: nil,
+    started_at: dispatch_time, finished_at: T0, json_envelope: nil, request_id: nil
+  )
+  sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  assert dispatcher.send(:cheap_probe_requires_full_tick?, now: T0)
+  assert_equal 0, controller.in_flight_count
+  assert_equal 0, status.fetch_count
+  assert events_include?(logger, :child_exited)
 end
 
 def test_request_methods_flip_lifecycle_flags
@@ -1137,6 +1257,121 @@ def test_refresh_post_completion_mtime_records_existing_state_file
     assert_equal File.mtime(state_file),
                  ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
   end
+end
+
+def test_success_completion_then_followup_tick_does_not_redispatch_same_stage
+  # Plan Unit 1 end-to-end scenario: simulate a SUCCESS where the
+  # post-completion mtime refresh has run, then assert the next
+  # decision does NOT re-dispatch the same completed stage. This is the
+  # single regression that stands in for the deleted SUCCESS cooldown.
+  # Its two halves are proven separately elsewhere — the refresh bumps
+  # the baseline (test_refresh_post_completion_mtime_records_existing_state_file)
+  # and the baseline gates the edit decision (the baseline_recorded /
+  # observe_state_file_mtime tests) — here they run as one flow.
+  folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+  state_file = File.join(folder, "brainstorm.md")
+  File.write(state_file, "## Round 1\n\n<!-- WAITING -->\n")
+  # The agent's post-completion write left the mtime at this value.
+  agent_write = T0 - 1
+  File.utime(agent_write, agent_write, state_file)
+
+  edit_row = row(
+    stage: "2-brainstorm", action: "needs_input", marker: "waiting",
+    command: "hive brainstorm s1 --from 2-brainstorm",
+    mtime: File.mtime(state_file), state_file: state_file, folder: folder
+  )
+  dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: [ edit_row ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  # The daemon dispatched a runner for this stage on an earlier tick;
+  # seed the in-flight entry with a STALE baseline (pre-agent-write).
+  ctrl.record_dispatch(
+    pid: 999, project: "p1", slug: "s1", stage: "2-brainstorm",
+    command: "hive brainstorm s1 --from 2-brainstorm",
+    started_at: T0 - 100, state_file_mtime: T0 - 600
+  )
+
+  # Tick 1 reaps the SUCCESS child. refresh_post_completion_mtime bumps
+  # the baseline from the stale T0-600 to the file's CURRENT
+  # (post-completion) mtime.
+  reaped = false
+  sup.define_singleton_method(:reap_all) do |now:|
+    next [] if reaped
+
+    reaped = true
+    [ ChildExit.new(pid: 999, exit_code: Hive::ExitCodes::SUCCESS,
+                    project: "p1", slug: "s1", stage: "2-brainstorm",
+                    command: "hive brainstorm s1 --from 2-brainstorm",
+                    state_file_path: state_file, started_at: T0 - 100,
+                    finished_at: T0, json_envelope: nil) ]
+  end
+  dispatcher.tick(now: T0)
+
+  assert_equal File.mtime(state_file).to_i,
+               ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1").to_i,
+               "post-completion refresh must seed the baseline to the agent's last write"
+  spawned_after_reap = sup.spawned.size
+
+  # Tick 2 (the follow-up): same row, mtime unchanged. Policy sees
+  # mtime == baseline → :skip. The already-completed stage is NOT
+  # re-dispatched.
+  status.next_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ edit_row ],
+    projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "p1", legacy_stage_dirs: []) ],
+    error: nil
+  )
+  dispatcher.tick(now: T0 + 1)
+
+  assert_equal spawned_after_reap, sup.spawned.size,
+               "follow-up tick must NOT re-dispatch the just-completed stage"
+end
+
+def test_reaped_success_dispatches_successor_within_2s_wall_budget
+  # Plan Unit 2: pin the ≤2s end-to-end latency bound as a single test
+  # with an injected clock. The bound is composed of (a) the fast-poll
+  # probe detecting the child exit within one fast_poll_sec, and (b) the
+  # triggered full tick reaping the SUCCESS and dispatching its
+  # successor in the SAME tick (zero extra wall). fast_poll_sec defaults
+  # to 1, so the worst case is one sleep (~1s) plus a same-instant
+  # dispatch — comfortably inside 2s.
+  fast_poll_sec = 1
+  t_exit = T0
+
+  # A row ready to advance to its successor stage. When the predecessor
+  # child exits, the fast-probe-triggered tick dispatches this.
+  successor = row(stage: "2-brainstorm", action: "ready_to_plan",
+                  command: "hive plan s1 --from 2-brainstorm")
+  dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: [ successor ])
+
+  # Predecessor in-flight; its SUCCESS exit is queued for the next reap.
+  ctrl.record_dispatch(pid: 777, project: "p1", slug: "s1",
+                       stage: "2-brainstorm", command: "hive brainstorm s1",
+                       started_at: t_exit - 100, state_file_mtime: nil)
+  reaped = false
+  sup.define_singleton_method(:reap_all) do |now:|
+    next [] if reaped
+
+    reaped = true
+    [ ChildExit.new(pid: 777, exit_code: Hive::ExitCodes::SUCCESS,
+                    project: "p1", slug: "s1", stage: "2-brainstorm",
+                    command: "hive brainstorm s1", state_file_path: nil,
+                    started_at: t_exit - 100, finished_at: now, json_envelope: nil) ]
+  end
+
+  # Injected clock: the worst-case probe fires one fast_poll_sec after
+  # the child exits (the loop had just slept when the exit landed).
+  t_probe = t_exit + fast_poll_sec
+  assert dispatcher.send(:cheap_probe_requires_full_tick?, now: t_probe),
+         "child-exit must trip the cheap probe within one fast-poll tick"
+
+  # The probe trips a full tick at the same instant; it dispatches the
+  # successor stage.
+  t_dispatch = t_probe
+  dispatcher.tick(now: t_dispatch)
+
+  assert_equal 1, sup.spawned.size, "the reaped SUCCESS must dispatch its successor"
+  assert_operator (t_dispatch - t_exit), :<=, 2.0,
+                  "end-to-end child-exit→successor-dispatch must stay within the 2s wall budget"
 end
 
 def test_resolve_post_completion_path_finds_advanced_stage_state_file
@@ -2285,6 +2520,26 @@ end
     assert_equal "term", attrs[:action]
     assert_equal 7300, attrs[:elapsed_sec]
     assert_equal 7200, attrs[:timeout_sec]
+  end
+
+  def test_safe_mtime_returns_nil_when_mtime_raises_on_existing_path
+    # dispatcher.rb 566: File.exist? can race File.mtime — the file may
+    # vanish (or otherwise error) between the existence check and the
+    # stat. The rescue must degrade to nil rather than propagate.
+    dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+
+    Dir.mktmpdir("dispatcher-safe-mtime") do |dir|
+      path = File.join(dir, "vanishing.md")
+      File.write(path, "x\n")
+      with_replaced_singleton_method(File, :mtime, lambda { |arg|
+        raise Errno::ENOENT, arg if arg == path
+
+        File.stat(arg).mtime
+      }) do
+        assert_nil dispatcher.send(:safe_mtime, path),
+                   "safe_mtime must return nil when File.mtime raises after File.exist? passed"
+      end
+    end
   end
 
   def test_enforce_child_timeouts_noop_when_supervisor_lacks_method

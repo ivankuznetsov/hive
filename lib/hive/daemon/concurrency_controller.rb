@@ -19,13 +19,11 @@ module Hive
     # safer than persisting bad state across restarts and worse only
     # when the same task is genuinely permanently broken.
     class ConcurrencyController
-      # Default cooldown after a SUCCESS exit. Prevents a happy task
-      # from re-firing on the next tick before the user sees the result.
-      # 60s gives the operator one full TUI polling cycle to notice the
-      # transition before the daemon advances to the next stage. The
-      # original value (300s) felt too long when watching live — see
-      # commit message for the brainstorm-→-plan handoff incident.
-      SUCCESS_COOLDOWN_SEC = 60
+      # Protective backoff after a WRONG_STAGE exit. WRONG_STAGE usually
+      # means another actor advanced the task or classification raced a
+      # marker change, so backing off avoids retry churn while the next
+      # status scan catches up.
+      WRONG_STAGE_BACKOFF_SEC = 60
 
       # Transient-failure backoff schedule (seconds). After the Nth
       # consecutive transient failure on the same (project, slug),
@@ -192,7 +190,7 @@ module Hive
       # Record a child completion. Side-effects on cooldown / quarantine
       # / daily-counter depend on exit_code per Hive::ExitCodes:
       #
-      #   0  SUCCESS              → 1 min cooldown
+      #   0  SUCCESS              → no cooldown; next stage may dispatch immediately
       #   3  TASK_IN_ERROR        → no cooldown (marker handles re-entry policy via Policy)
       #   4  WRONG_STAGE          → 1 min cooldown (race or classifier bug; back off)
       #   64 USAGE                → quarantine for daemon lifetime
@@ -207,14 +205,13 @@ module Hive
 
         case exit_code
         when Hive::ExitCodes::SUCCESS
-          @cooldown_until[key] = completed_at + SUCCESS_COOLDOWN_SEC
           @transient_failures.delete(key)
         when Hive::ExitCodes::TASK_IN_ERROR
           @transient_failures.delete(key)
           # Marker now classifies as recover_stale → Policy returns :skip;
           # no controller-level quarantine needed.
         when Hive::ExitCodes::WRONG_STAGE
-          @cooldown_until[key] = completed_at + SUCCESS_COOLDOWN_SEC
+          @cooldown_until[key] = completed_at + WRONG_STAGE_BACKOFF_SEC
         when Hive::ExitCodes::USAGE
           @quarantine.add(key)
           @transient_failures.delete(key)

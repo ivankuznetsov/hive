@@ -82,6 +82,26 @@ class TuiAppTest < Minitest::Test
     poller&.join
   end
 
+  def test_snapshot_poller_dispatches_identical_snapshot_once
+    require "hive/tui/messages"
+    require "hive/tui/snapshot"
+    snapshot = Hive::Tui::Snapshot.new(generated_at: "now", projects: [])
+    state_source = StaticSnapshotStateSource.new(snapshot)
+    runner = RecordingRunner.new
+    poller = Hive::Tui::App.start_snapshot_poller(state_source, runner)
+
+    wait_until { runner.messages.any? }
+    sleep 0.6
+
+    snapshot_messages = runner.messages.select { |message|
+      message.is_a?(Hive::Tui::Messages::SnapshotArrived)
+    }
+    assert_equal 1, snapshot_messages.size
+  ensure
+    poller&.kill
+    poller&.join
+  end
+
   def test_snapshot_poller_rescues_state_source_errors_and_stays_alive
     state_source = RaisingStateSource.new
     runner = RecordingRunner.new
@@ -157,6 +177,19 @@ class TuiAppTest < Minitest::Test
 
     def current
       @current
+    end
+  end
+
+  class StaticSnapshotStateSource
+    attr_reader :last_error
+
+    def initialize(snapshot)
+      @snapshot = snapshot
+      @last_error = nil
+    end
+
+    def current
+      @snapshot
     end
   end
 

@@ -252,7 +252,19 @@ def rewrite_help_flag!(argv)
   argv.unshift("help", cmd)
 end
 
+def normalize_leading_class_options!(argv)
+  return if argv.length < 2
+
+  leading_class_options = []
+  leading_class_options << argv.shift while argv.first == "--json" || argv.first == "--no-json"
+  return if leading_class_options.empty? || argv.empty?
+  return argv.unshift(*leading_class_options) unless %w[clean help list replay run version].include?(argv.first)
+
+  argv.insert(1, *leading_class_options)
+end
+
 begin
+  normalize_leading_class_options!(ARGV)
   rewrite_help_flag!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and either prints to
   # stderr + exit 1 (when exit_on_failure? is true) or warns + exit 0

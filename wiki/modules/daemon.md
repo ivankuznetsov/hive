@@ -328,6 +328,41 @@ left by a prior process via `DispatchRequestQueue.recover_claims`:
 
 Each removal logs `:dispatch_request_recovered request_id=… reason=owner_gone|claim_expired|malformed_claim`.
 
+**Crash-durability (#248).** `claim` fsyncs the `dispatch_requests/`
+directory after the `.claimed` rename and sidecar write, so the
+at-most-once commit point survives an unclean shutdown rather than
+silently un-persisting and re-dispatching on restart. The directory
+fsync is best-effort (swallowed on platforms that won't open a
+directory for fsync) so it never aborts the claim it hardens.
+
+**Still-alive orphan window (#264).** When `recover_dispatch_claims`
+keeps a still-alive orphan's claim (correct — the restarted daemon
+can't reap a process it didn't spawn), it does **not** re-register that
+`(project, slug)` in the fresh `ConcurrencyController`. For the interval
+until the orphan exits (or its claim ages out), the per-row auto-advance
+path — gated only by the now-empty `running_task?` — could dispatch an
+advance for the same slug. The task `.lock` is the backstop that still
+prevents two live runs of the same task; it is a narrower guarantee than
+an in-flight controller slot but holds across the restart. Re-registering
+the orphan was deliberately rejected: with no supervised child to reap,
+the slot would only free on claim age-out (up to `CLAIM_EXPIRY_SEC`),
+trading a narrow already-backstopped window for a guaranteed multi-hour
+stuck slot.
+
+**Prune is claim-safe (#265).** `hive daemon queue prune` runs in a
+separate CLI process with no lock. A request can be claimed+dispatched by
+the daemon between prune's `pending` scan and its removal; prune uses
+`remove_if_unclaimed`, which re-checks the claimed set and removes only
+the pending `*.json` (never a `*.json.claimed`'s crash-recovery state),
+counting only files actually unlinked. Reported prune counts are
+therefore advisory under concurrency but never delete a live claim or
+over-report a removal a racing claim turned into a no-op.
+
+`ChildSupervisor#pgid_for` returns **nil** (not the pid) on `ESRCH`
+(#249), so the timeout-kill callers' `if pgid` guard short-circuits
+rather than signaling `-pid` — which could hit a recycled process group
+on a long-running host.
+
 ### Per-child wall-clock timeout (R-02)
 
 `ChildSupervisor` enforces a per-child timeout so a wedged `hive run`
@@ -340,7 +375,10 @@ calls `ChildSupervisor#enforce_timeouts`: a child past its deadline gets
 SIGTERM, then SIGKILL after `daemon.child_kill_grace_sec` (default 30s),
 each logged as `:child_timeout action=term|kill elapsed_sec=… timeout_sec=…`.
 The killed child surfaces as a normal `ChildExit` on a later reap. See
-[[config]] for the knobs.
+[[config]] for the knobs. The in-code `fetch` fallbacks for
+`child_timeout_sec` reference `Hive::Config::DEFAULTS.dig("daemon",
+"child_timeout_sec")` rather than a hardcoded literal, so an un-merged
+daemon block can never silently drift from the canonical default (#255).
 
 ### Queue sequence continuations
 

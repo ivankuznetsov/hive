@@ -229,6 +229,81 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  # #259: a single-element argv passes the bare `is_a?(Array)` check but
+  # violates the schema's `argv minItems: 2` and would surface a nil verb in
+  # `queue list`. parse_data must reject it as :invalid_argv.
+  def test_pending_rejects_single_element_argv
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      write_request(dir, request_id: "shortarg", created_at: Time.utc(2026, 5, 28, 18, 0, 0),
+                         argv: [ "hive" ])
+      reasons = []
+      pending = Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { reasons << reason })
+
+      assert_empty pending, "a single-element argv must not parse into a pending row"
+      assert_includes reasons, "invalid_argv"
+    end
+  end
+
+  # #265: prune must not delete a request the daemon has claimed between the
+  # `pending` scan and removal. remove_if_unclaimed removes only the pending
+  # `.json`, never a `.json.claimed`, and reports whether it actually removed.
+  def test_remove_if_unclaimed_removes_pending_file
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      path = write_request(dir, request_id: "unclmd01", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+
+      assert Q.remove_if_unclaimed("unclmd01", state_home: dir),
+             "an unclaimed pending request is removed and reported true"
+      refute File.exist?(path)
+    end
+  end
+
+  def test_remove_if_unclaimed_skips_claimed_request
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      json_path = write_request(dir, request_id: "clmd0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      claimed = Q.claim("clmd0001", pid: 4321, now: Time.utc(2026, 5, 28, 18, 0, 1), state_home: dir)
+
+      refute Q.remove_if_unclaimed("clmd0001", state_home: dir),
+             "a claimed request must be left for the daemon (no false prune)"
+      refute File.exist?(json_path), "the pending file was renamed to .claimed by claim"
+      assert File.exist?(claimed), "the .claimed file (and its recovery state) survives prune"
+    end
+  end
+
+  def test_remove_if_unclaimed_ignores_empty_request_id
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      refute Q.remove_if_unclaimed("", state_home: dir)
+    end
+  end
+
+  def test_remove_if_unclaimed_returns_false_when_glob_raises_enoent
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      # Drive the outer ENOENT rescue (FS surfacing a vanished dir mid-op)
+      # by stubbing Dir.glob to raise, mirroring the `remove` test.
+      Dir.singleton_class.alias_method(:__orig_glob, :glob) unless Dir.singleton_class.method_defined?(:__orig_glob)
+      Dir.define_singleton_method(:glob) { |*| raise Errno::ENOENT, "vanished" }
+      begin
+        refute Q.remove_if_unclaimed("whatever1", state_home: dir),
+               "outer ENOENT rescue must return false instead of raising"
+      ensure
+        Dir.define_singleton_method(:glob, Dir.singleton_class.instance_method(:__orig_glob).bind(Dir))
+      end
+    end
+  end
+
+  # #248: fsync_directory is best-effort — a platform that won't open a
+  # directory for fsync must not abort the claim it is hardening.
+  def test_fsync_directory_swallows_errors
+    assert_nil Q.fsync_directory("/nonexistent-hive-dir-#{Process.pid}")
+  end
+
+  # #250: `alive:` is required — omitting it once silently reaped every
+  # non-aged-out live claim. The required kwarg makes that a load-time error.
+  def test_recover_claims_requires_alive
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      assert_raises(ArgumentError) { Q.recover_claims(state_home: dir) }
+    end
+  end
+
   def test_valid_argv_accepts_allowlisted_verbs
     %w[run develop brainstorm plan review open-pr artifacts finalize archive markers].each do |verb|
       argv = [ "hive", verb, "slug" ]

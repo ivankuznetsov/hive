@@ -3,8 +3,8 @@ title: 1-inbox stage
 type: stage
 source: lib/hive/stages/inbox.rb
 created: 2026-04-25
-updated: 2026-04-25
-tags: [stage, inbox, capture]
+updated: 2026-06-03
+tags: [stage, inbox, capture, task-id]
 ---
 
 **TLDR**: `1-inbox/` is an inert capture zone. `hive run` here does *not* spawn an agent; it simply prints guidance to `mv` the task into `2-brainstorm/` first.
@@ -12,6 +12,8 @@ tags: [stage, inbox, capture]
 ## State file
 
 `idea.md` — created by `hive new` from `templates/idea.md.erb`, ends with a trailing `<!-- WAITING -->` marker so `hive status` shows ⏸.
+
+`meta.yml` — sidecar created by `hive new` with `{id, slug, display_name}`. The id comes from the global `Hive::TaskCounter` when the counter lock is available; otherwise it is null. The display name starts null and `Hive::Task#display_label` falls back to the slug until a later writer fills it.
 
 ## Behaviour of `hive run`
 

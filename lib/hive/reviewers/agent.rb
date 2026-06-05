@@ -11,7 +11,10 @@ module Hive
     # success is detected via the profile's :output_file_exists mode (file
     # exists + non-empty + exit 0).
     class Agent < Base
-      DEFAULT_TIMEOUT_SEC = 3600
+      # Per-reviewer wall-clock cap. A deep code review legitimately runs
+      # 1-2h, so default to 2h; the previous 1h cap killed thorough
+      # reviewers mid-run. Override per reviewer via `spec["timeout_sec"]`.
+      DEFAULT_TIMEOUT_SEC = 7200
 
       def initialize(spec, ctx, cfg: nil)
         super(spec, ctx)
@@ -80,9 +83,9 @@ module Hive
         # effective timeout is capped at `deadline - now`; backoff
         # sleeps are also clamped to that remaining budget. Without
         # this, a single reviewer could consume max_attempts ×
-        # timeout_sec + backoff (defaults: 2 × 3600 + 1 = 7201s; with
-        # max_attempts: 3 override: 3 × 3600 + 3 = 10803s) and exhaust
-        # the outer review wall_clock budget (5400s default) before
+        # timeout_sec + backoff (defaults: 2 × 7200 + 1 = 14401s; with
+        # max_attempts: 3 override: 3 × 7200 + 3 = 21603s) and exhaust
+        # the outer review wall_clock budget (14400s default) before
         # the between-reviewer check in run_reviewers fires.
         attempts = 0
         result = nil

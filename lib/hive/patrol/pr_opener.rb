@@ -163,6 +163,7 @@ module Hive
           branch: patch.branch,
           pr_url: pr_url,
           state: state,
+          finding: finding,
           now: now
         )
         @state.write_fingerprints(fingerprints)

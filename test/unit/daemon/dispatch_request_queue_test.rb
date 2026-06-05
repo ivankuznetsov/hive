@@ -423,12 +423,17 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
               now: Time.utc(2026, 5, 28, 18, 0, 0), state_home: dir)
       # 20 minutes later, well past the 600s expiry, even an "alive" owner
       # must not pin the claim forever.
+      reasons = []
       removed = Q.recover_claims(
         state_home: dir, now: Time.utc(2026, 5, 28, 18, 20, 0),
-        alive: ->(_pid, _start) { true }, expiry_sec: 600
+        alive: ->(_pid, _start) { true }, expiry_sec: 600,
+        handler: ->(request_id:, reason:, path:) { reasons << [ request_id, reason ] }
       )
       assert_equal 1, removed
       assert_empty Dir.glob(File.join(dir, "dispatch_requests", "*"))
+      # #261: pin the recovery reason, not just the count — an aged-out claim
+      # must be reported as claim_expired (distinct from owner_gone).
+      assert_equal [ [ "aged0001", "claim_expired" ] ], reasons
     end
   end
 

@@ -1,18 +1,18 @@
 ---
 title: Hive::Task
 type: module
-source: lib/hive/task.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-04-25
-tags: [model, task, parsing]
+updated: 2026-06-03
+tags: [model, task, parsing, task-id]
 ---
 
-**TLDR**: Pure parser/value-object that turns a task folder path into a structured `(project_root, hive_state_path, stage_index, stage_name, slug)` tuple plus derived paths (`state_file`, `worktree_path`, `lock_file`, `log_dir`, `commit_lock_file`, `reviews_dir`, `worktree_yml_path`).
+**TLDR**: Value object and sidecar helpers for task identity. `Hive::Task` turns a task folder path into a structured `(project_root, hive_state_path, stage_index, stage_name, slug)` tuple plus derived paths; `Hive::TaskMeta` reads `<task>/meta.yml`; `Hive::TaskCounter` allocates global numeric ids for newly captured tasks.
 
 ## Constants
 
-- `STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review finalize done]` — 8 stages post-PR-renumber. `open-pr` is hyphenated; the dash must be allowed by `PATH_RE`.
-- `STATE_FILES` — maps stage name → state file basename (`idea.md`, `brainstorm.md`, `plan.md`, `task.md`, `pr.md`, `task.md`, `pr.md`, `task.md`).
+- `STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done]` — 9 stages post-artifacts insertion. `open-pr` is hyphenated; the dash must be allowed by `PATH_RE`.
+- `STATE_FILES` — maps stage name → state file basename (`idea.md`, `brainstorm.md`, `plan.md`, `task.md`, `pr.md`, `task.md`, `artifact.md`, `pr.md`, `task.md`).
 - `PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}` — the only validator for task paths. The `[a-z][a-z0-9-]*` class for `stage_name` (no `\w+`) is what permits the dash in `5-open-pr`.
 
 ## Constructor (`#initialize(folder)`)
@@ -32,6 +32,10 @@ tags: [model, task, parsing]
 | `#state_file` | `File.join(folder, STATE_FILES[stage_name])` |
 | `#reviews_dir` | `File.join(folder, "reviews")` |
 | `#worktree_yml_path` | `File.join(folder, "worktree.yml")` |
+| `#meta_yml_path` | `Hive::TaskMeta.path(folder)` |
+| `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
+| `#display_name` | `display_name` from `meta.yml`, or nil |
+| `#display_label` | `display_name || slug` |
 | `#lock_file` | `File.join(folder, ".lock")` |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
 | `#commit_lock_file` | `File.join(@hive_state_path, ".commit-lock")` |
@@ -40,7 +44,7 @@ tags: [model, task, parsing]
 
 Returns `nil` for stage indexes < 4 (no worktree before execute).
 
-For 4–6:
+For stages 4 and later:
 1. If `worktree.yml` exists in the task folder, return `data["path"]` from it (the canonical pointer).
 2. Otherwise fall back to `derive_worktree_path`: `<cfg["worktree_root"] || ~/Dev/<project_name>.worktrees>/<slug>`. This is the path that *would* be assigned, useful before `worktree.yml` is written.
 
@@ -48,9 +52,26 @@ For 4–6:
 
 `Task` carries identity (`@folder`, `@slug`, `@stage_name`) — it's a value object. All other path-like helpers are derived. `Markers`, `Lock`, `Config` etc. are stateless modules.
 
+## Task metadata helpers
+
+`Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
+
+- `read(task_folder)` returns `{id:, slug:, display_name:}` and is total over missing, malformed, or non-Hash YAML.
+- `write(task_folder, id:, slug:, display_name:)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `update_display_name(task_folder, name)` preserves the existing id and slug, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
+
+`Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
+
+- `next!` locks `<state_home>/.task-counter.lock`, returns the current id, then writes `next_id: id + 1`.
+- `peek` returns the current `next_id`, defaulting to `1` on missing or corrupt YAML.
+- `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
+- Lock timeout raises `Hive::ConcurrentRunError` with `lock_path` set to the counter lock.
+
 ## Tests
 
-- `test/unit/task_test.rb` — path parsing, invalid stage rejection, derived-path correctness, slug edge cases.
+- `test/unit/task_test.rb` — path parsing, invalid stage rejection, derived-path correctness, slug edge cases, and `meta.yml` readers.
+- `test/unit/task_meta_test.rb` — sidecar read/write, malformed YAML tolerance, and display-name updates.
+- `test/unit/task_counter_test.rb` — first id, sequential ids, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 
 ## Backlinks
 

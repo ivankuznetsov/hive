@@ -1037,7 +1037,7 @@ module Hive
         return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
+          "#{Hive::Bot::NotificationBuilders.display_title(row)} — " \
             "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
@@ -1076,7 +1076,7 @@ module Hive
       # Labels carry the task title so the operator can tell rows apart.
       def status_action_button(row)
         nb = Hive::Bot::NotificationBuilders
-        title = Hive::Bot::TitleFormatter.title_from_slug(row.slug)
+        title = nb.display_title(row)
         action = row.action.to_s
 
         if action == "needs_input" && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
@@ -1100,7 +1100,7 @@ module Hive
         attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
                    .map { |key, value| "#{key}=#{value}" }
         [
-          "#{row.project}/#{row.slug} (#{row.stage})",
+          "#{Hive::Bot::NotificationBuilders.display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
           "Action: #{row.action_label || row.action}",
           "Marker: #{row.marker || 'none'}",
           ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)

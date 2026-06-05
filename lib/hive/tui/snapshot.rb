@@ -42,6 +42,8 @@ module Hive
         :project_name,
         :stage,
         :slug,
+        :id,
+        :display_name,
         :folder,
         :state_file,
         :worktree_path,
@@ -69,8 +71,10 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
-        def initialize(worktree_path: nil, live_task_lock: false, unanswered_questions: 0, **rest)
-          super(worktree_path: worktree_path, live_task_lock: live_task_lock,
+        def initialize(id: nil, display_name: nil, worktree_path: nil,
+                       live_task_lock: false, unanswered_questions: 0, **rest)
+          super(id: id, display_name: display_name,
+                worktree_path: worktree_path, live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
         end
       end
@@ -126,6 +130,8 @@ module Hive
           project_name: project_name,
           stage: payload["stage"],
           slug: payload["slug"],
+          id: payload["id"],
+          display_name: payload["display_name"],
           folder: payload["folder"],
           state_file: payload["state_file"],
           worktree_path: payload["worktree_path"],
@@ -151,7 +157,8 @@ module Hive
         @projects.flat_map(&:rows)
       end
 
-      # Case-insensitive substring filter on each row's slug. Empty
+      # Case-insensitive substring filter on each row's slug, display name,
+      # or id. Empty
       # substring is a no-op (returns self). Projects with zero matches
       # are kept with `rows: []` so the renderer can still show their
       # error/empty state.
@@ -160,7 +167,13 @@ module Hive
 
         needle = substring.downcase
         filtered = @projects.map do |project|
-          matched = project.rows.select { |row| row.slug.to_s.downcase.include?(needle) }
+          matched = project.rows.select do |row|
+            [
+              row.slug,
+              row.display_name,
+              row.id
+            ].any? { |value| value.to_s.downcase.include?(needle) }
+          end
           ProjectView.new(
             name: project.name,
             path: project.path,

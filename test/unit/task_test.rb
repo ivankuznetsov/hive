@@ -91,6 +91,40 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_meta_readers_use_sidecar_when_present
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"),
+                 { "id" => 42, "slug" => "add-foo", "display_name" => "Add Foo" }.to_yaml)
+
+      task = Hive::Task.new(folder)
+
+      assert_equal File.join(folder, "meta.yml"), task.meta_yml_path
+      assert_equal 42, task.id
+      assert_equal "Add Foo", task.display_name
+      assert_equal "Add Foo", task.display_label
+    end
+  end
+
+  def test_meta_readers_fall_back_when_sidecar_absent_or_malformed
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+
+      task = Hive::Task.new(folder)
+      assert_nil task.id
+      assert_nil task.display_name
+      assert_equal "add-foo", task.display_label
+
+      File.write(File.join(folder, "meta.yml"), ":\n:not yaml")
+      task = Hive::Task.new(folder)
+      assert_nil task.id
+      assert_nil task.display_name
+      assert_equal "add-foo", task.display_label
+    end
+  end
+
   def test_worktree_path_returns_nil_for_low_stages
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")

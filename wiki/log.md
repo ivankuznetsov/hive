@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T00:00:01Z] tui - document residual idle cost of liveness fallback (6-review pass 2)
+
+**Action:** Updated [[commands/tui]] latency section to call out, against the plan's "near-zero idle CPU" AC, that `LIVENESS_REPARSE_FALLBACK_SECONDS` (3s) re-incurs a full `json_payload` + `Dir.glob` fingerprint rebuild ~20×/min even when mtimes are unchanged — an accepted correctness tradeoff that never causes a redraw thanks to the snapshot dedup in `App.start_snapshot_poller`.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
 ## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
 
 **Action:** Applied accepted `/ce-code-review` findings on the TUI/daemon latency-reduction work:

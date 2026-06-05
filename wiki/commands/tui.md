@@ -130,7 +130,13 @@ without reparsing unchanged status data. A time-bounded fallback
 (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
 when the fingerprint is unchanged, so liveness-derived fields
 (`live_task_lock`, `claude_pid_alive`) that flip without touching any
-file cannot stay stale indefinitely. Read-only, no locks taken. The render thread reads `@current` once per frame; under
+file cannot stay stale indefinitely. This makes the "near-zero idle
+CPU" AC a partial win: even with unchanged mtimes the fallback re-incurs
+a full `json_payload` + `Dir.glob` fingerprint rebuild ~20×/min (every
+3s). It is an accepted correctness tradeoff — those liveness fields flip
+without any file write and must self-heal — and it never causes a redraw
+because `App.start_snapshot_poller` dedups identical snapshots (below).
+Read-only, no locks taken. The render thread reads `@current` once per frame; under
 MRI 3.4's GVL the pointer-sized reference write is atomic.
 JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `RUBY_ENGINE != "ruby"` boot guard makes the assumption auditable.

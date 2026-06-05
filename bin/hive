@@ -5,6 +5,32 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "hive"
 require "hive/cli"
 
+class ThorUsageError < Hive::InvalidTaskPath; end
+
+JSON_PARSE_ERROR_ENVELOPES = {
+  "run" => [ "hive-run", "invalid_task_path" ],
+  "approve" => [ "hive-approve", "invalid_task_path" ],
+  "findings" => [ "hive-findings", "invalid_task_path" ],
+  "accept-finding" => [ "hive-findings", "invalid_task_path" ],
+  "reject-finding" => [ "hive-findings", "invalid_task_path" ],
+  "brainstorm" => [ "hive-stage-action", "invalid_task_path" ],
+  "plan" => [ "hive-stage-action", "invalid_task_path" ],
+  "develop" => [ "hive-stage-action", "invalid_task_path" ],
+  "open-pr" => [ "hive-stage-action", "invalid_task_path" ],
+  "pr" => [ "hive-stage-action", "invalid_task_path" ],
+  "review" => [ "hive-stage-action", "invalid_task_path" ],
+  "artifacts" => [ "hive-stage-action", "invalid_task_path" ],
+  "finalize" => [ "hive-stage-action", "invalid_task_path" ],
+  "archive" => [ "hive-stage-action", "invalid_task_path" ],
+  "drop" => [ "hive-drop", "invalid_task_path" ],
+  "markers" => [ "hive-markers-clear", "invalid_task_path" ],
+  "forget" => [ "hive-forget", "missing_name" ],
+  "prune" => [ "hive-prune", "usage" ],
+  "status" => [ "hive-status", "error" ],
+  "patrol" => [ "hive-patrol", "error" ],
+  "daemon" => [ "hive-daemon-enroll", "missing_project" ]
+}.freeze
+
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
   exit 0
@@ -27,10 +53,43 @@ def rewrite_help_flag!(argv)
   argv.unshift("help", cmd)
 end
 
+def emit_thor_usage_json(argv, error)
+  command = argv.find { |arg| !arg.start_with?("-") }
+  schema, error_kind = JSON_PARSE_ERROR_ENVELOPES[command]
+  usage_error = ThorUsageError.new(error.message)
+
+  payload = if schema
+    Hive::Schemas::ErrorEnvelope.build(
+      schema: schema,
+      error: usage_error,
+      error_kind: error_kind
+    )
+  else
+    {
+      "ok" => false,
+      "error_class" => usage_error.class.name,
+      "error_kind" => "invalid_task_path",
+      "exit_code" => Hive::ExitCodes::USAGE,
+      "message" => usage_error.message
+    }
+  end
+
+  require "json"
+  puts JSON.generate(payload)
+rescue Errno::EPIPE, JSON::GeneratorError
+end
+
 rewrite_help_flag!(ARGV)
 
 begin
-  Hive::CLI.start(ARGV)
+  Hive::CLI.start(ARGV, debug: true)
+rescue Thor::Error => e
+  if ARGV.include?("--json")
+    emit_thor_usage_json(ARGV, e)
+  else
+    warn e.message
+  end
+  exit Hive::ExitCodes::USAGE
 rescue Hive::Error => e
   warn "hive: #{e.message}"
   exit(e.respond_to?(:exit_code) ? e.exit_code : 1)

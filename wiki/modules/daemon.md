@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -18,7 +18,7 @@ the safety-relevant decisions are unit-testable without forking.
 | Module | File | Purpose |
 |--------|------|---------|
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, mtime debounce, and `answers_pending` → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:wait_for_answers` / `:record_baseline` / `:skip`. Source of truth for "should this row fire a child?". |
-| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), cooldowns, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
+| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates schema version; surfaces parse failures as `Result(ok: false)`. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; reaps via `Process.wait(-1, WNOHANG)`; parses JSON envelopes from child stdout; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
@@ -48,9 +48,17 @@ hive daemon start
             └─ Hive::Daemon::Policy              (pure decisions)
 ```
 
-Each tick runs in order: reap completed children → fetch status →
+`run_forever` wakes at `daemon.fast_poll_sec` (default 1s) for a cheap
+probe: non-blocking child reap plus mtime stats of state files and stage
+directories seen on the last full status scan. A child exit or mtime
+change triggers a full `tick` immediately; otherwise
+`daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
+cadence for changes the cheap probe cannot see.
+
+Each full tick runs in order: reap completed children → fetch status →
 **process dispatch requests** → handle PR-merge watcher → per-row
-dispatch → prune baselines. Dispatch requests come BEFORE the
+dispatch → prune baselines → refresh cheap-probe mtime fingerprints.
+Dispatch requests come BEFORE the
 row-scan so a slug whose request just dispatched this tick is
 already in-flight in the controller and the row scan's per-slug
 in-flight gate (`controller.running_task?`) keeps the same tick

@@ -2932,3 +2932,13 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-05T00:00:00Z] daemon/tui — reduce perceived stage-transition latency
+
+**Action:** Refreshed wiki coverage after removing the SUCCESS inter-stage cooldown, adding the daemon's 1s cheap fast-poll probe, and mtime-gating TUI status reparses. `daemon.poll_interval_sec` remains the 30s full-scan backstop, while `daemon.fast_poll_sec` drives child reap and state-file/stage-dir mtime probes. SUCCESS exits now allow immediate follow-on dispatch; WRONG_STAGE keeps a 60s protective backoff. The TUI still polls at 1 Hz and redraws only on changed snapshots, and now skips `Status#json_payload` when its mtime fingerprint is unchanged.
+
+**Refreshed pages:**
+- [[commands/daemon]]
+- [[modules/daemon]]
+- [[commands/tui]]
+- [[index]]

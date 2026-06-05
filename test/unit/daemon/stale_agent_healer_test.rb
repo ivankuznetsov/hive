@@ -242,6 +242,46 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_review_working_heal_logs_failure_when_marker_clear_raises
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      File.write(File.join(File.dirname(state_file), ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      original = Hive::Markers.method(:clear_current)
+      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+        raise Errno::ENOSPC, "no space left" if path == state_file
+
+        original.call(path, *args)
+      end
+
+      begin
+        with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+          heal([ row ])
+        end
+      ensure
+        Hive::Markers.define_singleton_method(:clear_current, &original)
+      end
+
+      failure = @logger.events.find { |name, _| name == :marker_heal_failed }
+      assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
+      assert_equal "review_agent_died", failure[1][:reason]
+      assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
   def test_review_working_skips_when_child_inspection_fails
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")

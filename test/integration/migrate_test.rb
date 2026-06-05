@@ -437,6 +437,23 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_warns_with_singular_display_name_recovery_command
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git!) do |*_args|
+      raise Hive::GitError, "permission denied"
+    end
+    migrate = migrate_command("/tmp/project")
+
+    with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
+      _out, err = capture_io do
+        migrate.send(:commit_display_name_backfill, "/tmp/project/.hive-state", 1)
+      end
+
+      assert_includes err, "hive: migrate display names (1 task)'"
+      refute_includes err, "1 tasks"
+    end
+  end
+
   def test_restart_daemon_uses_systemctl_when_available
     migrate = migrate_command("/tmp/project")
     calls = []

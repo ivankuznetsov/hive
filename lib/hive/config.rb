@@ -1436,7 +1436,7 @@ module Hive
       [ "transient_retry_backoff_sec", 1 ],
       [ "shutdown_grace_sec", 0 ],
       # child_timeout_sec >= 0  — 0 disables the per-child wall-clock cap
-      # child_kill_grace_sec >= 0 — 0 means "SIGKILL immediately after TERM"
+      # child_kill_grace_sec >= 0 — 0 means "SIGKILL on the next timeout tick after TERM"
       [ "child_timeout_sec", 0 ],
       [ "child_kill_grace_sec", 0 ],
       [ "log_max_bytes", 1024 ],

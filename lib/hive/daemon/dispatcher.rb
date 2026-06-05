@@ -52,7 +52,7 @@ module Hive
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, patrol_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
-                     dispatch_request_state_home: nil)
+                     dispatch_request_state_home: nil, dispatch_result_state_home: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -132,10 +132,14 @@ module Hive
         # see the next warning the next time it goes red, but we don't
         # actively re-emit on every tick. Issue #95.
         @legacy_layout_logged = {}
-        # Test-injectable state home for the dispatch-request queue.
-        # Production passes nil so `DispatchRequestQueue` resolves
-        # `Hive::Paths.state_home`; unit tests inject a sandbox.
+        # Test-injectable state homes for the dispatch-request and
+        # dispatch-result queues. Production passes nil so both resolve
+        # `Hive::Paths.state_home`; unit tests inject a sandbox. The result
+        # home is separately injectable so a test sandboxing the request
+        # queue doesn't silently write failure notices where the bot (which
+        # resolves the result home independently) never reads them (#251).
         @dispatch_request_state_home = dispatch_request_state_home
+        @dispatch_result_state_home = dispatch_result_state_home
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answers_pending?`).
@@ -404,13 +408,11 @@ module Hive
       end
 
       # R-02: drive the supervisor's per-child timeout enforcement and
-      # log one `:child_timeout` event per signal sent. Guarded by
-      # `respond_to?` so older/test supervisor doubles that predate
-      # `enforce_timeouts` stay compatible (no-op). Wrapped so a kill
-      # error never crashes a tick.
+      # log one `:child_timeout` event per signal sent. Wrapped so a kill
+      # error never crashes a tick. (Every supervisor — real and test —
+      # implements `enforce_timeouts`; the old `respond_to?` seam was
+      # removed in #252.)
       def enforce_child_timeouts(now:)
-        return unless @supervisor.respond_to?(:enforce_timeouts)
-
         @supervisor.enforce_timeouts(now: now).each do |action|
           @logger.event(:child_timeout,
                         pid: action.pid, project: action.project,
@@ -1167,7 +1169,7 @@ module Hive
       # crashes a tick.
       def prune_dispatch_results(now:)
         Hive::Daemon::DispatchResultQueue.prune_expired(
-          state_home: dispatch_request_state_home, now: now
+          state_home: dispatch_result_state_home, now: now
         )
       rescue StandardError => e
         @logger.event(:fatal,
@@ -1189,7 +1191,7 @@ module Hive
           project: entry.project, slug: entry.slug,
           request_id: entry.request_id, exit_code: entry.exit_code,
           command: entry.command, now: now,
-          state_home: dispatch_request_state_home
+          state_home: dispatch_result_state_home
         )
         @logger.event(:dispatch_result_written,
                       request_id: entry.request_id, project: entry.project,
@@ -1232,6 +1234,10 @@ module Hive
 
       def dispatch_request_state_home
         @dispatch_request_state_home || Hive::Paths.state_home
+      end
+
+      def dispatch_result_state_home
+        @dispatch_result_state_home || Hive::Paths.state_home
       end
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
@@ -1365,17 +1371,17 @@ module Hive
         # R-02: push reloaded child-timeout knobs into the supervisor so
         # an operator tuning daemon.child_timeout_sec / verb overrides via
         # SIGHUP takes effect for children spawned after the reload.
-        if @supervisor.respond_to?(:update_timeouts)
-          @supervisor.update_timeouts(
-            default_timeout_sec: @daemon_cfg.fetch(
-              "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
-            ),
-            verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
-            kill_grace_sec: @daemon_cfg.fetch(
-              "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC
-            )
+        # (Every supervisor implements `update_timeouts`; the `respond_to?`
+        # seam was removed in #252.)
+        @supervisor.update_timeouts(
+          default_timeout_sec: @daemon_cfg.fetch(
+            "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
+          ),
+          verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
+          kill_grace_sec: @daemon_cfg.fetch(
+            "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC
           )
-        end
+        )
         # Rebuild the healer so an operator tuning
         # daemon.agent_marker_grace_sec via SIGHUP takes effect within
         # one tick. Without this rebuild the healer keeps the grace it

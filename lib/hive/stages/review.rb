@@ -158,7 +158,7 @@ module Hive
         )
 
         started_at = Time.now
-        max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 5400
+        max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
 
         # --- Phase 1: CI fix ---
         # Resume rule: if marker is :review_waiting, the CI was already
@@ -934,9 +934,9 @@ module Hive
           return :wall_clock_exceeded
         end
 
-        # Keep a rolling fair share of the remaining wall-clock budget
-        # for each reviewer. A hung early reviewer can spend its share,
-        # but not the time reserved for siblings later in the pass.
+        # Track the remaining spec count for legacy adapter compatibility,
+        # but modern reviewers receive the full remaining wall-clock budget.
+        # Each reviewer's own timeout_sec remains the per-reviewer cap.
         remaining_specs = specs.length
 
         statuses = []
@@ -1018,8 +1018,13 @@ module Hive
         remaining = max_wall_clock_sec - (Time.now - started_at)
         return Process.clock_gettime(Process::CLOCK_MONOTONIC) if remaining <= 0
 
-        fair_share = remaining / specs_remaining
-        Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ fair_share, 1 ].max
+        # Give each reviewer the FULL remaining wall-clock budget; its own
+        # `timeout_sec` (default 2h) is the real per-reviewer cap. The old
+        # even split (`remaining / specs_remaining`) squeezed each reviewer
+        # to a fraction of the budget and killed thorough 1-2h reviewers
+        # mid-run with "deadline reached", which then tore down the shared
+        # claude session and cascade-failed the rest of the pass.
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) + remaining
       end
 
       def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)

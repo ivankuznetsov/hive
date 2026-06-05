@@ -57,9 +57,16 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
       assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
       assert_stubbed env, "git", "merge", "feature"
+      assert_stubbed env, "git", "remote", "set-url", "origin", "git@example.com:owner/repo.git"
+      assert_stubbed env, "git", "remote", "add", "upstream", "git@example.com:owner/upstream.git"
+      assert_stubbed env, "git", "remote", "remove", "upstream"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
+      assert_passes env, "git", "remote"
+      assert_passes env, "git", "remote", "-v"
+      assert_passes env, "git", "remote", "show", "-n", "origin"
+      assert_passes env, "git", "remote", "get-url", "--push", "origin"
 
       skipped = File.read(log_path)
       assert_includes skipped, "gh -R owner/repo pr ready 42 skipped"
@@ -80,6 +87,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
+      assert_includes skipped, "git remote set-url origin git@example.com:owner/repo.git skipped"
+      assert_includes skipped, "git remote add upstream git@example.com:owner/upstream.git skipped"
+      assert_includes skipped, "git remote remove upstream skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
@@ -87,6 +97,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-git -C #{dir} status --short"
       assert_includes real_invocations, "real-git config --get remote.origin.url"
+      assert_includes real_invocations, "real-git remote"
+      assert_includes real_invocations, "real-git remote -v"
+      assert_includes real_invocations, "real-git remote show -n origin"
+      assert_includes real_invocations, "real-git remote get-url --push origin"
     end
   end
 

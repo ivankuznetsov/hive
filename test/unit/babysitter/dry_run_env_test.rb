@@ -60,6 +60,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "remote", "set-url", "origin", "git@example.com:owner/repo.git"
       assert_stubbed env, "git", "remote", "add", "upstream", "git@example.com:owner/upstream.git"
       assert_stubbed env, "git", "remote", "remove", "upstream"
+      assert_stubbed env, "git", "diff", "--output", File.join(dir, "diff.patch")
+      assert_stubbed env, "git", "diff", "--output=#{File.join(dir, "diff.patch")}"
+      assert_stubbed env, "git", "diff", "--ext-diff"
+      assert_stubbed env, "git", "show", "--external-diff", "HEAD"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
@@ -90,6 +94,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git remote set-url origin git@example.com:owner/repo.git skipped"
       assert_includes skipped, "git remote add upstream git@example.com:owner/upstream.git skipped"
       assert_includes skipped, "git remote remove upstream skipped"
+      assert_includes skipped, "git diff --output #{File.join(dir, "diff.patch")} skipped"
+      assert_includes skipped, "git diff --output=#{File.join(dir, "diff.patch")} skipped"
+      assert_includes skipped, "git diff --ext-diff skipped"
+      assert_includes skipped, "git show --external-diff HEAD skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
@@ -101,6 +109,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-git remote -v"
       assert_includes real_invocations, "real-git remote show -n origin"
       assert_includes real_invocations, "real-git remote get-url --push origin"
+      refute_includes real_invocations, "real-git diff --output"
+      refute_includes real_invocations, "real-git diff --ext-diff"
+      refute_includes real_invocations, "real-git show --external-diff HEAD"
     end
   end
 

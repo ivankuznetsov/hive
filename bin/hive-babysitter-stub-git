@@ -46,7 +46,15 @@ def read_only_remote?(rest)
   end
 end
 
+def unsafe_read_option?(arg)
+  arg == "--output" ||
+    arg.start_with?("--output=") ||
+    ["--ext-diff", "--external-diff"].include?(arg)
+end
+
 def read_only?(rest)
+  return false if rest.any? { |arg| unsafe_read_option?(arg) }
+
   case rest.first.to_s
   when "branch"
     rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")

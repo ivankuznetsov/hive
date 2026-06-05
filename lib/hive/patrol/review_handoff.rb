@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/task_counter"
 require "hive/task_meta"
 
 module Hive
@@ -34,10 +35,16 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: nil,
+          id: allocate_task_id,
           slug: slug,
           display_name: display_name(finding)
         )
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)

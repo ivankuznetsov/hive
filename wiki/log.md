@@ -3216,3 +3216,10 @@ TTL config.
 - [[commands/migrate]]
 - [[state-model]]
 - [[stages/inbox]]
+
+## [2026-06-05T18:02:00Z] patrol — allocate task ids for review handoff tasks
+
+**Action:** Changed `Hive::Patrol::ReviewHandoff` so synthetic `6-review/patrol-.../` tasks allocate a normal `Hive::TaskCounter` id instead of writing `id: nil` unconditionally. The fail-soft behavior now matches `hive new`: counter lock contention leaves the id null, but the task is still enqueued and `hive migrate` can repair it later. Added patrol handoff/opener coverage and corrected the task sidecar docs.
+
+**Refreshed pages:**
+- [[state-model]]

@@ -26,9 +26,15 @@ end.parse!
 
 def scenario_path(root, value)
   return nil if value.nil?
-  return File.expand_path(value, root) if value.end_with?(".rb")
+  if value.include?("/") || value.include?("\\")
+    raise ArgumentError, "scenario must be a basename under test/eval/scenarios"
+  end
 
-  basename = value.sub(/_test\z/, "")
+  basename = File.basename(value, ".rb").sub(/_test\z/, "")
+  unless basename.match?(/\A[\w-]+\z/)
+    raise ArgumentError, "scenario must be a safe basename under test/eval/scenarios"
+  end
+
   File.join(root, "test", "eval", "scenarios", "#{basename}_test.rb")
 end
 
@@ -38,7 +44,14 @@ env = {
 }
 env["HIVE_EVAL_NO_JUDGE"] = "1" if options[:no_judge]
 
-if (path = scenario_path(root, options[:scenario]))
+begin
+  path = scenario_path(root, options[:scenario])
+rescue ArgumentError => e
+  warn "hive-eval: #{e.message}"
+  exit 64
+end
+
+if path
   unless File.exist?(path)
     warn "hive-eval: scenario not found: #{path}"
     exit 64

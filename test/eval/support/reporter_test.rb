@@ -1,4 +1,5 @@
 require "eval/eval_helper"
+require "fileutils"
 require "json"
 require "open3"
 
@@ -29,7 +30,8 @@ class HiveEvalReporterTest < Minitest::Test
     # nonzero + report shape + per-scenario "fail" status) without
     # coupling to any specific production bug.
     Dir.mktmpdir("hive-eval-report") do |dir|
-      fixture = File.join(dir, "intentional_failure_test.rb")
+      scenario_name = "intentional_failure_#{Process.pid}"
+      fixture = File.expand_path("../scenarios/#{scenario_name}_test.rb", __dir__)
       File.write(fixture, <<~RUBY)
         require "eval/eval_helper"
 
@@ -46,7 +48,7 @@ class HiveEvalReporterTest < Minitest::Test
 
       _out, _err, status = Open3.capture3(
         { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", fixture, "--no-judge", "--report", report
+        "bin/hive-eval", "--scenario", scenario_name, "--no-judge", "--report", report
       )
 
       refute status.success?, "fixture asserts false; reporter CLI must exit nonzero on failure"
@@ -56,6 +58,24 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal "fail", entry.fetch("status")
       assert_match(/intentional failure for HiveEvalReporterTest fixture/,
                    entry.fetch("failures").join("\n"))
+    ensure
+      FileUtils.rm_f(fixture) if fixture
+    end
+  end
+
+  def test_cli_rejects_scenario_paths_outside_scenario_dir
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "outside.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "test/eval/support/reporter_test.rb", "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario must be a basename/, err)
+      refute File.exist?(report)
     end
   end
 end

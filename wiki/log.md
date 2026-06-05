@@ -3150,6 +3150,24 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
+## [2026-06-05T16:05:00Z] tui — document display-cell formatting for task rows
+
+**Action:** Documented the TUI formatter's direct `unicode-display_width` dependency after task-pane icon alignment work. `Hive::Tui::Views::Format` now owns display-cell truncation and padding so emoji status icons and other wide glyphs do not shift fixed columns. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[dependencies]]
+
+## [2026-06-05T16:25:00Z] patrol/status — review-task idea context and archive age filtering
+
+**Action:** Documented two dogfood fixes: patrol review handoff now writes `idea.md` from the original patrol finding so the TUI idea preview has context, and archive hiding now uses row `mtime` rather than mutable `folder_mtime` so sidecar edits do not make old archived tasks reappear in daily views. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/patrol]]
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+
 ## [2026-06-03T13:20:00Z] task identity surfaces — document status, TUI, bot, and migration backfill
 
 **Action:** Extended the task-identity wiki refresh through commits `457c2f16` (`hive status` id/display_name schema v3), `d76be350` (TUI id/name columns), `5daa08c9` (Telegram display titles), and `1a4922c4` (`hive migrate` id backfill). Documented human rendering fallbacks, preserved slug-based callbacks/commands, diagnose schema v2, and migration counter seeding/idempotency. Did not run `qmd update` or `qmd embed`.

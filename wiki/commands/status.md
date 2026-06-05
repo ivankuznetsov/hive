@@ -7,7 +7,7 @@ updated: 2026-06-05
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal text status hides clean `9-done` tasks whose task-folder mtime is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal text status hides `9-done` tasks whose row `mtime` is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
 
 ## Output shape
 
@@ -25,7 +25,7 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 
 ## Archived tasks
 
-`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable only when `stage == Hive::Stages::DIRS.last` (`9-done`), the marker is resolved (`:complete` or `:none`), `folder_mtime` is present, and `(now - folder_mtime) > 3 days`. Any unresolved marker on a done task (`ERROR`, `AGENT_WORKING`, `WAITING`, `MANUAL_STEERING`, etc.) remains visible regardless of age.
+`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), the row timestamp is present, and `(now - mtime) > 3 days`. The policy uses the task row's `mtime` (state-file mtime, the same timestamp rendered as row age) rather than `folder_mtime`, because sidecar updates such as `meta.yml` display-name backfills can touch the directory without making the archived task newly relevant. Older consumers that only have `folder_mtime` still get it as a fallback. Done rows with unresolved markers are hidden by the same age rule; `hive archive` remains the full view.
 
 The filter applies only to human daily surfaces: default `hive status` text and the TUI grid. Default `hive status --json` stays unfiltered so bots, daemons, and agents continue to see every task row. Text status prints `… and N archived >3d ago (hive archive to view)` when rows were hidden.
 

@@ -159,13 +159,13 @@ module Hive
 
         def render_row(row, project_idx, row_idx, model, layout)
           highlighted = highlight?(model, project_idx, row_idx)
-          icon = ICONS.fetch(row.action_key.to_s, DEFAULT_ICON)
-          id = row.id ? row.id.to_s.rjust(ID_WIDTH) : "—".rjust(ID_WIDTH)
-          name = truncate(display_name(row), layout[:name]).ljust(layout[:name])
-          age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
+          icon = Format.ljust_cells(ICONS.fetch(row.action_key.to_s, DEFAULT_ICON), ICON_WIDTH)
+          id = Format.rjust_cells(row.id ? row.id.to_s : "—", ID_WIDTH)
+          name = Format.ljust_cells(display_name(row), layout[:name])
+          age = Format.rjust_cells(Format.age(row.age_seconds), AGE_WIDTH)
           parts = [ icon, id, name ]
-          parts << truncate(row.stage.to_s, layout[:stage]).ljust(layout[:stage]) if layout[:stage].positive?
-          parts << truncate(status_label(row), layout[:status]).ljust(layout[:status]) if layout[:status].positive?
+          parts << Format.ljust_cells(row.stage.to_s, layout[:stage]) if layout[:stage].positive?
+          parts << Format.ljust_cells(status_label(row), layout[:status]) if layout[:status].positive?
           parts << age
           line = parts.join(" ")
           colored = Styles.for_action_key(row.action_key).render(line)

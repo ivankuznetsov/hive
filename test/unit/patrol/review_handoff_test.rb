@@ -50,4 +50,28 @@ class HivePatrolReviewHandoffTest < Minitest::Test
                    "slug uniqueness must scan every stage dir, not only 6-review"
     end
   end
+
+  def test_enqueue_writes_idea_md_from_original_finding
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding,
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7",
+        now: Time.utc(2026, 6, 5, 12, 0, 0)
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      frontmatter = YAML.safe_load(idea.split("---\n\n", 2).first)
+
+      assert_equal "patrol", frontmatter.fetch("source")
+      assert_equal "f1", frontmatter.fetch("patrol_finding_id")
+      assert_equal "fp1", frontmatter.fetch("patrol_fingerprint")
+      assert_includes frontmatter.fetch("original_text"), "Patrol: Fix bug"
+      assert_includes idea, "## Finding"
+      assert_includes idea, "bug details"
+      assert_includes idea, "## Recommendation"
+      assert_includes idea, "fix it"
+      assert_includes idea, "`app.rb:1`: puts"
+    end
+  end
 end

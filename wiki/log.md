@@ -3126,3 +3126,12 @@ TTL config.
 - [[commands/migrate]]
 - [[modules/bot]]
 - [[state-model]]
+
+## [2026-06-05T15:14:59Z] babysitter — refresh dry-run git stub write guard coverage
+
+**Action:** Refreshed command/API and executable-stub wiki coverage after commit `29532639` changed `bin/hive-babysitter-stub-git`. Verified the committed diff plus the current git/gh dry-run stubs, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, [[commands/babysit]], [[modules/babysitter]], and [[gaps]]. Documented that otherwise read-only `git` commands now skip when they include `--output` / `--output=...`, while plain read forms such as `git diff --name-only` still pass through. Recorded that the change is unit-pinned but still lacks a live `hive babysit --once PROJECT --dry-run` agent smoke artifact. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]

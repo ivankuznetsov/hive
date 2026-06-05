@@ -42,6 +42,10 @@ Patrol state is deliberately inspectable and removable:
 
 The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
 
+## Daemon triggers
+
+`Hive::Daemon::PatrolScheduler` supports three `patrol.trigger` modes; `continuous` is the default. `continuous` is the hybrid mode for larger repositories: it dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges while still recording the current `last_scanned_sha` after each successful scan. `new_commits` preserves the original conservative behavior and dispatches only when the default branch SHA changes. `timer` dispatches solely from `last_run_at` age.
+
 ## Safety invariants
 
 - Patrol is opt-in: `patrol.enabled` defaults false and the daemon still requires `daemon.enabled`.

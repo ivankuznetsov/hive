@@ -3,7 +3,7 @@ require "tmpdir"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 
-# Pin the concurrency controller's caps + cooldown + quarantine + daily-
+# Pin the concurrency controller's caps + backoff + quarantine + daily-
 # rate semantics. Pure unit — no I/O, no Process.spawn. The controller
 # is the daemon's load-bearing budget gate; misclassifying an exit code
 # (e.g., consuming a daily slot on TEMPFAIL) breaks fairness across the
@@ -85,8 +85,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
     dispatch(c, 101, "p1", "s2", started_at: T0 + 600)
     c.record_completion(pid: 101, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 601)
-    # Both completed; cooldown only blocks the same slug, not new ones
-    # → daily cap is the gate now.
+    # Both completed; SUCCESS no longer blocks, so daily cap is the gate now.
     result = c.can_dispatch?(project: "p1", slug: "s3", now: T0 + 1000)
     assert_equal :daily_cap, result
   end
@@ -103,17 +102,15 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s2", now: next_day)
   end
 
-  # ── cooldown after SUCCESS ────────────────────────────────────────────
+  # ── SUCCESS completion ────────────────────────────────────────────────
 
-  def test_success_triggers_cooldown_for_same_slug
+  def test_success_does_not_cool_down_same_slug
     c = make
-    cd = Hive::Daemon::ConcurrencyController::SUCCESS_COOLDOWN_SEC
     dispatch(c, 100, "p1", "s1")
+
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 5)
-    # Mid-cooldown: still blocked.
-    assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 5 + (cd / 2))
-    # After cooldown elapses.
-    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 5 + cd + 1)
+
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 5)
   end
 
   # ── transient retry → quarantine after schedule exhausted ──────────────
@@ -158,12 +155,13 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
 
   def test_wrong_stage_triggers_short_cooldown
     c = make
+    backoff = Hive::Daemon::ConcurrencyController::WRONG_STAGE_BACKOFF_SEC
     dispatch(c, 100, "p1", "s1")
 
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::WRONG_STAGE, completed_at: T0 + 1)
 
     assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
-    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 62)
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 1 + backoff + 1)
   end
 
   # ── TEMPFAIL refunds daily slot ───────────────────────────────────────

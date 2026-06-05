@@ -168,4 +168,101 @@ class TuiStateSourceTest < Minitest::Test
       keep_raising = false
     end
   end
+
+  def test_refresh_once_skips_status_parse_when_mtime_fingerprint_is_unchanged
+    with_seeded_project do |_project, _dir|
+      calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects|
+          calls += 1
+          super(projects)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      first = source.current
+      source.send(:refresh_once)
+
+      assert_equal 1, calls, "unchanged mtimes should reuse the cached snapshot"
+      assert_same first, source.current
+    end
+  end
+
+  def test_refresh_once_reparses_when_state_file_mtime_changes
+    with_seeded_project do |_project, _dir|
+      calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects|
+          calls += 1
+          super(projects)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      state_file = source.current.rows.first.state_file
+      File.utime(Time.now + 5, Time.now + 5, state_file)
+      source.send(:refresh_once)
+
+      assert_equal 2, calls, "state-file mtime changes must invalidate the cached snapshot"
+    end
+  end
+
+  def test_safe_mtime_returns_nil_when_mtime_raises_on_existing_path
+    # state_source.rb 152: the file may vanish (or error) between the
+    # File.exist? check and File.mtime. The rescue must degrade to nil
+    # rather than propagate out of the fingerprint computation.
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+
+    Dir.mktmpdir("state-source-safe-mtime") do |dir|
+      path = File.join(dir, "vanishing.md")
+      File.write(path, "x\n")
+      with_replaced_singleton_method(File, :mtime, lambda { |arg|
+        raise Errno::ENOENT, arg if arg == path
+
+        File.stat(arg).mtime
+      }) do
+        assert_nil source.send(:safe_mtime, path),
+                   "safe_mtime must return nil when File.mtime raises after File.exist? passed"
+      end
+    end
+  end
+
+  def test_registry_config_path_returns_nil_when_global_config_path_raises
+    # state_source.rb 141: mtime_fingerprint_for must keep working even
+    # if the registry path lookup blows up (e.g. HOME unset / config
+    # subsystem error). The rescue degrades to nil so the registry path
+    # is simply dropped from the watched-mtime set instead of crashing
+    # the poll thread.
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+
+    with_replaced_singleton_method(Hive::Config, :global_config_path, lambda {
+      raise StandardError, "registry path unavailable"
+    }) do
+      assert_nil source.send(:registry_config_path),
+                 "registry_config_path must degrade to nil when global_config_path raises"
+    end
+  end
+
+  def test_poll_loop_observes_state_file_change_within_latency_budget
+    with_seeded_project do |_project, _dir|
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.start
+      begin
+        first = wait_for(deadline_seconds: 0.5) { source.current }
+        refute_nil first
+
+        state_file = first.rows.first.state_file
+        File.utime(Time.now + 5, Time.now + 5, state_file)
+
+        changed = wait_for(deadline_seconds: 1.5) { source.current unless source.current.equal?(first) }
+        refute_nil changed, "state-file mtime changes must produce a fresh snapshot within 1.5s"
+      ensure
+        source.stop
+      end
+    end
+  end
 end

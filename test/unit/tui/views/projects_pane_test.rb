@@ -50,6 +50,20 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     assert_includes out, "Projects", "pane should carry a 'Projects' title header"
   end
 
+  # Wide-char (emoji/CJK) project names are 2 terminal cells per glyph.
+  # render_row must pad by display cells (Format.ljust_cells), not code
+  # units, so a row never over-pads past inner_width and pushes the pane
+  # border out of alignment.
+  def test_render_row_pads_wide_char_label_to_exact_cell_width
+    inner_width = 20
+    ascii = Hive::Tui::Views::ProjectsPane.render_row("plain", false, inner_width)
+    wide = Hive::Tui::Views::ProjectsPane.render_row("🤖🤖 proj", false, inner_width)
+
+    assert_equal inner_width, Hive::Tui::Views::Format.display_width(ascii)
+    assert_equal inner_width, Hive::Tui::Views::Format.display_width(wide),
+                 "wide-char project rows must pad to inner_width by display cells, not code units"
+  end
+
   # ---- Selection (cursor highlight) ----
   # Verifies the selection predicate directly. lipgloss strips ANSI in
   # non-tty so render output cannot distinguish selected vs unselected

@@ -35,9 +35,11 @@ module Hive
         EMPTY_PLACEHOLDER = "(no tasks)".freeze
         NO_SNAPSHOT_PLACEHOLDER = "(loading…)".freeze
 
-        # Action_key → status icon. Single-codepoint Unicode where possible
-        # so column alignment doesn't drift on terminals that render emoji
-        # double-width. Fallback for unknown keys is the empty space.
+        # Action_key → status icon. Glyphs vary in terminal cell width
+        # (e.g. `🤖` is 2 cells), so the icon column is padded to
+        # ICON_WIDTH via `Format.ljust_cells` in render_row — alignment is
+        # guaranteed by that cell-aware padding, not by the glyph choice.
+        # Fallback for unknown keys is the empty space.
         ICONS = {
           "agent_running"   => "🤖",
           "error"           => "⚠ ",

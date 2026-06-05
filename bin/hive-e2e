@@ -271,7 +271,7 @@ rescue Thor::Error => e
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
-    warn e.message
+    warn "hive-e2e: #{e.message}"
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e

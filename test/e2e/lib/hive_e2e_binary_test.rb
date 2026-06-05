@@ -84,13 +84,15 @@ class E2EBinaryTest < Minitest::Test
   # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
   # see a non-zero status instead. Pin the contract here.
   def test_unknown_command_exits_usage_code
-    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
+    _out, err, status = Open3.capture3(hive_e2e, "no-such-command")
     assert_equal 64, status.exitstatus
+    assert_match(/hive-e2e:/, err, "human mode should print a prose error to stderr")
   end
 
   def test_missing_required_args_exits_usage_code
-    _out, _err, status = Open3.capture3(hive_e2e, "replay")
+    _out, err, status = Open3.capture3(hive_e2e, "replay")
     assert_equal 64, status.exitstatus
+    assert_match(/hive-e2e:/, err, "human mode should print a prose error to stderr")
   end
 
   def test_run_help_after_subcommand_shows_usage

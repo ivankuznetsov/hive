@@ -76,7 +76,7 @@ The dry-run guard is best-effort: an agent that invokes absolute binary paths ca
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation and lifecycle helpers.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard and the `git --output` write guard.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard, `git --output` write skips, and argv-wide git exec/write guard regressions for config injection and pager execution.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

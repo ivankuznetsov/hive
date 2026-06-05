@@ -3157,3 +3157,13 @@ TTL config.
 **Refreshed pages:**
 - [[commands/babysit]]
 - [[log]]
+
+## [2026-06-05T18:30:39+01:00] wiki — refresh babysitter dry-run executable coverage after argv-wide guard
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `b5f53f98` hardened `bin/hive-babysitter-stub-git`. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config"` surfaced prior babysitter dry-run history, so verification used the committed diff plus direct source reads. Checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Updated [[commands/babysit]], [[modules/babysitter]], and [[gaps]] so command tests, module/boundary coverage, and live-smoke uncertainty mention `-c`, `--config-env`, `-O`, `--open-files-in-pager`, and `--output` screening across the original argv. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[commands/babysit]]
+- [[gaps]]
+- [[log]]

@@ -3135,3 +3135,10 @@ TTL config.
 - [[commands/babysit]]
 - [[modules/babysitter]]
 - [[gaps]]
+
+## [2026-06-05T16:45:15Z] wiki — audit babysitter dry-run refresh coverage
+
+**Action:** Audited residual wiki commit `e4d6fdab` after it committed the babysitter dry-run documentation refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output residual worktree"` only surfaced earlier babysitter wiki history, so verification used the committed diff plus direct source reads. Checked source commit `29532639` against `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/commands/babysit.rb`, and `lib/hive/babysitter/`. Confirmed existing [[commands/babysit]], [[modules/babysitter]], and [[gaps]] coverage matches the code: broad read-only `git` commands skip `--output` / `--output=...`, `git diff --name-only` still passes through, and live `hive babysit --once PROJECT --dry-run` agent smoke evidence remains absent. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

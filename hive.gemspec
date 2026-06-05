@@ -35,6 +35,12 @@ Gem::Specification.new do |spec|
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "lib/**/*.rb",
+    # hivebox web UI assets: ERB view templates and static CSS/JS. Without
+    # these the installed gem ships no templates and `hive web` 500s on every
+    # rendered page (the source tree masks it — views resolve relative to
+    # __dir__ at dev time).
+    "lib/hive/web/views/*.erb",
+    "public/**/*",
     "templates/**/*",
     "schemas/**/*.json",
     "examples/systemd/*",

@@ -1091,6 +1091,62 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert_equal 0, supervisor.spawned.size
 end
 
+def test_run_forever_escalates_to_full_tick_when_cheap_probe_detects_change
+  # Drive the fast-poll escalation branch in run_forever (dispatcher.rb
+  # 323-324): on a fast poll where no full tick is due, a cheap probe
+  # that detects a change must run a full `tick`. The full tick is
+  # observable via the real per-row dispatch spawning a child.
+  rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+  dispatcher, supervisor, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:recover_dispatch_claims) { |now:| nil }
+
+  # No full tick is due on this iteration; the cheap probe says a change
+  # was detected, so the elsif branch must fire a full tick.
+  dispatcher.define_singleton_method(:full_tick_due?) { |_now| false }
+  probe_calls = 0
+  dispatcher.define_singleton_method(:cheap_probe_requires_full_tick?) do |now:|
+    probe_calls += 1
+    true
+  end
+  # Stop after the single escalated tick so the loop terminates.
+  dispatcher.define_singleton_method(:interruptible_sleep) do |_seconds|
+    request_shutdown!
+  end
+
+  dispatcher.run_forever
+
+  assert_equal 1, probe_calls, "the cheap probe must be consulted on the fast-poll iteration"
+  assert_equal 1, supervisor.spawned.size,
+               "a cheap probe detecting a change must escalate to a full tick that dispatches"
+  assert_equal "hive plan s1 --from 2-brainstorm", supervisor.spawned.first[:command]
+  assert events_include?(logger, :dispatched)
+end
+
+def test_run_forever_skips_escalated_tick_when_shutdown_requested_mid_probe
+  # The escalated tick is guarded by `unless @shutdown || @reload`
+  # (dispatcher.rb 324): if shutdown is requested while the cheap probe
+  # runs, the full tick must NOT fire.
+  rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+  dispatcher, supervisor, _ctrl, _logger, _mw = make_dispatcher(rows: rows)
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:recover_dispatch_claims) { |now:| nil }
+  dispatcher.define_singleton_method(:full_tick_due?) { |_now| false }
+  dispatcher.define_singleton_method(:cheap_probe_requires_full_tick?) do |now:|
+    # Simulate a shutdown signal landing while the probe runs.
+    request_shutdown!
+    true
+  end
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+
+  dispatcher.run_forever
+
+  assert_equal 0, supervisor.spawned.size,
+               "shutdown mid-probe must suppress the escalated full tick"
+end
+
 def test_fast_probe_does_not_fetch_status_when_idle_and_mtimes_unchanged
   folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
   state_file = File.join(folder, "brainstorm.md")
@@ -2464,6 +2520,26 @@ end
     assert_equal "term", attrs[:action]
     assert_equal 7300, attrs[:elapsed_sec]
     assert_equal 7200, attrs[:timeout_sec]
+  end
+
+  def test_safe_mtime_returns_nil_when_mtime_raises_on_existing_path
+    # dispatcher.rb 566: File.exist? can race File.mtime — the file may
+    # vanish (or otherwise error) between the existence check and the
+    # stat. The rescue must degrade to nil rather than propagate.
+    dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+
+    Dir.mktmpdir("dispatcher-safe-mtime") do |dir|
+      path = File.join(dir, "vanishing.md")
+      File.write(path, "x\n")
+      with_replaced_singleton_method(File, :mtime, lambda { |arg|
+        raise Errno::ENOENT, arg if arg == path
+
+        File.stat(arg).mtime
+      }) do
+        assert_nil dispatcher.send(:safe_mtime, path),
+                   "safe_mtime must return nil when File.mtime raises after File.exist? passed"
+      end
+    end
   end
 
   def test_enforce_child_timeouts_noop_when_supervisor_lacks_method

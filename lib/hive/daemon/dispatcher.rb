@@ -1094,6 +1094,19 @@ module Hive
       # spawn); owner-gone and aged-out claims are removed WITHOUT
       # re-dispatch (at-most-once). Each removal is logged so an operator
       # can see what the restart cleaned up.
+      #
+      # Known narrow window (#264): a still-alive orphan's (project, slug) is
+      # NOT re-registered in the fresh controller, so for the interval until
+      # that orphan exits (or its claim ages out and a later sweep removes
+      # it), the per-row auto-advance path — gated only by the controller's
+      # now-empty `running_task?` — could dispatch an advance for the same
+      # slug. The task `.lock` is the backstop that still prevents two live
+      # runs of the same task; it is a narrower guarantee than an in-flight
+      # controller slot but holds across the daemon restart. Re-registering
+      # the orphan in the controller was deliberately rejected: without a
+      # supervised child to reap, the slot would only free on claim age-out
+      # (up to CLAIM_EXPIRY_SEC), trading a narrow already-backstopped window
+      # for a guaranteed multi-hour stuck slot. See [[modules/daemon]].
       def recover_dispatch_claims(now:)
         alive = lambda do |pid, recorded_start_time|
           next false unless pid.is_a?(Integer) && pid.positive?
@@ -1140,7 +1153,9 @@ module Hive
       # disabled (child_timeout_sec=0, no bound) fall back to the queue's
       # generous CLAIM_EXPIRY_SEC.
       def claim_expiry_sec
-        timeout = @daemon_cfg.fetch("child_timeout_sec", 0).to_i
+        timeout = @daemon_cfg.fetch(
+          "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
+        ).to_i
         return Hive::Daemon::DispatchRequestQueue::CLAIM_EXPIRY_SEC unless timeout.positive?
 
         grace = @daemon_cfg.fetch("child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC).to_i
@@ -1359,7 +1374,9 @@ module Hive
         # (Every supervisor implements `update_timeouts`; the `respond_to?`
         # seam was removed in #252.)
         @supervisor.update_timeouts(
-          default_timeout_sec: @daemon_cfg.fetch("child_timeout_sec", 0),
+          default_timeout_sec: @daemon_cfg.fetch(
+            "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
+          ),
           verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
           kill_grace_sec: @daemon_cfg.fetch(
             "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC

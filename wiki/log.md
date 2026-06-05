@@ -48,6 +48,20 @@ Append-only log of all wiki operations.
 - **#247** added a `schema_files_test` assertion that a `.json.claimed` file still validates against `hive-dispatch-request.v1` (no stray `claim` key) — completing the contract pin deferred from batch A.
 
 100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
+## [2026-06-03T18:30:00Z] daemon - PR #244 review follow-ups, batch A (dispatch-queue correctness)
+
+**Action:** Implemented the correctness/durability cluster of the deferred PR #244 `/ce-code-review` issues and refreshed [[modules/daemon]]:
+
+- **#249** `ChildSupervisor#pgid_for` returns `nil` (not the pid) on `ESRCH`, so the timeout-kill callers' `if pgid` guard short-circuits instead of signaling a possibly-recycled `-pid`.
+- **#248** `DispatchRequestQueue.claim` fsyncs the `dispatch_requests/` directory after the `.claimed` rename so the at-most-once commit point is crash-durable (best-effort `fsync_directory`).
+- **#250** `recover_claims(alive:)` is now a required kwarg — the old `alive: nil` default silently reaped every non-aged live claim.
+- **#259** `parse_data` rejects a single-element `argv` (`length >= 2`), mirroring the schema's `argv minItems: 2`, so `queue list` can't emit a nil verb.
+- **#255** the `child_timeout_sec` fetch fallbacks (start, reload, `claim_expiry_sec`) reference `Hive::Config::DEFAULTS.dig("daemon","child_timeout_sec")` instead of a `0` literal (the issue's "7200 default" premise was stale; the real default is `0`/disabled — this is drift-proofing, behavior-preserving).
+- **#265** `hive daemon queue prune` uses the new `remove_if_unclaimed`, which skips any id the daemon has since claimed and counts only files actually unlinked — never deleting a live `.claimed`'s recovery state under the lock-free prune race.
+- **#264** documented the still-alive-orphan auto-advance window (comment + wiki); re-registration in the controller was rejected to avoid a guaranteed multi-hour stuck slot vs. the narrow, `.lock`-backstopped window.
+- **#247** verified by the existing claim test (`refute data.key?("claim")`): the sidecar design already keeps the `.claimed` file schema-valid; the full schema-validation assertion lands in batch B.
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
 ## [2026-06-03T14:54:56Z] babysitter - narrow dry-run git remote passthrough
 
 **Action:** Tightened `bin/hive-babysitter-stub-git` so `git remote` is no longer blanket read-only in babysitter dry-run. The stub now passes only listing, `show [-n]`, and `get-url` forms through to the real git binary; mutating forms such as `remote set-url`, `remote add`, and `remote remove` are skipped and logged. Updated `test/unit/babysitter/dry_run_env_test.rb` to pin both the mutating skips and read-only passthrough examples.

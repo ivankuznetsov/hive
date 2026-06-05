@@ -16,8 +16,11 @@
   </div>
   <% if defined?(@session) && @session %>
     <% if @session_url.nil? && !@session.done %>
-      <%# Native HTML refresh (no JS/Turbo): poll until the authorize URL prints. %>
-      <meta http-equiv="refresh" content="2;url=/agents/<%= h(@session.agent) %>/login/<%= h(@session.id) %>">
+      <%# Native HTML refresh (no JS/Turbo): poll until the authorize URL %>
+      <%# prints. Emitted into the document <head> via the layout's @head %>
+      <%# yield so the http-equiv refresh is valid HTML (a meta-refresh in %>
+      <%# <body> is invalid). @head is read by the layout's <head>. %>
+      <% @head = %(<meta http-equiv="refresh" content="2;url=/agents/#{h(@session.agent)}/login/#{h(@session.id)}">) %>
     <% end %>
     <section class="narrow">
       <h2><%= h(@session.agent) %> login</h2>

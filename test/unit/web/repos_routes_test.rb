@@ -126,6 +126,35 @@ class WebReposRoutesTest < Minitest::Test
     end
   end
 
+  # When the target already exists under the repos root the route must NOT
+  # re-clone over it — it re-inits the existing checkout in place (the
+  # File.directory? branch). Pre-create a git repo at the target and assert
+  # no clone runs.
+  def test_existing_target_is_reinitialized_without_cloning
+    with_box do |root, log|
+      target = File.join(root, "widgets")
+      FileUtils.mkdir_p(target)
+      system("git", "init", "-q", "-b", "master", target, out: File::NULL, err: File::NULL)
+      system("git", "-C", target, "config", "user.email", "t@e.com")
+      system("git", "-C", target, "config", "user.name", "T")
+      system("git", "-C", target, "config", "commit.gpgsign", "false")
+      File.write(File.join(target, "README.md"), "hi")
+      system("git", "-C", target, "add", ".", out: File::NULL, err: File::NULL)
+      system("git", "-C", target, "commit", "-q", "-m", "init", out: File::NULL, err: File::NULL)
+
+      token = csrf_token_from("/repos")
+      post "/repos",
+           { "url" => "https://github.com/octo/widgets.git", "name" => "widgets", "authenticity_token" => token },
+           "HTTP_HOST" => "127.0.0.1"
+
+      assert last_response.redirect?, "re-adding an existing repo must re-init and redirect"
+      assert_equal "", File.exist?(log) ? File.read(log).strip : "",
+                   "an existing target must be re-inited in place, never re-cloned"
+      assert Hive::Config.registered_projects.any? { |p| p["name"] == "widgets" },
+             "the re-inited repo must be registered"
+    end
+  end
+
   def test_delete_forgets_named_project_with_csrf
     with_box do |_root, _log|
       with_tmp_git_repo do |dir|

@@ -28,3 +28,4 @@ th { color: var(--muted); font-weight: 600; }
 .card { min-width: 200px; }
 pre { overflow: auto; background: #111827; color: #f9fafb; padding: 12px; border-radius: 6px; }
 .error { color: var(--danger); }
+.notice { color: var(--accent); }

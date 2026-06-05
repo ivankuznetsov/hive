@@ -22,7 +22,7 @@
   </div>
   <form method="post" action="/tasks/<%= h(@project["name"]) %>/<%= h(@row["slug"]) %>/intervene">
     <%= csrf_tag %>
-    <textarea name="message" rows="4" placeholder="Steer or answer"></textarea>
+    <textarea name="message" rows="4" placeholder="Steer or answer" required></textarea>
     <button type="submit">Send</button>
   </form>
   <% @files.each do |name, content| %>

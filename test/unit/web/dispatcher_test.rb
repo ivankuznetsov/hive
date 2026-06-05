@@ -94,6 +94,30 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  def test_dispatch_rejects_an_unknown_action
+    with_tmp_global_config do
+      dispatcher = Hive::Web::Dispatcher.new
+
+      # An unknown action must NOT be passed through as a literal hive verb
+      # (which would enqueue a bad request); it raises so the app maps it to a
+      # 422 rather than a queued bad verb or an opaque 500.
+      assert_raises(KeyError) do
+        dispatcher.dispatch(slug: "demo-task", project: "demo", action: "totally-bogus")
+      end
+    end
+  end
+
+  def test_assert_dispatchable_raises_for_unknown_action
+    with_tmp_global_config do
+      dispatcher = Hive::Web::Dispatcher.new
+
+      assert dispatcher.assert_dispatchable!("ready_to_plan").nil?,
+             "a known action passes the guard without raising"
+      error = assert_raises(Hive::Error) { dispatcher.assert_dispatchable!("nope") }
+      assert_match(/unknown dispatch action/, error.message)
+    end
+  end
+
   def test_dispatch_maps_each_gate_action_distinctly
     with_tmp_global_config do
       dispatcher = Hive::Web::Dispatcher.new

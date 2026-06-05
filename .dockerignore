@@ -8,3 +8,17 @@ log
 node_modules
 vendor/bundle
 *.gem
+
+# Secrets and local state — the Dockerfile does `COPY . /app`, so keep these
+# out of the image to avoid baking credentials / tokens into a shipped layer.
+.env
+.env.*
+*.session_secret
+.web.session_secret
+.pi
+.claude
+.codex
+*.pem
+*.key
+data/
+hivebox-data/

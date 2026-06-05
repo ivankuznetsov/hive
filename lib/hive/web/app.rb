@@ -12,6 +12,7 @@ require "hive/web/agents_auth"
 require "hive/web/telegram_validator"
 require "hive/web/telegram_tester"
 require "hive/web/sse_limiter"
+require "hive/commands/web"
 
 module Hive
   module Web
@@ -22,8 +23,17 @@ module Hive
       set :show_exceptions, false
       set :raise_errors, false
 
-      configure do
+      # Build (or rebuild) the runtime settings from the CURRENT config.yml.
+      # Extracted from the `configure` block so tests can `require` the app
+      # once (keeping stdlib Coverage's line attribution for the inline route
+      # blocks) and then call `reconfigure!` per test to re-read config.yml,
+      # instead of `load`-reloading the whole class (which drops Coverage
+      # attribution for the reloaded inline route/helper/error blocks).
+      def self.apply_runtime_config!
         cfg = Hive::Config.load_global_web
+        # Reclaim the previous poller thread before replacing the feed so a
+        # per-test reconfigure can't leak background pollers.
+        settings.status_feed.stop if settings.respond_to?(:status_feed) && settings.status_feed.respond_to?(:stop)
         set :web_config, cfg
         set :github_auth, Hive::Web::GithubAuth.new(config: cfg)
         set :status_feed, Hive::Web::StatusFeed.new
@@ -31,9 +41,16 @@ module Hive
         set :agents_auth, Hive::Web::AgentsAuth.new
         set :telegram_validator, Hive::Web::TelegramValidator
         set :telegram_tester, Hive::Web::TelegramTester
-        # Cap concurrent SSE streams so open dashboards can't exhaust Puma's
-        # thread pool (see Hive::Web::SseLimiter).
-        set :sse_limiter, Hive::Web::SseLimiter.new(max: 64)
+        # Cap concurrent SSE streams strictly below Puma's thread pool so
+        # open dashboards can't pin every worker thread (see
+        # Hive::Web::SseLimiter and Commands::Web::MAX_SSE_STREAMS, which
+        # reserves headroom for non-SSE requests).
+        set :sse_limiter, Hive::Web::SseLimiter.new(max: Hive::Commands::Web::MAX_SSE_STREAMS)
+        # Log-tail cadence + idle ceiling (seconds). Overridable so the SSE
+        # log stream releases its thread + slot after a bounded idle period
+        # instead of parking forever; tests shrink these to converge fast.
+        set :log_stream_tick, 1.0
+        set :log_stream_idle_timeout, 60.0
         # A truthy Hash for `:sessions` both enables Sinatra's session
         # middleware AND carries the cookie options below. Do NOT follow it
         # with `enable :sessions` — that is `set(:sessions, true)`, which
@@ -50,7 +67,25 @@ module Hive
         # operator's reverse proxy/tunnel, which sets and validates Host.
         # If you expose the raw port without a trusted front proxy, drop
         # this `except:` to restore the DNS-rebinding / Host-injection guard.
-        use Rack::Protection, except: :host_authorization
+        # Guard against double-stacking the middleware: a per-test
+        # `reconfigure!` would otherwise push another Rack::Protection onto
+        # the middleware list on every call.
+        unless @rack_protection_installed
+          use Rack::Protection, except: :host_authorization
+          @rack_protection_installed = true
+        end
+      end
+
+      # Re-apply runtime settings against the current config.yml without
+      # reloading the class. Used by the test boot path so Coverage keeps
+      # attributing the inline routes/helpers/error handlers defined in this
+      # class body.
+      def self.reconfigure!
+        apply_runtime_config!
+      end
+
+      configure do
+        apply_runtime_config!
       end
 
       helpers do
@@ -83,15 +118,34 @@ module Hive
         end
 
         def find_project!(name)
-          project = Hive::Config.registered_projects.find { |p| p["name"] == name }
+          project = registered_projects_cached.find { |p| p["name"] == name }
           halt 404, "unknown project" unless project
           project
+        end
+
+        # Memoize the registry for the lifetime of one request. A single
+        # request can hit `find_project!` and `task_row` (which also reads the
+        # registry via the snapshot) repeatedly; without this each call
+        # re-globs the filesystem and re-parses config.yml. Scoped to `env` so
+        # the value never leaks across requests (the registry can change
+        # between them).
+        def registered_projects_cached
+          env["hive.registered_projects"] ||= Hive::Config.registered_projects
         end
       end
 
       before do
         protected!
         verify_csrf!
+      end
+
+      # An InvalidTaskPath means an unknown agent session / missing task — a
+      # not-found, not an unprocessable request. Map it to 404 BEFORE the
+      # catch-all below (which would otherwise label it 422). Registered
+      # before the broader handler so Sinatra's most-specific-match wins.
+      error Hive::InvalidTaskPath do
+        status 404
+        erb :unauthorized, locals: { message: "Not found: #{env["sinatra.error"].message}" }
       end
 
       # Any uncaught Hive::Error or KeyError (missing param / config key)
@@ -119,7 +173,14 @@ module Hive
       end
 
       get "/auth/github/callback" do
-        halt 403, erb(:unauthorized, locals: { message: "Invalid OAuth state" }) unless params["state"] == session.delete(:github_oauth_state)
+        # Require a non-empty stored state that secure-compares against the
+        # supplied one. A bare `stored == supplied` passes when BOTH are nil
+        # (no OAuth flow ever started), defeating the CSRF/state check; demand
+        # a real stored value and constant-time compare it.
+        stored = session.delete(:github_oauth_state)
+        supplied = params["state"].to_s
+        valid_state = stored && !stored.empty? && Rack::Utils.secure_compare(stored, supplied)
+        halt 403, erb(:unauthorized, locals: { message: "Invalid OAuth state" }) unless valid_state
 
         # A denied consent screen (or any GitHub error) comes back as
         # `?error=...&error_description=...` with no `code`. Render a

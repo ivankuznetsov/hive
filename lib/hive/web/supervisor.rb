@@ -1,3 +1,8 @@
+# Load the full library first so constants like Hive::ConfigError (defined in
+# lib/hive.rb and referenced transitively by hive/config → hive/agent_profiles)
+# resolve even when this file is required directly as the container entrypoint
+# does (`ruby -rhive/web/supervisor`), before any `require "hive"`.
+require "hive"
 require "hive/config"
 
 module Hive
@@ -85,10 +90,25 @@ module Hive
           next unless pid
 
           child.pid = nil
-          schedule_restart(child) if child.name == "web" && !@stopping && !status.success?
+          schedule_restart(child) if should_restart?(status)
         rescue Errno::ECHILD
           child.pid = nil
         end
+      end
+
+      # Restart any crashed child (web, daemon, or bot) — a daemon or bot that
+      # died must come back, not silently disappear. Three deaths are NOT
+      # respawned: (1) anything reaped while we are stopping, (2) a clean
+      # (success) exit, and (3) a signal death (e.g. SIGTERM) — a child killed
+      # by a signal during shutdown would otherwise be respawned only to be
+      # immediately re-killed, racing the drain in terminate_all. A genuine
+      # in-loop crash exits non-zero and is still restarted.
+      def should_restart?(status)
+        return false if @stopping
+        return false if status.success?
+        return false if status.signaled?
+
+        true
       end
 
       # Defer the actual restart so a crash-looping child backs off instead
@@ -122,12 +142,19 @@ module Hive
         rescue Errno::ESRCH
           nil
         end
-        @children.each { |child| reap_with_escalation(child, grace) if child.pid }
+        # Drain children concurrently within ONE grace window. Reaping serially
+        # cost up to (children × grace), which on the default 60s grace blows
+        # far past Docker's 10s stop timeout and gets the whole container
+        # SIGKILLed mid-shutdown. One thread per child shares the window.
+        @children
+          .select(&:pid)
+          .map { |child| Thread.new { reap_with_escalation(child, grace) } }
+          .each(&:join)
       end
 
-      # Give *each* child its own grace window (a shared deadline let the first
-      # slow child consume the whole budget, leaving the rest ~0s), then
-      # SIGKILL the process group of any child that ignored TERM so the
+      # Give *each* child its own grace window — but run them concurrently in
+      # terminate_all so the windows overlap into a single wall-clock budget —
+      # then SIGKILL the process group of any child that ignored TERM so the
       # container can't hang on `docker stop` or orphan agent processes.
       def reap_with_escalation(child, grace)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + grace

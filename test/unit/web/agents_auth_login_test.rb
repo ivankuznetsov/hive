@@ -89,6 +89,43 @@ class AgentsAuthLoginTest < Minitest::Test
     assert_raises(Hive::InvalidTaskPath) { auth.start("nope") }
   end
 
+  # The reader now scans line-by-line (not the O(n²) per-char full-buffer scan).
+  # A CLI that prints the URL with NO trailing newline — the URL immediately
+  # followed by the input prompt on the same final line — must still surface it
+  # (the URL_RE `\z` tail match), and the relayed output must include the
+  # prompt that came after.
+  def install_no_newline_claude(bin_dir)
+    path = File.join(bin_dir, "claude")
+    File.write(path, <<~SH)
+      #!/usr/bin/env bash
+      # printf with no trailing newline: "...<URL> Paste code: " then read.
+      printf 'Open #{AUTH_URL} Paste code: '
+      read -r code
+      [ -n "$code" ] && { echo ok; exit 0; }
+      exit 1
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
+  def test_url_detected_when_printed_without_a_trailing_newline
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      install_no_newline_claude(bin_dir)
+      with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        auth = Hive::Web::AgentsAuth.new
+        session = auth.start("claude")
+
+        found = wait_until { auth.session(session.id).url }
+        assert_equal AUTH_URL, found,
+                     "a URL with no trailing newline (tail buffer) must still be detected"
+      ensure
+        auth.complete(session.id, "x") rescue nil
+        wait_until { auth.session(session.id).nil? || auth.session(session.id).done } rescue nil
+      end
+    end
+  end
+
   # A `claude` that rejects any code != "good" and exits non-zero — models a
   # wrong/expired callback code.
   def install_strict_claude(bin_dir)
@@ -118,6 +155,195 @@ class AgentsAuthLoginTest < Minitest::Test
         error = assert_raises(Hive::Error) { auth.complete(session.id, "wrong") }
         assert_match(/login failed|did not accept/, error.message,
                      "a rejected code must surface a clear error, not a silent redirect")
+      end
+    end
+  end
+
+  # P1-6: if the watchdog already reaped the child, the reader thread's ensure
+  # hits Errno::ECHILD on Process.wait2. The rescue must swallow it so close_io
+  # + done=true STILL run — otherwise the PTY fds leak and the session is stuck
+  # "in flight" forever. Drive relay_reader directly against a real PTY whose
+  # child we reap out from under it first.
+  def test_reader_ensure_cleans_up_even_when_child_already_reaped
+    auth = Hive::Web::AgentsAuth.new
+    reader, writer, pid = PTY.spawn("sh", "-c", "exit 0")
+    Process.waitpid(pid) # steal the reap, like the watchdog would
+    session = Hive::Web::AgentsAuth::Session.new(
+      id: "abc", agent: "claude", pid: pid, io: writer, reader: reader, output: +"", done: false
+    )
+
+    # Must not raise Errno::ECHILD even though the child is already gone.
+    auth.send(:relay_reader, session, reader, writer, pid)
+
+    assert session.done, "session must be marked done despite the ECHILD on wait"
+    assert reader.closed?, "the PTY master must be closed so its fd is reclaimed"
+    assert writer.closed?, "the PTY slave must be closed so its fd is reclaimed"
+  end
+
+  # P2: a session whose child was already reaped (pid cleared / done) must NOT
+  # be signalled by the watchdog — a bare pid kill after pid reuse could SIGKILL
+  # an unrelated process (e.g. the daemon). The watchdog reads done under the
+  # mutex and skips the kill; we prove no signal is sent for a done session.
+  def test_watchdog_does_not_kill_a_reaped_session
+    auth = Hive::Web::AgentsAuth.new
+    # A live process we own, masquerading as a recycled pid. If the watchdog
+    # wrongly signalled it, this would die.
+    bystander = Process.spawn("sleep", "5", pgroup: true)
+    bystander_pgid = Process.getpgid(bystander)
+    session = Hive::Web::AgentsAuth::Session.new(
+      id: "z", agent: "claude", pid: bystander, pgid: bystander_pgid, output: +"", done: true
+    )
+
+    # done == true means the child was already reaped; the watchdog must bail
+    # before signalling, leaving the bystander alive.
+    auth.send(:start_watchdog, session).join
+
+    assert process_alive?(bystander), "a reaped (done) session must not be signal-killed"
+  ensure
+    Process.kill("KILL", -bystander_pgid) rescue nil
+    Process.waitpid(bystander) rescue nil
+  end
+
+  def process_alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  end
+
+  # P2 (watchdog): a session that never reaches `done` past the deadline must be
+  # killed by SIGTERM → SIGKILL on its PROCESS GROUP (not a bare pid). Drive a
+  # real child that ignores SIGTERM so the KILL-escalation branch runs, with a
+  # tiny timeout so the test doesn't wait LOGIN_TIMEOUT_SEC.
+  def test_watchdog_force_kills_a_hung_session_via_its_process_group
+    auth = Hive::Web::AgentsAuth.new
+    # Traps TERM and keeps sleeping → only the group SIGKILL stops it.
+    pid = Process.spawn("sh", "-c", "trap '' TERM; sleep 30", pgroup: true)
+    pgid = Process.getpgid(pid)
+    session = Hive::Web::AgentsAuth::Session.new(
+      id: "h", agent: "claude", pid: pid, pgid: pgid, output: +"", done: false
+    )
+
+    auth.send(:start_watchdog, session, timeout: 0.05).join
+    # The group KILL must have reaped the hung child.
+    assert wait_killed?(pid), "the watchdog must SIGKILL a hung child's process group"
+  ensure
+    Process.kill("KILL", -pgid) rescue nil
+    Process.waitpid(pid) rescue nil
+  end
+
+  def wait_killed?(pid)
+    deadline = monotonic + 5
+    loop do
+      _, _ = Process.waitpid2(pid, Process::WNOHANG)
+      Process.kill(0, pid)
+      return false if monotonic > deadline
+
+      sleep 0.02
+    end
+  rescue Errno::ESRCH, Errno::ECHILD
+    true
+  end
+
+  # signal_group must swallow ESRCH (group already gone) — calling it on a pgid
+  # that no longer exists must NOT raise.
+  def test_signal_group_swallows_a_dead_group
+    auth = Hive::Web::AgentsAuth.new
+    pid = Process.spawn("true")
+    Process.waitpid(pid) # now gone
+
+    # Must not raise even though the group is gone.
+    assert_nil auth.send(:signal_group, pid, "TERM"),
+               "signalling a dead process group must be a benign no-op"
+  end
+
+  # process_group_of must fall back to the pid when the child is already gone
+  # (Process.getpgid raises Errno::ESRCH).
+  def test_process_group_of_falls_back_to_pid_when_child_gone
+    auth = Hive::Web::AgentsAuth.new
+    pid = Process.spawn("true")
+    Process.waitpid(pid)
+
+    assert_equal pid, auth.send(:process_group_of, pid),
+                 "a reaped child has no pgid — fall back to the pid"
+  end
+
+  # The reader must scan only newly-arrived data and still detect a URL that
+  # arrives AFTER a non-URL preamble (exercising the "no match yet, carry the
+  # tail" branch before the URL line lands).
+  def install_preamble_claude(bin_dir)
+    path = File.join(bin_dir, "claude")
+    File.write(path, <<~SH)
+      #!/usr/bin/env bash
+      # Emit a non-URL preamble FIRST and flush, pause so the reader consumes it
+      # as its own chunk (exercising the "no URL yet, carry the tail" branch),
+      # then emit the URL in a later read.
+      echo "Initializing provider handshake..."
+      echo "Please open the following link:"
+      sleep 0.4
+      echo "#{AUTH_URL}"
+      read -r code
+      [ -n "$code" ] && exit 0
+      exit 1
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
+  def test_url_detected_after_a_non_url_preamble
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      install_preamble_claude(bin_dir)
+      with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        auth = Hive::Web::AgentsAuth.new
+        session = auth.start("claude")
+
+        found = wait_until { auth.session(session.id).url }
+        assert_equal AUTH_URL, found, "a URL after preamble lines must still be detected"
+      ensure
+        auth.complete(session.id, "x") rescue nil
+        wait_until { auth.session(session.id).nil? || auth.session(session.id).done } rescue nil
+      end
+    end
+  end
+
+  # A `claude` that NEVER accepts the code: it keeps re-prompting (stays alive,
+  # never logs in). `complete` must time out and surface the "did not accept —
+  # still waiting" error rather than a silent redirect.
+  def install_reprompting_claude(bin_dir)
+    path = File.join(bin_dir, "claude")
+    File.write(path, <<~SH)
+      #!/usr/bin/env bash
+      echo "Open #{AUTH_URL} to authenticate"
+      while read -r code; do
+        echo "that code was not accepted, try again:"
+      done
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
+  def test_login_outcome_times_out_into_a_still_waiting_error
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      install_reprompting_claude(bin_dir)
+      # HOME points at an empty dir so logged_in? can't false-positive.
+      with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR), "HOME" => dir) do
+        auth = Hive::Web::AgentsAuth.new
+        session = auth.start("claude")
+        wait_until { auth.session(session.id).url }
+        auth.session(session.id).io.write("wrong\n")
+
+        # Drive the real outcome wait with a short timeout: the CLI keeps
+        # re-prompting (never done, never logged in) → the still-waiting error.
+        error = assert_raises(Hive::Error) do
+          auth.send(:wait_for_login_outcome, auth.session(session.id), timeout: 0.3)
+        end
+        assert_match(/did not accept/, error.message,
+                     "a never-accepted code must surface a clear still-waiting error")
+      ensure
+        s = auth.session(session.id) if session
+        Process.kill("KILL", -Process.getpgid(s.pid)) rescue nil if s&.pid
       end
     end
   end

@@ -44,6 +44,21 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_logged_in_false_for_unknown_agent
+    with_tmp_dir do |home|
+      refute Hive::AgentProfiles.logged_in?(:nonesuch, home: home),
+             "an unrecognized agent name must read as not logged in"
+    end
+  end
+
+  def test_logged_in_swallows_path_errors_and_returns_false
+    # A NUL byte in the home makes File.file?/File.read raise ArgumentError
+    # ("string contains null byte"); the rescue must absorb it and report
+    # not-logged-in rather than letting the probe blow up the status view.
+    refute Hive::AgentProfiles.logged_in?(:pi, home: "bad\0home"),
+           "a path-construction error must be rescued into a false result"
+  end
+
   def teardown
     # Restore the v1 built-in registrations after any test that mutated the
     # registry. require'd files don't re-evaluate, so reset + explicit

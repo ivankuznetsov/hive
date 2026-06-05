@@ -43,8 +43,21 @@ module Hive
         approve(slug: slug, project: project, from: from, to: destination, force: true)
       end
 
+      # Raise unless `action` maps to a known stage verb. Reused by the
+      # dispatch route to fail fast with a clean 422 before anything is
+      # enqueued; `dispatch` itself re-checks as defense in depth.
+      def assert_dispatchable!(action)
+        return if STAGE_VERB_BY_ACTION.key?(action.to_s)
+
+        raise Hive::Error, "unknown dispatch action: #{action.inspect}"
+      end
+
       def dispatch(slug:, project:, action:, stage: nil)
-        verb = STAGE_VERB_BY_ACTION.fetch(action.to_s) { action.to_s }
+        # `fetch` with no fallback block raises KeyError on an unknown action
+        # instead of passing the literal string through as a hive verb the
+        # daemon can't run. The app's `error Hive::Error, KeyError` handler
+        # turns that into a 422 rather than an opaque 500 or a queued bad verb.
+        verb = STAGE_VERB_BY_ACTION.fetch(action.to_s)
         argv = [ "hive", verb, slug, "--project", project ]
         argv += [ "--from", stage ] if stage
         request_id = Hive::Bot::DispatchRequestWriter.write!(

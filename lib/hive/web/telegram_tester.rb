@@ -1,4 +1,5 @@
 require "telegram/bot"
+require "hive/web/telegram_timeouts"
 
 module Hive
   module Web
@@ -12,18 +13,28 @@ module Hive
 
       TEST_MESSAGE = "✅ hivebox test message".freeze
 
-      def call(token:, chat_ids:)
+      # `url:` overrides the Telegram API base (the gem's own Client option) so
+      # tests can drive the real network-error path against an unroutable
+      # address; production leaves it nil → api.telegram.org.
+      def call(token:, chat_ids:, url: nil)
         chats = Array(chat_ids)
         return { ok: false, error: "no allowed chat IDs configured" } if chats.empty?
 
-        client = ::Telegram::Bot::Client.new(token.to_s)
-        me = client.api.get_me
-        return { ok: false, error: "getMe failed — token rejected" } unless me.is_a?(Hash) && me["ok"]
-
+        client = url ? ::Telegram::Bot::Client.new(token.to_s, url: url) : ::Telegram::Bot::Client.new(token.to_s)
+        # getMe authenticates the token: a bad/revoked token raises ResponseError
+        # (rescued below into a failure result), so reaching past it means the
+        # token is valid and we can prove delivery to each chat.
+        client.api.get_me
         chats.each { |chat_id| client.api.send_message(chat_id: chat_id, text: TEST_MESSAGE) }
         { ok: true, sent: chats.length }
       rescue ::Telegram::Bot::Exceptions::ResponseError => e
         { ok: false, error: e.message }
+      rescue *TelegramTimeouts::NETWORK_ERRORS => e
+        # A transport failure (timeout / connection refused / DNS) would
+        # otherwise escape to the Sinatra thread as an opaque 500 after a long
+        # block. Convert it to Hive::Error so the app renders a friendly
+        # "couldn't reach Telegram" page.
+        raise Hive::Error, "couldn't reach Telegram to send the test message (#{e.class}). Try again."
       end
     end
   end

@@ -6,6 +6,10 @@
     <title>hivebox</title>
     <link rel="stylesheet" href="/css/app.css">
     <script src="/js/sse.js" defer></script>
+    <%# Per-page <head> extras (e.g. the agents-page meta-refresh) are %>
+    <%# rendered here, in the document head, where http-equiv refresh is %>
+    <%# valid — never inside <body>. Set @head in the view that needs it. %>
+    <%= @head if defined?(@head) && @head %>
   </head>
   <body>
     <header class="topbar">

@@ -25,7 +25,8 @@ class WebAppTest < Minitest::Test
         "github" => { "owner" => "alice", "client_id" => "client" }
       }
     }.to_yaml)
-    load File.expand_path("../../../lib/hive/web/app.rb", __dir__)
+    require "hive/web/app"
+    Hive::Web::App.reconfigure!
     @app = Hive::Web::App
   end
 

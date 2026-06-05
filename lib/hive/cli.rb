@@ -963,6 +963,24 @@ module Hive
     option :bind, type: :string, desc: "override web.bind"
     option :port, type: :numeric, desc: "override web.port"
     def web
+      if options[:json]
+        require "json"
+        message = "hive web has no JSON output (it runs a long-lived server). " \
+                  "Use 'hive status --json' for machine-readable task data."
+        # Mirror `hive tui`'s rejection: emit a structured error envelope (sans
+        # `schema`, since web has no registered hive-* schema) and raise
+        # InvalidTaskPath for the USAGE (64) exit code — parity with every
+        # other --json failure on this surface.
+        puts JSON.generate(
+          "ok" => false,
+          "error_class" => "InvalidTaskPath",
+          "error_kind" => "invalid_task_path",
+          "exit_code" => Hive::ExitCodes::USAGE,
+          "message" => message
+        )
+        raise Hive::InvalidTaskPath, message
+      end
+
       require "hive/commands/web"
       Hive::Commands::Web.new(bind: options[:bind], port: options[:port]).call
     end

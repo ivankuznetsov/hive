@@ -16,6 +16,12 @@ module Hive
       # still be surfaced instead of leaving the operator with only the raw
       # `<pre>` output.
       URL_RE = %r{https?://[^\s<>"']+(?=\s|\z)}.freeze
+      # A URL definitively terminated by whitespace — used to know the captured
+      # value has "settled" so the reader can stop re-scanning. A match that
+      # only reaches the end of the buffer (\z, no trailing space yet) may still
+      # be a truncated prefix if the URL straddles a read boundary, so we keep
+      # scanning until a whitespace-terminated match (or EOF) settles it.
+      URL_SETTLED_RE = %r{https?://[^\s<>"']+(?=\s)}.freeze
       AGENT_COMMANDS = {
         "claude" => %w[claude setup-token],
         "codex" => %w[codex login]
@@ -29,12 +35,15 @@ module Hive
       # block its reader thread forever. The watchdog force-kills the child
       # past this deadline so the reader unblocks and the session is reaped.
       LOGIN_TIMEOUT_SEC = 300
+      # Grace between the watchdog's SIGTERM and its SIGKILL escalation.
+      WATCHDOG_ESCALATE_SEC = 1
       # How long `start` waits for the authorize URL before rendering, and how
       # long `complete` waits to learn whether a pasted code was accepted.
       URL_WAIT_SEC = 8
       COMPLETE_WAIT_SEC = 8
 
-      Session = Struct.new(:id, :agent, :pid, :io, :reader, :output, :url, :done, :error, keyword_init: true)
+      Session = Struct.new(:id, :agent, :pid, :pgid, :io, :reader, :output, :url, :done, :error,
+                           keyword_init: true)
 
       def initialize
         @sessions = {}
@@ -56,28 +65,14 @@ module Hive
         session.io = writer
         session.reader = reader
         session.pid = pid
+        # PTY.spawn runs the child in a fresh session, so it leads its own
+        # process group. Capture the pgid up front: the watchdog kills the
+        # whole group (not a bare pid) so a child that forked helpers is fully
+        # torn down, and so a reaped-then-reused pid can't be signalled.
+        session.pgid = process_group_of(pid)
         @mutex.synchronize { @sessions[session.id] = session }
 
-        Thread.new do
-          begin
-            reader.each_char do |char|
-              @mutex.synchronize do
-                session.output << char
-                extracted = session.output[URL_RE]
-                session.url = extracted if extracted
-              end
-            end
-          rescue Errno::EIO
-            nil
-          ensure
-            _, status = Process.wait2(pid)
-            # Close both PTY ends so the master/slave fds are reclaimed —
-            # otherwise a long-running box leaks two fds per login attempt.
-            close_io(reader)
-            close_io(writer)
-            @mutex.synchronize { session.done = true; session.error = "exit #{status.exitstatus}" unless status.success? }
-          end
-        end
+        Thread.new { relay_reader(session, reader, writer, pid) }
         start_watchdog(session)
         await_url(session.id)
         session
@@ -159,19 +154,38 @@ module Hive
       # Kill a CLI that never reaches EOF (e.g. a hung provider handshake) so
       # its reader thread unblocks and the fds/child are reclaimed. A clean
       # exit makes this a no-op (the wait returns once the session is done).
-      def start_watchdog(session)
+      def start_watchdog(session, timeout: LOGIN_TIMEOUT_SEC)
         Thread.new do
-          done = wait_until(LOGIN_TIMEOUT_SEC) { session.done }
+          done = wait_until(timeout) { session_done?(session) }
           next if done
 
-          begin
-            Process.kill("TERM", session.pid)
-            sleep 1
-            Process.kill("KILL", session.pid) unless session.done
-          rescue Errno::ESRCH
-            nil
-          end
+          # Capture the process group under the mutex and skip the kill if the
+          # reader thread already reaped the child (cleared pid). Reading
+          # `done`/`pid` racily and then signalling a bare pid could SIGKILL an
+          # unrelated process after pid reuse (e.g. the daemon). Signalling the
+          # process group (-pgid) the CLI leads avoids that and tears down any
+          # helpers it spawned.
+          pgid = @mutex.synchronize { session.done ? nil : session.pgid }
+          next unless pgid
+
+          signal_group(pgid)
+          # Give TERM a brief window to land, then escalate if the reader
+          # thread hasn't observed the exit (set `done`).
+          escalate = wait_until(WATCHDOG_ESCALATE_SEC) { session_done?(session) }
+          signal_group(pgid, "KILL") unless escalate
         end
+      end
+
+      def session_done?(session)
+        @mutex.synchronize { session.done }
+      end
+
+      # Best-effort signal to a process group. ESRCH (already gone) and EPERM
+      # (pid/group recycled to a process we don't own) are both benign here.
+      def signal_group(pgid, signal = "TERM")
+        Process.kill(signal, -pgid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
       end
 
       # After a code is relayed, wait a bounded time to learn the outcome and
@@ -179,8 +193,8 @@ module Hive
       # code makes the CLI re-prompt (the session never goes `done`), so the
       # operator would otherwise be redirected with the agent still "Not
       # logged in" and no explanation.
-      def wait_for_login_outcome(session)
-        wait_until(COMPLETE_WAIT_SEC) do
+      def wait_for_login_outcome(session, timeout: COMPLETE_WAIT_SEC)
+        wait_until(timeout) do
           session.done || Hive::AgentProfiles.logged_in?(session.agent)
         end
 
@@ -213,6 +227,93 @@ module Hive
       # nothing left to read or relay a code into.
       def prune_finished_sessions
         @mutex.synchronize { @sessions.delete_if { |_, s| s.done } }
+      end
+
+      # Relay the CLI's PTY output into the session buffer, surface the
+      # authorize URL, and ALWAYS clean up. The `ensure` must run close_io +
+      # mark `done` regardless of how the wait turns out — if the watchdog
+      # already reaped the child, Process.wait2 raises Errno::ECHILD; without
+      # the rescue that exception would propagate and skip the cleanup, leaking
+      # the PTY fds and wedging the session "in flight" forever.
+      def relay_reader(session, reader, writer, pid)
+        scan_output(session, reader)
+      ensure
+        status = reap_child(pid)
+        # Close both PTY ends so the master/slave fds are reclaimed — otherwise
+        # a long-running box leaks two fds per login attempt.
+        close_io(reader)
+        close_io(writer)
+        finalize_session(session, status)
+      end
+
+      # Bytes carried between reads so a URL split across a read boundary is
+      # still matched. The cap bounds the tail we re-scan so a long URL-free run
+      # can't grow the scan window without limit.
+      SCAN_TAIL_BYTES = 2048
+
+      # Scan newly-arrived data only, instead of re-running URL_RE against the
+      # whole growing buffer on every character (the old O(n²)-under-the-mutex
+      # path). readpartial returns whatever is available WITHOUT waiting for a
+      # newline, so a URL printed with no trailing newline (immediately followed
+      # by the input prompt) is still detected. Once the URL is found we stop
+      # scanning and just relay. The mutex is held only for the buffer append
+      # and the regex on the small tail — not the whole stream.
+      def scan_output(session, reader)
+        tail = +""
+        settled = false
+        loop do
+          chunk = read_available(reader)
+          break unless chunk
+
+          @mutex.synchronize do
+            session.output << chunk
+            next if settled # URL locked in — just relay from here on
+
+            tail << chunk
+            # Re-extract the latest match each read (a \z-only match may be a
+            # truncated prefix that grows on the next read); lock it in only
+            # once a whitespace-terminated match proves it is complete.
+            match = tail[URL_RE]
+            session.url = match if match
+            if tail[URL_SETTLED_RE]
+              settled = true
+              tail = nil
+            else
+              tail = tail[-SCAN_TAIL_BYTES..] || tail
+            end
+          end
+        end
+      end
+
+      # Read whatever bytes are available without blocking for a newline.
+      # End-of-stream surfaces as EOFError on a pipe or, for a PTY master whose
+      # child has exited, as Errno::EIO on Linux — both mean "done", so return
+      # nil and let scan_output's loop break.
+      def read_available(reader)
+        reader.readpartial(4096)
+      rescue EOFError, Errno::EIO
+        nil
+      end
+
+      def reap_child(pid)
+        _, status = Process.wait2(pid)
+        status
+      rescue Errno::ECHILD
+        # The watchdog already reaped this child. Cleanup still must run.
+        nil
+      end
+
+      def finalize_session(session, status)
+        @mutex.synchronize do
+          session.done = true
+          session.error = "exit #{status.exitstatus}" if status && !status.success?
+        end
+      end
+
+      def process_group_of(pid)
+        Process.getpgid(pid)
+      rescue Errno::ESRCH
+        pid
       end
 
       def close_io(io)

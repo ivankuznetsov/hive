@@ -59,7 +59,8 @@ class WebGithubAuthFlowTest < Minitest::Test
       "registered_projects" => [],
       "web" => { "origin" => "http://127.0.0.1", "github" => { "owner" => "alice", "client_id" => "client" } }
     }.to_yaml)
-    load File.expand_path("../../../lib/hive/web/app.rb", __dir__)
+    require "hive/web/app"
+    Hive::Web::App.reconfigure!
     @app = Hive::Web::App
   end
 
@@ -115,6 +116,19 @@ class WebGithubAuthFlowTest < Minitest::Test
 
     assert_equal 403, last_response.status, "a second GitHub account must be denied (U2)"
     assert_match(/is not allowed/, last_response.body)
+  end
+
+  # P3: when no OAuth flow ever started there is no stored state. A naive
+  # `params["state"] == stored` passes when BOTH are nil, bypassing the CSRF
+  # guard. The callback must reject an absent/empty stored state outright.
+  def test_absent_state_is_denied
+    install_auth(login: "alice")
+    # No begin_oauth → nothing stored in the session. Send a callback with no
+    # state param at all; nil == nil must NOT be treated as a valid match.
+    get "/auth/github/callback", { "code" => "c" }, "HTTP_HOST" => "127.0.0.1"
+
+    assert_equal 403, last_response.status, "an absent stored state must not pass the OAuth state check"
+    assert_match(/Invalid OAuth state/, last_response.body)
   end
 
   def test_owner_is_admitted

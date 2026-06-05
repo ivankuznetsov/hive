@@ -57,6 +57,30 @@ class GithubAuthTest < Minitest::Test
     error = assert_raises(Hive::Error) { auth.exchange_code("stale-code") }
     assert_match(/bad_verification_code/, error.message)
   end
+  def test_exchange_code_raises_on_unparseable_token_response
+    # A proxy/error page returns 200 with non-JSON; JSON.parse raises and the
+    # rescue must surface a clean Hive::Error, not a raw JSON::ParserError.
+    auth = build_auth(
+      token_body: "<html>not json</html>",
+      user_body: JSON.generate("login" => "octo")
+    )
+
+    error = assert_raises(Hive::Error) { auth.exchange_code("good-code") }
+    assert_match(/unparseable response/, error.message)
+  end
+
+  def test_exchange_code_raises_on_unparseable_user_response
+    # The token leg parses fine but the user lookup returns non-JSON; the
+    # second rescue must map that to a friendly Hive::Error too.
+    auth = build_auth(
+      token_body: JSON.generate("access_token" => "tok"),
+      user_body: "<html>not json</html>"
+    )
+
+    error = assert_raises(Hive::Error) { auth.exchange_code("good-code") }
+    assert_match(/user lookup returned an unparseable response/, error.message)
+  end
+
   def test_authorize_url_contains_callback_and_state
     auth = Hive::Web::GithubAuth.new(
       config: {

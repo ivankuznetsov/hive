@@ -3,6 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: packaging/docker/Dockerfile
+    restart: unless-stopped
     ports:
       - "4567:4567"
     volumes:

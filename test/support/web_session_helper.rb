@@ -19,11 +19,31 @@ module WebSessionHelper
     @app
   end
 
-  # (Re)load the Sinatra app so its `configure` block reads the current
-  # config.yml. Mirrors test/unit/web/app_test.rb.
+  # Stop the shared StatusFeed poller thread after every web test. The app is a
+  # require-once singleton, so an SSE test that lazily started the poller would
+  # otherwise leak a background thread that keeps shelling out to Hive::Config
+  # against a torn-down tmp HIVE_HOME — a cross-test race in the full suite.
+  def teardown
+    if defined?(Hive::Web::App) && Hive::Web::App.respond_to?(:settings) &&
+       Hive::Web::App.settings.respond_to?(:status_feed)
+      Hive::Web::App.settings.status_feed&.stop
+    end
+  rescue StandardError
+    nil
+  ensure
+    super
+  end
+
+  # Boot the Sinatra app against the current config.yml. The app is
+  # `require`d once (idempotent) and then `reconfigure!`d so its runtime
+  # settings re-read config.yml each test. We deliberately do NOT `load`-
+  # reload the class: under a reloaded Sinatra::Base subclass stdlib Coverage
+  # drops line attribution for the inline route/helper/error blocks, leaving
+  # app.rb's auth/OAuth/error code falsely "uncovered".
   def boot_web_app
     ENV["HIVEBOX_SESSION_SECRET"] ||= "x" * 64
-    load File.expand_path("../../../lib/hive/web/app.rb", __FILE__)
+    require "hive/web/app"
+    Hive::Web::App.reconfigure!
     @app = Hive::Web::App
     @app.set :github_auth, FakeGithubAuth.new("alice")
     @app

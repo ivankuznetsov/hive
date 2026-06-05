@@ -7,4 +7,8 @@ if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
 
-exec ruby -rhive/web/supervisor -e 'Hive::Web::Supervisor.new.run'
+# Load the full library (-rhive) before the supervisor so constants like
+# Hive::ConfigError, referenced transitively while requiring the supervisor,
+# are already defined — otherwise boot dies with an uninitialized-constant
+# NameError and the container never starts.
+exec ruby -rhive -rhive/web/supervisor -e 'Hive::Web::Supervisor.new.run'

@@ -39,6 +39,7 @@ class OpenClawSkillsTest < Minitest::Test
   EXPECTED_SKILLS = {
     "hive" => { description: "Drive any Hive CLI workflow from OpenClaw.", command: "hive" },
     "hive-new" => { cli: "new_task", command: "hive new" },
+    "generate-name" => { cli: "generate_name", command: "hive generate-name" },
     "brainstorm" => { cli: "brainstorm", command: "hive brainstorm" },
     "plan" => { cli: "plan", command: "hive plan" },
     "work" => { cli: "develop", command: "hive develop" },

@@ -1,5 +1,6 @@
 require "yaml"
 require "hive/stages"
+require "hive/task_meta"
 
 module Hive
   class Task
@@ -54,6 +55,22 @@ module Hive
       File.join(@folder, "worktree.yml")
     end
 
+    def meta_yml_path
+      Hive::TaskMeta.path(@folder)
+    end
+
+    def id
+      meta[:id]
+    end
+
+    def display_name
+      meta[:display_name]
+    end
+
+    def display_label
+      display_name || slug
+    end
+
     def worktree_path
       # Worktree first appears in 4-execute and carries through open-pr,
       # review, artifacts, and finalize; earlier stages don't have one. 9-done is post-PR; the
@@ -83,6 +100,12 @@ module Hive
 
     def commit_lock_file
       File.join(@hive_state_path, ".commit-lock")
+    end
+
+    private
+
+    def meta
+      @meta ||= Hive::TaskMeta.read(@folder)
     end
   end
 end

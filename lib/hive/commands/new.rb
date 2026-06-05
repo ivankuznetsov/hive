@@ -4,6 +4,9 @@ require "time"
 require "erb"
 require "hive/config"
 require "hive/git_ops"
+require "hive/paths"
+require "hive/task_counter"
+require "hive/task_meta"
 require "hive/tui/text"
 
 module Hive
@@ -48,6 +51,18 @@ module Hive
         @attachments = attachments
       end
 
+      class << self
+        attr_writer :name_generator_spawn
+
+        def name_generator_spawn
+          @name_generator_spawn ||= ->(*argv, **opts) { Process.spawn(*argv, **opts) }
+        end
+
+        def name_generator_spawn_configured?
+          !@name_generator_spawn.nil?
+        end
+      end
+
       # CLI entry point. Naming is inverted from Ruby convention here:
       # `call` is the user-facing variant that prints to stderr and
       # `exit 1`s on known failures, while `call!` is the pure raising
@@ -86,9 +101,12 @@ module Hive
         FileUtils.mkdir_p(task_dir)
 
         idea_path = File.join(task_dir, "idea.md")
+        id = nil
         begin
           File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
           copy_attachments!(task_dir)
+          id = allocate_task_id
+          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as
@@ -101,9 +119,11 @@ module Hive
 
         ops = Hive::GitOps.new(project["path"])
         ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured")
+        spawn_name_generator(task_dir)
 
         puts "hive: captured #{idea_path}"
-        puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', '2-brainstorm/')} && hive run <task>"
+        target_hint = id ? id.to_s : slug
+        puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', '2-brainstorm/')} && hive run #{target_hint}"
       end
 
       def derive_slug(text)
@@ -185,6 +205,34 @@ module Hive
 
           FileUtils.cp(src_path, File.join(assets_dir, name))
         end
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
+      end
+
+      def spawn_name_generator(task_dir)
+        return nil if defined?(Minitest) && !self.class.name_generator_spawn_configured?
+
+        FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "logs"))
+        log_path = File.join(Hive::Paths.state_home, "logs", "display-name.log")
+        pid = self.class.name_generator_spawn.call(
+          ENV.fetch("HIVE_BIN", "hive"), "generate-name", task_dir,
+          pgroup: true,
+          out: [ log_path, "a" ],
+          err: [ log_path, "a" ]
+        )
+        Thread.new do
+          Thread.current.report_on_exception = false
+          Process.wait(pid)
+        rescue Errno::ECHILD, Errno::ESRCH
+          nil
+        end
+        pid
+      rescue StandardError
+        nil
       end
 
       class IdeaBinding

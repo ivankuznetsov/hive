@@ -176,6 +176,8 @@ module Hive
         {
           "stage" => row[:stage],
           "slug" => row[:slug],
+          "id" => row[:id],
+          "display_name" => row[:display_name],
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
@@ -296,6 +298,8 @@ module Hive
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status-diagnose"),
             "ok" => true,
             "slug" => task.slug,
+            "id" => task.id,
+            "display_name" => task.display_name,
             "task_folder" => task.folder,
             "diagnostic" => diagnostic,
             "path" => path
@@ -350,9 +354,14 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            puts "    #{r[:icon]} #{r[:slug].ljust(36)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
+            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
           end
         end
+      end
+
+      def display_identity(row)
+        id = row[:id] ? "##{row[:id]}" : "—"
+        "#{id} #{row[:display_name] || row[:slug]}"
       end
 
       def render_legacy_stage_warning(legacy)
@@ -396,6 +405,8 @@ module Hive
             rows << {
               stage: stage,
               slug: slug,
+              id: task.id,
+              display_name: task.display_name,
               folder: entry,
               state_file: task.state_file,
               worktree_path: worktree_path,

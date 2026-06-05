@@ -54,6 +54,8 @@ class HiveBotStatusWatcherTest < Minitest::Test
     {
       "stage" => "2-brainstorm",
       "slug" => slug,
+      "id" => 42,
+      "display_name" => "Readable Row",
       "folder" => "/tmp/hive/.hive-state/stages/2-brainstorm/#{slug}",
       "state_file" => "/tmp/hive/.hive-state/stages/2-brainstorm/#{slug}/brainstorm.md",
       "marker" => marker,
@@ -79,6 +81,8 @@ class HiveBotStatusWatcherTest < Minitest::Test
       row = result.rows.first
       assert_equal "hive", row.project
       assert_equal "s1", row.slug
+      assert_equal 42, row.id
+      assert_equal "Readable Row", row.display_name
       assert_equal "waiting", row.marker
       assert_equal "needs_input", row.action
       assert_nil row.diagnostic

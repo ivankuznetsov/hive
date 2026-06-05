@@ -74,6 +74,7 @@ The intended published slugs are:
 |---|---|---|
 | `hive` | `/hive` | Any `hive ...` command |
 | `hive-new` | `/hive-new` | `hive new` |
+| `hive-generate-name` | `/generate-name` | `hive generate-name` |
 | `hive-brainstorm` | `/brainstorm` | `hive brainstorm` |
 | `hive-plan` | `/plan` | `hive plan` |
 | `hive-work` | `/work` | `hive develop` |

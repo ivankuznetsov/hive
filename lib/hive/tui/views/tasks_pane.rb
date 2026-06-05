@@ -13,7 +13,7 @@ module Hive
       # box. Replaces v1's project-grouped section format; project
       # context now lives in the left pane (Views::ProjectsPane).
       #
-      # Columns: icon · slug · stage · status · age. Within each
+      # Columns: icon · id · display name · stage · status · age. Within each
       # project, rows are sorted by `Hive::Commands::Status::ACTION_LABEL_ORDER`
       # at Snapshot construction time, so "Ready to plan" appears above
       # "Agent running" within the same project. At ★ All projects
@@ -57,14 +57,15 @@ module Hive
         DEFAULT_ICON = "  ".freeze
 
         # Column widths (excluding 1-cell separators between columns).
-        # The table consumes `inner_width` minus four separators (4 cells)
-        # and an icon column (2 cells). slug is the elastic column —
+        # The table consumes `inner_width` minus five separators (5 cells)
+        # and fixed icon/id/stage/status/age columns. name is the elastic column —
         # it absorbs any extra width and is left-truncated when narrow.
         ICON_WIDTH = 2
+        ID_WIDTH = 4
         STAGE_WIDTH = 12
         STATUS_WIDTH = 18
         AGE_WIDTH = 4
-        SEPARATORS = 4 # spaces between the 5 columns
+        SEPARATORS = 5 # spaces between the 6 columns
 
         module_function
 
@@ -133,35 +134,36 @@ module Hive
           snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
         end
 
-        # Below `inner_width = ICON+STAGE+STATUS+AGE+SEPARATORS+slug_min`
+        # Below `inner_width = ICON+ID+STAGE+STATUS+AGE+SEPARATORS+name_min`
         # (~48 cells) the 5-column layout overflows. Drop columns in
         # priority order — first stage (mostly redundant with status),
         # then status — to keep the line within `inner_width` even on
         # very narrow terminals. The dropped columns silently shrink to
         # zero width; row-line builder pads with the remaining widths.
         def compute_layout(inner_width)
-          slug_min = 8
-          fixed_full = ICON_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
-          if inner_width >= fixed_full + slug_min
-            { slug: inner_width - fixed_full, stage: STAGE_WIDTH, status: STATUS_WIDTH }
-          elsif inner_width >= ICON_WIDTH + STATUS_WIDTH + AGE_WIDTH + 3 + slug_min
+          name_min = 8
+          fixed_full = ICON_WIDTH + ID_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
+          if inner_width >= fixed_full + name_min
+            { name: inner_width - fixed_full, stage: STAGE_WIDTH, status: STATUS_WIDTH }
+          elsif inner_width >= ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4 + name_min
             # Drop the stage column; separators reduce from 4 to 3.
-            { slug: inner_width - (ICON_WIDTH + STATUS_WIDTH + AGE_WIDTH + 3), stage: 0, status: STATUS_WIDTH }
-          elsif inner_width >= ICON_WIDTH + AGE_WIDTH + 2 + slug_min
+            { name: inner_width - (ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4), stage: 0, status: STATUS_WIDTH }
+          elsif inner_width >= ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3 + name_min
             # Drop both stage and status.
-            { slug: inner_width - (ICON_WIDTH + AGE_WIDTH + 2), stage: 0, status: 0 }
+            { name: inner_width - (ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3), stage: 0, status: 0 }
           else
-            # Floor at slug_min; row will overflow visually but won't crash.
-            { slug: slug_min, stage: 0, status: 0 }
+            # Floor at name_min; row will overflow visually but won't crash.
+            { name: name_min, stage: 0, status: 0 }
           end
         end
 
         def render_row(row, project_idx, row_idx, model, layout)
           highlighted = highlight?(model, project_idx, row_idx)
           icon = ICONS.fetch(row.action_key.to_s, DEFAULT_ICON)
-          slug = truncate(row.slug.to_s, layout[:slug]).ljust(layout[:slug])
+          id = row.id ? row.id.to_s.rjust(ID_WIDTH) : "—".rjust(ID_WIDTH)
+          name = truncate(display_name(row), layout[:name]).ljust(layout[:name])
           age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
-          parts = [ "#{icon} #{slug}" ]
+          parts = [ icon, id, name ]
           parts << truncate(row.stage.to_s, layout[:stage]).ljust(layout[:stage]) if layout[:stage].positive?
           parts << truncate(status_label(row), layout[:status]).ljust(layout[:status]) if layout[:status].positive?
           parts << age
@@ -175,6 +177,11 @@ module Hive
           return error_status(row) if row.action_key.to_s == "error"
 
           row.action_label.to_s
+        end
+
+        def display_name(row)
+          value = row.display_name.to_s.strip
+          value.empty? ? row.slug.to_s : value
         end
 
         # Operator-supplied marker reasons (stdout-tail snippets,

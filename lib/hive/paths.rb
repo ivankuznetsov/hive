@@ -20,6 +20,14 @@ module Hive
       hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
     end
 
+    def task_counter_path
+      File.join(state_home, "task-counter.yml")
+    end
+
+    def task_counter_lock_path
+      File.join(state_home, ".task-counter.lock")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

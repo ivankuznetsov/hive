@@ -67,15 +67,35 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "-c", "diff.external=touch pwned", "diff"
       assert_stubbed env, "git", "-c", "core.pager=touch pwned", "show"
       assert_stubbed env, "git", "--config-env=diff.external=PWN", "diff"
+      # Two-token `--config-env KEY=VAL` form (not just the glued `=` spelling).
+      assert_stubbed env, "git", "--config-env", "diff.external=PWN", "diff"
+      # `--exec-path=<dir>` redirects git's helper-binary lookup (exec class).
+      assert_stubbed env, "git", "--exec-path=/tmp/evil", "diff"
       assert_stubbed env, "git", "grep", "-Otouch pwned", "needle"
+      # Bundled short option (`-nO…`) must not slip past the `-O` pager screen.
+      assert_stubbed env, "git", "grep", "-nOtouch pwned", "needle"
       assert_stubbed env, "git", "grep", "--open-files-in-pager=touch pwned", "needle"
+      # Bare `--open-files-in-pager` (no glued value) is equally a pager exec.
+      assert_stubbed env, "git", "grep", "--open-files-in-pager", "needle"
+      # Trailing bare two-token global option must not underflow / crash.
+      assert_stubbed env, "git", "-c"
+      assert_stubbed env, "git", "-C"
+      assert_stubbed env, "git", "--config-env"
       assert_stubbed env, "git", "--output=patch.diff", "diff"
       assert_stubbed env, "git", "log", "--output=log.txt"
       assert_stubbed env, "git", "show", "--output=show.txt"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
       assert_passes env, "git", "diff", "--name-only"
+      # Read-only diff orderfile (`-O<file>`) and formatting flags
+      # (`--output-indicator-*`) must pass — the pager screen is grep-scoped and
+      # `--output` is matched exactly.
+      assert_passes env, "git", "diff", "-Oorderfile", "--name-only"
+      assert_passes env, "git", "diff", "--output-indicator-new=>", "--name-only"
       assert_passes env, "git", "grep", "needle"
+      # `git grep -c` (= --count) is read-only; `-c` is dangerous only as a
+      # global option, so it must pass here.
+      assert_passes env, "git", "grep", "-c", "needle"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
       assert_passes env, "git", "remote"
       assert_passes env, "git", "remote", "-v"

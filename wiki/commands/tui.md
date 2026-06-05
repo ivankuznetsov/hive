@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [command, tui, observability, interactive, diagnostics, task-id]
 ---
 
@@ -116,7 +116,34 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 
 ## Data source
 
-`Hive::Tui::StateSource` calls `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` in-process at 1 Hz from a non-daemon background thread. Read-only, no locks taken. The render thread reads `@current` once per frame; under MRI 3.4's GVL the pointer-sized reference write is atomic. JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a `RUBY_ENGINE != "ruby"` boot guard makes the assumption auditable.
+`Hive::Tui::StateSource` polls at 1 Hz from a non-daemon background
+thread. It calls
+`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
+in-process for the first snapshot and whenever the cached mtime
+fingerprint changes; otherwise it reuses the previous `Snapshot` and
+only refreshes `current_seen_at`. The fingerprint watches the global
+project registry (`Hive::Config.global_config_path`), each visible
+row's state file, plus the project's `.hive-state/stages` directory and
+stage children, so ordinary marker edits, newly-created task folders,
+and `hive init`/`forget` registry changes all invalidate the cache
+without reparsing unchanged status data. A time-bounded fallback
+(`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
+when the fingerprint is unchanged, so liveness-derived fields
+(`live_task_lock`, `claude_pid_alive`) that flip without touching any
+file cannot stay stale indefinitely. This makes the "near-zero idle
+CPU" AC a partial win: even with unchanged mtimes the fallback re-incurs
+a full `json_payload` + `Dir.glob` fingerprint rebuild ~20×/min (every
+3s). It is an accepted correctness tradeoff — those liveness fields flip
+without any file write and must self-heal — and it never causes a redraw
+because `App.start_snapshot_poller` dedups identical snapshots (below).
+Read-only, no locks taken. The render thread reads `@current` once per frame; under
+MRI 3.4's GVL the pointer-sized reference write is atomic.
+JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
+`RUBY_ENGINE != "ruby"` boot guard makes the assumption auditable.
+
+`Hive::Tui::App.start_snapshot_poller` wakes every 0.5s and dispatches a
+`SnapshotArrived` message only when `state_source.current` differs from
+the last dispatched snapshot. Identical snapshots do not redraw.
 
 `Hive::Tui::Snapshot::Row` carries `slug`, `id`, and `display_name` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
 

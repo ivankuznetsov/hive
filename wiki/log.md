@@ -29,6 +29,24 @@ Append-only log of all wiki operations.
 - **Room for long reviews**: `Reviewers::Agent::DEFAULT_TIMEOUT_SEC` 3600→7200 (2h), `review.max_wall_clock_sec` default 5400→14400 (4h), and the init template's reviewer `timeout_sec` 3600→7200.
 
 100% line coverage, rubocop clean.
+## [2026-06-05T00:00:01Z] tui - document residual idle cost of liveness fallback (6-review pass 2)
+
+**Action:** Updated [[commands/tui]] latency section to call out, against the plan's "near-zero idle CPU" AC, that `LIVENESS_REPARSE_FALLBACK_SECONDS` (3s) re-incurs a full `json_payload` + `Dir.glob` fingerprint rebuild ~20×/min even when mtimes are unchanged — an accepted correctness tradeoff that never causes a redraw thanks to the snapshot dedup in `App.start_snapshot_poller`.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
+
+**Action:** Applied accepted `/ce-code-review` findings on the TUI/daemon latency-reduction work:
+
+- **TUI mtime gate** (`Hive::Tui::StateSource`): the cached-snapshot gate could mask state indefinitely because the fingerprint only watches file mtimes. Added `LIVENESS_REPARSE_FALLBACK_SECONDS` (3s) time-bounded fallback so liveness-derived fields (`live_task_lock`, `claude_pid_alive`) that flip without touching a file still self-heal, and added the global project registry (`Hive::Config.global_config_path`) to the fingerprint so `hive init`/`forget` changes reflect within the latency budget.
+- **Daemon run loop**: gated `version_drift_detected?` (which hashes the schema file via `Digest::SHA256.file`) behind `full_tick_due?` so the hash runs at the ~30s poll cadence instead of every ~1s fast probe (Unit 2 cheap-only intent).
+- **`refresh_tracked_state_file_mtimes`**: dropped the `|| row.state_file_mtime` fallback so an absent tracked file stores `nil` consistently, avoiding a perpetual full-tick loop from `nil != <Time>` comparisons.
+- Added clarifying comments documenting the benign double-`reap_all` on the child-exit path and the expected post-dispatch redundant full tick.
+
+Refreshed [[commands/tui]] and [[modules/daemon]]. Tests + rubocop clean. Did not run `qmd update` or `qmd embed`.
+
 ## [2026-06-04T21:30:00Z] patrol - default draft_prs to false (open ready PRs)
 
 **Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Also flipped the init template + `hive patrol` long_desc to match. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.
@@ -3034,6 +3052,23 @@ TTL config.
 - [[operating]]
 - [[testing]]
 - [[index]]
+- [[gaps]]
+
+## [2026-06-05T00:00:00Z] daemon/tui — reduce perceived stage-transition latency
+
+**Action:** Refreshed wiki coverage after removing the SUCCESS inter-stage cooldown, adding the daemon's 1s cheap fast-poll probe, and mtime-gating TUI status reparses. `daemon.poll_interval_sec` remains the 30s full-scan backstop, while `daemon.fast_poll_sec` drives child reap and state-file/stage-dir mtime probes. SUCCESS exits now allow immediate follow-on dispatch; WRONG_STAGE keeps a 60s protective backoff. The TUI still polls at 1 Hz and redraws only on changed snapshots, and now skips `Status#json_payload` when its mtime fingerprint is unchanged.
+
+**Refreshed pages:**
+- [[commands/daemon]]
+- [[modules/daemon]]
+- [[commands/tui]]
+- [[index]]
+
+## [2026-06-05T10:09:45Z] wiki — audit daemon/tui latency refresh coverage
+
+**Action:** Audited commit `68d9245f` after it refreshed daemon/TUI latency wiki pages. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search` had no indexed hits for this exact latency work, so verification used the committed diff plus direct source reads. Checked commits `0f4d9373`, `c1a63370`, and `7375c51d` against `lib/hive/daemon/concurrency_controller.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/config.rb`, `lib/hive/tui/state_source.rb`, and focused tests. Confirmed existing daemon/TUI pages matched the code and added the missing live-smoke uncertainty to [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
 - [[gaps]]
 
 ## [2026-06-03T12:35:51Z] new/display-name/resolver — refresh task identity command coverage

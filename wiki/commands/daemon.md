@@ -3,14 +3,16 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [command, daemon, automation, json]
 ---
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
-auto-advancing dispatcher (ADR-024). One long-running process polls
-`hive status --json` every 30s, dispatches workflow verbs (`hive plan`
-/ `develop` / `open-pr` / `review` / `artifacts` / `finalize`) on tasks ready to advance, and
+auto-advancing dispatcher (ADR-024). One long-running process wakes
+every 1s for cheap child-exit/state-mtime probes, runs a full
+`hive status --json` scan on change or every 30s as a backstop, dispatches
+workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
+`artifacts` / `finalize`) on tasks ready to advance, and
 auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED`. Stops
 only at human-input gates: `_WAITING` markers (Q&A / triage), recovery
 markers (`_STALE` / `_ERROR`), and 8-finalize while the PR is still open on
@@ -96,7 +98,8 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `poll_interval_sec` | 30 | Tick cadence for status polling. Min 5. |
+| `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
+| `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
@@ -115,9 +118,9 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 
 | Exit | Constant | Action |
 |------|----------|--------|
-| 0 | `SUCCESS` | 5-min cooldown on `(project, slug)`; daily counter +1 |
+| 0 | `SUCCESS` | No cooldown; daily counter +1 and the next stage may dispatch immediately |
 | 3 | `TASK_IN_ERROR` | No retry; marker now classifies row as `recover_*` → Policy returns `:skip` |
-| 4 | `WRONG_STAGE` | 5-min cooldown (race or classifier bug) |
+| 4 | `WRONG_STAGE` | 60s protective backoff (race or classifier bug) |
 | 64 | `USAGE` | Quarantine `(project, slug)` for daemon lifetime |
 | 70 / 1 | `SOFTWARE` / `GENERIC` | Transient: 60→120→300 s backoff, then quarantine |
 | 75 | `TEMPFAIL` | Refund daily slot, allow immediate retry next tick |

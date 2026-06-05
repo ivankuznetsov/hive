@@ -262,6 +262,7 @@ module Hive
         "enabled" => false,
         "autostart" => false,
         "poll_interval_sec" => 30,
+        "fast_poll_sec" => 1,
         "edit_debounce_sec" => 30,
         "pr_merge_poll_interval_sec" => 300,
         "max_concurrent_runs" => 3,
@@ -1424,6 +1425,8 @@ module Hive
     # encode behavioural floors:
     #   poll_interval_sec >= 5         — anything tighter starves CPU on
     #                                    `hive status` subprocesses
+    #   fast_poll_sec >= 1             — cheap reap/stat cadence between
+    #                                    full status polls
     #   edit_debounce_sec >= 0         — 0 means "no debounce, dispatch
     #                                    on first mtime move"; valid choice
     #   pr_merge_poll_interval_sec >= 60 — `gh pr view` is rate-limited
@@ -1437,6 +1440,7 @@ module Hive
     #   log_max_files >= 1
     DAEMON_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 5 ],
+      [ "fast_poll_sec", 1 ],
       [ "edit_debounce_sec", 0 ],
       [ "pr_merge_poll_interval_sec", 60 ],
       [ "max_concurrent_runs", 1 ],

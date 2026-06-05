@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T01:00:00Z] patrol - similarity dedup so re-found findings don't re-open PRs
+
+**Action:** Fixed patrol re-opening the same PRs every scan. The exact fingerprint (`[feature_id, category, path, snippet]` SHA) is agent-volatile — the review agent re-files the same issue with a different feature attribution, title, and snippet each run, so the SHA never matches a prior PR and the finding is re-opened forever (observed: #284/#290/#303 and #288/#303/#304 were all the same "dry-run gh implicit-POST" issue with different fingerprints). Added a similarity gate: `Fingerprint.record_seen` now stores the finding's `category` + normalized `title_tokens`; `Fingerprint.similar_known?` skips a new finding whose same-category title-token overlap (Szymkiewicz–Simpson) ≥ `SIMILARITY_THRESHOLD` (0.6) with an open/merged/dismissed finding; `commands/patrol.rb#skip_reason` returns `similar_to_existing`; the `Dismissals` reconciler carries the content into dismissed entries. Documented in [[modules/patrol]]. 100% line coverage, rubocop clean.
+
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

@@ -31,7 +31,7 @@ class ConfigTest < Minitest::Test
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
       assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
-      assert_equal true, cfg.dig("patrol", "draft_prs")
+      assert_equal false, cfg.dig("patrol", "draft_prs")
       assert_equal [], cfg.dig("patrol", "include")
       assert_includes cfg.dig("patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("patrol", "commands", "test")

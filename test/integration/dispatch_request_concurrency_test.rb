@@ -144,10 +144,8 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     remaining_ids = queue_files.map { |path| JSON.parse(File.read(path))["request_id"] }
     assert_includes remaining_ids, request_b
 
-    # Reap the first child. record_completion uses the tick's `now`
-    # for completed_at, so the SUCCESS_COOLDOWN_SEC (60) extends past
-    # this tick. We need TWO subsequent ticks: one to reap and start
-    # the cooldown, a later one (past cooldown_until) to dispatch B.
+    # Reap the first child. SUCCESS completion has no cooldown, so once A is
+    # reaped the deferred request can dispatch in the same tick.
     pid_a = @supervisor.spawned.first[:pid]
     @supervisor.reap_queue = [
       ChildExit.new(
@@ -157,13 +155,9 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
         request_id: request_a
       )
     ]
-    @dispatcher.tick(now: T0 + 120) # reap, set cooldown_until = T0 + 180
-    assert_equal 1, @supervisor.spawned.size,
-                 "tick 2 reaps but cooldown blocks the deferred request"
-
-    @dispatcher.tick(now: T0 + 200) # cooldown cleared
+    @dispatcher.tick(now: T0 + 120)
     assert_equal 2, @supervisor.spawned.size,
-                 "after cooldown clears, the third tick must dispatch the deferred request"
+                 "after A is reaped, the same tick must dispatch the deferred request"
     assert_equal request_b, @supervisor.spawned.last[:request_id]
   end
 

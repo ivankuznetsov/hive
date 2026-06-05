@@ -83,9 +83,9 @@ module Hive
         # effective timeout is capped at `deadline - now`; backoff
         # sleeps are also clamped to that remaining budget. Without
         # this, a single reviewer could consume max_attempts ×
-        # timeout_sec + backoff (defaults: 2 × 3600 + 1 = 7201s; with
-        # max_attempts: 3 override: 3 × 3600 + 3 = 10803s) and exhaust
-        # the outer review wall_clock budget (5400s default) before
+        # timeout_sec + backoff (defaults: 2 × 7200 + 1 = 14401s; with
+        # max_attempts: 3 override: 3 × 7200 + 3 = 21603s) and exhaust
+        # the outer review wall_clock budget (14400s default) before
         # the between-reviewer check in run_reviewers fires.
         attempts = 0
         result = nil

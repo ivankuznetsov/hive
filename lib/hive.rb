@@ -367,6 +367,18 @@ module Hive
     end
   end
 
+  # A Thor-level usage error (missing required argument, unknown flag)
+  # surfaced through `bin/hive`'s top-level rescue when a command is
+  # invoked with `--json`. Lives in the Hive:: namespace so library code
+  # can name and rescue it, and carries the USAGE (64) exit code.
+  # Distinct from InvalidTaskPath, whose "bad path" semantics are a poor
+  # fit for a malformed flag or missing positional.
+  class UsageError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
   class ConcurrentRunError < Error
     attr_reader :holder, :lock_path
 

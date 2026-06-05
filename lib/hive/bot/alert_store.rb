@@ -9,8 +9,8 @@ module Hive
 
       Entry = Data.define(:first_seen_at, :reminded_at, :delivered_to,
                           :consecutive_failures, :next_attempt_after, :absent_since, :row)
-      RowSnapshot = Data.define(:project, :slug, :stage, :marker, :attrs, :action) do
-        def initialize(project:, slug:, stage:, marker:, attrs: {}, action: nil)
+      RowSnapshot = Data.define(:project, :slug, :id, :display_name, :stage, :marker, :attrs, :action) do
+        def initialize(project:, slug:, id: nil, display_name: nil, stage:, marker:, attrs: {}, action: nil)
           super
         end
       end
@@ -329,6 +329,8 @@ module Hive
         {
           "project" => row.project.to_s,
           "slug" => row.slug.to_s,
+          "id" => row.respond_to?(:id) ? row.id : nil,
+          "display_name" => row.respond_to?(:display_name) ? row.display_name : nil,
           "stage" => row.stage.to_s,
           "marker" => row.marker.to_s,
           "attrs" => row.attrs.to_h.transform_keys(&:to_s),
@@ -367,6 +369,8 @@ module Hive
         RowSnapshot.new(
           project: raw["project"],
           slug: raw["slug"],
+          id: raw["id"],
+          display_name: raw["display_name"],
           stage: raw["stage"],
           marker: raw["marker"],
           attrs: raw["attrs"].is_a?(Hash) ? raw["attrs"] : {},

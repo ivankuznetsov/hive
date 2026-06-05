@@ -1,5 +1,6 @@
 require "hive/config"
 require "hive/task"
+require "hive/task_meta"
 require "hive/stages"
 
 module Hive
@@ -38,6 +39,8 @@ module Hive
         return File.realpath(expanded) if File.directory?(expanded)
       end
 
+      return resolve_numeric_id if numeric_target?
+
       matches = find_slug_across_projects(@target)
       case matches.size
       when 0
@@ -58,6 +61,27 @@ module Hive
       @target.include?("/") || @target.start_with?("~", ".")
     end
 
+    def numeric_target?
+      @target.to_s.match?(/\A\d+\z/)
+    end
+
+    def resolve_numeric_id
+      matches = find_id_across_projects(Integer(@target))
+      case matches.size
+      when 0
+        raise Hive::InvalidTaskPath,
+              "no task folder for id #{@target}#{project_hint}"
+      when 1
+        File.realpath(matches.first[:folder])
+      else
+        raise Hive::AmbiguousSlug.new(
+          id_ambiguity_message(matches),
+          slug: @target,
+          candidates: matches
+        )
+      end
+    end
+
     def project_hint
       hints = []
       hints << "project '#{@project_filter}'" if @project_filter
@@ -76,6 +100,11 @@ module Hive
       end
     end
 
+    def id_ambiguity_message(matches)
+      labels = matches.map { |m| "#{m[:project]}/#{m[:stage]}/#{File.basename(m[:folder])}" }.join(", ")
+      "task id #{@target} is duplicated (#{labels}); repair duplicate meta.yml ids"
+    end
+
     def find_slug_across_projects(slug)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
@@ -86,6 +115,26 @@ module Hive
           next nil unless File.directory?(folder)
 
           { project: project["name"], stage: stage, folder: folder }
+        end
+      end
+    end
+
+    def find_id_across_projects(id)
+      projects = Hive::Config.registered_projects
+      projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
+      stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+      projects.flat_map do |project|
+        stages.flat_map do |stage|
+          stage_dir = File.join(project["hive_state_path"], "stages", stage)
+          next [] unless File.directory?(stage_dir)
+
+          Dir.children(stage_dir).sort.filter_map do |entry|
+            folder = File.join(stage_dir, entry)
+            next unless File.directory?(folder)
+            next unless Hive::TaskMeta.read(folder)[:id] == id
+
+            { project: project["name"], stage: stage, folder: folder }
+          end
         end
       end
     end

@@ -8,10 +8,12 @@ class HiveBotAlertStoreTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(attrs: { "pass" => "1" }, action: "recover_review", project: "hive",
-          slug: "stuck-task-260525-abcd", stage: "6-review")
+          slug: "stuck-task-260525-abcd", stage: "6-review", id: nil, display_name: nil)
     Row.new(
       project: project,
       slug: slug,
+      id: id,
+      display_name: display_name,
       stage: stage,
       marker: "review_error",
       attrs: attrs,
@@ -47,12 +49,18 @@ class HiveBotAlertStoreTest < Minitest::Test
   def test_persists_entries_across_instances
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
-      Hive::Bot::AlertStore.new(path: path).add("fp1", row, Time.utc(2026, 5, 25, 10, 0, 0))
+      Hive::Bot::AlertStore.new(path: path).add(
+        "fp1",
+        row(id: 42, display_name: "Readable Recovery"),
+        Time.utc(2026, 5, 25, 10, 0, 0)
+      )
 
       fresh = Hive::Bot::AlertStore.new(path: path)
 
       assert_equal [ "fp1" ], fresh.each_fingerprint.to_a
       assert_equal "stuck-task-260525-abcd", fresh.entry("fp1").row.slug
+      assert_equal 42, fresh.entry("fp1").row.id
+      assert_equal "Readable Recovery", fresh.entry("fp1").row.display_name
     end
   end
 

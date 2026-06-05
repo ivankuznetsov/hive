@@ -10,7 +10,7 @@ module Hive
 
       Draft = Struct.new(:chat_id, :phase, :text, :project, :token, :attachments,
                          :counter, :staging_dir, :staging_tmp_root,
-                         :created_at, :updated_at, keyword_init: true)
+                         :origin, :created_at, :updated_at, keyword_init: true)
 
       def initialize(ttl_sec: DEFAULT_TTL_SEC, now: -> { Time.now })
         @ttl_sec = ttl_sec
@@ -18,7 +18,7 @@ module Hive
         @drafts = {}
       end
 
-      def start(chat_id:, phase:, text: nil, token: nil)
+      def start(chat_id:, phase:, text: nil, token: nil, origin: nil)
         clear(chat_id: chat_id)
         now = @now.call
         draft = Draft.new(
@@ -26,6 +26,7 @@ module Hive
           phase: phase,
           text: text,
           token: token,
+          origin: origin,
           attachments: [],
           counter: 0,
           created_at: now,
@@ -52,6 +53,17 @@ module Hive
           draft.text = text
           draft.phase = :awaiting_project
         end
+      end
+
+      def set_transcript(chat_id:, text:)
+        update(chat_id: chat_id) do |draft|
+          draft.text = text
+          draft.phase = :awaiting_transcript_confirm
+        end
+      end
+
+      def confirm_transcript(chat_id:)
+        update(chat_id: chat_id) { |draft| draft.phase = :awaiting_project }
       end
 
       def set_project(chat_id:, project:)

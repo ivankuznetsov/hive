@@ -10,12 +10,27 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
   end
 
   def test_start_and_get_round_trip
-    draft = @store.start(chat_id: 1, phase: :awaiting_text, text: nil, token: "tok")
+    draft = @store.start(chat_id: 1, phase: :awaiting_text, text: nil, token: "tok", origin: :voice)
 
     assert_equal draft, @store.get(chat_id: 1)
     assert_equal :awaiting_text, draft.phase
     assert_equal "tok", draft.token
+    assert_equal :voice, draft.origin
     assert_equal [], draft.attachments
+  end
+
+  def test_set_transcript_and_confirm_transcript
+    @store.start(chat_id: 1, phase: :awaiting_text, token: "tok", origin: :voice)
+
+    @store.set_transcript(chat_id: 1, text: "capture this")
+    draft = @store.get(chat_id: 1)
+
+    assert_equal "capture this", draft.text
+    assert_equal :awaiting_transcript_confirm, draft.phase
+
+    @store.confirm_transcript(chat_id: 1)
+    assert_equal :awaiting_project, @store.get(chat_id: 1).phase
+    assert_equal :voice, @store.get(chat_id: 1).origin
   end
 
   def test_set_text_and_project_advance_phase
@@ -46,7 +61,7 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
   end
 
   def test_ttl_prune_removes_stale_draft
-    @store.start(chat_id: 1, phase: :awaiting_project, text: "fix", token: "tok")
+    @store.start(chat_id: 1, phase: :awaiting_transcript_confirm, text: "fix", token: "tok")
 
     @now += 901
     @store.prune!

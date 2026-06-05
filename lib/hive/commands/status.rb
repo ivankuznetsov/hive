@@ -5,6 +5,7 @@ require "hive/task"
 require "hive/markers"
 require "hive/lock"
 require "hive/stages"
+require "hive/archive_filter"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -34,13 +35,14 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false)
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false)
         @json = json
         @diagnose = diagnose
         @project = project
         @stage = stage
         @write = write
         @force = force
+        @archive = archive
       end
 
       def call
@@ -121,6 +123,7 @@ module Hive
           # external consumers (TUI, daemon, bots) read `diagnostic` off
           # every row. Schema mandates the field.
           rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
+          rows = archive_rows(rows) if @archive
           out = base.merge("tasks" => rows.map { |r| task_payload(r) })
           # Always emit `legacy_stage_dirs` (default empty array) so
           # consumers can branch on `.empty?` without a `key?` probe and
@@ -184,6 +187,7 @@ module Hive
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601,
+          "folder_mtime" => row[:folder_mtime].utc.iso8601,
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
@@ -339,16 +343,22 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
+        if @archive
+          render_archive_project(project, rows)
+          return
+        end
+
+        hidden_rows, visible_rows = rows.partition { |row| hide_archived_row?(row) }
         legacy = detect_legacy_stage_dirs(hive_state)
         puts project["name"]
         render_legacy_stage_warning(legacy) unless legacy.empty?
-        if rows.empty?
+        if visible_rows.empty? && hidden_rows.empty?
           puts "  no active tasks" if legacy.empty?
           return
         end
 
-        action_labels(rows).each do |label|
-          stage_rows = rows.select { |r| r[:action_label] == label }
+        action_labels(visible_rows).each do |label|
+          stage_rows = visible_rows.select { |r| r[:action_label] == label }
           next if stage_rows.empty?
 
           puts "  #{label}"
@@ -357,6 +367,38 @@ module Hive
             puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
           end
         end
+        render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
+      end
+
+      def hide_archived_row?(row)
+        Hive::ArchiveFilter.hide?(
+          stage: row[:stage],
+          marker_name: row[:marker_name],
+          folder_mtime: row[:folder_mtime]
+        )
+      end
+
+      def render_archive_project(project, rows)
+        rows = archive_rows(rows)
+        puts project["name"]
+        if rows.empty?
+          puts "  no archived tasks"
+          return
+        end
+
+        puts "  Archived"
+        rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
+          command = row[:suggested_command] || "-"
+          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{row[:state_label].ljust(24)} #{command} #{row[:age]}"
+        end
+      end
+
+      def archive_rows(rows)
+        rows.select { |row| Hive::ArchiveFilter.archived?(row[:stage]) }
+      end
+
+      def render_archived_hidden_summary(hidden_count)
+        puts "  … and #{hidden_count} archived >3d ago (hive archive to view)"
       end
 
       def display_identity(row)
@@ -387,7 +429,8 @@ module Hive
               next
             end
             marker = Hive::Markers.current(task.state_file)
-            mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : File.mtime(entry)
+            folder_mtime = File.mtime(entry)
+            mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
             lock_holder = task_lock_holder(task)
             live_holder = live_task_lock_holder(lock_holder)
             icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
@@ -416,6 +459,7 @@ module Hive
               icon: icon,
               state_label: state_label,
               mtime: mtime,
+              folder_mtime: folder_mtime,
               age: humanise_age(mtime),
               claude_pid: claude_pid,
               claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,

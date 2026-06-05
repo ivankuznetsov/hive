@@ -694,6 +694,28 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil new_model.token_stats_state
   end
 
+  def test_close_archive_pane_returns_to_grid
+    starting = model.with(mode: :archive)
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CLOSE_ARCHIVE_PANE)
+
+    assert_equal :grid, new_model.mode
+  end
+
+  def test_open_archive_pane_sets_archive_mode
+    new_model, _cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
+
+    assert_equal :archive, new_model.mode
+  end
+
+  def test_close_archive_pane_from_other_mode_is_noop
+    starting = model.with(mode: :grid)
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CLOSE_ARCHIVE_PANE)
+
+    assert_same starting, new_model
+  end
+
   def test_token_stats_scope_changed_drills_task_to_project_to_all
     state = Hive::Tui::Model::TokenStatsState.new(
       scope_level: :task,
@@ -868,6 +890,26 @@ class HiveTuiUpdateTest < Minitest::Test
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 0 ])
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
     assert_equal [ 0, 1 ], new_model.cursor
+  end
+
+  def test_cursor_down_uses_archive_filtered_rows
+    hidden = build_row(
+      project: "alpha",
+      slug: "old-archived",
+      stage: "9-done",
+      marker: "complete",
+      action_key: "archived",
+      action_label: "Archived",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    visible = build_row(project: "alpha", slug: "visible-row")
+    snap = snapshot_with_rows(hidden, visible)
+    starting = model.with(snapshot: snap, cursor: [ 0, 0 ])
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+
+    assert_equal [ 0, 0 ], new_model.cursor,
+                 "after filtering the hidden archived row, the only visible row is already selected"
   end
 
   def test_cursor_down_jumps_to_next_project_at_last_row

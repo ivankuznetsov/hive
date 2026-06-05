@@ -14,6 +14,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 action_label: "Ready to plan", age: 120,
                 marker: "complete", attrs: {},
                 id: 42, display_name: nil,
+                folder_mtime: "2026-05-01T00:00:00Z",
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -25,6 +26,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "marker" => marker,
       "attrs" => attrs,
       "mtime" => "2026-05-01T00:00:00Z",
+      "folder_mtime" => folder_mtime,
       "age_seconds" => age,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
@@ -64,6 +66,38 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap, scope: 2), width: 80)
     assert_includes out, "Tasks · myapp"
+  end
+
+  def test_render_omits_old_clean_archived_rows_but_keeps_visible_rows
+    old = (Time.now - (5 * 86_400)).utc.iso8601
+    recent = (Time.now - 86_400).utc.iso8601
+    snap = make_snapshot([
+                           { "name" => "hive", "tasks" => [
+                             make_task(
+                               slug: "old-archived",
+                               stage: "9-done",
+                               action: "archived",
+                               action_label: "Archived",
+                               marker: "complete",
+                               folder_mtime: old
+                             ),
+                             make_task(
+                               slug: "recent-archived",
+                               stage: "9-done",
+                               action: "archived",
+                               action_label: "Archived",
+                               marker: "complete",
+                               folder_mtime: recent
+                             ),
+                             make_task(slug: "active-task", stage: "4-execute", marker: "execute_complete")
+                           ] }
+                         ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    refute_includes out, "old-archived"
+    assert_includes out, "recent-archived"
+    assert_includes out, "active-task"
   end
 
   # ---- Column rendering ----

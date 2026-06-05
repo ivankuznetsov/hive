@@ -181,6 +181,7 @@
         "marker",
         "attrs",
         "mtime",
+        "folder_mtime",
         "age_seconds",
         "claude_pid",
         "claude_pid_alive",
@@ -260,6 +261,10 @@
           "additionalProperties": true
         },
         "mtime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "folder_mtime": {
           "type": "string",
           "format": "date-time"
         },

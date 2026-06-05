@@ -154,6 +154,23 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_without_target_lists_archived_tasks_via_status
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "archive", "--json" ])
+
+      assert_equal({ json: true, project: nil, archive: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_archive_without_target_scopes_to_project
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "archive", "--project", "proj" ])
+
+      assert_equal({ json: false, project: "proj", archive: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "execute", "--write", "--force", "--json" ])

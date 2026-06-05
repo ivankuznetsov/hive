@@ -41,6 +41,7 @@ module Hive
         { mode: :grid, key: "i",         action: :open_idea_preview,  description: "open the info panel for the focused task (slug, stage, created_at, folder, latest log, original idea, and stage-specific brainstorm.md / plan.md / execute log tail)" },
         { mode: :grid, key: "s",         action: :open_in_agent,      description: "steer the focused task manually — opens the project's configured development agent in the feature worktree with every stage folder for this slug preloaded as context, marks the task MANUAL_STEERING so headless runs skip it, then archives the slug on agent exit" },
         { mode: :grid, key: "T",         action: :token_stats,        description: "open token usage statistics for the current selection" },
+        { mode: :grid, key: "z",         action: :archive_pane,       description: "open Archive pane (all done tasks)" },
         { mode: :grid, key: "n",         action: :new_idea,           description: "open the new-idea prompt; from ★ All projects, choose a target project first; submitting runs `hive new <project> \"<title>\"`" },
         { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
         { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },
@@ -67,6 +68,9 @@ module Hive
         { mode: :token_stats, key: "Up/Down",    action: :token_stats_select, description: "select the project or task at the current drill level" },
         { mode: :token_stats, key: "q",          action: :back, description: "close token stats and return to grid" },
         { mode: :token_stats, key: "Esc",        action: :back, description: "close token stats and return to grid" },
+        # Archive mode.
+        { mode: :archive, key: "q",   action: :back, description: "close archive and return to grid" },
+        { mode: :archive, key: "Esc", action: :back, description: "close archive and return to grid" },
         # Filter prompt mode.
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
         { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" },

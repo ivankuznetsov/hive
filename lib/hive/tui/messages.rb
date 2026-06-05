@@ -208,6 +208,14 @@ module Hive
       CloseTokenStats = Class.new
       CLOSE_TOKEN_STATS = CloseTokenStats.new.freeze
 
+      # `z` in grid mode — open the full-screen archive pane.
+      OpenArchivePane = Class.new
+      OPEN_ARCHIVE_PANE = OpenArchivePane.new.freeze
+
+      # q / Esc in archive mode — return to the grid.
+      CloseArchivePane = Class.new
+      CLOSE_ARCHIVE_PANE = CloseArchivePane.new.freeze
+
       # Left/right arrows in token-stats mode. direction is :in or :out.
       TokenStatsScopeChanged = Data.define(:direction)
 

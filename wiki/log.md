@@ -3211,3 +3211,12 @@ TTL config.
 **Refreshed pages:**
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-05T20:52:51Z] wiki/testing — refresh default-suite coverage after eval docs commit
+
+**Action:** Post-commit wiki refresh after `dd295c03` touched [[testing]], [[gaps]], and [[log]] to document the `bin/hive-eval --scenario` basename clamp from `762bd7f8`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "eval basename-only hive-eval scenario selection"` returned no indexed results, so this refresh used the committed diffs and direct source reads. Verified current `bin/hive-eval`, `test/eval/support/reporter_test.rb`, and `Rakefile`. Confirmed the HEAD documentation matches the scenario-only runner behavior, then corrected stale default-suite coverage wording so [[testing]], [[active-areas]], and [[gaps]] include `test/babysitter/` alongside `test/unit/` and `test/integration/`. Page count did not change, so [[index]] needed no catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[active-areas]]
+- [[gaps]]

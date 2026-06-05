@@ -7,7 +7,7 @@ updated: 2026-06-05
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, and `test/eval/` evaluates the Telegram bot signal contract.
+**TLDR**: Minitest for unit/integration/babysitter coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/babysitter/` covers dry-run command shims, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, and `test/eval/` evaluates the Telegram bot signal contract.
 
 ## Run all
 
@@ -32,7 +32,7 @@ In CI (`CI=true`), tests that exercise backgrounding commands must force a foreg
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
+  t.test_files = FileList["test/{unit,integration,babysitter}/**/*_test.rb"]
   t.warning = false
 end
 task default: :test
@@ -52,7 +52,7 @@ task default: :test
 | `test/fixtures/fake-claude` | Shell script that takes Claude/Codex headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. Pointed at via `HIVE_CLAUDE_BIN` and e2e `HIVE_CODEX_BIN`. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 
-## Unit suite (`test/unit/`)
+## Unit and babysitter suites (`test/unit/`, `test/babysitter/`)
 
 | File | Covers |
 |------|--------|
@@ -65,7 +65,7 @@ task default: :test
 | `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers, signal cleanup, and wrapper argv policy. |
 | `hv_test.rb` | `bin/hv` — refuses unsafe Apache Hive fallback paths (`/usr/bin/hive`, `/opt/hive/bin/hive`) and verifies `HIVE_BIN_OVERRIDE` can point at a custom Hive CLI install path. |
-| `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, and `gh api` implicit-POST payload flag blocking. |
+| `test/babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, and `gh api` implicit-POST payload flag blocking. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives are hidden from daily text/grid views by row `mtime`, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
 | `tui/app_test.rb` | `Hive::Tui::App` — charm-only backend selection, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, and signal-handler restore failure tolerance. |

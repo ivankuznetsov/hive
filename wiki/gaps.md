@@ -25,7 +25,7 @@ tags: [gap, todo]
 | `lib/hive/task_action.rb`, status/recovery helpers | ✓ [[modules/task_action]], [[commands/status]], [[modules/execute_waiting_action]], [[modules/diagnosis_agent]] |
 | Core task/state helpers: `task`, `markers`, `lock`, `worktree`, `git_ops`, `rebase`, `workflows`, `metrics`, `secret_patterns`, `protected_files`, `events` | ✓ `wiki/modules/*` pages exist for each named domain. |
 | `templates/*.erb` and prompt files | ✓ [[templates]] plus stage pages |
-| `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]] |
+| `test/unit`, `test/integration`, `test/babysitter`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]] |
 
 Uncertainty: this table was refreshed manually from targeted source and wiki reads on 2026-06-01. It verifies domain coverage, not exact one-to-one file coverage. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 

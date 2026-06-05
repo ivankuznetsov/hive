@@ -17,6 +17,7 @@ module Hive
         notification_sent
         notification_skipped_dedupe
         notification_skipped_backoff
+        notification_skipped_active_conversation
         fresh_install_seeded
         answer_lock_contention
         dispatched_command

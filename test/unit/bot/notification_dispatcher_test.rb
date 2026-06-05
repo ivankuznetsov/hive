@@ -135,6 +135,51 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
     assert_empty telegram.messages,
                  "no proactive push for a slug with an active answer conversation"
+    # The suppressed row never enters the alert pipeline, so no dedup
+    # entry is written — keeping it would block the eventual re-alert.
+    assert_nil alert_store_via(d).entry(Hive::Bot::NotificationBuilders.fingerprint(row)),
+               "a suppressed alert must not leave a dedup entry"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_active_conversation },
+           "the suppression must be logged for audit")
+  end
+
+  # The single most important regression guard: fire → suppress while
+  # answering → RE-FIRE once the conversation ends and the row is still
+  # WAITING. A bug that left a stale dedup entry would silence the re-alert.
+  def test_alert_refires_after_conversation_ends
+    store = Hive::Bot::ConversationStore.new(now: -> { NOW })
+    d = dispatcher(now: NOW, conversation_store: store)
+
+    d.process_rows([ row ])
+    assert_equal 1, telegram.messages.size, "first alert fires (no conversation yet)"
+
+    store.start(chat_id: 12345, slug: "slug-260514-abcd", question_n: 1)
+    d.process_rows([ row ])
+    assert_equal 1, telegram.messages.size, "no new push while answering"
+
+    store.clear(chat_id: 12345, slug: "slug-260514-abcd")
+    d.process_rows([ row ])
+    assert_equal 2, telegram.messages.size,
+                 "re-engages with a fresh alert once the conversation ends"
+  end
+
+  def test_review_waiting_alert_suppressed_while_answering
+    d = dispatcher(now: NOW, conversation_store: active_conversation_for("slug-260514-abcd"))
+
+    d.process_rows([ row(action: "needs_input", marker: "review_waiting", stage: "5-review") ])
+
+    assert_empty telegram.messages, "review-triage waiting is also gated by an active conversation"
+  end
+
+  def test_needs_input_alert_fires_with_empty_store_or_nil_store
+    d_empty = dispatcher(now: NOW, conversation_store: Hive::Bot::ConversationStore.new(now: -> { NOW }))
+    d_empty.process_rows([ row ])
+    assert_equal 1, telegram.messages.size, "an empty store suppresses nothing"
+
+    # Default wiring (no store) must also fire — the nil guard path.
+    d_nil = dispatcher(now: NOW)
+    d_nil.process_rows([ row ])
+    assert_equal 2, telegram.messages.size, "no conversation store → no suppression"
   end
 
   def test_needs_input_alert_fires_with_store_but_no_active_conversation

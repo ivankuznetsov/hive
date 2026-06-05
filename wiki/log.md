@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T08:42:50Z] bot/wiki - post-commit refresh for PR #281 follow-up coverage
+
+**Action:** Refreshed wiki coverage after commit `26be3aff` (`fix(bot): address PR #281 review — thread-safe ConversationStore + observability`). Read AGENTS.md, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, the committed diff, current bot source/tests, and `schemas/hive-bot-log.v1.json`; also ran `qmd search` for the bot suppression terms and checked the configured master wiki path. Tightened [[modules/bot]]'s `NotificationDispatcher` row so it now documents project+slug active-conversation suppression, lenient nil-project matching, `notification_skipped_active_conversation` logging, and the no-alert-store-entry behavior that lets a still-waiting task re-alert after the conversation ends. [[gaps]] already recorded the remaining uncertainty: no live Telegram bot plus daemon WAITING-flap smoke artifact was found. No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[log]]
+
 ## [2026-06-05T01:00:00Z] patrol - similarity dedup so re-found findings don't re-open PRs
 
 **Action:** Fixed patrol re-opening the same PRs every scan. The exact fingerprint (`[feature_id, category, path, snippet]` SHA) is agent-volatile — the review agent re-files the same issue with a different feature attribution, title, and snippet each run, so the SHA never matches a prior PR and the finding is re-opened forever (observed: #284/#290/#303 and #288/#303/#304 were all the same "dry-run gh implicit-POST" issue with different fingerprints). Added a similarity gate: `Fingerprint.record_seen` now stores the finding's `category` + normalized `title_tokens`; `Fingerprint.similar_known?` skips a new finding whose same-category title-token overlap (Szymkiewicz–Simpson) ≥ `SIMILARITY_THRESHOLD` (0.6) with an open/merged/dismissed finding; `commands/patrol.rb#skip_reason` returns `similar_to_existing`; the `Dismissals` reconciler carries the content into dismissed entries. Documented in [[modules/patrol]]. 100% line coverage, rubocop clean.
@@ -38,6 +46,26 @@ Append-only log of all wiki operations.
 - [[testing]]
 - [[gaps]]
 
+## [2026-06-03T13:20:00Z] bot/wiki - refresh PR #281 suppress-while-answering follow-up coverage
+
+**Action:** Refreshed bot wiki coverage after the PR #281 follow-up changed `ConversationStore`, `NotificationDispatcher`, `Logger`, `hive-bot-log.v1`, and focused bot tests. Verified the current staged source diff while resolving the wiki rebase conflict. Documented that `ConversationStore` is now mutex-guarded because the Telegram poll thread mutates conversations while the status-poll thread reads/prunes through `active_for_slug?`; that active-conversation suppression is scoped by project+slug with a lenient nil fallback; and that suppression now emits `notification_skipped_active_conversation` in the bot log schema. Preserved the unrelated babysitter wiki entries from the other side of the conflict. No page count changed, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-03T13:00:00Z] fix — PR #281 ce-code-review: thread-safe ConversationStore + suppression observability
+
+**Action:** Addressed the `/ce-code-review` findings on PR #281 (the waiting-alert suppression):
+
+- **Thread safety:** `ConversationStore` is now read from the status-poll thread (`active_for_slug?`, which prunes) while mutated from the Telegram poll thread (`start`/`update`/`clear`). Added a `Mutex` guarding every `@states` access, mirroring `AlertStore`/`ChildSupervisor`, with a lock-free `prune_locked` body to avoid re-entrancy.
+- **Observability:** `suppress_active_conversation?` now logs `:notification_skipped_active_conversation`, registered in the bot Logger enum and `hive-bot-log.v1.json`, matching the other `:notification_skipped_*` events.
+- **Correctness:** `NotificationDispatcher` uses `Hive::Schemas::TaskActionKind::NEEDS_INPUT` instead of a magic string and scopes suppression by `(project, slug)`. `ConversationStore` refuses cross-suppression only when both projects are known and different; project-less/unresolved conversations still suppress to avoid a silent regression.
+- **Tests:** Coverage includes the multi-tick re-fire lifecycle, suppressed rows leaving no dedup entry, logged suppression, `review_waiting`, nil/empty store, partial expiry across chats, project scoping, and concurrent access.
+
+**Pages:** [[modules/bot]]
+
 ## [2026-06-03T11:05:00Z] babysitter - skip draft PRs explicitly
 
 **Action:** Fixed the babysitter PR selector so GitHub draft PRs are skipped before worktree materialization and agent spawn. The prior label filter treated `draft` as a label, but GitHub exposes draft state as `isDraft`; live babysitter activity showed draft PR #278 being selected despite `labels_ignore: [draft]`. Added the `draft_pr` skipped event outcome and focused ProjectTick coverage.
@@ -62,6 +90,15 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[commands/babysit]]
 - [[modules/babysitter]]
+
+## [2026-06-03T11:00:19Z] bot/wiki - refresh waiting-alert suppression coverage after commit 0d9bf875
+
+**Action:** Post-commit wiki refresh for `0d9bf875` (`fix(bot): suppress "questions waiting" push while operator is answering`). Read AGENTS.md, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, the committed diff, and the relevant bot source/tests. Verified that `ConversationStore#active_for_slug?` is prune-aware, `NotificationDispatcher#suppress_active_conversation?` only gates `needs_input` rows, `Supervisor` injects the same store during startup and SIGHUP reload, and tests cover same-slug suppression plus recovery non-suppression. Expanded [[modules/bot]]'s `ConversationStore` row so the active-slug helper is documented outside the long dispatcher row. Recorded the remaining uncertainty in [[gaps]]: no live Telegram smoke artifact was found for the mid-answer flap scenario. No page count changed, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[gaps]]
+- [[log]]
 
 ## [2026-06-03T10:02:12Z] release - correct prepared version to 0.1.11
 

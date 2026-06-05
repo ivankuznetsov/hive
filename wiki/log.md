@@ -48,6 +48,12 @@ Append-only log of all wiki operations.
 - **#247** added a `schema_files_test` assertion that a `.json.claimed` file still validates against `hive-dispatch-request.v1` (no stray `claim` key) — completing the contract pin deferred from batch A.
 
 100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
+## [2026-06-03T14:54:56Z] babysitter - narrow dry-run git remote passthrough
+
+**Action:** Tightened `bin/hive-babysitter-stub-git` so `git remote` is no longer blanket read-only in babysitter dry-run. The stub now passes only listing, `show [-n]`, and `get-url` forms through to the real git binary; mutating forms such as `remote set-url`, `remote add`, and `remote remove` are skipped and logged. Updated `test/unit/babysitter/dry_run_env_test.rb` to pin both the mutating skips and read-only passthrough examples.
+
+**Refreshed pages:**
+- [[commands/babysit]]
 
 ## [2026-06-03T14:10:33Z] release/wiki - refresh v0.2.0 release prep coverage
 

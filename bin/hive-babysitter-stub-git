@@ -27,13 +27,34 @@ def stripped_global_options(argv)
   rest
 end
 
+def read_only_remote?(rest)
+  args = rest[1..] || []
+  args.shift while ["-v", "--verbose"].include?(args.first)
+  return true if args.empty?
+
+  case args.first
+  when "show"
+    args.shift
+    args.shift if args.first == "-n"
+    args.all? { |arg| !arg.start_with?("-") }
+  when "get-url"
+    args.shift
+    args.shift while ["--push", "--all"].include?(args.first)
+    args.length == 1 && !args.first.start_with?("-")
+  else
+    false
+  end
+end
+
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
     rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")
   when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
-       "remote", "rev-list", "rev-parse", "show", "status"
+       "rev-list", "rev-parse", "show", "status"
     true
+  when "remote"
+    read_only_remote?(rest)
   when "config"
     rest.include?("--get") || rest.include?("--get-all") || rest.include?("--list")
   else

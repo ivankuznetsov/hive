@@ -121,11 +121,16 @@ thread. It calls
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
 in-process for the first snapshot and whenever the cached mtime
 fingerprint changes; otherwise it reuses the previous `Snapshot` and
-only refreshes `current_seen_at`. The fingerprint watches each visible
-row's state file plus the project's `.hive-state/stages` directory and
-stage children, so ordinary marker edits and newly-created task folders
-invalidate the cache without reparsing unchanged status data. Read-only,
-no locks taken. The render thread reads `@current` once per frame; under
+only refreshes `current_seen_at`. The fingerprint watches the global
+project registry (`Hive::Config.global_config_path`), each visible
+row's state file, plus the project's `.hive-state/stages` directory and
+stage children, so ordinary marker edits, newly-created task folders,
+and `hive init`/`forget` registry changes all invalidate the cache
+without reparsing unchanged status data. A time-bounded fallback
+(`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
+when the fingerprint is unchanged, so liveness-derived fields
+(`live_task_lock`, `claude_pid_alive`) that flip without touching any
+file cannot stay stale indefinitely. Read-only, no locks taken. The render thread reads `@current` once per frame; under
 MRI 3.4's GVL the pointer-sized reference write is atomic.
 JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `RUBY_ENGINE != "ruby"` boot guard makes the assumption auditable.

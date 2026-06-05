@@ -23,12 +23,23 @@ module Hive
     class StateSource
       attr_reader :last_error, :current_seen_at
 
+      # Upper bound on how long the mtime gate may reuse a cached
+      # snapshot before forcing a full re-parse. The fingerprint only
+      # tracks file mtimes, but some payload fields (`live_task_lock`,
+      # `claude_pid_alive`) are derived from process liveness, which
+      # flips without touching any file. Without this fallback a dead
+      # lock holder's "live" indicator could never clear. The bound
+      # keeps the indicator self-healing while still skipping most
+      # idle-path parses.
+      LIVENESS_REPARSE_FALLBACK_SECONDS = 3.0
+
       def initialize(poll_interval_seconds: 1.0)
         @poll_interval_seconds = poll_interval_seconds
         @current = nil
         @current_seen_at = nil
         @last_error = nil
         @mtime_fingerprint = nil
+        @last_full_parse_at = nil
         @stop = false
         @thread = nil
       end
@@ -78,7 +89,7 @@ module Hive
       end
 
       def refresh_once
-        if @current && @mtime_fingerprint && mtime_fingerprint_unchanged?
+        if @current && @mtime_fingerprint && mtime_fingerprint_unchanged? && !full_reparse_due?
           @current_seen_at = Time.now
           @last_error = nil
           return
@@ -88,10 +99,19 @@ module Hive
         snapshot = Snapshot.from_payload(payload)
         @current = snapshot
         @current_seen_at = Time.now
+        @last_full_parse_at = @current_seen_at
         @mtime_fingerprint = mtime_fingerprint_for(snapshot)
         @last_error = nil
       rescue StandardError => e
         @last_error = e
+      end
+
+      # Time-bounded fallback so the mtime gate can't mask liveness
+      # state indefinitely (see LIVENESS_REPARSE_FALLBACK_SECONDS).
+      def full_reparse_due?(now: Time.now)
+        return true if @last_full_parse_at.nil?
+
+        (now - @last_full_parse_at) >= LIVENESS_REPARSE_FALLBACK_SECONDS
       end
 
       def mtime_fingerprint_unchanged?
@@ -103,12 +123,22 @@ module Hive
       end
 
       def mtime_fingerprint_for(snapshot)
-        paths = []
+        # Watch the global project registry too: `hive init`/`forget`
+        # rewrite config.yml without touching any tracked state file,
+        # so without this the gate would never see a project added or
+        # removed and the displayed set would go stale indefinitely.
+        paths = [ registry_config_path ]
         snapshot.projects.each do |project|
           paths.concat(project_watch_paths(project))
           project.rows.each { |row| paths << row.state_file }
         end
         paths.compact.uniq.to_h { |path| [ path, safe_mtime(path) ] }
+      end
+
+      def registry_config_path
+        Hive::Config.global_config_path
+      rescue StandardError
+        nil
       end
 
       def project_watch_paths(project)

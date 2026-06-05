@@ -3127,6 +3127,19 @@ TTL config.
 - [[modules/bot]]
 - [[state-model]]
 
+## [2026-06-05T14:22:45Z] cli/status — refresh no-target archive listing coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `93fb45fb` changed `hive archive` from a target-required workflow-only command into a split surface: no target lists archived tasks through `Hive::Commands::Status.new(archive: true)`, while `hive archive <target>` still runs the `StageAction` promote-or-run workflow verb. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "archive status command"` found existing workflow/archive wiki context. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, and focused CLI/status tests. Documented no-target text and JSON archive listing, empty archive output, and the CLI overlay boundary. Recorded that live registered-project archive workflow evidence is still missing. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/status]]
+- [[commands/stage_action]]
+- [[commands/tui]]
+- [[state-model]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-04T21:38:00Z] status/tui — archive hiding and archive views
 
 **Action:** Refreshed command/API wiki coverage after commits `6d10e386` through `bfa4b590` added `tasks[].folder_mtime`, `Hive::ArchiveFilter`, default text/TUI hiding for clean old `9-done` rows, an unfiltered TUI Archive pane, and no-arg `hive archive` listing. Verified the committed diffs plus current `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/archive_pane.rb`, `lib/hive/cli.rb`, the status schema, and focused status/TUI/CLI tests. Documented the distinction between state-file `mtime` and task-folder `folder_mtime`, the 3-day resolved-marker-only hide policy, the JSON boundary that keeps default `hive status --json` unfiltered, the explicit archive views, and the missing live registered-project smoke evidence. Did not run `qmd update` or `qmd embed`.

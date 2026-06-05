@@ -4,10 +4,10 @@ type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
 updated: 2026-06-05
-tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id]
+tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal text status hides clean `9-done` tasks whose task-folder mtime is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. Use `hive archive` for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal text status hides clean `9-done` tasks whose task-folder mtime is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
 
 ## Output shape
 
@@ -29,7 +29,7 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id]
 
 The filter applies only to human daily surfaces: default `hive status` text and the TUI grid. Default `hive status --json` stays unfiltered so bots, daemons, and agents continue to see every task row. Text status prints `… and N archived >3d ago (hive archive to view)` when rows were hidden.
 
-`hive archive` with no target reuses Status in archive mode: it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
+`hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and currently render the slug identity rather than the `#id display_name` column used by daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 
@@ -66,7 +66,7 @@ The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hi
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
 - Old clean `9-done` rows → hidden from text output with the per-project summary line above; unresolved done markers remain visible.
-- Task identity is left-padded to 36 chars; state label to 24 chars; then the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
+- Daily task identity is left-padded to 42 chars; state label to 24 chars; then the suggested command and humanised age. Archive-mode rows left-pad the slug to 36 chars. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.
 

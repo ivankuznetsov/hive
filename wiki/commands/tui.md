@@ -4,7 +4,7 @@ type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
 updated: 2026-06-05
-tags: [command, tui, observability, interactive, diagnostics, task-id]
+tags: [command, tui, observability, interactive, diagnostics, task-id, archive]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).

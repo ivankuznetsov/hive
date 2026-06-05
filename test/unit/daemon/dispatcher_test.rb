@@ -30,8 +30,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # ── fakes ─────────────────────────────────────────────────────────────
 
   class FakeStatusConsumer
+    attr_reader :fetch_count
     attr_writer :next_result
+
+    def initialize
+      @fetch_count = 0
+    end
+
     def fetch
+      @fetch_count += 1
       @next_result || Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [], error: nil)
     end
   end
@@ -1068,7 +1075,7 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   dispatcher.define_singleton_method(:install_signal_handlers!) { true }
   dispatcher.define_singleton_method(:reload_config!) { reloads += 1 }
   dispatcher.define_singleton_method(:interruptible_sleep) { |seconds| sleeps << seconds }
-  dispatcher.define_singleton_method(:tick) do
+  dispatcher.define_singleton_method(:tick) do |now: Time.now|
     ticks += 1
     request_reload! if ticks == 1
     request_shutdown! if ticks == 2
@@ -1078,10 +1085,67 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
 
   assert_equal 2, ticks
   assert_equal 1, reloads
-  assert_equal [ 30, 30 ], sleeps
+  assert_equal [ 1, 1 ], sleeps
   assert events_include?(logger, :dispatcher_started)
   assert events_include?(logger, :dispatcher_stopping)
   assert_equal 0, supervisor.spawned.size
+end
+
+def test_fast_probe_does_not_fetch_status_when_idle_and_mtimes_unchanged
+  folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+  state_file = File.join(folder, "brainstorm.md")
+  File.write(state_file, "WAITING\n")
+  status_row = row(
+    stage: "2-brainstorm", action: "needs_input", command: "hive brainstorm s1",
+    folder: folder, state_file: state_file, mtime: File.mtime(state_file)
+  )
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher(rows: [ status_row ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  dispatcher.tick(now: T0)
+  assert_equal 1, status.fetch_count
+
+  refute dispatcher.send(:cheap_probe_requires_full_tick?, now: T0 + 1)
+  assert_equal 1, status.fetch_count, "fast probe must not run the expensive status scan"
+end
+
+def test_fast_probe_requests_full_tick_when_tracked_state_file_mtime_changes
+  folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
+  state_file = File.join(folder, "brainstorm.md")
+  File.write(state_file, "WAITING\n")
+  status_row = row(
+    stage: "2-brainstorm", action: "needs_input", command: "hive brainstorm s1",
+    folder: folder, state_file: state_file, mtime: File.mtime(state_file)
+  )
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher(rows: [ status_row ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  dispatcher.tick(now: T0)
+  File.utime(Time.now + 5, Time.now + 5, state_file)
+
+  assert dispatcher.send(:cheap_probe_requires_full_tick?, now: T0 + 1)
+  assert_equal 1, status.fetch_count, "mtime probe should request a full tick without fetching itself"
+end
+
+def test_fast_probe_reaps_child_exit_before_requesting_full_tick
+  dispatcher, sup, controller, logger, _mw = make_dispatcher(rows: [])
+  dispatch_time = T0 - 10
+  controller.record_dispatch(
+    pid: 123, project: "p1", slug: "s1", stage: "4-execute",
+    command: "hive develop s1", started_at: dispatch_time, state_file_mtime: nil
+  )
+  exited = ChildExit.new(
+    pid: 123, exit_code: Hive::ExitCodes::SUCCESS, project: "p1", slug: "s1",
+    stage: "4-execute", command: "hive develop s1", state_file_path: nil,
+    started_at: dispatch_time, finished_at: T0, json_envelope: nil, request_id: nil
+  )
+  sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+  status = dispatcher.instance_variable_get(:@status_consumer)
+
+  assert dispatcher.send(:cheap_probe_requires_full_tick?, now: T0)
+  assert_equal 0, controller.in_flight_count
+  assert_equal 0, status.fetch_count
+  assert events_include?(logger, :child_exited)
 end
 
 def test_request_methods_flip_lifecycle_flags

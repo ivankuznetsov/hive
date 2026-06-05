@@ -28,10 +28,11 @@ module Hive
     # ConcurrencyController) to the I/O pieces (StatusConsumer,
     # ChildSupervisor, Logger) and a PrMergeWatcher (if injected).
     #
-    # Each `tick` is one round: reap completed children, fetch status,
-    # decide per row, dispatch where allowed. The poller calls `tick` at
-    # `daemon.poll_interval_sec` cadence; signals (TERM/INT/HUP) drive
-    # graceful shutdown / config reload.
+    # Each `tick` is one full round: reap completed children, fetch status,
+    # decide per row, dispatch where allowed. The poller also wakes at
+    # `daemon.fast_poll_sec` cadence for cheap child-reap/state-file-mtime
+    # probes; a full tick still runs at `daemon.poll_interval_sec` as the
+    # backstop. Signals (TERM/INT/HUP) drive graceful shutdown / config reload.
     class Dispatcher
       attr_reader :controller, :supervisor, :logger
 
@@ -78,6 +79,7 @@ module Hive
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
+        @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
         # Grace window for AGENT_WORKING markers with no PID attribute
         # (placeholders stamped on stage entry). Within this window the
         # dispatcher is presumed to be mid-spawn; past it, the marker
@@ -111,6 +113,7 @@ module Hive
         @last_reexec_at = nil
         @started_at = nil
         @last_tick_at = nil
+        @tracked_state_file_mtimes = {}
         @dispatched_today = 0
         reset_active_agent_snapshot
         # Per-tick enable cache. Populated lazily within one tick so
@@ -270,6 +273,7 @@ module Hive
           result.rows.map { |row| [ row.project, row.slug ] },
           scope_projects: Array(result.projects).map(&:name)
         )
+        refresh_tracked_state_file_mtimes(result.rows)
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -305,8 +309,13 @@ module Hive
             reload_config!
             @reload = false
           end
-          tick
-          interruptible_sleep(@poll_interval_sec)
+          now = Time.now
+          if full_tick_due?(now)
+            tick(now: now)
+          elsif cheap_probe_requires_full_tick?(now: now)
+            tick(now: Time.now) unless @shutdown || @reload
+          end
+          interruptible_sleep(@fast_poll_sec)
         end
 
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
@@ -428,8 +437,19 @@ module Hive
                       keeping_previous: true)
       end
 
+      def full_tick_due?(now)
+        @last_tick_at.nil? || (now - @last_tick_at) >= @poll_interval_sec
+      end
+
+      def cheap_probe_requires_full_tick?(now:)
+        child_exited = reap_completed(now: now)
+        state_file_changed = tracked_state_file_mtime_changed?
+        child_exited || state_file_changed
+      end
+
       def reap_completed(now:)
-        @supervisor.reap_all(now: now).each do |entry|
+        entries = @supervisor.reap_all(now: now)
+        entries.each do |entry|
           @controller.record_completion(
             pid: entry.pid, exit_code: entry.exit_code, completed_at: now
           )
@@ -484,6 +504,29 @@ module Hive
             @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
           end
         end
+        entries.any?
+      end
+
+      def refresh_tracked_state_file_mtimes(rows)
+        @tracked_state_file_mtimes = {}
+        rows.each do |row|
+          next if row.state_file.nil? || row.state_file.empty?
+
+          @tracked_state_file_mtimes[row.state_file] = safe_mtime(row.state_file) || row.state_file_mtime
+        end
+      end
+
+      def tracked_state_file_mtime_changed?
+        @tracked_state_file_mtimes.any? do |path, previous_mtime|
+          current_mtime = safe_mtime(path)
+          current_mtime != previous_mtime
+        end
+      end
+
+      def safe_mtime(path)
+        File.mtime(path) if path && File.exist?(path)
+      rescue StandardError
+        nil
       end
 
       # After a child exits, re-stat the task's state file and store
@@ -1353,6 +1396,7 @@ module Hive
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
+        @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
         # R-02: push reloaded child-timeout knobs into the supervisor so
         # an operator tuning daemon.child_timeout_sec / verb overrides via
         # SIGHUP takes effect for children spawned after the reload.

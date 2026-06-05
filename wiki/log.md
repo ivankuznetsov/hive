@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T22:04:03Z] wiki — refresh pass 02 patrol/archive/tui coverage
+
+**Action:** Refreshed wiki coverage after commit `217459fe` (`fix(review): apply pass 02 findings`). Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff archive filter tui format"` only surfaced the prior related log entry, so verification used the committed diff plus direct source reads. Checked `lib/hive/patrol/review_handoff.rb`, `lib/hive/archive_filter.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/archive_pane.rb`, `lib/hive/tui/views/format.rb`, and focused unit tests. Documented patrol handoff's sparse-finding normalization, archive filtering's nil-timestamp fail-open behavior, Archive-pane display-cell alignment, and the expanded unit-test edge cases. No page coverage changed, and no new uncertainty was found beyond existing patrol/archive live-smoke gaps. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/patrol]]
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+
 ## [2026-06-05T22:00:24Z] wiki — audit residual handoff/format coverage commit
 
 **Action:** Audited commit `8d3c93ce` after it committed residual wiki changes from 6-review. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv tui executable fallback"` found prior testing/gaps/log context. Verified the committed wiki diff plus the `HEAD` versions of `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, and `test/unit/tui/views/format_test.rb`. Confirmed [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]] are source-synced for patrol `idea.md` provenance, nil/sparse evidence formatting, project-pane display-cell padding, and focused unit coverage. Page coverage did not change and no new uncertainty was found beyond existing [[gaps]] patrol live-smoke coverage; did not run `qmd update` or `qmd embed`.

@@ -110,7 +110,7 @@ v2 anchors on a Charm-modern palette with rounded borders and semantic color:
 
 Cursor highlight is reverse-video (works on monochrome terminals). Lipgloss strips ANSI when stdout isn't a tty, so the ANSI escapes don't leak into pipelines or test snapshots.
 
-Project-pane rows use the same `Hive::Tui::Views::Format.ljust_cells` helper as the task table, so warning icons and other wide labels are padded by terminal display cells rather than Ruby string length. This keeps left-pane labels aligned with the fixed pane width even when a project row starts with `⚠`.
+Project-pane and Archive-pane rows use the same `Hive::Tui::Views::Format` cell helpers as the task table, so warning icons, wide CJK labels, and other multi-cell glyphs are padded or truncated by terminal display cells rather than Ruby string length. This keeps fixed-width columns aligned even when a project row starts with `⚠` or an archived slug/project label contains wide glyphs.
 
 ## Verb refusal on agent_running rows
 

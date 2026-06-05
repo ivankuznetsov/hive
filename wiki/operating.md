@@ -102,10 +102,12 @@ in-tree `bin/hv` fallback probes only `HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
 and `/usr/local/bin/hive`; it intentionally does not fall through to
 `/usr/bin/hive` or `/opt/hive/bin/hive`, because those are common Apache Hive
-locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. The AUR
-package does not ship the gem's `bin/hv` wrapper; its `conflicts=('hive'
-'apache-hive')` metadata blocks the parallel install before fallback aliasing is
-possible.
+locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. RubyGems
+does not advertise `hv` as a gem executable, because RubyGems would wrap the
+bash launcher in a Ruby binstub; install channels create the working `hv`
+wrapper/symlink themselves. The AUR package also uses an `hv -> hive` symlink;
+its `conflicts=('hive' 'apache-hive')` metadata blocks the parallel install
+before fallback aliasing is possible.
 
 Daemon autostart is part of install, not project enrollment. The bash installer
 runs `hive daemon install --json` after installing the gem. Agent-assisted

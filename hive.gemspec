@@ -46,7 +46,7 @@ Gem::Specification.new do |spec|
   ]
 
   spec.bindir      = "bin"
-  spec.executables = [ "hive", "hv" ]
+  spec.executables = [ "hive" ]
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.

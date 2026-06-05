@@ -3143,6 +3143,16 @@ TTL config.
 **Refreshed pages:**
 - [[log]]
 
+## [2026-06-05T18:52:58+01:00] babysitter — refresh dry-run git exec/env stub coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `f748deed` changed `bin/hive-babysitter-stub-git` and `test/unit/babysitter/dry_run_env_test.rb`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git exec env bypass grep output pager config-env"` had no exact indexed hits, so verification used the committed diff plus direct source reads. Documented that dry-run git screening is now structurally scoped: config injection is screened only in global options, `--exec-path` is a global exec screen, `--output` is exact so `--output-indicator-*` passes, and grep pager execution includes bundled short flags such as `-nO...`; also documented scrubbing of `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and `GIT_CONFIG*`, plus the exit-127 diagnostic for invalid `HIVE_BABYSITTER_REAL_GIT`. The live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains open. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-05T17:26:02Z] wiki — audit patrol handoff residual log coverage
 
 **Action:** Audited residual wiki commit `a94719a0`, which only appended the previous babysitter dry-run audit entry to [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff opened PR residual wiki"` surfaced the existing patrol handoff coverage. Verified the residual commit diff directly, then checked the underlying patrol PR #312 source commit `598fd191` against `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/commands/patrol.rb`, `lib/hive/daemon/patrol_scheduler.rb`, `lib/hive/config.rb`, `templates/project_config.yml.erb`, and the focused patrol/config tests. Confirmed current [[commands/patrol]], [[modules/patrol]], [[modules/config]], [[stages/review]], [[state-model]], [[testing]], and [[gaps]] already match the code: patrol handoff is defaulted through `patrol.review_prs: true`, synthetic review slugs are globally unique across stages, handoff failures are retryable and surfaced in `review_handoff_errors`, successful handoff keeps the patrol worktree for `6-review`, and `patrol.trigger` is now `continuous` by default. No page-list or gap changes were needed. Did not run `qmd update` or `qmd embed`.

@@ -263,8 +263,7 @@ module Hive
       # with an unparseable mtime simply keeps its archived-at as nil and
       # stays visible rather than being hidden. We deliberately do not log
       # here — this runs in the TUI render path, where stderr noise would
-      # corrupt the frame; systemic corruption surfaces via `hive status`
-      # instead.
+      # corrupt the frame.
       def parse_time(value)
         return nil if value.nil? || value.to_s.strip.empty?
 

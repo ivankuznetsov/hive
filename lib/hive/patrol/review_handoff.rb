@@ -164,7 +164,7 @@ module Hive
       end
 
       def idea_text(finding)
-        # `Finding` is a plain Struct that enforces no evidence invariant,
+        # `Finding` is a plain Struct that applies no coercion to `evidence`,
         # so a finding built without `evidence:` yields nil; `Array(...)`
         # mirrors Finding.from_h's own guard and keeps this nil-safe.
         evidence = Array(finding.evidence)

@@ -2,6 +2,18 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T13:30:00Z] patrol - make `continuous` the default trigger
+
+**Action:** Flipped the default `patrol.trigger` from `new_commits` to `continuous` so patrol keeps mining existing feature slices on the `poll_interval_sec` timer (in addition to default-branch SHA changes) out of the box. Changed `Config::DEFAULTS["patrol"]["trigger"]`, the `PatrolScheduler#due?` fetch fallback, the init template (`templates/project_config.yml.erb`, with an inline mode comment), and the `config_test` default assertion. Refreshed [[commands/patrol]], [[modules/patrol]], and `docs/cli.md` to mark `continuous` as the default. `new_commits` / `timer` remain opt-in.
+
+**Refreshed pages:**
+- [[commands/patrol]]
+- [[modules/patrol]]
+
+## [2026-06-05T09:30:00Z] patrol - continuous hybrid trigger
+
+**Action:** Added and documented `patrol.trigger: continuous`, a hybrid daemon scheduling mode that dispatches patrol when either the default branch SHA changed or `poll_interval_sec` elapsed. This keeps large repositories under active patrol between infrequent merges while preserving the `last_scanned_sha` freshness marker after each successful scan. Updated [[commands/patrol]] and [[modules/patrol]].
+
 ## [2026-06-05T09:10:00Z] babysitter - refresh rebased PR-head cache refs
 
 **Action:** Documented the babysitter worktree fix that force-refreshes internal `refs/hive-babysitter/pr-*` cache refs when fetching `pull/<PR>/head`. The refs are Hive-owned cache refs, not user branches, so force-updating them is the correct behavior when a PR branch is rebased or force-pushed; otherwise `git fetch pull/<PR>/head:refs/hive-babysitter/pr-<PR>` can fail with a non-fast-forward reject and leave babysitter unable to inspect that PR. Updated [[modules/babysitter]].

@@ -25,7 +25,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("patrol", "enabled")
-      assert_equal "new_commits", cfg.dig("patrol", "trigger")
+      assert_equal "continuous", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "claude", cfg.dig("patrol", "agent")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
@@ -46,7 +46,7 @@ class ConfigTest < Minitest::Test
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         patrol:
           enabled: true
-          trigger: timer
+          trigger: continuous
           commands:
             test: bundle exec rake test
       YAML
@@ -54,7 +54,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal true, cfg.dig("patrol", "enabled")
-      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal "continuous", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec"),
                    "sibling patrol defaults must survive deep merge"
       assert_equal "bundle exec rake test", cfg.dig("patrol", "commands", "test")
@@ -75,6 +75,7 @@ class ConfigTest < Minitest::Test
       assert_match(/patrol\.trigger/, err.message)
       assert_match(/new_commits/, err.message)
       assert_match(/timer/, err.message)
+      assert_match(/continuous/, err.message)
     end
   end
 

@@ -120,15 +120,25 @@ module Hive
 
       def due?(entry, cfg, patrol, now)
         state = read_state(entry.fetch("path"))
-        case patrol.fetch("trigger", "new_commits")
+        case patrol.fetch("trigger", "continuous")
         when "timer"
-          last = parse_time(state["last_run_at"])
-          last.nil? || (now - last) >= patrol.fetch("poll_interval_sec", 600)
+          timer_due?(state, patrol, now)
+        when "continuous"
+          default_branch_changed?(entry, cfg, state) || timer_due?(state, patrol, now)
         else
-          branch = @git.default_branch(entry.fetch("path"), cfg: cfg)
-          current = @git.rev_parse(entry.fetch("path"), branch)
-          current != state["last_scanned_sha"]
+          default_branch_changed?(entry, cfg, state)
         end
+      end
+
+      def timer_due?(state, patrol, now)
+        last = parse_time(state["last_run_at"])
+        last.nil? || (now - last) >= patrol.fetch("poll_interval_sec", 600)
+      end
+
+      def default_branch_changed?(entry, cfg, state)
+        branch = @git.default_branch(entry.fetch("path"), cfg: cfg)
+        current = @git.rev_parse(entry.fetch("path"), branch)
+        current != state["last_scanned_sha"]
       end
 
       def read_state(project_root)

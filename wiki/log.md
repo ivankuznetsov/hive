@@ -3230,3 +3230,10 @@ TTL config.
 - [[commands/patrol]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-05T21:18:19Z] wiki/patrol — post-commit validation of evidence-rendering coverage
+
+**Action:** Post-commit wiki refresh after `2c991e3d` touched [[commands/patrol]], [[modules/patrol]], [[testing]], [[gaps]], and [[log]] with documentation for `Hive::Patrol::ReviewHandoff` evidence rendering. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured master wiki index first; `qmd search "residual worktree changes docs plans wiki patrol eval"` returned only prior indexed patrol/wiki log context. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/finding.rb`, and `test/unit/patrol/review_handoff_test.rb`. Confirmed the HEAD wiki pages already match the source behavior for one computed `idea.md` body, nil/empty evidence omission, no-location evidence fallback rows, symbol-keyed evidence entries, and synthetic review-task file coverage. Page coverage did not change, [[index]] needed no catalog update, and no new uncertainty needed recording in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

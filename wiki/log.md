@@ -3167,3 +3167,10 @@ TTL config.
 - [[commands/babysit]]
 - [[gaps]]
 - [[log]]
+
+## [2026-06-05T18:45:40+01:00] wiki — audit residual babysitter dry-run coverage commit
+
+**Action:** Audited residual wiki commit `557e6ef4`, which committed the previous babysitter dry-run documentation refresh as 6-review residue. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config residual"` surfaced prior babysitter dry-run history. Verified the committed diff, then checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Confirmed the current pages already match the code and tests: dry-run git allowlisted read subcommands still pass through only after argv-wide screening for config-injection, pager-exec, and output-file vectors; the live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains recorded in [[gaps]]. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

@@ -3142,3 +3142,18 @@ TTL config.
 
 **Refreshed pages:**
 - [[log]]
+
+## [2026-06-05T17:26:02Z] wiki — audit patrol handoff residual log coverage
+
+**Action:** Audited residual wiki commit `a94719a0`, which only appended the previous babysitter dry-run audit entry to [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff opened PR residual wiki"` surfaced the existing patrol handoff coverage. Verified the residual commit diff directly, then checked the underlying patrol PR #312 source commit `598fd191` against `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/commands/patrol.rb`, `lib/hive/daemon/patrol_scheduler.rb`, `lib/hive/config.rb`, `templates/project_config.yml.erb`, and the focused patrol/config tests. Confirmed current [[commands/patrol]], [[modules/patrol]], [[modules/config]], [[stages/review]], [[state-model]], [[testing]], and [[gaps]] already match the code: patrol handoff is defaulted through `patrol.review_prs: true`, synthetic review slugs are globally unique across stages, handoff failures are retryable and surfaced in `review_handoff_errors`, successful handoff keeps the patrol worktree for `6-review`, and `patrol.trigger` is now `continuous` by default. No page-list or gap changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:00:00Z] babysit — dry-run git stub screens exec/write options across argv
+
+**Action:** Hardened `bin/hive-babysitter-stub-git` after a review pass found that the read-only allowlist plus the original-`argv` `exec` let several non-mutating-looking commands run arbitrary code via real git: `-c diff.external=<cmd>`/`*.textconv`/`core.pager` config injection (silently stripped by `stripped_global_options` yet preserved in the exec argv), `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` pager exec, and global-position `--output`. Replaced the one-entry `no_write_options?` (`--output` only, on the stripped `rest`) with `dangerous_option?` + `no_exec_or_write_options?` that screen the entire invocation — `-c`, `--config-env`, `--output`, `-O`, `--open-files-in-pager` — before exec, so the guard no longer trusts the stripped subcommand alone. Also guarded `stripped_global_options` against `shift(2)` on a trailing valueless option and made `log_skip` warn instead of silently swallowing `SystemCallError`. Added regression tests in `test/unit/babysitter/dry_run_env_test.rb` for each exec/write vector plus a passing `git grep needle`, and updated [[commands/babysit]] to document the broadened screening.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[log]]

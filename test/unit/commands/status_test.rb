@@ -439,6 +439,27 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_render_project_hides_archived_row_by_state_file_mtime_not_folder_mtime
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = create_status_task(hive_state, "9-done", "diverging-archived-260604-abcd", marker: "COMPLETE", age_days: 5)
+      # Diverge the two timestamps: the state file (source of `mtime`) stays
+      # old (>3d), but a sidecar touch bumps the folder mtime to "now". A
+      # regression that wired `folder_mtime` into the hide check would keep
+      # this row visible; the `mtime`-precedence contract still hides it.
+      now = Time.now
+      File.utime(now, now, folder)
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      refute_includes out, "diverging-archived-260604-abcd",
+                       "archived row must hide on old state-file mtime even when folder_mtime is fresh"
+      assert_includes out, "… and 1 archived >3d ago (hive archive to view)"
+    end
+  end
+
   def test_render_project_reports_hidden_count_with_mixed_archived_rows
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

@@ -84,4 +84,13 @@ class ArchiveFilterTest < Minitest::Test
       now: now
     )
   end
+
+  def test_keeps_archived_row_when_neither_timestamp_supplied
+    now = Time.utc(2026, 6, 4, 12, 0, 0)
+
+    refute Hive::ArchiveFilter.hide?(
+      stage: Hive::Stages::DIRS.last,
+      now: now
+    ), "archived row with no mtime or folder_mtime must fail visible (stay shown)"
+  end
 end

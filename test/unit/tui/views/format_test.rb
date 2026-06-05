@@ -67,6 +67,38 @@ class HiveTuiViewsFormatTest < Minitest::Test
     assert_equal "", Format.take_cells("🤖", 1)
   end
 
+  # Multi-codepoint grapheme clusters: a regression from
+  # `each_grapheme_cluster` back to `each_char` would split these mid-cluster
+  # (emitting half a flag / a partial ZWJ sequence) while still passing every
+  # single-codepoint test above. These pin the exact case the change targets.
+
+  def test_take_cells_keeps_a_flag_cluster_whole
+    # "🇺🇸" is ONE grapheme (width 2) made of two regional-indicator chars
+    # that each measure 1 cell. `each_char` would emit a lone "🇺" at budget 1;
+    # cluster-aware logic drops the whole cluster instead.
+    flag = "🇺🇸"
+    assert_equal 1, flag.each_grapheme_cluster.to_a.size, "fixture must be a single cluster"
+    assert_equal "", Format.take_cells(flag, 1),
+                 "a 2-cell flag must not be split into half a flag at budget 1"
+    assert_equal flag, Format.take_cells(flag, 2)
+  end
+
+  def test_take_cells_keeps_a_zwj_family_cluster_whole
+    # "👨‍👩‍👧" is ONE grapheme (width 6) of five chars. `each_char` would emit a
+    # partial ZWJ sequence once a sub-codepoint fits; cluster logic keeps it atomic.
+    family = "👨‍👩‍👧"
+    assert_equal 1, family.each_grapheme_cluster.to_a.size, "fixture must be a single cluster"
+    assert_equal "", Format.take_cells(family, 5),
+                 "a 6-cell ZWJ family must not be partially emitted under its full width"
+    assert_equal family, Format.take_cells(family, 6)
+  end
+
+  def test_truncate_does_not_split_a_flag_cluster_below_two
+    # max_width < 2 routes to a hard cut; the 2-cell flag can't fit in 1 cell
+    # and must vanish rather than degrade to a half-flag regional indicator.
+    assert_equal "", Format.truncate("🇺🇸", 1)
+  end
+
   # ---- ljust_cells / rjust_cells ----
 
   def test_ljust_cells_pads_wide_char_to_full_cell_width

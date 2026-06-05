@@ -61,7 +61,10 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       )
 
       idea = File.read(File.join(folder, "idea.md"))
-      frontmatter = YAML.safe_load(idea.split("---\n\n", 2).first)
+      # Parse the YAML block between the frontmatter delimiters rather than
+      # splitting on the writer's exact `---\n\n` spacing, so a formatting
+      # change to write_frontmatter_md can't break this on whitespace.
+      frontmatter = YAML.safe_load(idea[/\A---\n(.*?)\n---/m, 1])
 
       assert_equal "patrol", frontmatter.fetch("source")
       assert_equal "f1", frontmatter.fetch("patrol_finding_id")

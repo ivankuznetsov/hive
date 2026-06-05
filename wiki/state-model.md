@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [state, filesystem, model, architecture, review, task-id]
 ---
 
@@ -137,6 +137,7 @@ reviews/
 ├── <reviewer-name>-01.md      # per-reviewer finding file, pass 1
 ├── <reviewer-name>-02.md      # per-reviewer finding file, pass 2
 ├── escalations-01.md          # triage output: items needing user judgment
+├── errors-01.md               # reviewer infrastructure failures for a pass
 ├── ci-blocked-NN.md           # written when CI hard-blocks (REVIEW_CI_STALE)
 ├── browser-result-NN-AA.json  # per-attempt browser-test result
 ├── browser-blocked-NN.md      # written when all browser attempts fail (browser=warned)
@@ -157,13 +158,13 @@ Per-reviewer file format (checkbox triage lines):
 
 Pass derivation is filesystem-native: `Stages::Review` reads the max `-NN` suffix across per-reviewer files in `reviews/` to derive the current pass. Pass-N completion is classified by `pass_completion_status(folder, N)`:
 
-- **`:complete`** — pass-`N+1` reviewer files exist OR `reviews/fix-success-NN.md` sentinel exists. The runner moved past pass N cleanly; advance to `NN+1`.
-- **`:triage_incomplete`** — reviewer files for pass N exist but no `escalations-NN.md`. Triage never ran. The next markerless run retries pass N at Phase 2/3.
+- **`:complete`** — pass-`N+1` reviewer files exist OR `reviews/fix-success-NN.md` sentinel exists and is fresh relative to `escalations-NN.md`. The runner moved past pass N cleanly; advance to `NN+1`.
+- **`:triage_incomplete`** — reviewer files for pass N exist but no `escalations-NN.md`, or `reviews/errors-NN.md` records reviewer infrastructure failures for that pass. The next markerless run retries pass N at Phase 2/3 so failed reviewers get a fresh attempt and stale `errors-NN.md` is cleared at the start of `run_reviewers`.
 - **`:fix_incomplete`** — both reviewer files and `escalations-NN.md` exist, but neither the fix-success sentinel nor any pass-`N+1` reviewer file exists. The fix phase failed (`REVIEW_ERROR phase=fix`) or the runner was interrupted mid-fix. The next markerless run **skips Phase 2/3** and re-runs Phase 4 on the operator's existing `[x]` marks — preserving accepted findings instead of regenerating them.
 
 The runner writes the `fix-success-NN.md` sentinel at every "pass N is done, advance" decision (post-guardrail-not-tripped, and the Phase 2 zero-findings short-circuit to Phase 5). The current pass's sentinel path is protected during the fix-agent spawn so only the runner can mark a pass complete. For repos created before the sentinel existed, the pass-`N+1` reviewer files act as a back-compat fallback at non-topmost passes (the topmost pass on a legacy repo may re-run its fix once on first encounter — accepted migration cost).
 
-No `pass:` frontmatter or sidecar — recovery is "delete the highest-NN files to drop pass back" for completed stale passes. Accepted findings (`[x]` lines) are concatenated and passed to the Phase 4 fix agent via the per-spawn nonce wrap; orchestrator-owned files (`escalations-`, `ci-blocked-`, `browser-`, `fix-guardrail-`, `fix-success-`) are excluded from the `Hive-Reviewer-Sources` trailer derivation.
+No `pass:` frontmatter or sidecar — recovery is "delete the highest-NN files to drop pass back" for completed stale passes. Accepted findings (`[x]` lines) are concatenated and passed to the Phase 4 fix agent via the per-spawn nonce wrap; orchestrator-owned files (`escalations-`, `errors-`, `ci-blocked-`, `browser-`, `fix-guardrail-`, `fix-success-`) are excluded from the `Hive-Reviewer-Sources` trailer derivation.
 
 ## Configs
 

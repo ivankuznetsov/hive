@@ -2,6 +2,18 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
+
+**Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.
+
+## [2026-06-05T14:07:35Z] review/wiki - audit partial reviewer failure recovery coverage
+
+**Action:** Refreshed wiki coverage after commit `55a5cf4c` (`fix(review): treat partial reviewer failures as recovery`). Read AGENTS.md, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search` found only prior changelog context in the hive collection and no master hits. Verified the committed diff plus `lib/hive/stages/review.rb`, `test/integration/run_review_test.rb`, current `lib/hive/commands/run.rb`, and relevant review/marker/run wiki pages. Added the missing [[state-model]] coverage that pass-local `reviews/errors-NN.md` now classifies a pass as `:triage_incomplete`, so marker-clear recovery reruns reviewers and clears stale errors at reviewer-run start. Recorded the unresolved legacy `REVIEW_WAITING reason=reviewer_partial_failure` JSON branch/test in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[state-model]]
+- [[gaps]]
+
 ## [2026-06-05T13:30:00Z] review - classify partial reviewer failure as recovery
 
 **Action:** Changed mixed reviewer success/failure with no findings from `REVIEW_WAITING reason=reviewer_partial_failure` to `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure`. This keeps the safety invariant that partial reviewer coverage must not auto-complete, but classifies the task as recoverable review infrastructure failure instead of user input. Status diagnostics already include `reviews/errors-NN.md`, so retry/autofix flows can clear `REVIEW_ERROR` and rerun reviewers.

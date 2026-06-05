@@ -798,11 +798,15 @@ module Hive
       #                         the operator has not edited escalations
       #                         since; the runner moved past pass N cleanly.
       #   :triage_incomplete  — reviewer files for pass N exist but no
-      #                         `escalations-NN.md`, or
+      #                         `escalations-NN.md`, or escalations exist
+      #                         without a completed fix while
       #                         `errors-NN.md` records reviewer infra
       #                         failures for the pass. Retry runs Phase
       #                         2/3 so failed reviewers get a fresh
-      #                         attempt and stale errors are cleared.
+      #                         attempt and stale errors are cleared. A
+      #                         pass with a fresh `fix-success-NN.md` stays
+      #                         `:complete` even if `errors-NN.md` lingers,
+      #                         so an already-fixed pass is never re-run.
       #   :fix_incomplete     — reviewer files AND escalations-NN.md
       #                         exist, but neither the fix-success
       #                         sentinel nor any pass-N+1 reviewer file
@@ -827,15 +831,28 @@ module Hive
 
         escalations_path = File.join(reviews_dir, "escalations-#{pass_suffix}.md")
         errors_path = File.join(reviews_dir, "errors-#{pass_suffix}.md")
-        return :triage_incomplete if File.exist?(errors_path)
 
         unless File.exist?(escalations_path)
+          # No triage escalations yet (this includes the empty-findings
+          # partial-failure case, which writes no escalations). Retry Phase
+          # 2/3; an errors-NN.md here just means some reviewers also need a
+          # fresh attempt.
           return :triage_incomplete
         end
 
-        # Triage produced escalations. Was the fix completed?
+        # Triage produced escalations. A fresh fix-success sentinel means the
+        # pass is complete — even if errors-NN.md lingers from a partial
+        # reviewer failure earlier in the same pass. This check must come
+        # BEFORE the errors-NN.md retry below: otherwise an already-fixed
+        # pass that also carries errors-NN.md would re-run reviewers and
+        # clobber the operator's [x] marks (regression guarded here).
         fix_success = fix_success_path(task_folder, pass)
         return :complete if fix_success_fresh?(fix_success, escalations_path)
+
+        # Escalations exist but the fix isn't done. If reviewers recorded
+        # infra failures this pass, retry Phase 2/3 so they get a fresh
+        # attempt and the stale errors-NN.md is cleared.
+        return :triage_incomplete if File.exist?(errors_path)
 
         next_pass_suffix = format("%02d", pass + 1)
         next_pass_started = Dir[File.join(reviews_dir, "*-#{next_pass_suffix}.md")].any? do |path|

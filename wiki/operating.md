@@ -158,6 +158,9 @@ umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
 version verification, `hive daemon install`, and optional non-interactive
 `hive init`; after setup, users pass normal CLI verbs as
 `/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+The skill also documents `/hive wiki compile-log --check` as the read-only
+aggregate-changelog verification path and tells agents to reserve mutating
+`hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 

@@ -54,10 +54,12 @@ and optionally run non-interactive `hive init` for the current repository.
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include
 `/hive status --json`, `/hive new . "build this feature"`, `/hive plan
-<task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>`.
-The skill tells agents to pass arguments safely rather than interpolate raw user
-text into a shell string, to prefer `--json` when structured output is useful,
-and to confirm before destructive or foreground/blocking admin commands.
+<task-slug>`, `/hive develop <task-slug>`, `/hive review <task-slug>`,
+and `/hive wiki compile-log --check`. The skill tells agents to pass arguments
+safely rather than interpolate raw user text into a shell string, to prefer
+`--json` when structured output is useful, to use `--check` when verifying a
+compiled wiki changelog, and to confirm before destructive or
+foreground/blocking admin commands.
 
 OpenClaw does not introduce Ruby routes, HTTP handlers, controllers, resolvers,
 or new executable entrypoints. It is an agent-facing wrapper over the existing

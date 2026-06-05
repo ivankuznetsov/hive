@@ -348,7 +348,7 @@ module Hive
           return
         end
 
-        visible_rows, hidden_rows = rows.partition { |row| !hide_archived_row?(row) }
+        hidden_rows, visible_rows = rows.partition { |row| hide_archived_row?(row) }
         legacy = detect_legacy_stage_dirs(hive_state)
         puts project["name"]
         render_legacy_stage_warning(legacy) unless legacy.empty?

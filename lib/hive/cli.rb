@@ -369,7 +369,7 @@ module Hive
     def archive(target = nil)
       if target.nil?
         require "hive/commands/status"
-        return Hive::Commands::Status.new(json: options[:json], archive: true).call
+        return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end
 
       run_stage_action("archive", target)

@@ -3114,6 +3114,20 @@ TTL config.
 - [[commands/tui]]
 - [[index]]
 
+## [2026-06-05T15:00:47Z] tui resize — document app-level SIGWINCH dispatch
+
+**Action:** Fixed and documented `hive tui` resize handling after a terminal-grow report showed the two-pane dashboard retaining stale dimensions. `App.run_charm` now seeds the model from `STDOUT.winsize` and installs a Hive-owned `SIGWINCH` hook that dispatches `Messages::WindowSized`; Bubble Tea still owns renderer resizing and chains back through Hive's hook. Added unit coverage for terminal-size mapping, unavailable tty handling, resize-hook dispatch, and restore failure handling, plus a PTY integration regression that resizes a running `hive tui` process from 120 to 150 columns, sends `SIGWINCH`, and asserts the next frame expands. Refreshed the Charm bubbletea API-gaps solution note so it no longer claims Hive has no WINCH hook.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T16:30:00Z] wiki — audit TUI resize refresh coverage
+
+**Action:** Audited commit `50a2a010` after it updated the TUI resize implementation and initial docs. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "tui resize SIGWINCH bubbletea WindowSized"` found the updated TUI command page and prior Charm backend context. Verified the committed diff plus `lib/hive/tui/app.rb`, `test/unit/tui/app_test.rb`, `test/integration/tui_smoke_charm_test.rb`, `wiki/commands/tui.md`, and `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`. Confirmed the command page and solution note match the app-owned WINCH hook, added focused `tui/app_test.rb` coverage to [[testing]], and added a PTY resize integration smoke so the live resize path is no longer only unit-pinned. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+
 ## [2026-06-05T10:09:45Z] wiki — audit daemon/tui latency refresh coverage
 
 **Action:** Audited commit `68d9245f` after it refreshed daemon/TUI latency wiki pages. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search` had no indexed hits for this exact latency work, so verification used the committed diff plus direct source reads. Checked commits `0f4d9373`, `c1a63370`, and `7375c51d` against `lib/hive/daemon/concurrency_controller.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/config.rb`, `lib/hive/tui/state_source.rb`, and focused tests. Confirmed existing daemon/TUI pages matched the code and added the missing live-smoke uncertainty to [[gaps]]. Did not run `qmd update` or `qmd embed`.

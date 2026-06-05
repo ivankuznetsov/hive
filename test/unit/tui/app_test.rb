@@ -134,6 +134,74 @@ class TuiAppTest < Minitest::Test
     Signal.singleton_class.define_method(:trap, original) if original
   end
 
+  def test_terminal_size_message_maps_winsize_rows_cols
+    require "hive/tui/messages"
+    output = FakeTerminalOutput.new([ 37, 142 ])
+
+    message = Hive::Tui::App.terminal_size_message(output: output)
+
+    assert_kind_of Hive::Tui::Messages::WindowSized, message
+    assert_equal 142, message.cols
+    assert_equal 37, message.rows
+  end
+
+  def test_terminal_size_message_ignores_unavailable_terminal_size
+    output = FakeTerminalOutput.new(Errno::ENOTTY.new("not a tty"))
+
+    assert_nil Hive::Tui::App.terminal_size_message(output: output)
+  end
+
+  def test_install_resize_hook_seeds_size_and_enqueues_on_sigwinch
+    require "hive/tui/messages"
+    runner = RecordingRunner.new
+    output = FakeTerminalOutput.new([ 24, 80 ], [ 42, 160 ])
+    captured = nil
+    original = Signal.singleton_class.instance_method(:trap)
+    Signal.define_singleton_method(:trap) do |signal_name, *_args, &block|
+      captured = block if signal_name == "WINCH"
+      :previous_winch
+    end
+
+    previous = Hive::Tui::App.install_resize_hook(runner, output: output)
+    captured.call
+
+    assert_equal :previous_winch, previous
+    assert_equal [ [ 80, 24 ], [ 160, 42 ] ], runner.messages.map { |msg| [ msg.cols, msg.rows ] }
+  ensure
+    Signal.singleton_class.define_method(:trap, original) if original
+  end
+
+  def test_install_resize_hook_returns_nil_when_winch_is_unsupported
+    runner = RecordingRunner.new
+    original = Signal.singleton_class.instance_method(:trap)
+    Signal.define_singleton_method(:trap) do |_signal_name, *_args, &_block|
+      raise ArgumentError, "unsupported signal"
+    end
+
+    assert_nil Hive::Tui::App.install_resize_hook(runner)
+    assert_empty runner.messages
+  ensure
+    Signal.singleton_class.define_method(:trap, original) if original
+  end
+
+  def test_dispatch_terminal_size_logs_and_returns_false_when_runner_send_fails
+    output = FakeTerminalOutput.new([ 24, 80 ])
+    runner = RaisingRunner.new(RuntimeError.new("queue closed"))
+
+    assert_equal false, Hive::Tui::App.dispatch_terminal_size(runner, output: output)
+  end
+
+  def test_restore_resize_hook_swallows_invalid_previous_handler
+    original = Signal.singleton_class.instance_method(:trap)
+    Signal.define_singleton_method(:trap) do |_signal_name, _handler|
+      raise ArgumentError, "invalid signal handler"
+    end
+
+    assert_nil Hive::Tui::App.restore_resize_hook(:bad_handler)
+  ensure
+    Signal.singleton_class.define_method(:trap, original) if original
+  end
+
   def test_restore_terminate_hook_swallows_invalid_previous_handler
     original = Signal.singleton_class.instance_method(:trap)
     Signal.define_singleton_method(:trap) do |_signal_name, _handler|
@@ -164,6 +232,29 @@ class TuiAppTest < Minitest::Test
 
     def send(message)
       @mutex.synchronize { @messages << message }
+    end
+  end
+
+  class RaisingRunner
+    def initialize(error)
+      @error = error
+    end
+
+    def send(_message)
+      raise @error
+    end
+  end
+
+  class FakeTerminalOutput
+    def initialize(*sizes)
+      @sizes = sizes
+    end
+
+    def winsize
+      size = @sizes.shift || @sizes.last
+      raise size if size.is_a?(Exception)
+
+      size
     end
   end
 

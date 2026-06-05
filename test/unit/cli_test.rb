@@ -163,6 +163,17 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_without_target_warns_when_from_is_supplied
+    with_command_new_stub(Hive::Commands::Status) do |calls|
+      _stdout, stderr = capture_io do
+        Hive::CLI.start([ "archive", "--from", "8-finalize" ])
+      end
+
+      assert_includes stderr, "--from is ignored when listing"
+      assert_equal({ json: false, project: nil, archive: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
   def test_archive_without_target_scopes_to_project
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "archive", "--project", "proj" ])

@@ -120,9 +120,15 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 ## Data source
 
 `Hive::Tui::StateSource` polls at 1 Hz from a non-daemon background
-thread. It calls
+thread. TUI boot performs one synchronous `StateSource#refresh_now` before
+entering Bubbletea's render/input loop, then seeds the initial model with that
+snapshot so the first useful frame shows registered projects/tasks instead of a
+long-lived loading grid. This is necessary because bubbletea-ruby's raw input
+poll can starve Ruby background threads during startup; relying on the first
+background poll alone produced multi-second loading screens even when
+`hive status` itself was fast. After boot, the source calls
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-in-process for the first snapshot and whenever the cached mtime
+in-process whenever the cached mtime
 fingerprint changes; otherwise it reuses the previous `Snapshot` and
 only refreshes `current_seen_at`. The fingerprint watches the global
 project registry (`Hive::Config.global_config_path`), each visible

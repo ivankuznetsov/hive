@@ -60,6 +60,21 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_refresh_now_populates_current_without_background_thread
+    with_seeded_project do |project, _dir|
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+
+      snapshot = source.refresh_now
+
+      refute_nil snapshot, "refresh_now must synchronously seed the first snapshot"
+      assert_same snapshot, source.current
+      assert_nil source.instance_variable_get(:@thread),
+                 "refresh_now must not start the background polling thread"
+      assert_equal project, snapshot.rows.first.project_name
+      assert_nil source.last_error
+    end
+  end
+
   def test_last_error_records_failure_and_clears_on_subsequent_success
     with_seeded_project do |_project, _dir|
       # Inject a one-shot raise into `Status#json_payload` via a

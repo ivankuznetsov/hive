@@ -76,11 +76,17 @@ module Hive
       # alerts always fire even mid-answer. The first alert still fires
       # (no conversation exists until the operator taps "Answer in chat"),
       # and an abandoned conversation stops suppressing once it TTL-expires.
+      # Scoped to (project, slug) so two projects sharing a slug can't
+      # cross-suppress. Logs the skip, matching `:notification_skipped_*`,
+      # so "why didn't I get the alert?" has an audit trail.
       def suppress_active_conversation?(row)
         return false unless @conversation_store
-        return false unless row.action == "needs_input"
+        return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        return false unless @conversation_store.active_for_slug?(row.slug, project: row.project)
 
-        @conversation_store.active_for_slug?(row.slug)
+        @logger.event(:notification_skipped_active_conversation,
+                      project: row.project, slug: row.slug, marker: row.marker)
+        true
       end
 
       # Suppress the proactive "questions waiting" push for a 3-plan

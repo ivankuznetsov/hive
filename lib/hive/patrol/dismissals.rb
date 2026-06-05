@@ -27,8 +27,12 @@ module Hive
             dismissed[fingerprint] = {
               "dismissed_at" => now.utc.iso8601,
               "pr_url" => pr["url"] || entry["pr_url"],
-              "branch" => branch
-            }
+              "branch" => branch,
+              # Carry the finding content forward so the similarity gate can
+              # recognise a re-worded re-file of a dismissed issue.
+              "category" => entry["category"],
+              "title_tokens" => entry["title_tokens"]
+            }.compact
             entry["state"] = "dismissed"
           when "MERGED"
             entry["state"] = "merged"

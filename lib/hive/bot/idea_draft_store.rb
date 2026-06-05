@@ -66,6 +66,13 @@ module Hive
         update(chat_id: chat_id) { |draft| draft.phase = :awaiting_project }
       end
 
+      def await_text(chat_id:)
+        update(chat_id: chat_id) do |draft|
+          draft.text = nil
+          draft.phase = :awaiting_text
+        end
+      end
+
       def set_project(chat_id:, project:)
         update(chat_id: chat_id) { |draft| draft.project = project }
       end

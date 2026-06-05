@@ -78,6 +78,14 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  TranscriptionResult = Struct.new(:status, :text, :language, keyword_init: true)
+  FakeTranscriber = Struct.new(:results, :calls, keyword_init: true) do
+    def call(bytes, filename:, content_type:)
+      calls << { bytes: bytes, filename: filename, content_type: content_type }
+      results.shift
+    end
+  end
+
   # Captures every dispatch-request write so tests can assert that the
   # queue-routable bot verbs (run/develop/brainstorm/plan/review/
   # open-pr/artifacts/finalize/archive/markers) no longer spawn — they
@@ -164,6 +172,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
     @idea_draft_store = Hive::Bot::IdeaDraftStore.new
+    @transcriber = FakeTranscriber.new(results: [], calls: [])
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
     @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [], sequences: [], discarded_sequences: [])
     # Drive the real constructor so any future invariant added to
@@ -177,7 +186,8 @@ class HiveBotSupervisorTest < Minitest::Test
       "poll_interval_sec" => 1,
       "idea_attachment_max_bytes" => 20 * 1024 * 1024,
       "idea_attachment_max_count" => 10,
-      "idea_draft_ttl_sec" => 900
+      "idea_draft_ttl_sec" => 900,
+      "transcription" => { "enabled" => true }
     }
     @supervisor = Hive::Bot::Supervisor.new(
       config: @config,
@@ -190,6 +200,7 @@ class HiveBotSupervisorTest < Minitest::Test
       child_supervisor: @child_supervisor,
       conversation_store: @conversation_store,
       idea_draft_store: @idea_draft_store,
+      transcriber: @transcriber,
       dry_run: false,
       dispatch_request_writer: @dispatch_request_writer
     )
@@ -422,6 +433,139 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/too large/, @telegram.messages.last.fetch(:text))
   ensure
     @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_transcribe_voice_sets_transcript_and_discards_audio
+    @transcriber.results << TranscriptionResult.new(status: :ok, text: "voice idea", language: "en")
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    result = FakeRouter::Result.new(
+      action: :transcribe_voice,
+      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5, edit: false }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    assert_equal [ { bytes: "audio-bytes", filename: "voice.oga", content_type: "audio/ogg" } ], @transcriber.calls
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal :voice, draft.origin
+    assert_equal :awaiting_transcript_confirm, draft.phase
+    assert_equal "voice idea", draft.text
+    assert_empty draft.attachments
+    assert_match(/Transcript:\n\nvoice idea/, @telegram.messages.last.fetch(:text))
+    assert_equal "Confirm", @telegram.messages.last.fetch(:reply_markup).first.first[:text]
+  end
+
+  def test_transcribe_voice_edit_replaces_existing_transcript
+    @idea_draft_store.start(chat_id: 42, phase: :awaiting_transcript_confirm,
+                            text: "old", token: "tok", origin: :voice)
+    @transcriber.results << TranscriptionResult.new(status: :ok, text: "new transcript", language: "en")
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    result = FakeRouter::Result.new(
+      action: :transcribe_voice,
+      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5, edit: true }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal "tok", draft.token
+    assert_equal "new transcript", draft.text
+    assert_match(/new transcript/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_transcribe_voice_no_speech_clears_draft
+    @idea_draft_store.start(chat_id: 42, phase: :awaiting_transcript_confirm,
+                            text: "old", token: "tok", origin: :voice)
+    @transcriber.results << TranscriptionResult.new(status: :no_speech)
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id" }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_nil @idea_draft_store.get(chat_id: 42)
+    assert_match(/couldn't hear any speech/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_transcribe_voice_unsupported_language_clears_draft
+    @idea_draft_store.start(chat_id: 42, phase: :awaiting_transcript_confirm,
+                            text: "old", token: "tok", origin: :voice)
+    @transcriber.results << TranscriptionResult.new(status: :unsupported_language, language: "de")
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id" }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_nil @idea_draft_store.get(chat_id: 42)
+    assert_match(/unsupported language/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_transcribe_voice_failed_stages_audio_and_awaits_text
+    @transcriber.results << TranscriptionResult.new(status: :failed)
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id" }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal :awaiting_text, draft.phase
+    assert_nil draft.text
+    assert_equal 1, draft.attachments.size
+    attachment = draft.attachments.first
+    assert_equal "voice-1.oga", attachment.fetch(:dest_name)
+    assert_equal "oga", attachment.fetch(:ext)
+    assert_equal "audio-bytes", File.binread(attachment.fetch(:staging_path))
+    assert_match(/saved the audio/, @telegram.messages.last.fetch(:text))
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_transcribe_voice_rechecks_remote_size_before_download
+    downloaded = false
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 25 * 1024 * 1024 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| downloaded = true }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id" }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    refute downloaded
+    assert_match(/voice note is too large/, @telegram.messages.last.fetch(:text))
+    assert_nil @idea_draft_store.get(chat_id: 42)
+  end
+
+  def test_commit_voice_idea_uses_transcript_without_assets
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        @idea_draft_store.start(chat_id: 42, phase: :awaiting_project,
+                                text: "voice transcript", token: "tok", origin: :voice)
+        @idea_draft_store.set_project(chat_id: 42, project: project)
+
+        @supervisor.send(:execute_result,
+                         FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                         Update.new(chat_id: 42, update_id: 1))
+
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "voice-transcript-*")]
+        assert_equal 1, inbox.size
+        idea = File.read(File.join(inbox.first, "idea.md"))
+        assert_includes idea, "voice transcript"
+        refute_path_exists File.join(inbox.first, "assets")
+        assert_nil @idea_draft_store.get(chat_id: 42)
+      end
+    end
   end
 
   def test_commit_idea_uses_commands_new_with_attachments_and_cleans_draft

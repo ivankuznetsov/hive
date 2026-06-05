@@ -33,6 +33,18 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
     assert_equal :voice, @store.get(chat_id: 1).origin
   end
 
+  def test_await_text_clears_text_and_moves_phase
+    @store.start(chat_id: 1, phase: :awaiting_transcript_confirm,
+                 text: "transcript", token: "tok", origin: :voice)
+
+    @store.await_text(chat_id: 1)
+    draft = @store.get(chat_id: 1)
+
+    assert_nil draft.text
+    assert_equal :awaiting_text, draft.phase
+    assert_equal :voice, draft.origin
+  end
+
   def test_set_text_and_project_advance_phase
     @store.start(chat_id: 1, phase: :awaiting_text, token: "tok")
 

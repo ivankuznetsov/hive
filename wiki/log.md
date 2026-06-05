@@ -3185,3 +3185,10 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-05T20:05:00Z] tui — vertical resize viewport and reduced dashboard chrome
+
+**Action:** Made the grid composer height-aware: it subtracts footer/stalled-banner rows from `model.rows`, passes the remaining budget into `ProjectsPane` and `TasksPane`, and each pane clips/pads with a cursor-following viewport. Removed the persistent grid metadata strip and hidden-archive footer prefix so the first frame prioritizes panes and the footer stays visible under vertical terminal resize. Added focused pane viewport tests plus a PTY Charm smoke that performs a real vertical `winsize` + `SIGWINCH` resize and verifies the footer remains visible.
+
+**Refreshed pages:**
+- [[commands/tui]]

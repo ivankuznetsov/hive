@@ -192,7 +192,7 @@ class E2EReproScriptWriterTest < Minitest::Test
             make_step("register_project", args: { "name" => "project-b" }, position: 3),
             make_step("ruby_block", args: { "block" => "puts 1" }, position: 4),
             make_step("tui_keys", args: { "keys" => "p" }, position: 5),
-            make_step("tui_expect", args: { "anchor" => "hive tui" }, position: 6),
+            make_step("tui_expect", args: { "anchor" => "Tasks ·" }, position: 6),
             make_step("cli", args: { "args" => [ "version" ] }, position: 7)
           ]
           path = Hive::E2E::ReproScriptWriter.new(

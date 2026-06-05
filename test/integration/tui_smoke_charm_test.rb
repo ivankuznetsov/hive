@@ -61,6 +61,12 @@ class TuiSmokeCharmTest < Minitest::Test
     end
   end
 
+  def seed_brainstorm_task(project_root, slug)
+    folder = File.join(project_root, ".hive-state", "stages", "2-brainstorm", slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "brainstorm.md"), "# #{slug}\n\n<!-- COMPLETE -->\n")
+  end
+
   def test_charm_tui_repaints_after_pty_resize
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -88,6 +94,42 @@ class TuiSmokeCharmTest < Minitest::Test
           resized_width = max_plain_line_width(resized)
           assert_operator resized_width, :>=, 145,
                           "resized frame should expand to the 150-column PTY"
+
+          writer.write("q")
+          writer.flush
+          status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
+          refute_nil status, "charm TUI must exit within 3s of pressing 'q'"
+          assert_equal 0, status.exitstatus, "clean quit exits 0"
+        end
+      end
+    end
+  rescue Errno::EIO
+    raise unless $!.message.include?("Input/output error")
+  end
+
+  def test_charm_tui_vertical_resize_keeps_panes_footer_and_selected_row_visible
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        16.times { |idx| seed_brainstorm_task(dir, "rz#{format('%02d', idx)}") }
+
+        env = { "TERM" => "xterm-256color", "HIVE_TUI_BACKEND" => "charm" }
+        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+          reader.winsize = [ 30, 120 ]
+
+          initial = read_until(reader, deadline_seconds: 15.0) do |buf|
+            buf.include?("rz00")
+          end
+          assert_includes initial, "rz00"
+
+          reader.winsize = [ 9, 120 ]
+          Process.kill("WINCH", pid)
+
+          resized = read_until(reader, deadline_seconds: 5.0) do |buf|
+            buf.include?("[Tab] switch")
+          end
+          assert_includes initial, "Projects", "project pane must render before vertical resize"
+          assert_includes resized, "[Tab] switch", "footer must remain visible after vertical resize"
 
           writer.write("q")
           writer.flush

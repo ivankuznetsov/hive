@@ -3,11 +3,11 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-06-05
 tags: [test, e2e, tui, artifacts]
 ---
 
-**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging.
+**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
 
 ## Commands
 
@@ -20,6 +20,19 @@ bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+## Binary contract
+
+`bin/hive-e2e` mirrors the main Hive CLI's sysexits-shaped contract for the e2e harness:
+
+| Code | Meaning |
+|------|---------|
+| `0` | all selected scenarios passed |
+| `1` | one or more scenarios failed, or an unclassified harness error occurred |
+| `64` | usage error: unknown command, missing required Thor arguments, unsafe replay path, invalid retention window, or no matching scenarios |
+| `78` | preflight/config failure: missing `tmux`, missing `asciinema` when required, or missing replay repro artifact |
+
+Thor is started with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prints prose to stderr and exits with the same code. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
 
 ## Layout
 

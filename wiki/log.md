@@ -3582,3 +3582,12 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[decisions]]
 - [[stages/review]]
 - [[gaps]]
+
+## [2026-06-05T16:04:21Z] e2e — refresh `bin/hive-e2e` usage exit-code coverage
+
+**Action:** Refreshed executable-entrypoint wiki coverage after commit `d51455e6` changed `bin/hive-e2e` so Thor usage failures always re-raise through the outer rescue and exit `64`, including human unknown-command and missing-required-argument paths. Verified the committed diff plus `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], [[testing]], [[cli]], and relevant [[gaps]] entries. Documented the e2e binary's success/failure/usage/config exit-code contract, the `hive-e2e-error` JSON envelope behavior, the focused executable tests, and the remaining lack of installed-binary smoke evidence. Page coverage count did not change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]

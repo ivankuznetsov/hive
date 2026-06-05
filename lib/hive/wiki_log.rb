@@ -58,7 +58,12 @@ module Hive
     def legacy_body(existing)
       body = existing.to_s.dup
       body.sub!(/#{Regexp.escape(BEGIN_MARKER)}.*?#{Regexp.escape(END_MARKER)}\n*/m, "")
-      body.sub!(/\A# Wiki Changelog\s*\n+Append-only log[^\n]*\n*/m, "")
+      body.sub!(/\A# Wiki Changelog\s*\n+/m, "")
+      body = body.lstrip
+      unless body.start_with?("## ")
+        first_entry = body.index(/^## /)
+        body = first_entry ? body[first_entry..] : ""
+      end
       body.strip
     end
   end

@@ -54,4 +54,23 @@ class WikiLogTest < Minitest::Test
       refute Hive::WikiLog.stale?(dir)
     end
   end
+
+  def test_compile_drops_template_prose_without_legacy_entries
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "wiki", "log.d"))
+      File.write(File.join(dir, "wiki", "log.md"), <<~MARKDOWN)
+        # Wiki Changelog
+
+        Append-only log of meaningful wiki updates. New work is added through
+        `wiki/log.d/*.md` fragments and compiled with `hive wiki compile-log`
+        after merge or when a local checkout needs refreshed aggregate output.
+      MARKDOWN
+
+      compiled = Hive::WikiLog.compile(dir)
+
+      assert_includes compiled, Hive::WikiLog::BEGIN_MARKER
+      refute_includes compiled, "`wiki/log.d/*.md` fragments"
+      refute_includes compiled, "after merge or when a local checkout needs refreshed aggregate output"
+    end
+  end
 end

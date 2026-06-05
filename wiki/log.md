@@ -3203,3 +3203,13 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-05T21:03:33Z] cli/install — refresh hv semver candidate guard
+
+**Action:** Refreshed executable-entrypoint wiki coverage after commit `7e6f474a` tightened `bin/hv` so probed candidates must return a bare `X.Y.Z` from `--version` before the wrapper will `exec` them. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hv fallback launcher bin/hv Apache Hive candidate"` had no indexed hits, so verification used the committed diff plus direct reads of `bin/hv`, `test/unit/hv_test.rb`, [[cli]], [[operating]], and [[testing]]. Documented the bare-semver guard, updated unit-test coverage notes, and kept the live Apache Hive collision smoke uncertainty in [[gaps]]. Page coverage count did not change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[operating]]
+- [[testing]]
+- [[gaps]]

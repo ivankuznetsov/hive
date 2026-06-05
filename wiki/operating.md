@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -100,9 +100,13 @@ Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
 bash installer creates `hv` when another `hive` is already earlier on PATH. The
 in-tree `bin/hv` fallback probes only `HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
-and `/usr/local/bin/hive`; it intentionally does not fall through to
-`/usr/bin/hive` or `/opt/hive/bin/hive`, because those are common Apache Hive
-locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. The AUR
+and `/usr/local/bin/hive`; it only execs a candidate after
+`<candidate> --version` returns a bare `X.Y.Z` semver line, which is the
+contract of Hive CLI's `bin/hive --version` and not Apache Hive's
+`Hive X.Y.Z` output. It intentionally does not fall through to `/usr/bin/hive`
+or `/opt/hive/bin/hive`, because those are common Apache Hive locations. Use
+`HIVE_BIN_OVERRIDE` for a custom Hive CLI install path, but that override must
+still point at a binary with the same bare-semver version contract. The AUR
 package does not ship the gem's `bin/hv` wrapper; its `conflicts=('hive'
 'apache-hive')` metadata blocks the parallel install before fallback aliasing is
 possible.

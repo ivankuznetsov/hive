@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T21:10:00Z] wiki - audit RubyGem `hv` executable coverage
+
+**Action:** Audited commit `02591fbb` after it fixed the broken RubyGems `hv` executable surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv fallback command bin"` found prior `hv`/testing/gaps context. Verified the committed diff plus current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, [[cli]], [[operating]], and [[testing]]. Clarified that the bash installer always writes its internal `hv` wrapper and only conditionally exposes it in the user bin directory, and recorded the missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
 ## [2026-06-05T20:52:02Z] release/install - remove `hv` from RubyGem executables
 
 **Action:** Fixed the RubyGem executable surface so `hive.gemspec` advertises only the Ruby `hive` entrypoint, not the bash `bin/hv` launcher that RubyGems would wrap in an unusable Ruby binstub. Adjusted `install.sh` so it no longer moves a gem-installed `hv` shim before writing its own working `hv` wrapper. Added focused assertions in `gemspec_test.rb` and `install_script_test.rb`; verified an isolated `gem build` + `gem install` creates `bin/hive` and no `bin/hv`. Refreshed `[[cli]]`, `[[operating]]`, and `[[testing]]` to document that channel installers own `hv` creation.

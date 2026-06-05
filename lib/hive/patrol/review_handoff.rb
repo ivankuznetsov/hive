@@ -73,6 +73,7 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
+        body = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -81,10 +82,13 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            "original_text" => idea_text(finding)
+            # Deliberately stores the full rendered body again as the
+            # `original_text` provenance scalar; the duplication with the
+            # markdown body below is intentional, not a bug.
+            "original_text" => body
           },
           <<~MD
-          #{idea_text(finding)}
+          #{body}
         MD
         )
       end
@@ -165,11 +169,12 @@ module Hive
       end
 
       def idea_text(finding)
+        evidence = Array(finding.evidence)
         parts = []
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
-        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
+        parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
         parts.join("\n\n")
       end
 

@@ -74,4 +74,51 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       assert_includes idea, "`app.rb:1`: puts"
     end
   end
+
+  def test_idea_md_renders_cosmetic_evidence_branches
+    # Cover the location-empty (`- evidence`), snippet-empty (bare
+    # backticked location), and file-only `compact.join` variants of
+    # evidence_text in one fixture.
+    sparse_finding = Hive::Patrol::Finding.new(
+      id: "f2", feature_id: "feature", category: "bug", severity: "high",
+      confidence: "medium", title: "Sparse", description: "details",
+      recommendation: "fix it",
+      evidence: [
+        { "snippet" => "" },
+        { "file" => "app.rb", "line" => 2, "snippet" => "" },
+        { "file" => "only.rb", "snippet" => "context" }
+      ],
+      fingerprint: "fp2"
+    )
+
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: sparse_finding, patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+      idea = File.read(File.join(folder, "idea.md"))
+
+      assert_includes idea, "- evidence", "no file/line renders the bare evidence marker"
+      assert_includes idea, "- `app.rb:2`", "empty snippet renders just the location"
+      assert_includes idea, "- `only.rb`: context", "file-only location joins without a colon-line"
+    end
+  end
+
+  def test_idea_md_tolerates_nil_evidence
+    nil_evidence_finding = Hive::Patrol::Finding.new(
+      id: "f3", feature_id: "feature", category: "bug", severity: "high",
+      confidence: "medium", title: "No evidence", description: "details",
+      recommendation: "fix it", evidence: nil, fingerprint: "fp3"
+    )
+
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: nil_evidence_finding, patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+      idea = File.read(File.join(folder, "idea.md"))
+
+      refute_includes idea, "## Evidence", "nil evidence omits the section instead of raising"
+    end
+  end
 end

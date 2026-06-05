@@ -3237,3 +3237,10 @@ TTL config.
 
 **Refreshed pages:**
 - [[log]]
+
+## [2026-06-05T21:24:12Z] wiki/patrol — validate post-commit patrol log refresh
+
+**Action:** Post-commit wiki refresh after `e1773ad9` touched only [[log]] with a validation entry for patrol review-handoff evidence-rendering coverage. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured master wiki index first; `qmd search "wiki patrol post commit evidence rendering coverage e1773ad9"` returned no indexed results. Verified the committed diff plus current [[commands/patrol]], [[modules/patrol]], [[testing]], [[gaps]], `lib/hive/patrol/review_handoff.rb`, and `test/unit/patrol/review_handoff_test.rb`. Confirmed the prior log entry accurately reflects the documented source behavior for synthetic patrol review tasks and evidence rendering. Page coverage did not change, [[index]] needed no catalog update, and no new uncertainty needed recording in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

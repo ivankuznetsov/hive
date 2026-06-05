@@ -1611,7 +1611,10 @@ class HiveDaemonCommandTest < Minitest::Test
       File.write(File.join(home, "dispatch_requests"), "not a directory")
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
                                          "daemon", "queue", "list", "--json")
-      refute_equal 0, status.exitstatus
+      # #262: an internal queue failure exits 70 (SOFTWARE), matching the
+      # envelope's error_kind:"internal" — not a bare uncaught StandardError
+      # (exit 1 + stack trace).
+      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
       doc = JSON.parse(out)
       assert_equal false, doc["ok"]
       assert_equal "internal", doc["error_kind"]

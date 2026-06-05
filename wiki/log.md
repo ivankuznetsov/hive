@@ -29,6 +29,15 @@ Append-only log of all wiki operations.
 
 **Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Also flipped the init template + `hive patrol` long_desc to match. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.
 
+## [2026-06-03T20:00:00Z] daemon/bot - PR #244 review follow-ups, batch D (docs + security)
+
+**Action:** Implemented the docs + security cluster of the deferred PR #244 `/ce-code-review` issues:
+
+- **#263** (security) `Supervisor#drain_dispatch_results` now re-checks each notice's `chat_id` against `chat_id_allowlist` before relaying — a chat removed from the allowlist mid-flight, or a notice forged in the 0700 dir, is dropped + removed (logging the new `:dispatch_result_rejected_unauthorized` bot event, added to the logger enum + `hive-bot-log.v1.json`) instead of relayed. Documented in [[modules/bot]].
+- **#262** (docs) documented the `hive daemon queue` exit codes in the `daemon` `long_desc` ([[cli]]) and the [[commands/daemon]] exit-codes table: `list`/`prune` → 0; `show` → 0 found / 1 not-found; unknown action or missing REQUEST_ID → 64 (USAGE); internal error → 70 (SOFTWARE). The issue's "70 on internal error" was NOT true of the code — a bare `StandardError` re-raise exited 1 — so `queue_command` now wraps internal failures in `Hive::InternalError` so the exit code matches the `--json` envelope's `error_kind:"internal"`.
+- **#266** (docs) documented `child_kill_grace_sec` as a tick-jittered **minimum**, not a precise timer (enforced once per `poll_interval_sec`; `0` ≠ immediate KILL) in the config knob comment and [[modules/daemon]].
+
+100% line coverage, rubocop clean. Did not run `qmd update` or `qmd embed`.
 ## [2026-06-03T19:30:00Z] daemon - PR #244 review follow-ups, batch C (maintainability)
 
 **Action:** Implemented the maintainability cluster of the deferred PR #244 `/ce-code-review` issues (except #254, which depends on #265 and waits for PR #294 to merge):

@@ -32,25 +32,16 @@ class ArchiveFilterTest < Minitest::Test
     )
   end
 
-  def test_hides_archived_rows_with_unresolved_markers
-    now = Time.utc(2026, 6, 4, 12, 0, 0)
-    %i[error agent_working manual_steering waiting].each do |marker|
-      assert Hive::ArchiveFilter.hide?(
-        stage: Hive::Stages::DIRS.last,
-        folder_mtime: now - (10 * 86_400),
-        now: now
-      ), "#{marker} must be hidden by archive age"
-    end
-  end
-
-  def test_none_marker_is_hidden_by_archive_age
+  def test_age_hiding_is_independent_of_marker_state
+    # hide? no longer inspects any marker — an old archived row is hidden
+    # purely by age, regardless of what state it was last in.
     now = Time.utc(2026, 6, 4, 12, 0, 0)
 
     assert Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
-      folder_mtime: now - (5 * 86_400),
+      folder_mtime: now - (10 * 86_400),
       now: now
-    )
+    ), "an old archived row is hidden by age alone"
   end
 
   def test_row_mtime_takes_precedence_over_folder_mtime

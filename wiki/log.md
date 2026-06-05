@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T22:00:24Z] wiki — audit residual handoff/format coverage commit
+
+**Action:** Audited commit `8d3c93ce` after it committed residual wiki changes from 6-review. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv tui executable fallback"` found prior testing/gaps/log context. Verified the committed wiki diff plus the `HEAD` versions of `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, and `test/unit/tui/views/format_test.rb`. Confirmed [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]] are source-synced for patrol `idea.md` provenance, nil/sparse evidence formatting, project-pane display-cell padding, and focused unit coverage. Page coverage did not change and no new uncertainty was found beyond existing [[gaps]] patrol live-smoke coverage; did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-05T21:54:00Z] patrol/tui — refresh handoff evidence and cell-format coverage
 
 **Action:** Refreshed command/API wiki coverage after commit `b8d4c157` tightened patrol review handoff rendering and TUI project-row formatting. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff idea_text evidence TUI Format ljust_cells"` had no indexed hits for this exact cleanup. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, `test/unit/tui/views/format_test.rb`, [[commands/patrol]], [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]]. Documented the intentional `idea.md` body/`original_text` duplication for patrol tasks, nil-evidence handling, project-pane display-cell padding, and focused unit coverage. No new page coverage or new uncertainty was found; did not run `qmd update` or `qmd embed`.

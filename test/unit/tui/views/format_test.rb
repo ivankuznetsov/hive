@@ -33,4 +33,31 @@ class HiveTuiViewsFormatTest < Minitest::Test
     assert_equal "  ab", Format.rjust_cells("ab", 4),
                  "rjust_cells pads on the left so content is right-aligned"
   end
+
+  def test_ljust_cells_truncates_wide_overflow_to_exact_cell_width
+    # "日本" is 4 cells; padded to 3 it must truncate (not overflow) and
+    # the result must occupy exactly 3 cells. A naive String#ljust would
+    # measure code units and leave a 4-cell string, shifting the column.
+    result = Format.ljust_cells("日本", 3)
+
+    assert_equal 3, Format.display_width(result),
+                 "ljust_cells must clamp wide content to exactly 3 cells, got " \
+                 "#{Format.display_width(result)} for #{result.inspect}"
+  end
+
+  def test_rjust_cells_truncates_wide_overflow_to_exact_cell_width
+    result = Format.rjust_cells("日本", 3)
+
+    assert_equal 3, Format.display_width(result),
+                 "rjust_cells must clamp wide content to exactly 3 cells, got " \
+                 "#{Format.display_width(result)} for #{result.inspect}"
+  end
+
+  def test_just_cells_clamp_to_empty_at_non_positive_width
+    # The `[width - display_width, 0].max` guard prevents negative pad
+    # counts; at width <= 0 there is no content and no padding.
+    assert_equal "", Format.ljust_cells("ab", 0)
+    assert_equal "", Format.rjust_cells("ab", 0)
+    assert_equal "", Format.ljust_cells("ab", -3)
+  end
 end

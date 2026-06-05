@@ -180,8 +180,11 @@ module Hive
 
       def evidence_text(evidence)
         evidence.map do |entry|
-          location = [ entry["file"], entry["line"] ].compact.join(":")
-          snippet = entry["snippet"].to_s.strip
+          # Read both string and symbol keys so a symbol-keyed evidence
+          # entry still renders its real location, matching the sibling
+          # patrol consumer in pr_opener.rb (`e['file'] || e[:file]`).
+          location = [ entry["file"] || entry[:file], entry["line"] || entry[:line] ].compact.join(":")
+          snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"
           snippet.empty? ? line : "#{line}: #{snippet}"
         end.join("\n")

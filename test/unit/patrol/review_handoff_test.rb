@@ -104,6 +104,54 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_idea_md_omits_empty_finding_and_recommendation_sections
+    # Whitespace-only description/recommendation must be treated as absent
+    # so the body never emits a bare `## Finding` / `## Recommendation`
+    # heading with no content under it.
+    blank_finding = Hive::Patrol::Finding.new(
+      id: "f4", feature_id: "feature", category: "bug", severity: "high",
+      confidence: "medium", title: "Blank sections", description: "   ",
+      recommendation: nil,
+      evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
+      fingerprint: "fp4"
+    )
+
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: blank_finding, patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+      idea = File.read(File.join(folder, "idea.md"))
+
+      refute_includes idea, "## Finding", "whitespace description omits the Finding heading"
+      refute_includes idea, "## Recommendation", "nil recommendation omits the Recommendation heading"
+      assert_includes idea, "## Evidence", "present evidence is still rendered"
+    end
+  end
+
+  def test_display_name_falls_back_to_id_when_title_nil
+    # A nil-title finding feeds both the `# ` heading and the
+    # `original_text` provenance scalar; both must fall back to the id.
+    untitled_finding = Hive::Patrol::Finding.new(
+      id: "f5", feature_id: "feature", category: "bug", severity: "high",
+      confidence: "medium", title: nil, description: "details",
+      recommendation: "fix it", evidence: nil, fingerprint: "fp5"
+    )
+
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: untitled_finding, patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+      idea = File.read(File.join(folder, "idea.md"))
+      frontmatter = YAML.safe_load(idea.split("---\n\n", 2).first)
+
+      assert_includes idea, "# Patrol: f5", "nil title falls back to the finding id in the heading"
+      assert_includes frontmatter.fetch("original_text"), "Patrol: f5",
+                      "original_text provenance also carries the id fallback"
+    end
+  end
+
   def test_idea_md_tolerates_nil_evidence
     nil_evidence_finding = Hive::Patrol::Finding.new(
       id: "f3", feature_id: "feature", category: "bug", severity: "high",

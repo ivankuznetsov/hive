@@ -109,12 +109,20 @@ module Hive
         base = base_slug(finding)
         slug = base
         counter = 2
-        while File.exist?(File.join(@project_root, ".hive-state", "stages", "6-review", slug))
+        while slug_taken?(slug)
           suffix = "-#{counter}"
           slug = trim_slug(base, MAX_SLUG_LENGTH - suffix.length) + suffix
           counter += 1
         end
         slug
+      end
+
+      # A slug must be unique across ALL stage dirs, not just 6-review: a
+      # synthetic task that has already advanced (e.g. to 7-artifacts /
+      # 9-done) or a re-handed-off finding would otherwise reuse the slug
+      # and collide on the slug-derived worktree and log-dir paths.
+      def slug_taken?(slug)
+        !Dir.glob(File.join(@project_root, ".hive-state", "stages", "*", slug)).empty?
       end
 
       def base_slug(finding)

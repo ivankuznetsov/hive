@@ -46,6 +46,10 @@ module Hive
           if review_prs_enabled? && existing["state"] == "OPEN"
             review_task_path = enqueue_review_task(finding, patch, existing["url"], now)
             unless review_task_path
+              # Same self-heal as the opened path: drop the unowned worktree
+              # so the next cycle can rebuild and retry the handoff against
+              # the still-open PR instead of dead-locking on the existing dir.
+              cleanup_worktree(patch)
               record_mapping(finding, patch, existing["url"], "review_handoff_failed", now)
               return Result.new(
                 status: :skipped,
@@ -85,6 +89,14 @@ module Hive
         record_mapping(finding, patch, pr_url, "open", now)
         review_task_path = enqueue_review_task(finding, patch, pr_url, now)
         if !review_task_path && review_prs_enabled?
+          # The handoff failed after the PR was opened. Remove the now-
+          # unowned worktree: otherwise it leaks under `.patrol/` AND the
+          # next cycle's fixer can't rebuild the deterministic worktree
+          # path (`git worktree add` rejects an existing dir), so the
+          # finding re-fails forever. The fix is already pushed to the PR
+          # branch, so the existing-PR path re-attempts the handoff on the
+          # next scan against a freshly rebuilt worktree — self-healing.
+          cleanup_worktree(patch)
           record_mapping(finding, patch, pr_url, "review_handoff_failed", now)
           return Result.new(
             status: :opened_review_handoff_failed,

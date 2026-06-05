@@ -181,6 +181,31 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_existing_open_pr_with_failed_handoff_is_skipped_and_retryable
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      gh.prs = [ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ]
+
+      result = Hive::Patrol::PrOpener.new(
+        dir,
+        cfg: cfg,
+        gh: gh,
+        review_handoff: FailingReviewHandoff.new
+      ).open(finding, patch(worktree_path: dir))
+
+      assert_equal :skipped, result.status
+      assert_equal "review_handoff_failed", result.reason
+      assert_nil result.review_task_path
+      assert_empty gh.pushed
+
+      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
+      assert_equal "review_handoff_failed", fingerprints.fetch("fp1").fetch("state")
+      refute Hive::Patrol::Fingerprint.known_active?(fingerprints, "fp1"),
+             "an existing-PR handoff failure must stay retryable, not become an active skip"
+    end
+  end
+
   def test_existing_merged_pr_does_not_enqueue_review_task
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

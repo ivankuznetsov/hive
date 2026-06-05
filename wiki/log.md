@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T20:52:04Z] babysitter - refresh dry-run git unsafe-option coverage
+
+**Action:** Audited commit `9d1e0fce` after it changed `bin/hive-babysitter-stub-git` so read-only passthrough commands are skipped when their argv includes output-writing or external-command options (`--output`, `--output=<path>`, `--ext-diff`, `--external-diff`). Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git passthrough stub"` found prior babysitter dry-run coverage in [[testing]], [[gaps]], and [[log]]. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Updated module/test coverage and kept the live-agent dry-run uncertainty in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-05T20:45:10Z] babysitter - block write-capable git dry-run options
 
 **Action:** Documented that the babysitter dry-run `git` stub now screens options after command allowlisting, so read-only commands such as `git diff` and `git show` are skipped when invoked with output-writing or external-command options (`--output`, `--output=<path>`, `--ext-diff`, `--external-diff`). Updated [[commands/babysit]].

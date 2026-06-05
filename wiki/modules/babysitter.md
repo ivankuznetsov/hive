@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/
 created: 2026-05-26
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -64,7 +64,7 @@ Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-er
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.
 - No Telegram or install/service integration in v1.
 - No success PR comments.
-- Dry-run is best-effort because absolute-path binary invocations can bypass the PATH overlay. Within the overlay, the `git` / `gh` stubs are default-deny: they strip leading global options, skip unknown commands, and only pass through known read-only commands to the real binary. `gh api` passes through only when it has no method and no payload flags, or when the method is explicitly GET; payload flags such as `-f`, `-F`, `--raw-field`, `--field`, and `--input` make a no-method call skip because the GitHub CLI can treat them as write payloads. `git config` only passes through for read forms (`--get`, `--get-all`, `--list`).
+- Dry-run is best-effort because absolute-path binary invocations can bypass the PATH overlay. Within the overlay, the `git` / `gh` stubs are default-deny: they strip leading global options, skip unknown commands, and only pass through known read-only commands to the real binary. `gh api` passes through only when it has no method and no payload flags, or when the method is explicitly GET; payload flags such as `-f`, `-F`, `--raw-field`, `--field`, and `--input` make a no-method call skip because the GitHub CLI can treat them as write payloads. `git config` only passes through for read forms (`--get`, `--get-all`, `--list`), and otherwise allowed git reads still skip when given write-capable or command-spawning options such as `--output`, `--output=<path>`, `--ext-diff`, or `--external-diff`.
 
 ## Backlinks
 

@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -76,7 +76,7 @@ The dry-run guard is best-effort: an agent that invokes absolute binary paths ca
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation and lifecycle helpers.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard and git read-option skips for `--output`, `--ext-diff`, and `--external-diff`.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

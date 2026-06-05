@@ -3203,3 +3203,12 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-05T18:02:14Z] cli — document executable parse-error JSON envelopes
+
+**Action:** Refreshed command/API wiki coverage after commit `0c1b66b7` changed `bin/hive` to call Thor with `debug: true`, catch `Thor::Error`, and emit usage-shaped JSON envelopes for mapped commands when `--json` is present. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command parse errors usage contract command bin"` found the existing CLI/source coverage context. Verified the committed diff plus current `bin/hive`, `lib/hive/cli.rb`, `lib/hive.rb` schema helpers, and `test/integration/cli_parse_error_test.rb`. Documented the executable wrapper's parse-error boundary, added the focused integration test to [[testing]], and recorded the missing full mapping/install smoke evidence in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[testing]]
+- [[gaps]]

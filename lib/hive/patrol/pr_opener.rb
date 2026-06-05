@@ -13,7 +13,11 @@ module Hive
     class PrOpener
       Result = Struct.new(:status, :pr_url, :reason, :review_task_path, keyword_init: true) do
         def opened?
-          status == :opened
+          %i[opened opened_review_handoff_failed].include?(status)
+        end
+
+        def review_handoff_failed?
+          status == :opened_review_handoff_failed || reason == "review_handoff_failed"
         end
       end
 
@@ -39,6 +43,26 @@ module Hive
           %w[OPEN MERGED].include?(pr["state"])
         end
         if existing
+          if review_prs_enabled? && existing["state"] == "OPEN"
+            review_task_path = enqueue_review_task(finding, patch, existing["url"], now)
+            unless review_task_path
+              record_mapping(finding, patch, existing["url"], "review_handoff_failed", now)
+              return Result.new(
+                status: :skipped,
+                pr_url: existing["url"],
+                reason: "review_handoff_failed"
+              )
+            end
+
+            record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
+            return Result.new(
+              status: :skipped,
+              pr_url: existing["url"],
+              reason: "existing_pr",
+              review_task_path: review_task_path
+            )
+          end
+
           record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
           # The branch already has a PR; this validated worktree is now
           # dead weight. Remove it so `.patrol/` doesn't accumulate one
@@ -60,7 +84,15 @@ module Hive
         pr_url = create_pr(patch, body)
         record_mapping(finding, patch, pr_url, "open", now)
         review_task_path = enqueue_review_task(finding, patch, pr_url, now)
-        if !review_task_path && @cfg.dig("patrol", "review_prs") == false
+        if !review_task_path && review_prs_enabled?
+          record_mapping(finding, patch, pr_url, "review_handoff_failed", now)
+          return Result.new(
+            status: :opened_review_handoff_failed,
+            pr_url: pr_url,
+            reason: "review_handoff_failed"
+          )
+        end
+        if !review_task_path && !review_prs_enabled?
           # The branch is pushed; the local worktree is no longer needed
           # only when patrol is not handing the PR to 6-review.
           cleanup_worktree(patch)
@@ -91,6 +123,10 @@ module Hive
       rescue StandardError => e
         warn "hive: patrol opened #{pr_url} but failed to enqueue 6-review task: #{e.class}: #{e.message}"
         nil
+      end
+
+      def review_prs_enabled?
+        @cfg.dig("patrol", "review_prs") != false
       end
 
       def default_branch

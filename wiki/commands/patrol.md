@@ -3,11 +3,11 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-05-28
+updated: 2026-06-05
 tags: [command, patrol, review, pr, json]
 ---
 
-**TLDR**: `hive patrol PROJECT [--dry-run] [--json]` runs one clawpatch-style repository scan cycle for a registered project: map semantic feature slices, review each slice, attempt isolated fixes above the confidence gate, validate configured commands, and open PRs for validated fixes only. Patrol state lives under `<project>/.hive-state/patrol/`; findings never go through `1-inbox/` or the stage pipeline.
+**TLDR**: `hive patrol PROJECT [--dry-run] [--json]` runs one clawpatch-style repository scan cycle for a registered project: map semantic feature slices, review each slice, attempt isolated fixes above the confidence gate, validate configured commands, and open PRs for validated fixes only. Patrol state lives under `<project>/.hive-state/patrol/`; findings never go through `1-inbox/`, and opened PRs now enter the normal `6-review` stage by default through synthetic `Patrol: ...` tasks.
 
 ## Usage
 
@@ -65,10 +65,13 @@ With `--json`, the command emits a single `hive-patrol.v1` envelope:
   "fixes_validated": 1,
   "prs_opened": 1,
   "pr_urls": ["https://github.com/org/repo/pull/123"],
+  "review_handoff_errors": [],
   "skipped_findings": [],
   "last_scanned_sha": "abc123"
 }
 ```
+
+If patrol opens a PR but cannot create its synthetic `6-review` task, the PR URL appears in `review_handoff_errors` and the finding fingerprint is recorded as `review_handoff_failed` so a later patrol cycle can retry the handoff instead of permanently skipping the finding as already active.
 
 Config errors emit `ok: false`, `error_kind: "config"`, and exit 78.
 

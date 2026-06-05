@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [gap, todo]
 ---
 
@@ -16,6 +16,7 @@ tags: [gap, todo]
 | `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] |
 | `lib/hive/commands/*.rb` | ✓ `wiki/commands/*` pages cover the active command surface, including daemon, bot, init, new, generate-name, status, run, stage-action, markers, migrate, findings, metrics, update, uninstall, and rebase-status. |
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
+| `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
 | `lib/hive/tui/**` | ✓ [[commands/tui]], [[architecture]], and [[token-usage]] cover the MVU/TUI surfaces. |
@@ -50,6 +51,7 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 18. **Telegram idea attachments need live Bot API/download smoke evidence.** The 2026-06-03 wiki refresh verified commit `af183c0b` against router/handler source and the local unit/integration tests that cover media classification, project-pick collection, and `commit_idea` routing. It did not find an in-tree artifact proving a real Telegram `getFile` + download + `Hive::Commands::New#call!` capture has been smoke-tested against the live Bot API.
 19. **`hv` unsafe fallback-path removal is unit-pinned but not live-smoked.** Commit `00a8bca5` removed `/usr/bin/hive` and `/opt/hive/bin/hive` from `bin/hv`'s implicit candidate list so the fallback launcher does not accidentally exec Apache Hive from common system locations; `test/unit/hv_test.rb` covers the removed path strings and the `HIVE_BIN_OVERRIDE` custom-path escape hatch. This refresh did not find an in-tree artifact showing a live host with Apache Hive at one of those paths and the installed `hv` wrapper returning the new exit-127/custom-override behavior.
 20. **v0.2.0 release prep is source-synced but not artifact-verified in-tree.** PR #289 sets `Hive::VERSION` and `Gemfile.lock`'s path gem to `0.2.0`, adds the `CHANGELOG.md` section, and points README/install Linux installer snippets at `v0.2.0`. This refresh did not find an in-tree artifact showing `packaging/verify-release.sh --version=v0.2.0` or channel verification against a published GitHub Release, Homebrew tap update, or AUR package after the tag exists.
+21. **Patrol-to-review handoff is unit-pinned but not live-smoked.** Commit `4d0541d6` adds `Hive::Patrol::ReviewHandoff`, defaults `patrol.review_prs` to true, and updates `PrOpener` so opened patrol PRs keep their local worktree and create synthetic `.hive-state/stages/6-review/patrol-.../` tasks with `task.md`, `worktree.yml`, `pr.md`, `reviews/`, and `meta.yml` display names. `test/unit/patrol/pr_opener_test.rb`, `test/unit/config_test.rb`, and `test/integration/patrol_command_test.rb` cover the config and handoff shape, but no in-tree artifact was found showing a real `hive patrol PROJECT` run opening a GitHub PR and the daemon/TUI subsequently picking up the synthetic review task.
 
 ## Release install follow-ups
 

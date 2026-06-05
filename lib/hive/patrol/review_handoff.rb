@@ -40,16 +40,17 @@ module Hive
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)
-        File.write(File.join(task_folder, "task.md"), <<~MD)
-          ---
-          slug: #{slug}
-          started_at: #{now.utc.iso8601}
-          source: patrol
-          patrol_finding_id: #{finding.id}
-          patrol_fingerprint: #{finding.fingerprint}
-          pr_url: #{pr_url}
-          ---
-
+        write_frontmatter_md(
+          File.join(task_folder, "task.md"),
+          {
+            "slug" => slug,
+            "started_at" => now.utc.iso8601,
+            "source" => "patrol",
+            "patrol_finding_id" => finding.id,
+            "patrol_fingerprint" => finding.fingerprint,
+            "pr_url" => pr_url
+          },
+          <<~MD
           # #{display_name(finding)}
 
           Patrol opened this PR from finding `#{finding.id}` and handed it to the standard 6-review flow.
@@ -67,6 +68,7 @@ module Hive
           Branch: `#{patch.branch}`
           Fingerprint: `#{finding.fingerprint}`
         MD
+        )
       end
 
       def write_worktree_pointer(task_folder, patch, now)
@@ -80,21 +82,27 @@ module Hive
       end
 
       def write_pr_md(task_folder, finding, pr_url)
-        File.write(File.join(task_folder, "pr.md"), <<~MD)
-          ---
-          pr_url: #{pr_url}
-          pr_number: #{pr_number(pr_url)}
-          source: patrol
-          patrol_finding_id: #{finding.id}
-          patrol_fingerprint: #{finding.fingerprint}
-          ---
-
+        write_frontmatter_md(
+          File.join(task_folder, "pr.md"),
+          {
+            "pr_url" => pr_url,
+            "pr_number" => pr_number(pr_url),
+            "source" => "patrol",
+            "patrol_finding_id" => finding.id,
+            "patrol_fingerprint" => finding.fingerprint
+          },
+          <<~MD
           ## Summary
           Patrol opened this PR for `#{finding.title || finding.id}`.
 
           ## Linked task
           #{task_folder}
         MD
+        )
+      end
+
+      def write_frontmatter_md(path, data, body)
+        File.write(path, "#{data.to_yaml}---\n\n#{body}")
       end
 
       def unique_slug(finding)

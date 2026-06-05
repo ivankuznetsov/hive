@@ -1560,7 +1560,7 @@ class SchemaFilesTest < Minitest::Test
     producer_required = %w[
       schema schema_version ok project project_root dry_run features_mapped
       findings fix_candidates fixes_attempted fixes_validated prs_opened
-      pr_urls skipped_findings last_scanned_sha
+      pr_urls review_handoff_errors skipped_findings last_scanned_sha
     ].sort
 
     assert_equal producer_required, schema_required,
@@ -1583,6 +1583,9 @@ class SchemaFilesTest < Minitest::Test
       "fixes_validated" => 1,
       "prs_opened" => 1,
       "pr_urls" => [ "https://example.com/pr/1" ],
+      "review_handoff_errors" => [
+        { "pr_url" => "https://example.com/pr/2", "reason" => "review_handoff_failed" }
+      ],
       "skipped_findings" => [
         { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" }
       ],

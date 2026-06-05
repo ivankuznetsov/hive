@@ -46,7 +46,7 @@ hive patrol my-project --json
 hive patrol my-project --dry-run --json
 ```
 
-The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix, validation, PR, skip, and `last_scanned_sha` counts. Durable patrol state is stored under `<project>/.hive-state/patrol/`.
+The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix, validation, PR, review handoff, skip, and `last_scanned_sha` counts. Durable patrol state is stored under `<project>/.hive-state/patrol/`.
 
 ## Lower-Level Surface
 

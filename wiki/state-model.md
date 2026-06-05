@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [state, filesystem, model, architecture, review, task-id]
 ---
 
@@ -47,7 +47,7 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `3-plan` | `plan.md` | `Stages::Plan` agent on first run |
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
-| `6-review` | `task.md` | reused from `4-execute`; markers driven by `Stages::Review` orchestrator |
+| `6-review` | `task.md` | reused from `4-execute`, or created by `Hive::Patrol::ReviewHandoff` for patrol-opened PRs; markers driven by `Stages::Review` orchestrator |
 | `7-artifacts` | `artifact.md` | `Stages::Artifacts` asks the configured artifact agent to write the artifact summary and stamp `COMPLETE` |
 | `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
 | `9-done` | `task.md` | reused from `4-execute` |
@@ -64,7 +64,7 @@ slug: add-foo-260603-abcd
 display_name:
 ```
 
-`Hive::Task#id`, `#display_name`, and `#display_label` are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil}`; `display_label` then falls back to the folder slug. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserving any existing display name and leaving legacy names null.
+`Hive::Task#id`, `#display_name`, and `#display_label` are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil}`; `display_label` then falls back to the folder slug. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserving any existing display name and leaving legacy names null. Patrol review handoff writes `meta.yml` with `id: nil` and display name `Patrol: <finding title>` because the task is synthesized after a PR has already opened, not captured through `hive new`.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 
@@ -357,4 +357,4 @@ See [[stages/index]] for one page per stage.
 
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
-- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]]
+- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]]

@@ -2290,6 +2290,15 @@ class ConfigTest < Minitest::Test
       assert_equal File.join(Hive::Paths.state_home, ".bot.alert_state.json"), cfg.dig("bot", "alert_state_file")
       assert_equal 28_800, cfg.dig("bot", "recovery_reminder_window_sec")
       assert_equal 3600, cfg.dig("bot", "conversation_ttl_sec")
+      assert_equal true, cfg.dig("bot", "transcription", "enabled")
+      assert_equal "https://api.openai.com/v1/audio/transcriptions", cfg.dig("bot", "transcription", "endpoint")
+      assert_equal "whisper-1", cfg.dig("bot", "transcription", "model")
+      assert_equal "HIVE_WHISPER_API_KEY", cfg.dig("bot", "transcription", "api_key_env")
+      assert_equal 3, cfg.dig("bot", "transcription", "max_retries")
+      assert_equal 2, cfg.dig("bot", "transcription", "retry_backoff_sec")
+      assert_equal 120, cfg.dig("bot", "transcription", "timeout_sec")
+      assert_equal 0.6, cfg.dig("bot", "transcription", "no_speech_threshold")
+      assert_equal %w[en ru], cfg.dig("bot", "transcription", "supported_languages")
       assert_equal 1, cfg.dig("bot", "codex_budget_usd")
       assert_equal 120, cfg.dig("bot", "codex_timeout_sec")
     end
@@ -2406,6 +2415,80 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
       assert_match(/bot.long_poll_timeout_sec.*between 5 and 50/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_non_hash_transcription_block
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription: enabled
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_bad_transcription_max_retries
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            max_retries: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.max_retries.*integer >= 0/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_scalar_transcription_languages
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            supported_languages: en
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.supported_languages.*Array of Strings/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_blank_transcription_endpoint
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            endpoint: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.endpoint.*non-empty String/, err.message)
+    end
+  end
+
+  def test_load_global_bot_deep_merges_transcription_override
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            model: whisper-large-v3
+            supported_languages: []
+      YAML
+
+      cfg = Hive::Config.load_global_bot
+
+      assert_equal "whisper-large-v3", cfg.dig("transcription", "model")
+      assert_equal [], cfg.dig("transcription", "supported_languages")
+      assert_equal "https://api.openai.com/v1/audio/transcriptions", cfg.dig("transcription", "endpoint")
+      assert_equal "HIVE_WHISPER_API_KEY", cfg.dig("transcription", "api_key_env")
     end
   end
 

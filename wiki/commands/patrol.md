@@ -31,11 +31,11 @@ patrol:
     test: bundle exec rake test
 ```
 
-`patrol.trigger` accepts three modes:
+`patrol.trigger` accepts three modes (default `continuous`):
 
+- `continuous` (default) is the hybrid mode: it runs when either the default branch moved or the timer interval elapsed, so patrol can keep mining existing slices between merges while still reacting to fresh `main` changes.
 - `new_commits` runs only when the default branch SHA differs from `last_scanned_sha`.
 - `timer` runs whenever `last_run_at` is older than `poll_interval_sec`.
-- `continuous` is the hybrid mode for larger repos: it runs when either the default branch moved or the timer interval elapsed, so patrol can keep mining existing slices between merges while still reacting to fresh `main` changes.
 
 ## Steps
 

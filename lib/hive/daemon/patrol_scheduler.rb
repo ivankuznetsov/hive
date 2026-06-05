@@ -120,7 +120,7 @@ module Hive
 
       def due?(entry, cfg, patrol, now)
         state = read_state(entry.fetch("path"))
-        case patrol.fetch("trigger", "new_commits")
+        case patrol.fetch("trigger", "continuous")
         when "timer"
           timer_due?(state, patrol, now)
         when "continuous"

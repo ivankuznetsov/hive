@@ -25,7 +25,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("patrol", "enabled")
-      assert_equal "new_commits", cfg.dig("patrol", "trigger")
+      assert_equal "continuous", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "claude", cfg.dig("patrol", "agent")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")

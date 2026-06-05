@@ -189,7 +189,9 @@ babysitter:
 # to 1-inbox or any stage folder.
 patrol:
   enabled: false
-  trigger: new_commits
+  # trigger: continuous (default) scans on default-branch SHA change OR
+  # every poll_interval_sec; new_commits = SHA-change only; timer = interval only.
+  trigger: continuous
   poll_interval_sec: 600
   agent: claude
   min_confidence_to_fix: medium

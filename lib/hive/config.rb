@@ -315,7 +315,7 @@ module Hive
       # successful fixes only as GitHub PRs.
       "patrol" => {
         "enabled" => false,
-        "trigger" => "new_commits",
+        "trigger" => "continuous",
         "poll_interval_sec" => 600,
         "agent" => "claude",
         "min_confidence_to_fix" => "medium",

@@ -387,6 +387,15 @@ class ClaudeLauncherTest < Minitest::Test
            "the idle caret at line end (with a hint footer below it) must read as ready"
   end
 
+  def test_claude_ready_prompt_accepts_current_footer_when_banner_scrolled_out
+    pane = "?────────────────────────────────────────────────────────────────────────\n" \
+           "  hive-patrol-command-bin-hive-babysitter-stub-gh-5031d524 hive-patrol/command-bin-hive-babysitter-stub-gh-5031d524  ❯\n" \
+           "  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #316 · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the live prompt footer can remain visible after the Claude Code banner scrolls out of the captured tail"
+  end
+
   # A numbered menu option must stay rejected even when a hint footer now
   # renders beneath it, so scanning the region (not just the last line) for
   # the caret does not start treating an interactive selection as idle.

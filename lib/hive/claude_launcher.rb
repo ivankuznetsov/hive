@@ -55,6 +55,7 @@ module Hive
     ].freeze
     CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
     CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
+    CLAUDE_READY_FOOTER_MARKER = "for agents".freeze
     # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
     # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
     # context). A caret embedded mid-line is Claude's own output, not the
@@ -546,7 +547,8 @@ module Hive
 
       return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
       return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
-      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
+      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER) ||
+                          current_text.include?(CLAUDE_READY_FOOTER_MARKER)
 
       # The idle caret sits at the bottom of the input box: it is the last
       # non-blank line, or the line above it when a one-line hint footer

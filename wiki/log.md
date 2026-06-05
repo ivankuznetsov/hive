@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
+
+**Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.
+
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
 **Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.
@@ -3203,3 +3207,12 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-05T17:42:09Z] migrate — backfill legacy display names for all task sources
+
+**Action:** Extended `hive migrate` beyond task-id repair so it also scans every canonical task folder with a missing/null `display_name` and runs `Hive::DisplayName::Generator` with commits disabled, then records successful name writes in a separate `.hive-state` commit. This uses the same agent-backed naming pipeline as `hive generate-name`, preserves existing names (including patrol handoff names), and leaves failed generations retryable. Added focused migration and generator tests and updated command/state docs.
+
+**Refreshed pages:**
+- [[commands/migrate]]
+- [[state-model]]
+- [[stages/inbox]]

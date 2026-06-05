@@ -62,10 +62,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   # on-disk marker name), not row.action, so we use the production-
   # accurate combo by default. Tests can override via the action: kwarg.
   def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
-               marker: "agent_working", action: "error", live_task_lock: nil)
+               marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil)
     Row.new(
       project: project, slug: slug, stage: stage,
-      marker: marker, folder: File.dirname(state_file), state_file: state_file,
+      marker: marker, marker_attrs: marker_attrs, folder: File.dirname(state_file), state_file: state_file,
       state_file_mtime: mtime,
       action: action, suggested_command: nil,
       claude_pid_alive: pid_alive, live_task_lock: live_task_lock, diagnostic: nil
@@ -176,6 +176,96 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
+  def test_heals_wedged_review_working_lock_when_agent_child_is_dead
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+        with_replaced_singleton_method(@healer, :terminate_lock_holder, ->(_holder) { nil }) do
+          heal([ row ])
+        end
+      end
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected review marker_healed event, got: #{@logger.events.inspect}"
+      assert_equal "review_agent_died", heal_event[1][:reason]
+      assert_equal "reviewers", heal_event[1][:phase]
+      assert_equal "1", heal_event[1][:pass]
+      refute File.exist?(lock_path), "stale review lock should be removed so recovery can run"
+      refute_match(/REVIEW_WORKING|REVIEW_ERROR/, File.read(state_file),
+                   "auto-recoverable stale review markers should clear so daemon can retry review")
+    end
+  end
+
+  def test_review_working_live_lock_with_children_is_left_alone
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=fix pass=2 -->\n")
+      File.write(File.join(File.dirname(state_file), ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "fix", "pass" => "2" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [ 12_345 ] }) do
+        heal([ row ])
+      end
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
+    end
+  end
+
+  def test_review_working_skips_when_child_inspection_fails
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      File.write(File.join(File.dirname(state_file), ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { nil }) do
+        heal([ row ])
+      end
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
     end
   end
 

@@ -271,8 +271,19 @@ def json_requested?(argv)
   argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(?:true|TRUE|t|T)\z/) }
 end
 
+def normalize_leading_global_options!(argv)
+  return unless argv.first == "--json"
+
+  commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
+  cmd_idx = argv[1..]&.index { |arg| commands.include?(arg) }
+  return unless cmd_idx
+
+  argv.delete_at(0)
+  argv.insert(cmd_idx + 1, "--json")
+end
+
 begin
-  normalize_leading_class_options!(ARGV)
+  normalize_leading_global_options!(ARGV)
   rewrite_help_flag!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise

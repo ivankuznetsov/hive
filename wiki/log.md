@@ -3600,3 +3600,13 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[e2e]]
 - [[testing]]
 - [[log]]
+
+## [2026-06-05T16:38:55Z] wiki/e2e — audit residual e2e wiki commit and scenario coverage
+
+**Action:** Audited commit `02717784` after it committed residual e2e wiki refresh changes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e usage exit-code e2e testing gaps"` returned no indexed hits. Verified the committed wiki diff plus current `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, and the scenario files under `test/e2e/scenarios/`. Kept [[index]] unchanged, preserved both archive-listing and e2e usage-exit gap entries while resolving the wiki merge state, and refreshed [[e2e]] / [[testing]] so scenario coverage no longer refers to the old seven/six-scenario inventory. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+- [[log]]

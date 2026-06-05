@@ -103,7 +103,12 @@ On failure, the harness writes a scenario bundle containing:
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `tui_new_idea_editing` | TUI new-idea prompt paste delivery plus cursor navigation/insertion before submit. |
+| `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement. |
 | `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |
+| `update_flow_pipeline` | Daemon update-check pipeline against a releases stub. |
+| `update_flow_tui_footer` | TUI update footer rendering after the update check records a newer release. |
+| `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
+| `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 
 ## Operational Notes
 

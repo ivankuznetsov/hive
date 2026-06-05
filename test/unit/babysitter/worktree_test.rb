@@ -21,8 +21,8 @@ class BabysitterWorktreeTest < Minitest::Test
         assert_equal "hive-babysitter/pr-42", result.branch
       end
 
-      assert calls.any? { |cmd| cmd.include?("fetch") && cmd.any? { |arg| arg.include?("pull/42/head") } },
-             "expected `git fetch origin pull/42/head:...` so fork PRs and same-repo PRs share the same path"
+      assert calls.any? { |cmd| cmd.include?("fetch") && cmd.include?("+pull/42/head:refs/hive-babysitter/pr-42") },
+             "expected force-updating `git fetch origin +pull/42/head:...` so rebased PR heads do not wedge babysitter"
       assert calls.any? { |cmd| cmd.include?("worktree") && cmd.include?("-B") && cmd.include?("hive-babysitter/pr-42") }
     end
   end

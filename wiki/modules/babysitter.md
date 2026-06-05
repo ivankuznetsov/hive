@@ -19,7 +19,7 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::ProjectTick` | `lib/hive/babysitter/project_tick.rb` | One-project tick: reload config, list PRs, filter labels, enforce `max_concurrent_prs`, call `PrFixer`. |
 | `Hive::Babysitter::PrFixer` | `lib/hive/babysitter/pr_fixer.rb` | Per-PR precheck, worktree setup, context gathering, prompt render, agent spawn, give-up handling. |
 | `Hive::Babysitter::ContextBuilder` | `lib/hive/babysitter/context_builder.rb` | Builds prompt-ready status rollup, failing-job logs, and diff stat. |
-| `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from the PR head branch. |
+| `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from a force-refreshed internal PR-head ref, so rebased or force-pushed PRs do not wedge the babysitter cache. |
 | `Hive::Babysitter::GhOps` | `lib/hive/babysitter/gh_ops.rb` | Hive-driven GitHub side effects: force-with-lease push, label, comment, rerun. Honors dry-run. |
 | `Hive::Babysitter::DryRunEnv` | `lib/hive/babysitter/dry_run_env.rb` + `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` | PATH overlay for agent-side dry-run `git` / `gh` stubs. |
 | `Hive::Babysitter::Events` | `lib/hive/babysitter/events.rb` | Append-only per-project JSONL events under `.hive-state/babysitter/events.jsonl`. |

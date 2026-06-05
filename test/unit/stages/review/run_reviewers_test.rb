@@ -343,7 +343,7 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
-  def test_shared_session_reviewers_receive_fair_deadlines
+  def test_shared_session_reviewers_each_get_full_remaining_budget
     with_tmp_dir do |dir|
       cfg = {
         "claude" => { "mode" => "tmux" },
@@ -372,10 +372,11 @@ class RunReviewersTest < Minitest::Test
         end
       end
 
-      assert_in_delta 30, adapters[0].session_deadline_seconds, 0.001,
-                      "first shared-session reviewer should receive half of the remaining 60s budget"
+      assert_in_delta 60, adapters[0].session_deadline_seconds, 0.001,
+                      "each shared-session reviewer gets the FULL remaining 60s budget — its own " \
+                      "timeout_sec is the real per-reviewer cap, not a 1/N split"
       assert_in_delta 60, adapters[1].session_deadline_seconds, 0.001,
-                      "last shared-session reviewer may use the remaining budget"
+                      "with no wall time elapsed, the last reviewer also sees the full budget"
     end
   end
 
@@ -412,9 +413,11 @@ class RunReviewersTest < Minitest::Test
         end
       end
 
-      assert_in_delta 30, adapters[1].deadline_seconds, 0.001
-      assert_in_delta 40, adapters[2].deadline_seconds, 0.001
-      assert_in_delta 60, adapters[0].session_deadline_seconds, 0.001
+      # Same deadline counter across the mixed pass; with no wall time
+      # elapsed in the fake clock every reviewer sees the full 120s budget.
+      assert_in_delta 120, adapters[1].deadline_seconds, 0.001
+      assert_in_delta 120, adapters[2].deadline_seconds, 0.001
+      assert_in_delta 120, adapters[0].session_deadline_seconds, 0.001
       assert_in_delta 120, adapters[3].session_deadline_seconds, 0.001
     end
   end
@@ -668,7 +671,7 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
-  def test_run_reviewers_caps_first_reviewer_to_fair_wall_clock_share
+  def test_run_reviewers_gives_each_reviewer_the_full_remaining_budget
     with_tmp_dir do |dir|
       cfg = {
         "review" => {
@@ -695,16 +698,16 @@ class RunReviewersTest < Minitest::Test
         end
       end
 
-      assert_in_delta 30, adapters[0].deadline_seconds, 0.001,
-                      "first of three reviewers should receive one third of the remaining 90s budget"
-      assert_in_delta 45, adapters[1].deadline_seconds, 0.001,
-                      "second reviewer should receive half of the still-remaining budget"
+      assert_in_delta 90, adapters[0].deadline_seconds, 0.001,
+                      "each reviewer receives the FULL remaining 90s budget, not a 1/N split"
+      assert_in_delta 90, adapters[1].deadline_seconds, 0.001,
+                      "no wall time elapsed → still the full budget"
       assert_in_delta 90, adapters[2].deadline_seconds, 0.001,
                       "last reviewer may use the remaining budget"
     end
   end
 
-  def test_run_reviewers_uses_elapsed_wall_clock_for_later_fair_share
+  def test_run_reviewers_reduces_later_deadline_by_elapsed_wall_clock
     with_tmp_dir do |dir|
       cfg = {
         "review" => {
@@ -733,9 +736,10 @@ class RunReviewersTest < Minitest::Test
           assert_equal :ok, result
         end
 
-        assert_in_delta 45, adapters[0].deadline_seconds, 0.001
+        assert_in_delta 90, adapters[0].deadline_seconds, 0.001,
+                        "first reviewer gets the full 90s budget"
         assert_in_delta 60, adapters[1].deadline_seconds, 0.001,
-                        "second reviewer deadline must be based on the reduced remaining wall clock"
+                        "second reviewer deadline reflects the 30s the first consumed (full remaining)"
       end
     end
   end

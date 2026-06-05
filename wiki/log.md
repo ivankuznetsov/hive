@@ -16,6 +16,15 @@ Append-only log of all wiki operations.
 ## [2026-06-05T00:00:00Z] bot - suppress daemon-auto-approved 3-plan pauses (+ fix label)
 
 **Action:** Fixed a spurious-notification bug: a 3-plan `waiting` marker is a plan-draft/approval pause that the daemon's `PlanApproval` auto-approves when `daemon.enabled`, but the bot's status poll raced the daemon and pinged the operator with an unactionable "questions waiting" alert (mislabelled "Brainstorm questions"). Added `NotificationDispatcher#suppress_daemon_plan_pause?` — suppresses `needs_input` + stage `3-plan` + marker `waiting` rows when the daemon is enabled (logging `notification_skipped_daemon_plan_pause`, added to the bot Logger enum + `hive-bot-log.v1.json`), mirroring `suppress_ready_action?`. Also split `NotificationBuilders#needs_input` so a 3-plan `waiting` renders "Plan draft is ready for your review" (daemon-off case) instead of the brainstorm "Answer in chat" text. 100% line coverage, rubocop clean.
+## [2026-06-05T02:00:00Z] review - tmux reviewer resilience + room for 1-2h reviewers
+
+**Action:** Fixed `6-review` getting stuck at `reviewer_partial_failure`. The claude-tmux reviewers run sequentially in ONE shared tmux session; when reviewer #1 exhausted its fair-share deadline (or its claude crashed), the shared session closed and every later reviewer failed with "session no longer exists" — cascading the whole pass into `reviewer_partial_failure`, which auto-triage (rightly) won't auto-advance. Three changes:
+
+- **Recover the dead session** (`ClaudeLauncher`): `with_shared_session` exposes a `reestablish` closure on the `SessionHandle`; `send_prompt_and_wait!` self-heals via `reestablish_dead_session!` — a reviewer that finds the session gone restarts claude and proceeds instead of cascade-failing.
+- **Stop the deadline squeeze** (`Stages::Review#reviewer_deadline`): each reviewer now gets the FULL remaining wall-clock budget (its own `timeout_sec` is the real per-reviewer cap), not `remaining / specs_remaining`. The even split killed thorough 1-2h reviewers mid-run.
+- **Room for long reviews**: `Reviewers::Agent::DEFAULT_TIMEOUT_SEC` 3600→7200 (2h), `review.max_wall_clock_sec` default 5400→14400 (4h), and the init template's reviewer `timeout_sec` 3600→7200.
+
+100% line coverage, rubocop clean.
 ## [2026-06-04T21:30:00Z] patrol - default draft_prs to false (open ready PRs)
 
 **Action:** Flipped `Config::DEFAULTS["patrol"]["draft_prs"]` from `true` to `false` so patrol opens ready (non-draft) PRs by default. Draft PRs are skipped by the babysitter (`labels_ignore: draft` + the GitHub-draft skip from #280), so the previous default left patrol-found fixes piling up as un-mergeable drafts. Per-project `patrol.draft_prs: true` still reverts to drafts. Also flipped the init template + `hive patrol` long_desc to match. Updated `test/unit/config_test.rb` default assertion and the [[commands/patrol]] / [[modules/patrol]] docs. 100% line coverage, rubocop clean.

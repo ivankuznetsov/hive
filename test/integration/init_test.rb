@@ -396,6 +396,7 @@ class InitTest < Minitest::Test
         # Other defaults present.
         assert_equal "courageous", cfg.dig("review", "triage", "bias")
         assert_equal 2,            cfg.dig("review", "max_passes")
+        assert_equal 14_400,       cfg.dig("review", "max_wall_clock_sec")
       end
     end
   end

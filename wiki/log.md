@@ -3203,3 +3203,11 @@ TTL config.
 - [[testing]]
 - [[index]]
 - [[gaps]]
+
+## [2026-06-05T19:32:10Z] eval — document basename-only hive-eval scenario selection
+
+**Action:** Refreshed command/API wiki coverage after commit `762bd7f8` changed `bin/hive-eval --scenario` from accepting `.rb` paths to accepting only safe basenames under `test/eval/scenarios/`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hive-eval eval reporter arbitrary Ruby scenario paths"` found the prior eval-harness log entry. Verified the committed diff plus current `bin/hive-eval`, `Rakefile`, `test/eval/support/reporter.rb`, `test/eval/eval_helper.rb`, and reporter tests. Documented the basename-only selector, exit-64 path rejection, scenario-only runner boundary, and remaining uncertainty that no full judge-backed eval sweep was found after this clamp. Ran `bundle exec ruby -Itest -Ilib test/eval/support/reporter_test.rb` (3 runs, 14 assertions, 0 failures). Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[gaps]]

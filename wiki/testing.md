@@ -1,7 +1,7 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, .rubocop.yml
+source: test/, Rakefile, .rubocop.yml, bin/hive-eval
 created: 2026-04-25
 updated: 2026-06-05
 tags: [test, minitest, fixtures]
@@ -122,7 +122,7 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 
 `test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
 
-`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
+`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--scenario` is intentionally a safe basename selector for files under `test/eval/scenarios/`: values may omit `.rb` and `_test`, but slash/backslash paths or unsafe names exit 64 before report creation. This keeps ad hoc support-test or arbitrary Ruby paths out of the scenario-only runner; reporter tests create temporary failure fixtures inside `test/eval/scenarios/` when they need to exercise the failing-report path. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
 
 ## Lint
 

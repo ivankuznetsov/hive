@@ -1249,6 +1249,33 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_pass_completion_status_errors_retry_only_before_fix_completes
+    # A pass can carry a partial reviewer failure (errors-NN.md) AND
+    # surviving reviewers whose accepted findings get triaged + fixed.
+    # errors-NN.md must force a reviewer rerun ONLY while the fix is still
+    # incomplete; once a fresh fix-success-NN.md exists, re-running would
+    # clobber the operator's [x] marks and redo the fix.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-ce-code-review-04.md"), "## High\n- [x] x\n")
+      escalations = File.join(reviews, "escalations-04.md")
+      errors = File.join(reviews, "errors-04.md")
+      File.write(escalations, "# Escalations pass 04\n- [x] done\n")
+      File.write(errors, "claude-ce-code-review: adapter failed\n")
+
+      assert_equal :triage_incomplete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "errors-NN.md with no completed fix → :triage_incomplete (rerun reviewers)"
+
+      fix_success = File.join(reviews, "fix-success-04.md")
+      File.write(fix_success, "ok\n")
+      File.utime(Time.now - 60, Time.now - 60, escalations)
+      File.utime(Time.now,      Time.now,      fix_success)
+      assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "fresh fix-success beats lingering errors-NN.md → :complete (no reviewer rerun)"
+    end
+  end
+
   def test_pass_completion_status_detects_operator_edit_to_escalations_after_fix
     # Operator-edit detection: when the user edits escalations-NN.md
     # after fix-success-NN.md was written, the next `hive run` should

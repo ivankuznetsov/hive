@@ -85,7 +85,8 @@ The escalations digest is mirrored to the PR with the same publisher path and du
 
 ## Branching after triage
 
-- `accepted.empty? && escalations.zero?` — Phase 2 produced zero findings — jump to Phase 5 (browser test).
+- `accepted.empty? && escalations.zero?` with `reviews/errors-NN.md` present — at least one reviewer failed while surviving reviewers found nothing; write `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=NN` so the task is recoverable/retryable rather than a user-input gate.
+- `accepted.empty? && escalations.zero?` without reviewer errors — Phase 2 produced zero findings — jump to Phase 5 (browser test).
 - `accepted.empty? && escalations > 0` — Pause for user gate: `REVIEW_WAITING escalations=N pass=NN`. The user ticks `[x]` on whatever escalations they want fixed and re-runs; the runner detects `:review_waiting` resume, skips Phase 2/3, jumps to Phase 4.
 - `accepted.any?` — Run Phase 4.
 

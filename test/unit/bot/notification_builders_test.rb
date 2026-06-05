@@ -319,6 +319,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ "Show details" ], labels
   end
 
+  def test_cause_sentence_for_review_error_reviewer_partial_failure
+    r = row(action: "recover_review", marker: "review_error",
+            attrs: { "phase" => "reviewers", "reason" => "reviewer_partial_failure", "pass" => "1" },
+            stage: "6-review")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text,
+                    "Some reviewers failed; the reviewers that ran found nothing, so review coverage is incomplete."
+    refute_includes notification.text, "The review agent crashed before it could finish."
+  end
+
   def test_cause_sentence_for_execute_stale
     r = row(action: "recover_review", marker: "execute_stale")
     notification = Hive::Bot::NotificationBuilders.build(r)

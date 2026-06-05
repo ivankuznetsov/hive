@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T21:41:29Z] wiki - post-commit audit of `hv` documentation refresh
+
+**Action:** Audited commit `dba72bbd` after it refreshed wiki coverage for the RubyGem `hv` executable fix. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "RubyGem hv executable install wrapper"` found the updated operating-page context. Verified the committed wiki diff plus commit `02591fbb`, current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, `test/unit/hv_test.rb`, [[cli]], [[operating]], [[testing]], and the existing [[gaps]] channel-smoke entry. Confirmed the pages are source-synced and page coverage did not change; no new uncertainty was found beyond the already-recorded missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-05T21:10:00Z] wiki - audit RubyGem `hv` executable coverage
 
 **Action:** Audited commit `02591fbb` after it fixed the broken RubyGems `hv` executable surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv fallback command bin"` found prior `hv`/testing/gaps context. Verified the committed diff plus current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, [[cli]], [[operating]], and [[testing]]. Clarified that the bash installer always writes its internal `hv` wrapper and only conditionally exposes it in the user bin directory, and recorded the missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.

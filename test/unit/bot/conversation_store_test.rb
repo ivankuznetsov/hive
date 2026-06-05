@@ -86,4 +86,53 @@ class HiveBotConversationStoreTest < Minitest::Test
     @now += 61
     refute store.active_for_slug?("slug"), "a TTL-expired conversation is not active"
   end
+
+  def test_active_for_slug_stays_active_if_any_chat_is_fresh
+    store.start(chat_id: 1, slug: "slug", question_n: 1)
+    @now += 40
+    store.start(chat_id: 2, slug: "slug", question_n: 1) # refreshes chat 2's clock
+    @now += 30 # chat 1 now 70s old (expired), chat 2 30s old (live)
+
+    assert store.active_for_slug?("slug"),
+           "still active while at least one chat's conversation is within TTL"
+  end
+
+  def test_active_for_slug_optional_project_scoping
+    store.start(chat_id: 1, project: "proj-a", slug: "slug", question_n: 1)
+
+    assert store.active_for_slug?("slug"), "unscoped query matches"
+    assert store.active_for_slug?("slug", project: "proj-a"), "matching project matches"
+    refute store.active_for_slug?("slug", project: "proj-b"),
+           "a different fully-resolved project does not cross-suppress"
+
+    # A conversation with no project still suppresses any project (lenient).
+    store.start(chat_id: 2, project: nil, slug: "slug2", question_n: 1)
+    assert store.active_for_slug?("slug2", project: "proj-b"),
+           "a project-less conversation suppresses leniently"
+  end
+
+  # Regression guard for the mutex: concurrent prune (reader) + mutation
+  # (writer) on @states must not raise "can't add a new key during
+  # iteration".
+  def test_concurrent_access_does_not_raise
+    s = Hive::Bot::ConversationStore.new(ttl_sec: 60, now: -> { Time.now })
+    errors = []
+    writers = Array.new(4) do |i|
+      Thread.new do
+        300.times { |j| s.start(chat_id: i, slug: "slug-#{j % 8}", question_n: 1) }
+      rescue StandardError => e
+        errors << e
+      end
+    end
+    readers = Array.new(4) do
+      Thread.new do
+        300.times { s.active_for_slug?("slug-3") }
+      rescue StandardError => e
+        errors << e
+      end
+    end
+    (writers + readers).each(&:join)
+
+    assert_empty errors, "mutex-guarded @states must tolerate concurrent read/prune + write"
+  end
 end

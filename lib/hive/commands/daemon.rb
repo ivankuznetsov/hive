@@ -169,7 +169,9 @@ module Hive
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(
           dry_run: @dry_run,
-          default_timeout_sec: daemon_cfg.fetch("child_timeout_sec", 0),
+          default_timeout_sec: daemon_cfg.fetch(
+            "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
+          ),
           verb_timeouts: daemon_cfg.fetch("child_verb_timeouts", {}),
           kill_grace_sec: daemon_cfg.fetch(
             "child_kill_grace_sec", Hive::Daemon::ChildSupervisor::DEFAULT_KILL_GRACE_SEC
@@ -575,11 +577,19 @@ module Hive
         end
       end
 
+      # `prune` runs in a separate CLI process against the live queue dir
+      # with no lock, so a request can be claimed+dispatched by the daemon
+      # between the `pending` scan and removal. `remove_if_unclaimed` skips
+      # any id the daemon has since claimed (never deleting a `.claimed`
+      # file's crash-recovery state), and we count only files actually
+      # unlinked — so the reported count is advisory under concurrency but
+      # never over-reports a removal that a racing claim turned into a no-op
+      # (#265).
       def queue_prune
         requests, malformed = load_queue_requests
-        expired = requests.select { |req| Hive::Daemon::DispatchRequestQueue.expired?(req) }
-        expired.each do |req|
-          Hive::Daemon::DispatchRequestQueue.remove(req.request_id, state_home: @hive_home)
+        expired = requests.select do |req|
+          Hive::Daemon::DispatchRequestQueue.expired?(req) &&
+            Hive::Daemon::DispatchRequestQueue.remove_if_unclaimed(req.request_id, state_home: @hive_home)
         end
         malformed.each { |bad| FileUtils.rm_f(bad[:path]) }
 

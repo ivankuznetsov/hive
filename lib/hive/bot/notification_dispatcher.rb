@@ -59,6 +59,7 @@ module Hive
       def current_notifications(rows)
         Array(rows).each_with_object({}) do |row, out|
           next if suppress_ready_action?(row)
+          next if suppress_daemon_plan_pause?(row)
           next if suppress_active_conversation?(row)
 
           notification = NotificationBuilders.build(row, logger: @logger)
@@ -75,11 +76,37 @@ module Hive
       # alerts always fire even mid-answer. The first alert still fires
       # (no conversation exists until the operator taps "Answer in chat"),
       # and an abandoned conversation stops suppressing once it TTL-expires.
+      # Scoped to (project, slug) so two projects sharing a slug can't
+      # cross-suppress. Logs the skip, matching `:notification_skipped_*`,
+      # so "why didn't I get the alert?" has an audit trail.
       def suppress_active_conversation?(row)
         return false unless @conversation_store
-        return false unless row.action == "needs_input"
+        return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        return false unless @conversation_store.active_for_slug?(row.slug, project: row.project)
 
-        @conversation_store.active_for_slug?(row.slug)
+        @logger.event(:notification_skipped_active_conversation,
+                      project: row.project, slug: row.slug, marker: row.marker)
+        true
+      end
+
+      # Suppress the proactive "questions waiting" push for a 3-plan
+      # approval pause when the daemon is enabled for the project. A
+      # 3-plan `waiting` marker is a plan-draft/approval pause, NOT a
+      # brainstorm question — and the daemon's `PlanApproval` auto-approves
+      # it (flips `waiting` → `complete`, dispatches `hive develop`) within
+      # a tick. Without this gate the bot's status poll races the daemon
+      # and pings the operator about a pause the daemon is about to resolve
+      # on its own — an unactionable alert (the operator can't approve a
+      # plan from the brainstorm `/answer` flow anyway). Mirrors
+      # `suppress_ready_action?`'s daemon-aware gating.
+      def suppress_daemon_plan_pause?(row)
+        return false unless row.action == "needs_input"
+        return false unless row.stage.to_s == "3-plan" && row.marker.to_s == "waiting"
+        return false unless daemon_enabled_for?(row.project)
+
+        @logger.event(:notification_skipped_daemon_plan_pause,
+                      project: row.project, slug: row.slug, marker: row.marker)
+        true
       end
 
       def immediate_on_fresh_install?(row)

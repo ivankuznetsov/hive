@@ -32,7 +32,8 @@
     },
     "chat_id": {
       "type": "integer",
-      "description": "Telegram chat to relay the failure to — copied from the originating dispatch request. Always present (the daemon only writes a notice when it has a chat to reply to)."
+      "not": { "const": 0 },
+      "description": "Telegram chat to relay the failure to — copied from the originating dispatch request. Always present (the daemon only writes a notice when it has a chat to reply to). 0 is never a valid Telegram chat id; private chats are positive and group/supergroup/channel chats are negative, so the machine-checked contract is 'non-zero' rather than 'positive' (#258)."
     },
     "update_id": {
       "type": ["integer", "null"],

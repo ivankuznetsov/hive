@@ -14,6 +14,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 action_label: "Ready to plan", age: 120,
                 marker: "complete", attrs: {},
                 id: 42, display_name: nil,
+                mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
@@ -25,7 +26,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "state_file" => "/tmp/#{slug}/brainstorm.md",
       "marker" => marker,
       "attrs" => attrs,
-      "mtime" => "2026-05-01T00:00:00Z",
+      "mtime" => mtime,
       "folder_mtime" => folder_mtime,
       "age_seconds" => age,
       "claude_pid" => nil,
@@ -79,6 +80,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                                action: "archived",
                                action_label: "Archived",
                                marker: "complete",
+                               mtime: old,
                                folder_mtime: old
                              ),
                              make_task(
@@ -87,6 +89,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                                action: "archived",
                                action_label: "Archived",
                                marker: "complete",
+                               mtime: recent,
                                folder_mtime: recent
                              ),
                              make_task(slug: "active-task", stage: "4-execute", marker: "execute_complete")
@@ -433,6 +436,31 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "🤖", "agent_running rows must show robot icon"
     assert_includes out, "▶",  "ready_* rows must show advance arrow"
     assert_includes out, "⚠",  "error rows must show warning icon"
+  end
+
+  def test_action_icon_cells_have_consistent_display_width
+    icons = Hive::Tui::Views::TasksPane::ICONS.values + [ Hive::Tui::Views::TasksPane::DEFAULT_ICON ]
+    cells = icons.map { |icon| Hive::Tui::Views::Format.ljust_cells(icon, Hive::Tui::Views::TasksPane::ICON_WIDTH) }
+    assert cells.all? { |cell| Hive::Tui::Views::Format.display_width(cell) == Hive::Tui::Views::TasksPane::ICON_WIDTH },
+           "every action icon cell must consume the fixed icon column width"
+  end
+
+  def test_wide_icon_does_not_shift_the_id_column
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
+        make_task(slug: "ready-task", id: 8, action: "ready_to_plan", action_label: "Ready to plan")
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    rows = out.lines.grep(/running-task|ready-task/)
+
+    id_offsets = rows.map do |row|
+      prefix = row.split(/\d/, 2).first
+      Hive::Tui::Views::Format.display_width(prefix)
+    end
+    assert_equal [ 7, 7 ], id_offsets,
+                 "wide emoji icons must not shift fixed-width columns"
   end
 
   # ---- Sort order ----

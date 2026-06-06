@@ -2,6 +2,9 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
+
+**Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.
 ## [2026-06-06T12:12:34Z] agents - normalize legacy Compound Engineering invocations
 
 **Action:** Double-checked the installed Compound Engineering plugin metadata (`compound-engineering` v3.11.1): the CE workflows are still exposed as bare `/ce-*` skills such as `/ce-code-review`; the official `/code-review` command is a separate PR-comment workflow and does not satisfy Hive's reviewer-file contract. Updated Hive defaults, templates, and docs to emit `/ce-brainstorm`, `/ce-code-review`, `/ce-commit-push-pr`, and `/ce-test-browser` forms. Added `AgentProfile#format_skill_invocation` compatibility normalization so existing `compound-engineering:ce-*` config values still render to current CE syntax for Claude/Codex and `/skill:ce-*` for Pi.
@@ -3199,6 +3202,24 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
+## [2026-06-05T16:05:00Z] tui — document display-cell formatting for task rows
+
+**Action:** Documented the TUI formatter's direct `unicode-display_width` dependency after task-pane icon alignment work. `Hive::Tui::Views::Format` now owns display-cell truncation and padding so emoji status icons and other wide glyphs do not shift fixed columns. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[dependencies]]
+
+## [2026-06-05T16:25:00Z] patrol/status — review-task idea context and archive age filtering
+
+**Action:** Documented two dogfood fixes: patrol review handoff now writes `idea.md` from the original patrol finding so the TUI idea preview has context, and archive hiding now uses row `mtime` rather than mutable `folder_mtime` so sidecar edits do not make old archived tasks reappear in daily views. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/patrol]]
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+
 ## [2026-06-03T13:20:00Z] task identity surfaces — document status, TUI, bot, and migration backfill
 
 **Action:** Extended the task-identity wiki refresh through commits `457c2f16` (`hive status` id/display_name schema v3), `d76be350` (TUI id/name columns), `5daa08c9` (Telegram display titles), and `1a4922c4` (`hive migrate` id backfill). Documented human rendering fallbacks, preserved slug-based callbacks/commands, diagnose schema v2, and migration counter seeding/idempotency. Did not run `qmd update` or `qmd embed`.
@@ -3235,6 +3256,22 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
+## [2026-06-05T17:42:09Z] migrate — backfill legacy display names for all task sources
+
+**Action:** Extended `hive migrate` beyond task-id repair so it also scans every canonical task folder with a missing/null `display_name` and runs `Hive::DisplayName::Generator` with commits disabled, then records successful name writes in a separate `.hive-state` commit. This uses the same agent-backed naming pipeline as `hive generate-name`, preserves existing names (including patrol handoff names), and leaves failed generations retryable. Added focused migration and generator tests and updated command/state docs.
+
+**Refreshed pages:**
+- [[commands/migrate]]
+- [[state-model]]
+- [[stages/inbox]]
+
+## [2026-06-05T18:02:00Z] patrol — allocate task ids for review handoff tasks
+
+**Action:** Changed `Hive::Patrol::ReviewHandoff` so synthetic `6-review/patrol-.../` tasks allocate a normal `Hive::TaskCounter` id instead of writing `id: nil` unconditionally. The fail-soft behavior now matches `hive new`: counter lock contention leaves the id null, but the task is still enqueued and `hive migrate` can repair it later. Added patrol handoff/opener coverage and corrected the task sidecar docs.
+
+**Refreshed pages:**
+- [[state-model]]
+
 ## [2026-06-05T20:05:00Z] tui — vertical resize viewport and reduced dashboard chrome
 
 **Action:** Made the grid composer height-aware: it subtracts footer/stalled-banner rows from `model.rows`, passes the remaining budget into `ProjectsPane` and `TasksPane`, and each pane clips/pads with a cursor-following viewport. Removed the persistent grid metadata strip and hidden-archive footer prefix so the first frame prioritizes panes and the footer stays visible under vertical terminal resize. Added focused pane viewport tests plus a PTY Charm smoke that performs a real vertical `winsize` + `SIGWINCH` resize and verifies the footer remains visible.
@@ -3242,6 +3279,32 @@ TTL config.
 **Refreshed pages:**
 - [[commands/tui]]
 
+## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
+
+**Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[modules/daemon]]
+- [[state-model]]
+- [[testing]]
+
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
 ## [2026-06-06T10:14:41Z] patrol — scoped review reviewers for patrol PR handoff
 
 **Action:** Added a separate `patrol.review.reviewers` config list for synthetic `Patrol: ...` review tasks. Fresh `hive init` now asks for patrol PR reviewers separately from normal `review.reviewers`, defaults patrol PR review to `codex-ce-code-review` only, and lets operators opt into `claude-ce-code-review`; `pr-review-toolkit` is intentionally excluded from the patrol prompt. The 6-review runner selects `patrol.review.reviewers` when `task.md` frontmatter has `source: patrol`, while normal tasks continue using `review.reviewers`. Updated [[commands/init]], [[commands/patrol]], [[modules/config]], and [[stages/review]].

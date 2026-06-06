@@ -13,7 +13,7 @@ tags: [stage, inbox, capture, task-id]
 
 `idea.md` — created by `hive new` from `templates/idea.md.erb`, ends with a trailing `<!-- WAITING -->` marker so `hive status` shows ⏸.
 
-`meta.yml` — sidecar created by `hive new` with `{id, slug, display_name}`. The id comes from the global `Hive::TaskCounter` when the counter lock is available; otherwise it is null. The display name starts null and `Hive::Task#display_label` falls back to the slug until a later writer fills it.
+`meta.yml` — sidecar created by `hive new` with `{id, slug, display_name}`. The id comes from the global `Hive::TaskCounter` when the counter lock is available; otherwise it is null. The display name starts null and `Hive::Task#display_label` falls back to the slug until a later writer fills it; `hive migrate` now backfills missing legacy display names with the same generator used by `hive generate-name`.
 
 ## Behaviour of `hive run`
 

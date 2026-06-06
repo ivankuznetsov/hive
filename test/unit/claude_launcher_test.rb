@@ -387,6 +387,15 @@ class ClaudeLauncherTest < Minitest::Test
            "the idle caret at line end (with a hint footer below it) must read as ready"
   end
 
+  def test_claude_ready_prompt_accepts_current_footer_when_banner_scrolled_out
+    pane = "?────────────────────────────────────────────────────────────────────────\n" \
+           "  hive-patrol-command-bin-hive-babysitter-stub-gh-5031d524 hive-patrol/command-bin-hive-babysitter-stub-gh-5031d524  ❯\n" \
+           "  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #316 · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the live prompt footer can remain visible after the Claude Code banner scrolls out of the captured tail"
+  end
+
   # A numbered menu option must stay rejected even when a hint footer now
   # renders beneath it, so scanning the region (not just the last line) for
   # the caret does not start treating an interactive selection as idle.
@@ -750,6 +759,71 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal :error, result.fetch(:status)
         assert_match(/tmux_pane_unreadable: pane unreadable/, result.fetch(:error_message))
       end
+    end
+  end
+
+  def test_wait_for_expected_output_fails_fast_when_session_dies_before_output
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { flunk "must not wait to timeout" }) do
+        result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+        assert_equal :error, result.fetch(:status)
+        assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+        assert_match(/missing\.md/, result.fetch(:error_message))
+      end
+    end
+  end
+
+  def test_wait_for_expected_output_treats_tmux_liveness_error_as_dead_session
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      runner = Struct.new(:name) do
+        def session_exists?
+          raise Hive::TmuxError, "server unavailable"
+        end
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+    end
+  end
+
+  def test_wait_for_expected_output_rejects_nonempty_output_when_session_dies_without_done_signal
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+      assert_equal "review findings", File.read(output)
+    end
+  end
+
+  def test_wait_for_expected_output_accepts_nonempty_output_and_done_when_session_dies_after_write
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal({ status: :ok, log_label: "review" }, result)
+      assert_equal "review findings", File.read(output)
     end
   end
 

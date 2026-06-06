@@ -642,6 +642,27 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_codex_reviewer_prompt_uses_dollar_plugin_skill_invocation
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      spec = make_spec(
+        "name" => "codex-ce-code-review",
+        "agent" => "codex",
+        "output_basename" => "codex-ce-code-review",
+        "prompt_template" => "reviewer_codex_ce_code_review.md.erb"
+      )
+      reviewer = Hive::Reviewers::Agent.new(spec, ctx)
+      prompt = reviewer.send(:render_prompt, Hive::AgentProfiles.lookup(:codex), "ce-code-review")
+
+      assert_includes prompt, "$compound-engineering:ce-code-review",
+                      "codex plugin skills must use dollar invocation, not Claude slash commands"
+      refute_includes prompt, "/ce-code-review"
+      assert_includes prompt, "mode:agent"
+      assert_includes prompt, "git diff main..HEAD"
+    end
+  end
+
   # --- Plan-context flow through to spawned subprocess argv ---
   #
   # The render_prompt tests (above) verify the prompt STRING is built

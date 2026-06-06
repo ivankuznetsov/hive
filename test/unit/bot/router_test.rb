@@ -199,18 +199,6 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "answer body", result.answer_text
   end
 
-  def test_free_text_inside_path_a_conversation_continues_codex
-    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd",
-                 question_n: 1, mode: :path_a)
-
-    result = @router.handle(update(text: "clarifying answer"))
-
-    assert_equal :start_codex, result.action
-    assert_equal "hive", result.project
-    assert_equal "slug-260514-abcd", result.slug
-    assert_equal "clarifying answer", result.answer_text
-  end
-
   def test_free_text_reply_can_reattach_to_slug_after_restart
     result = @router.handle(
       update(text: "offline answer", reply_to_text: "hive/slug-260514-abcd (2-brainstorm)")
@@ -295,11 +283,6 @@ class HiveBotRouterTest < Minitest::Test
       "answer:hive:slug-260514-abcd" => :callback_answer,
       "idea_done:token" => :callback_idea_done,
       "idea_skip:token" => :callback_idea_skip,
-      "path_a_yes:hive:slug-260514-abcd" => :callback_path_a_yes,
-      "path_a_type:hive:slug-260514-abcd" => :callback_path_a_just_type,
-      "codex_write:hive:slug-260514-abcd:1" => :callback_codex_write_draft,
-      "codex_edit:hive:slug-260514-abcd:1" => :callback_codex_edit,
-      "codex_cancel:hive:slug-260514-abcd:1" => :callback_codex_cancel,
       "findings:accept_all:hive:slug-260514-abcd:6-review" => :callback_findings_accept_all,
       "findings:reject_all:hive:slug-260514-abcd:6-review" => :callback_findings_reject_all,
       "idea_project_new:token" => :callback_idea_project_new,

@@ -2,6 +2,26 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T13:58:24Z] bot - remove retired Codex draft conversation
+
+**Action:** Removed the dead Telegram bot Path A Codex draft-assist path. Deleted `Hive::Bot::CodexConversation`, its prompt template, and its unit tests; removed `start_codex` / `confirm_codex_draft` router actions, stale Path A callback prefixes, and `ConversationStore`'s `:path_a` mode. Free-text answer conversations now have one active path: write the operator's literal answer to `brainstorm.md` via the existing deterministic answer flow.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[modules/bot]]
+- [[templates]]
+- [[decisions]]
+
+## [2026-06-06T13:46:57Z] codex - use dollar plugin invocations and xhigh reasoning
+
+**Action:** Corrected the Codex profile after local Codex rejected Claude-style `/ce-code-review`. Codex now renders plugin skills as `$plugin:skill`, maps bare Compound Engineering reviewer config (`ce-code-review`) to `$compound-engineering:ce-code-review`, and leaves Claude on `/ce-code-review` plus Pi on `/skill:ce-code-review`. Hive also forces `model_reasoning_effort="xhigh"` for Codex spawns through `AgentProfile` and for managed llm-wiki refresh scripts. Doctor parsing now accepts `$name` / `$plugin:name` while preserving legacy slash config compatibility.
+
+**Refreshed pages:**
+- [[modules/agent_profile]]
+- [[stages/plan]]
+- [[stages/review]]
+- [[commands/doctor]]
+
 ## [2026-06-06T12:12:34Z] agents - normalize legacy Compound Engineering invocations
 
 **Action:** Double-checked the installed Compound Engineering plugin metadata (`compound-engineering` v3.11.1): the CE workflows are still exposed as bare `/ce-*` skills such as `/ce-code-review`; the official `/code-review` command is a separate PR-comment workflow and does not satisfy Hive's reviewer-file contract. Updated Hive defaults, templates, and docs to emit `/ce-brainstorm`, `/ce-code-review`, `/ce-commit-push-pr`, and `/ce-test-browser` forms. Added `AgentProfile#format_skill_invocation` compatibility normalization so existing `compound-engineering:ce-*` config values still render to current CE syntax for Claude/Codex and `/skill:ce-*` for Pi.

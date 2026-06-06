@@ -344,7 +344,8 @@ module Hive
       # explains why the entry is unrunnable. For `agent`-kind entries,
       # the bare config skill (e.g., `ce-code-review`) is formatted
       # through the profile's `skill_syntax_format` to obtain the full
-      # invocation (`/ce-code-review`) before passing to `verify_skill`,
+      # invocation (`/ce-code-review` for Claude,
+      # `$compound-engineering:ce-code-review` for Codex) before passing to `verify_skill`,
       # so the JSON envelope's `skill` field shape is uniform across
       # stage and reviewer rows.
       def check_reviewer(spec)

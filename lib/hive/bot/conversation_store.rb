@@ -3,7 +3,7 @@ require "time"
 module Hive
   module Bot
     class ConversationStore
-      VALID_MODES = %i[path_a path_b].freeze
+      VALID_MODES = %i[path_b].freeze
 
       State = Struct.new(:chat_id, :project, :slug, :question_n, :history, :draft, :mode,
                          :awaiting_confirm, :updated_at, keyword_init: true)

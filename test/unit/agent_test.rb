@@ -421,6 +421,45 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_builtin_codex_profile_forces_xhigh_reasoning_in_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      fake_codex = File.join(dir, "fake-codex")
+      argv_log = File.join(dir, "argv.log")
+      stdin_log = File.join(dir, "stdin.log")
+      File.write(fake_codex, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then
+          echo "codex-cli 0.137.0"
+          exit 0
+        fi
+        printf '%s\n' "$@" > "#{argv_log}"
+        cat > "#{stdin_log}"
+        exit 0
+      SH
+      File.chmod(0o755, fake_codex)
+
+      profile = Hive::AgentProfiles.lookup(:codex).with_overrides("bin" => fake_codex)
+      result = Hive::Agent.new(
+        task: task,
+        prompt: "prompt body",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :exit_code_only
+      ).run!
+
+      assert_equal :ok, result[:status]
+      argv = File.read(argv_log).lines.map(&:chomp)
+      assert_equal "exec", argv[0]
+      assert_includes argv, "-c"
+      assert_includes argv, "model_reasoning_effort=\"xhigh\""
+      assert_equal "-", argv[-1]
+      assert_equal "prompt body", File.read(stdin_log)
+    end
+  end
+
   # Regression: claude's Edit/Write tools rewrite atomically (write tempfile
   # then rename), changing the file's inode. The earlier inode-tracking
   # heuristic falsely flagged that as a "concurrent edit". Verify hive does

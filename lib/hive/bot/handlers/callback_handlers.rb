@@ -29,17 +29,6 @@ module Hive
           when :callback_idea_project_pick then idea_project(data)
           when :callback_idea_done then commit_idea(data)
           when :callback_idea_skip then commit_idea(data)
-          # Codex-draft flow is retired (deterministic Q-by-Q answering only).
-          # Legacy callbacks still land here from messages sent before the
-          # removal; reply with the new path so the operator isn't stuck.
-          when :callback_path_a_yes,
-               :callback_path_a_just_type,
-               :callback_codex_write_draft,
-               :callback_codex_edit,
-               :callback_codex_cancel
-            @result_class.new(action: :reply,
-                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <slug>) " \
-                                    "and reply with your answer; the bot will send the next question automatically.")
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
           when :callback_idea_project_new then idea_project_new(data)

@@ -78,7 +78,7 @@ class HiveStagesSkillInvocationFormatTest < Minitest::Test
       with_stubbed_spawn do |captured|
         Hive::Stages::Plan.run!(task, { "plan" => { "agent" => "codex" } })
 
-        assert_includes captured.first[:prompt], "/llm-wiki:wiki-plan"
+        assert_includes captured.first[:prompt], "$llm-wiki:wiki-plan"
         assert_equal :codex, captured.first[:kwargs][:profile].name
       end
     end
@@ -98,7 +98,7 @@ class HiveStagesSkillInvocationFormatTest < Minitest::Test
       with_stubbed_spawn do |captured|
         Hive::Stages::Plan.run!(task, { "plan" => { "agent" => "codex", "skill" => "/plan" } })
 
-        assert_includes captured.first[:prompt], "/llm-wiki:wiki-plan"
+        assert_includes captured.first[:prompt], "$llm-wiki:wiki-plan"
         assert_equal :codex, captured.first[:kwargs][:profile].name
       end
     end

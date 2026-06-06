@@ -106,9 +106,9 @@ module Hive
           #{QMD_BASH_HELPERS}
           run_codex() {
             if command -v timeout >/dev/null 2>&1; then
-              run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
+              run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec -c 'model_reasoning_effort="xhigh"' --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
             else
-              run_without_git_env codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
+              run_without_git_env codex exec -c 'model_reasoning_effort="xhigh"' --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
             fi
           }
 
@@ -173,9 +173,9 @@ module Hive
             local prompt="$1"
             ran_refresh=1
             if command -v timeout >/dev/null 2>&1; then
-              run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
+              run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec -c 'model_reasoning_effort="xhigh"' --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
             else
-              run_without_git_env codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
+              run_without_git_env codex exec -c 'model_reasoning_effort="xhigh"' --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
             fi
           }
 

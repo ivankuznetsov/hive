@@ -172,8 +172,8 @@ class InitTest < Minitest::Test
           post_commit_script = File.join(dir, ".llm-wiki", "post-commit-refresh.sh")
           assert File.executable?(refresh_script)
           assert File.executable?(post_commit_script)
-          assert_includes File.read(refresh_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
-          assert_includes File.read(post_commit_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
+          assert_includes File.read(refresh_script), "codex exec -c 'model_reasoning_effort=\"xhigh\"' --add-dir \"$LLM_WIKI_QMD_CACHE_DIR\" -C \"$project_root\""
+          assert_includes File.read(post_commit_script), "codex exec -c 'model_reasoning_effort=\"xhigh\"' --add-dir \"$LLM_WIKI_QMD_CACHE_DIR\" -C \"$project_root\""
           assert_includes File.read(refresh_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(refresh_script), ".llm-wiki/qmd-cache"

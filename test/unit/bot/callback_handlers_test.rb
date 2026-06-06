@@ -49,18 +49,6 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     end
   end
 
-  def test_legacy_codex_callbacks_route_to_retirement_notice
-    # Old messages in the wild may still have Ask Codex / Write / Edit / Cancel
-    # buttons whose callback_data routes here. Replies steer the operator to
-    # the deterministic Answer-in-chat flow that replaced the Codex draft path.
-    %i[callback_path_a_yes callback_path_a_just_type callback_codex_write_draft
-       callback_codex_edit callback_codex_cancel].each do |intent|
-      result = @handlers.handle(intent, update("anything:hive:slug:1"))
-      assert_equal :reply, result.action
-      assert_match(/Codex draft flow was removed/, result.text)
-    end
-  end
-
   def test_answer_callback_starts_path_b_answer_mode
     answer = @handlers.handle(:callback_answer, update("answer:hive:brainstorm-task"))
 
@@ -165,11 +153,6 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal "hive", result.project
     assert_equal({ chat_id: 55 }, result.attachment)
   end
-
-  # The Codex draft flow was removed; codex_write callbacks from legacy
-  # messages now route to the retirement notice. The validate-question-n
-  # path is no longer exercised because no new Codex draft buttons are
-  # emitted. See test_legacy_codex_callbacks_route_to_retirement_notice.
 
   def test_findings_accept_all_dispatches_toggle_then_retry
     result = @handlers.handle(:callback_findings_accept_all, update("findings_accept_all:any:hive:slug:6-review"))

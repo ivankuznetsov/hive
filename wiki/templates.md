@@ -25,7 +25,6 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `project_config.yml.erb` | `Commands::Init#render_project_config` | `project_name`, `default_branch`, `worktree_root` |
 | `idea.md.erb` | `Commands::New#render_idea` | `slug`, `original_text`, `created_at` |
 | `brainstorm_prompt.md.erb` | `Stages::Brainstorm.run!` | `project_name`, `task_folder`, `idea_text`, `user_supplied_tag` |
-| `bot_brainstorm_codex_prompt.md.erb` | `Hive::Bot::CodexConversation` (Path A mobile brainstorm help) | `question_text`, `chat_history`, `draft`, `user_input`, `user_supplied_tag` |
 | `plan_prompt.md.erb` | `Stages::Plan.run!` | `project_name`, `task_folder`, `brainstorm_text`, `user_supplied_tag` |
 | `execute_prompt.md.erb` | `Stages::Execute.run!` (impl-only since ADR-014) | `project_name`, `worktree_path`, `task_folder`, `plan_text`, `user_supplied_tag` |
 | `open_pr_prompt.md.erb` | `Stages::OpenPr.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `branch`, `plan_text`, `execute_output_text`, `user_supplied_tag` |

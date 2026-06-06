@@ -23,11 +23,14 @@ module Hive
       permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox",
       add_dir_flag: "--add-dir",
       budget_flag: nil, # codex has no native --max-budget-usd
-      output_format_flags: [ "--json" ],
+      output_format_flags: [
+        "-c", "model_reasoning_effort=\"xhigh\"",
+        "--json"
+      ],
       version_flag: "--version",
-      # Codex CE plugin registers skills at the top level (no plugin
-      # namespace prefix needed in the prompt body).
-      skill_syntax_format: "/%{skill}",
+      # Codex plugin skills are invoked with `$plugin:skill` in the prompt
+      # body; Claude-style `/skill` commands are rejected by Codex.
+      skill_syntax_format: "$%{skill}",
       headless_supported: true,
       min_version: "0.125.0",
       status_detection_mode: :output_file_exists,

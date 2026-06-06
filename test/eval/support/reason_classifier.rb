@@ -51,11 +51,6 @@ module Hive
       ANSWER_INTENTS = %i[
         slash_answer
         callback_answer
-        callback_path_a_yes
-        callback_path_a_just_type
-        callback_codex_write_draft
-        callback_codex_edit
-        callback_codex_cancel
         free_text_answer
       ].freeze
 

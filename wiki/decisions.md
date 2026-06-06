@@ -189,7 +189,7 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 
 **Status:** Active
 **Context:** Phase 2 of the 6-review loop runs every configured reviewer adapter. The plan considered running them in parallel (each in its own thread / subprocess) versus sequentially.
-**Decision:** Sequential by default. The reviewers we ship (claude `/ce-code-review`, codex `/ce-code-review`, `pr-review-toolkit`) overlap heavily on findings — running them in parallel mostly produces near-duplicate `[x]` marks for triage to dedupe, at the cost of more concurrent agent processes (subprocess management, OOM risk, harder logs).
+**Decision:** Sequential by default. The reviewers we ship (claude `/ce-code-review`, codex `$compound-engineering:ce-code-review`, `pr-review-toolkit`) overlap heavily on findings — running them in parallel mostly produces near-duplicate `[x]` marks for triage to dedupe, at the cost of more concurrent agent processes (subprocess management, OOM risk, harder logs).
 **Consequences:** Phase 2 wall-clock is the sum of per-reviewer durations. With three reviewers averaging ~3 minutes each, that's ~9 minutes per pass — fits well inside `review.max_wall_clock_sec` (default 5400). Parallel execution can be added behind a config flag if the wall-clock cost becomes painful.
 
 ## ADR-016: Triage bias presets — `courageous` default, `safetyist` opt-in
@@ -207,7 +207,7 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 **Status:** Active
 **Context:** Pre-U12 `Hive::Agent` hardcoded `claude -p` invocation. The 6-review reviewer set wanted to spawn codex and pi alongside claude with the same lifecycle (per-spawn nonce, status detection, budget capture). Per-CLI behavior differs: codex emits status to stdout, pi exits non-zero on internal-server errors but cleanly on success, claude's `--dangerously-skip-permissions` flag has no codex equivalent.
 **Decision:** Introduce `AgentProfile` (a frozen value object with `name`, `binary`, `args_format`, `add_dir_flag`, `skill_syntax_format`, `status_detection_mode`, `version_check`, `preflight!`) and a registry (`Hive::AgentProfiles`). `Hive::Agent.run!` takes a `profile:` kwarg per spawn (defaults to the configured `agent_profile` or `claude`). Three profiles ship in v1: `claude`, `codex`, `pi`. `opencode` was scoped out — see [[active-areas]].
-**Consequences:** Per-spawn `<user_supplied>` nonce (ADR-019) is profile-independent. CE skills are invoked via `profile.skill_syntax_format` (e.g., `/ce-code-review` for claude/codex, `/run-skill ce-code-review` for pi).
+**Consequences:** Per-spawn `<user_supplied>` nonce (ADR-019) is profile-independent. CE skills are invoked via `profile.skill_syntax_format` (e.g., `/ce-code-review` for claude, `$compound-engineering:ce-code-review` for codex, `/skill:ce-code-review` for pi).
 
 ## ADR-018: Amended trust model when isolation flag varies per CLI; supersedes part of ADR-008
 
@@ -341,7 +341,7 @@ Hive's deployment model (single binary, no third-party consumers on different ve
 
 The one direct write is brainstorm answering. The bot writes literal answer text into `brainstorm.md` under `Hive::Lock.with_task_lock`, after re-parsing the file and confirming the target `### A<N>.` slot is still empty. First-write-wins across multiple Telegram devices is the concurrency contract.
 
-Path B is the default: the operator reads the question and replies in Telegram; the text is written verbatim. Path A exists for long brainstorm rounds: the bot spawns Codex for a short conversational turn, Codex returns a draft, and the bot writes only the literal draft the operator confirms. Codex never receives permission to edit `brainstorm.md` directly.
+The operator reads the question and replies in Telegram; the text is written verbatim. The old Path A Codex draft-assist branch was removed after the bot switched to deterministic Q-by-Q answering, so the bot no longer spawns Codex during brainstorm answer capture.
 
 **Relationship to ADR-024:** ADR-024 says approval is given once per project when the daemon is enabled. ADR-026 adds a mobile input surface for the gates the daemon deliberately cannot cross. Tapping Approve in Telegram is the same approval gesture as running the workflow verb in a terminal; safety still lives in `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`, `Hive::TaskAction`, marker clear allowlists, and the existing command contracts.
 

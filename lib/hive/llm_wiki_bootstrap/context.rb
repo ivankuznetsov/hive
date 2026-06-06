@@ -39,7 +39,7 @@ module Hive
           2. Search the project wiki with `qmd search "<topic>"` when QMD is available, or `rg "<topic>" wiki/` otherwise.
           3. Use `qmd query "<topic>"` only when local model generation is acceptable; if it hangs or errors, fall back to `qmd search` or `rg`.
           4. If `.llm-wiki/config.json` has `main_wiki_path`, search that main wiki too.
-          5. Use `/llm-wiki:wiki-plan` for planning-stage work when available.
+          5. Use the configured planning skill for planning-stage work when available (`/llm-wiki:wiki-plan` in Claude, `$llm-wiki:wiki-plan` in Codex).
 
           When code behavior, architecture, commands, or dependencies change:
 

@@ -15,6 +15,12 @@ class HiveSkillCheckParseTest < Minitest::Test
     assert_equal "ce-plan", inv.name
   end
 
+  def test_parses_codex_dollar_plugin_invocation
+    inv = Hive::SkillCheck.parse("$compound-engineering:ce-plan")
+    assert_equal "compound-engineering", inv.plugin
+    assert_equal "ce-plan", inv.name
+  end
+
   def test_rejects_nil
     assert_raises(ArgumentError) { Hive::SkillCheck.parse(nil) }
   end
@@ -209,7 +215,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
   def test_present_via_plugin_cache
     with_fake_home do |home|
       write_file("#{home}/.codex/plugins/cache/compound-engineering-plugin/compound-engineering/3.6.1/skills/ce-plan/SKILL.md")
-      status, msg = Hive::SkillCheck::Codex.verify("/compound-engineering:ce-plan")
+      status, msg = Hive::SkillCheck::Codex.verify("$compound-engineering:ce-plan")
       assert_equal :present, status
       assert_match(%r{compound-engineering/3.6.1/skills/ce-plan/SKILL.md\z}, msg)
     end

@@ -144,7 +144,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       ).call
 
       assert_equal 0, exit_code
-      assert_match(%r{plan.*codex.*/llm-wiki:wiki-plan.*✓ present}, out.string)
+      assert_match(%r{plan.*codex.*\$llm-wiki:wiki-plan.*✓ present}, out.string)
     end
   end
 
@@ -165,7 +165,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       ).call
 
       assert_equal 0, exit_code
-      assert_match(%r{plan.*codex.*/llm-wiki:wiki-plan.*✓ present}, out.string)
+      assert_match(%r{plan.*codex.*\$llm-wiki:wiki-plan.*✓ present}, out.string)
     end
   end
 
@@ -597,7 +597,7 @@ class HiveCommandsDoctorTest < Minitest::Test
     with_fake_home do |home|
       install_brainstorm_and_plan_skills(home)
       write_file("#{home}/.claude/skills/ce-code-review/SKILL.md")
-      write_file("#{home}/.codex/skills/ce-code-review/SKILL.md")
+      write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.11.1/skills/ce-code-review/SKILL.md")
 
       out = StringIO.new
       cfg = cfg_with_reviewers([
@@ -610,7 +610,7 @@ class HiveCommandsDoctorTest < Minitest::Test
 
       assert_equal 0, exit_code
       assert_match(%r{6-review/claude-ce-code-review.*claude.*✓ present}, out.string)
-      assert_match(%r{6-review/codex-ce-code-review.*codex.*✓ present}, out.string)
+      assert_match(%r{6-review/codex-ce-code-review.*codex.*\$compound-engineering:ce-code-review.*✓ present}, out.string)
     end
   end
 

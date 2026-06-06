@@ -207,11 +207,10 @@ then calls `Hive::Commands::New#call!` with a body override plus
 `attachments:` tuples. Final task files are still written through the
 same `hive new` command path.
 
-Path A brainstorm help uses Codex as a short-lived subprocess per turn
-through `Hive::Bot::CodexConversation`. Telegram-sourced text is wrapped
-with the same per-spawn `<user_supplied_<hex>>` nonce boundary as stage
-prompts, and Codex only returns a draft. The bot writes the literal
-confirmed draft; Codex never edits `brainstorm.md` directly.
+The brainstorm answer flow is deterministic: the operator replies in
+Telegram, and the bot writes that literal text into `brainstorm.md` under
+the task lock. The retired Codex draft-assist path has been removed, so
+the bot no longer spawns an LLM while answering brainstorm questions.
 
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 

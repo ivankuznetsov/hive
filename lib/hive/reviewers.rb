@@ -50,7 +50,7 @@ module Hive
           in your project's CI command — set `review.ci.command` to your linter
           driver (e.g., `bin/ci`) and let the 6-review CI-fix phase surface and
           repair its findings. The reviewer set is for CE-skill-based agent
-          reviewers only (claude /ce-code-review, codex /ce-code-review,
+          reviewers only (claude /ce-code-review, codex $compound-engineering:ce-code-review,
           pr-review-toolkit).
         MSG
       else

@@ -36,7 +36,7 @@ class InitDoctorPreflightTest < Minitest::Test
     # review.reviewers default set: claude-ce-code-review +
     # codex-ce-code-review + pr-review-toolkit:review-pr
     write_file("#{home}/.claude/skills/ce-code-review/SKILL.md")
-    write_file("#{home}/.codex/skills/ce-code-review/SKILL.md")
+    write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.11.1/skills/ce-code-review/SKILL.md")
     write_file("#{home}/.claude/plugins/cache/mp/pr-review-toolkit/1.0/skills/review-pr/SKILL.md")
   end
 

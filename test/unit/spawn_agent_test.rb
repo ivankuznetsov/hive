@@ -120,8 +120,8 @@ class SpawnAgentTest < Minitest::Test
   end
 
   # claude.permission_mode is a Claude-only setting. A non-claude (codex)
-  # profile spawn that now receives cfg: (codex_conversation / rebase /
-  # reviewers all thread it through) must NOT gain a --permission-mode flag;
+  # profile spawn that now receives cfg: (rebase / reviewers thread it
+  # through) must NOT gain a --permission-mode flag;
   # it keeps its own skip flag. Guards the `profile.name == :claude` gate in
   # spawn_agent so the new cfg threading can't leak Claude flags into codex.
   def test_codex_profile_with_cfg_does_not_receive_permission_mode_flags

@@ -73,8 +73,9 @@ module Hive
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
       for the schema). Legacy Compound Engineering skill values such as
       `/compound-engineering:ce-brainstorm` are normalized to the current
-      `/ce-brainstorm` form before prompts are rendered. Piped STDIN is
-      intentionally NOT consumed.
+      per-agent form before prompts are rendered (`/ce-brainstorm` for
+      Claude, `$compound-engineering:ce-brainstorm` for Codex). Piped
+      STDIN is intentionally NOT consumed.
 
       Exit codes:
         0  — initialised successfully
@@ -153,21 +154,22 @@ module Hive
       Walks the brainstorm and plan stage configs and asks the
       configured agent profile (claude / codex / pi) to probe whether
       its skill (`<stage>.skill` in config.yml) actually resolves to
-      an installed slash-command or skill on disk.
+      an installed command or skill on disk.
 
       Hive ships expecting both llm-wiki (`/plan`) and
-      compound-engineering (`/compound-engineering:ce-*`) to be
-      installed alongside your agent CLI. `hive doctor` is the
-      preflight that catches a missing install before a stage spawns
-      and the agent reports `skill not found` mid-run.
+      compound-engineering (`/ce-*` in Claude,
+      `$compound-engineering:ce-*` in Codex) to be installed alongside
+      your agent CLI. `hive doctor` is the preflight that catches a
+      missing install before a stage spawns and the agent reports
+      `skill not found` mid-run.
 
       Per-agent search rules:
       - claude: `~/.claude/{commands/<name>.md, skills/<name>/SKILL.md}`
         for plain `/<name>`; `~/.claude/plugins/marketplaces/<plug>*/skills/...`
         for `/<plug>:<name>`. Project-level paths checked too.
       - codex: `~/.codex/skills/<name>/SKILL.md` (and `.system/`) for
-        plain; `~/.codex/plugins/cache/*/<plug>/*/skills/...` for
-        plug-namespaced.
+        plain `$<name>`; `~/.codex/plugins/cache/*/<plug>/*/skills/...`
+        for `$<plug>:<name>`.
       - pi: `/skill:<name>` only. Probes (in order) `~/.pi/agent/skills`
         (recursive, plus root `<name>.md`), `~/.agents/skills` (recursive,
         cross-agent), `<project>/.pi/skills` (recursive), every ancestor

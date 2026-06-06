@@ -85,10 +85,14 @@ class AgentProfilesTest < Minitest::Test
                  claude.format_skill_invocation("/compound-engineering:ce-code-review")
     assert_equal "/ce-code-review",
                  claude.format_skill_invocation("compound-engineering:ce-code-review")
-    assert_equal "/ce-code-review",
+    assert_equal "$compound-engineering:ce-code-review",
                  codex.format_skill_invocation("/compound-engineering:ce-code-review")
-    assert_equal "/ce-code-review",
+    assert_equal "$compound-engineering:ce-code-review",
                  codex.format_skill_invocation("compound-engineering:ce-code-review")
+    assert_equal "$compound-engineering:ce-code-review",
+                 codex.format_skill_invocation("ce-code-review")
+    assert_equal "$llm-wiki:wiki-plan",
+                 codex.format_skill_invocation("/llm-wiki:wiki-plan")
     assert_equal "/skill:ce-code-review",
                  pi.format_skill_invocation("/compound-engineering:ce-code-review")
     assert_equal "/skill:ce-code-review",
@@ -101,6 +105,12 @@ class AgentProfilesTest < Minitest::Test
     assert_equal "/skill:ce-brainstorm", profile.format_skill_invocation("/compound-engineering:ce-brainstorm")
     assert_equal "/skill:plan", profile.format_skill_invocation("/skill:plan")
     assert_equal "/skill:plan", profile.format_skill_invocation("plan")
+  end
+
+  def test_codex_profile_forces_xhigh_reasoning
+    profile = Hive::AgentProfiles.lookup(:codex)
+    assert_includes profile.output_format_flags, "-c"
+    assert_includes profile.output_format_flags, "model_reasoning_effort=\"xhigh\""
   end
 
   # --- agents.* config overrides --------------------------------------

@@ -4,8 +4,8 @@ require "pathname"
 require "timeout"
 
 module Hive
-  # Per-agent verification that a configured slash-command skill
-  # invocation actually resolves to a file on disk. `Hive::AgentProfile`
+  # Per-agent verification that a configured command/skill invocation
+  # actually resolves to a file on disk. `Hive::AgentProfile`
   # delegates to one of `SkillCheck::Claude` / `SkillCheck::Codex` /
   # `SkillCheck::Pi` so the profile interface stays uniform.
   #
@@ -16,26 +16,28 @@ module Hive
   #     — invocation maps to a real on-disk file.
   #
   #   [:missing, "<install hint>"]
-  #     — invocation is a real shape (`/foo` or `/plug:foo`) but no
-  #       installed file matches it.
+  #     — invocation is a real shape (`/foo`, `/plug:foo`, `$foo`, or
+  #       `$plug:foo`) but no installed file matches it.
   #
   #   [:not_applicable, "<why>"]
   #     — this invocation form cannot be checked for this agent
   #       (e.g. pi only resolves skills as `/skill:<name>`).
   module SkillCheck
-    # Parsed invocation. Either form is accepted:
+    # Parsed invocation. Either Claude/Pi slash form or Codex dollar form is accepted:
     #   /name           -> Invocation.new(plugin: nil, name: "name")
     #   /plugin:name    -> Invocation.new(plugin: "plugin", name: "name")
+    #   $name           -> Invocation.new(plugin: nil, name: "name")
+    #   $plugin:name    -> Invocation.new(plugin: "plugin", name: "name")
     Invocation = Struct.new(:plugin, :name, keyword_init: true)
 
     # Raises ArgumentError on malformed input so callers can surface the
     # error rather than silently treating garbage as a valid skill.
     def self.parse(invocation)
-      raise ArgumentError, "expected /name or /plugin:name, got nil" if invocation.nil?
+      raise ArgumentError, "expected /name, /plugin:name, $name, or $plugin:name, got nil" if invocation.nil?
 
       str = invocation.to_s
-      m = str.match(%r{\A/(?:([^:/\s]+):)?([^:/\s]+)\z})
-      raise ArgumentError, "expected /name or /plugin:name, got #{str.inspect}" unless m
+      m = str.match(%r{\A[/$](?:([^:/\s]+):)?([^:/\s]+)\z})
+      raise ArgumentError, "expected /name, /plugin:name, $name, or $plugin:name, got #{str.inspect}" unless m
 
       Invocation.new(plugin: m[1], name: m[2])
     end
@@ -193,7 +195,7 @@ module Hive
           end
           paths << File.join(home, ".codex/skills/#{inv.name}/SKILL.md")
           paths << File.join(home, ".codex/skills/.system/#{inv.name}/SKILL.md")
-          # Plugin fallback: codex resolves `/foo` against any installed
+          # Plugin fallback: codex resolves `$foo` against any installed
           # plugin's skill named `foo` in addition to user-level
           # ~/.codex/skills/. Mirrors claude's behaviour.
           paths.concat(Dir[File.join(home, ".codex/plugins/cache/*/*/*/skills", name, "SKILL.md")])
@@ -203,16 +205,16 @@ module Hive
 
       def install_hint(inv)
         if inv.plugin
-          "codex: /#{inv.plugin}:#{inv.name} not found under " \
+          "codex: $#{inv.plugin}:#{inv.name} not found under " \
             "~/.codex/plugins/cache/*/#{inv.plugin}/*/skills/. " \
             "Install via `codex plugin install <marketplace>` for the marketplace " \
             "that ships #{inv.plugin}."
         else
-          "codex: /#{inv.name} not found under ~/.codex/skills/, ~/.codex/skills/.system/, " \
+          "codex: $#{inv.name} not found under ~/.codex/skills/, ~/.codex/skills/.system/, " \
             "or any installed plugin's skills/<name>/SKILL.md. Codex has no user-level " \
             "slash-command directory; either install a skill named #{inv.name.inspect}, " \
             "install a plugin that ships it, or override the stage's skill in config.yml " \
-            "(e.g. `plan.skill: /ce-plan`)."
+            "(e.g. `plan.skill: $compound-engineering:ce-plan`)."
         end
       end
     end

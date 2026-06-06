@@ -131,12 +131,15 @@ module Hive
     end
 
     # Render a configured skill name for this profile. Stage configs
-    # historically store full Claude/Codex slash invocations (`/plan`,
+    # historically store full Claude slash / Codex dollar invocations (`/plan`,
     # `/plugin:name`), while reviewer configs store bare names. Profiles
     # with a non-default syntax, such as pi's `/skill:<name>`, need the
     # bare skill name in both cases.
     def format_skill_invocation(skill)
-      raw = normalize_legacy_compound_engineering_invocation(skill.to_s)
+      raw = skill.to_s
+      return format_codex_plugin_invocation(raw) if @skill_syntax_format == "$%{skill}"
+
+      raw = normalize_legacy_compound_engineering_invocation(raw)
       if raw.start_with?("/")
         return raw if @skill_syntax_format == "/%{skill}"
 
@@ -144,6 +147,16 @@ module Hive
       end
       raw = raw.split(":", 2).last if @skill_syntax_format != "/%{skill}" && raw.include?(":")
 
+      format(@skill_syntax_format, skill: raw)
+    end
+
+    def format_codex_plugin_invocation(raw)
+      raw = raw.delete_prefix("/")
+      raw = raw.delete_prefix("$")
+      raw = "compound-engineering:#{raw}" if raw.match?(/\Ace-[A-Za-z0-9-]+\z/)
+      if (match = raw.match(/\Acompound-engineering:(ce-[A-Za-z0-9-]+)\z/))
+        raw = "compound-engineering:#{match[1]}"
+      end
       format(@skill_syntax_format, skill: raw)
     end
 

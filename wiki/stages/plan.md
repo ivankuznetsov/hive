@@ -7,7 +7,7 @@ updated: 2026-05-22
 tags: [stage, plan, llm-wiki, ce-plan]
 ---
 
-**TLDR**: Agent reads `brainstorm.md`, runs Hive's configured wiki-first planning skill to generate a structured `plan.md`, and waits for human review/edits via `<!-- WAITING -->` until ready (`<!-- COMPLETE -->`). The default is agent-aware: Claude uses `/plan`, Codex uses `/llm-wiki:wiki-plan`, and Pi receives `/skill:wiki-plan` after profile formatting.
+**TLDR**: Agent reads `brainstorm.md`, runs Hive's configured wiki-first planning skill to generate a structured `plan.md`, and waits for human review/edits via `<!-- WAITING -->` until ready (`<!-- COMPLETE -->`). The default is agent-aware: Claude uses `/plan`, Codex uses `$llm-wiki:wiki-plan`, and Pi receives `/skill:wiki-plan` after profile formatting.
 
 ## Setup
 

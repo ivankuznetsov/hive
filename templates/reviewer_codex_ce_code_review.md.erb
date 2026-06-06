@@ -8,7 +8,7 @@ Pass: <%= pass %>
 <%= plan_context_section %>
 Behavior:
 
-1. Use the `<%= skill_invocation %>` skill on the diff
+1. Use the `<%= skill_invocation %>` skill in `mode:agent` on the diff
    `git diff <%= default_branch %>..HEAD` in the current worktree.
 2. Output structured findings to <%= output_path %>
    using GFM checkboxes grouped by severity:

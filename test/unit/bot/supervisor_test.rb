@@ -241,15 +241,6 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  Outcome = Struct.new(:kind, :draft, :text, :reason, keyword_init: true)
-
-  FakeCodexConversation = Struct.new(:outcome, :calls, keyword_init: true) do
-    def next_turn(**kwargs)
-      calls << kwargs
-      outcome
-    end
-  end
-
   def test_status_tick_includes_legacy_stage_dirs_in_notification_inputs
     legacy = legacy_stage_dirs
     @status_watcher.result = StatusResult.new(ok: true, rows: [], legacy_stage_dirs: [ legacy ])

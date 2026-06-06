@@ -445,7 +445,10 @@ class HiveBotSlashHandlersTest < Minitest::Test
     # does not special-case, so it exercises the generic "Attached." fallback.
     %i[awaiting_project collecting_files awaiting_transcript_confirm].each do |phase|
       store = Hive::Bot::IdeaDraftStore.new
-      store.start(chat_id: 9, phase: phase, text: "fix", token: "tok")
+      # :awaiting_transcript_confirm is coupled to a voice-origin draft
+      # (validate_phase_origin!), so it must be started with origin: :voice.
+      origin = phase == :awaiting_transcript_confirm ? :voice : nil
+      store.start(chat_id: 9, phase: phase, text: "fix", token: "tok", origin: origin)
       handlers = idea_handlers(
         draft_store: store,
         policy: FakeAttachmentPolicy.new(

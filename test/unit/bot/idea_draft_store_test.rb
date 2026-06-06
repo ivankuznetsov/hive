@@ -73,7 +73,7 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
   end
 
   def test_ttl_prune_removes_stale_draft
-    @store.start(chat_id: 1, phase: :awaiting_transcript_confirm, text: "fix", token: "tok")
+    @store.start(chat_id: 1, phase: :awaiting_transcript_confirm, text: "fix", token: "tok", origin: :voice)
 
     @now += 901
     @store.prune!

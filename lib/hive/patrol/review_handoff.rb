@@ -73,6 +73,7 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
+        text = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -81,10 +82,10 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            "original_text" => idea_text(finding)
+            "original_text" => text
           },
           <<~MD
-          #{idea_text(finding)}
+          #{text}
         MD
         )
       end
@@ -169,7 +170,8 @@ module Hive
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
-        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
+        evidence = Array(finding.evidence)
+        parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
         parts.join("\n\n")
       end
 

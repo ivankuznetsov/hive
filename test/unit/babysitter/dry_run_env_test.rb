@@ -77,6 +77,15 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "grep", "--open-files-in-pager=touch pwned", "needle"
       # Bare `--open-files-in-pager` (no glued value) is equally a pager exec.
       assert_stubbed env, "git", "grep", "--open-files-in-pager", "needle"
+      # `--ext-diff`/`--textconv` re-enable the repo-configured diff.external and
+      # *.textconv helpers (both spawn commands) that the injected
+      # `--no-ext-diff`/`--no-textconv` flags neutralise; git resolves repeated
+      # booleans last-wins, so a later user flag would restore the bypass. Screen
+      # them across diff/log/show.
+      assert_stubbed env, "git", "diff", "--ext-diff"
+      assert_stubbed env, "git", "log", "-p", "--textconv"
+      assert_stubbed env, "git", "show", "--ext-diff"
+      assert_stubbed env, "git", "diff", "--textconv=cat"
       # Trailing bare two-token global option must not underflow / crash.
       assert_stubbed env, "git", "-c"
       assert_stubbed env, "git", "-C"
@@ -131,6 +140,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=diff.external=PWN diff skipped"
       assert_includes skipped, "git grep -Otouch pwned needle skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch pwned needle skipped"
+      assert_includes skipped, "git diff --ext-diff skipped"
+      assert_includes skipped, "git log -p --textconv skipped"
+      assert_includes skipped, "git show --ext-diff skipped"
+      assert_includes skipped, "git diff --textconv=cat skipped"
       assert_includes skipped, "git --output=patch.diff diff skipped"
       assert_includes skipped, "git log --output=log.txt skipped"
       assert_includes skipped, "git show --output=show.txt skipped"

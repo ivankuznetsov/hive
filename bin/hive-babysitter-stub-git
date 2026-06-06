@@ -164,6 +164,35 @@ def read_only_config?(rest)
   end
 end
 
+def writes_output_file?(arg)
+  arg == "--output" || arg.start_with?("--output=")
+end
+
+def grep_pager_option?(arg)
+  arg == "--open-files-in-pager" ||
+    arg.start_with?("--open-files-in-pager=") ||
+    arg.match?(/\A-[^-]*O/)
+end
+
+def safe_passthrough_argv(argv, rest)
+  return argv unless %w[diff log show].include?(rest.first)
+
+  safe_argv = argv.dup
+  global_count = argv.length - rest.length
+  separator = rest.each_with_index.find { |arg, index| index.positive? && arg == "--" }
+  insert_at = separator ? global_count + separator.last : safe_argv.length
+  safe_argv.insert(insert_at, "--no-ext-diff", "--no-textconv")
+end
+
+def exec_or_write_screened?(argv, rest)
+  global_options = argv[0, argv.length - rest.length]
+  return true if global_options.any? { |arg| dangerous_global_option?(arg) }
+  return true if argv.any? { |arg| writes_output_file?(arg) }
+  return true if rest.first == "grep" && rest.drop(1).any? { |arg| grep_pager_option?(arg) }
+
+  false
+end
+
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
@@ -193,9 +222,23 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
   exit 127
 end
+
+# Even an allowlisted read-only subcommand executes arbitrary commands if these
+# env vars reach real git, and argv screening structurally cannot see them. Git
+# also reads repository/global/system config after the stub's allowlist passes,
+# so force safe config for helpers that can spawn commands from read-looking
+# operations.
+%w[GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND].each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
+ENV["GIT_CONFIG_NOSYSTEM"] = "1"
+ENV["GIT_CONFIG_GLOBAL"] = File::NULL
+ENV["GIT_CONFIG_COUNT"] = "1"
+ENV["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
+ENV["GIT_CONFIG_VALUE_0"] = "false"
+ENV["GIT_PAGER"] = ""
+
 begin
-  # Array-form exec (no shell) hands argv straight to the real git binary.
-  exec real, *argv
+  exec(real, *safe_passthrough_argv(argv, rest))
 rescue SystemCallError => e
   # A set-but-invalid path (missing, not executable, …) would otherwise leak a raw Ruby
   # backtrace and exit 1; mirror the unset-case friendly exit-127 handling above.

@@ -228,6 +228,19 @@ Append-only log of all wiki operations.
 - [[operating]]
 - [[gaps]]
 
+## [2026-06-06T23:06:06+01:00] babysitter — neutralize configured git external diff in dry-run
+
+**Action:** Hardened `bin/hive-babysitter-stub-git` after patrol found that an allowlisted `git diff` could still execute repository/global/system config such as `diff.external` when the stub handed off to real Git. The stub now scrubs user-supplied exec-influencing Git env, disables system/global config for the child Git process, forces `core.fsmonitor=false`, disables pagers, and adds `--no-ext-diff --no-textconv` to `diff`/`log`/`show` invocations before any pathspec separator. Added a real temporary-repo regression proving repo-local `diff.external` is neutralized without logging a skip, and refreshed the dry-run docs. Did not run `qmd update` or `qmd embed`.
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`
+- `bundle exec rubocop bin/hive-babysitter-stub-git test/unit/babysitter/dry_run_env_test.rb`
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+
 ## [2026-06-06T20:24:46Z] openclaw — publish as one ClawHub skill
 
 **Action:** Corrected the OpenClaw publishing model after live ClawHub preflight showed that installing one skill folder is the right user surface. Hive now documents and tests a single ClawHub listing, `hive-cli`, whose installed `SKILL.md` still exposes `/hive`; all workflows are invoked as `/hive ...` arguments rather than separate shortcut listings. Deleted the accidental `ivankuznetsov` ClawHub shortcut listings `hive-accept-finding`, `hive-archive`, `hive-artifacts`, and `hive-babysit`; `hive-bot` never published because ClawHub rejected it at the new-skill rate limit. Refreshed the README, OpenClaw README, [[index]], [[operating]], and [[gaps]] so future publication uses only `clawhub skill publish openclaw/skills/hive --slug hive-cli`.

@@ -53,11 +53,12 @@ module Hive
       "archive" => stage_action_envelope("archive"),
       "drop" => Envelope.new(schema: "hive-drop", error_kind: "invalid_task_path"),
       "markers" => Envelope.new(schema: "hive-markers-clear", error_kind: "invalid_task_path"),
-      # Retained defensively. `forget`/`daemon` raise their own
-      # command-local `UsageError < Hive::Error` from inside the command
-      # body, caught by `bin/hive`'s lower `rescue Hive::Error`, so neither
-      # row fires today. Kept so a future refactor that routes one through
-      # the Thor parse path still emits a contract-valid envelope.
+      # Retained defensively. `forget` raises a command-local
+      # `UsageError < Hive::Error`; `daemon` raises a command-local
+      # `UsageError < Hive::InvalidTaskPath < Hive::Error`. Both are caught
+      # by `bin/hive`'s lower `rescue Hive::Error`, so neither row fires
+      # today. Kept so a future refactor that routes one through the Thor
+      # parse path still emits a contract-valid envelope.
       "forget" => Envelope.new(schema: "hive-forget", error_kind: "missing_name"),
       "prune" => Envelope.new(schema: "hive-prune", error_kind: "usage"),
       "status" => Envelope.new(schema: "hive-status", error_kind: "error"),

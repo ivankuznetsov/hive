@@ -461,4 +461,24 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "blank-mtime", "invalid-mtime" ], filtered.rows.map(&:slug)
     assert_equal 0, snapshot.hidden_old_archived_count(now: now)
   end
+
+  def test_without_old_archived_uses_valid_folder_mtime_when_row_mtime_is_invalid
+    now = Time.utc(2026, 6, 4, 12, 0, 0)
+    row = sample_task(slug: "invalid-row-mtime", stage: "9-done", marker: "complete")
+    row["mtime"] = "not-a-time"
+    row["folder_mtime"] = (now - (5 * 86_400)).utc.iso8601
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+                                                                 {
+                                                                   "name" => "alpha",
+                                                                   "path" => "/tmp/alpha",
+                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
+                                                                   "tasks" => [ row ]
+                                                                 }
+                                                               ]))
+
+    filtered = snapshot.without_old_archived(now: now)
+
+    refute_includes filtered.rows.map(&:slug), "invalid-row-mtime"
+    assert_equal 1, snapshot.hidden_old_archived_count(now: now)
+  end
 end

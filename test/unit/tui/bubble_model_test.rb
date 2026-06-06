@@ -807,6 +807,25 @@ class HiveTuiBubbleModelTest < Minitest::Test
            "hidden notice must be prepended ahead of key hints"
   end
 
+  def test_default_footer_suppresses_hidden_archived_notice_outside_grid_mode
+    row = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      slug: "old-archived",
+      stage: "9-done",
+      marker: "complete",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snapshot_with([ row ]), mode: :archive),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 180) }
+
+    refute_includes out, "hidden — open Archive pane"
+  end
+
   def test_default_footer_omits_hidden_notice_when_none_hidden
     row = make_task_row(action_key: "ready_to_plan", slug: "active-row")
     @model = Hive::Tui::BubbleModel.new(

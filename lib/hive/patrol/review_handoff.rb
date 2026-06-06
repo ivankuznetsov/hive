@@ -99,7 +99,7 @@ module Hive
           "branch" => patch.branch,
           "created_at" => now.utc.iso8601
         }
-        data["execute_base_head"] = patch.head_sha if patch.respond_to?(:head_sha) && patch.head_sha
+        data["execute_base_head"] = patch.head_sha if patch.head_sha
         File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
       end
 

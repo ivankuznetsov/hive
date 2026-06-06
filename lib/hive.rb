@@ -379,8 +379,9 @@ module Hive
   # In-process this is distinct from InvalidTaskPath (whose "bad path"
   # semantics fit a malformed flag poorly), but note that on the wire it
   # serialises to `"error_class":"UsageError"` (last `::` segment) just
-  # like those siblings — JSON consumers cannot tell the four apart, so
-  # the distinction is for rescue clarity, not a consumer-facing signal.
+  # like those sibling UsageError variants — JSON consumers cannot tell
+  # them apart, so the distinction is for rescue clarity, not a
+  # consumer-facing signal.
   class UsageError < Error
     attr_reader :error_kind
 

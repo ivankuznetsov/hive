@@ -78,7 +78,7 @@ module Hive
 
         def render_row(label, selected, inner_width)
           truncated = Format.truncate(label, inner_width)
-          padded = truncated.ljust(inner_width)
+          padded = Format.ljust_cells(truncated, inner_width)
           selected ? Styles::CURSOR_HIGHLIGHT.render(padded) : padded
         end
 

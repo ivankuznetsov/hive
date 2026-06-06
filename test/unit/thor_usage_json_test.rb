@@ -49,6 +49,7 @@ class HiveThorUsageJsonTest < Minitest::Test
     assert_equal "run", ThorUsageJson.command_token([ "run", "--json" ])
     assert_equal "run", ThorUsageJson.command_token([ "--json", "run" ])
     assert_nil ThorUsageJson.command_token([ "--json", "--verbose" ])
+    assert_nil ThorUsageJson.command_token([])
   end
 
   def test_json_requested_detects_the_flag_in_any_position

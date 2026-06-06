@@ -38,7 +38,7 @@ def rewrite_help_flag!(argv)
   return unless help_idx
 
   cmd = argv[cmd_idx]
-  argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
+  argv[cmd_idx..] = [ "help", cmd ]
 end
 
 normalize_leading_json_options!(ARGV)

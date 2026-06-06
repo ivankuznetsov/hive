@@ -140,7 +140,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-git -C #{dir} status --short"
-      assert_includes real_invocations, "real-git diff --name-only --no-ext-diff --no-textconv"
+      assert_includes real_invocations, "real-git diff --no-ext-diff --no-textconv --name-only"
       assert_includes real_invocations, "real-git grep needle"
       assert_includes real_invocations, "real-git config --get remote.origin.url"
       assert_includes real_invocations, "real-git remote"
@@ -175,6 +175,26 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes out, "+changed"
       refute_path_exists marker
       refute_path_exists File.join(repo, "skipped.log")
+    end
+  end
+
+  def test_git_diff_with_pathspec_does_not_misplace_safety_flags
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "README.md"), "changed\n")
+      run!("git", "-C", repo, "commit", "-am", "change", "--quiet")
+
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(repo, "skipped.log")
+      }
+      # Pathspecs after the rev would push the injected --no-ext-diff/--no-textconv
+      # behind non-option args, which real git rejects with exit 128.
+      out, err, status = Open3.capture3(
+        env, stub_path("git"), "-C", repo, "diff", "HEAD~1", "--", "README.md"
+      )
+
+      assert status.success?, err
+      assert_includes out, "+changed"
     end
   end
 

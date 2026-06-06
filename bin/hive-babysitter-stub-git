@@ -179,8 +179,10 @@ def safe_passthrough_argv(argv, rest)
 
   safe_argv = argv.dup
   global_count = argv.length - rest.length
-  separator = rest.each_with_index.find { |arg, index| index.positive? && arg == "--" }
-  insert_at = separator ? global_count + separator.last : safe_argv.length
+  # Git only honours --no-ext-diff/--no-textconv before positional args; placing
+  # them after a rev or pathspec (or a "--" separator) makes git exit 128. Insert
+  # them immediately after the subcommand token, ahead of every positional arg.
+  insert_at = global_count + 1
   safe_argv.insert(insert_at, "--no-ext-diff", "--no-textconv")
 end
 

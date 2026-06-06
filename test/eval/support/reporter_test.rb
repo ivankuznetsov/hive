@@ -4,6 +4,21 @@ require "json"
 require "open3"
 
 class HiveEvalReporterTest < Minitest::Test
+  def test_cli_rejects_positional_scenario_argument
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "positional.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "s1_status", "--no-judge", "--report", report
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_match(/unexpected argument: s1_status/, err)
+      refute File.exist?(report), "unexpected positional args must exit before running eval scenarios"
+    end
+  end
+
   def test_cli_writes_report_for_passing_scenario
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "s1.json")

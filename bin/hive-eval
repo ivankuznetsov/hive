@@ -11,7 +11,7 @@ options = {
   no_judge: false
 }
 
-OptionParser.new do |parser|
+parser = OptionParser.new do |parser|
   parser.banner = "Usage: bin/hive-eval [--scenario NAME] [--report PATH] [--no-judge]"
   parser.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
     options[:scenario] = value
@@ -22,7 +22,14 @@ OptionParser.new do |parser|
   parser.on("--no-judge", "Skip Codex judge assertions") do
     options[:no_judge] = true
   end
-end.parse!
+end
+parser.parse!
+
+unless ARGV.empty?
+  warn "hive-eval: unexpected argument: #{ARGV.first}"
+  warn parser.banner
+  exit 64
+end
 
 def scenario_path(root, value)
   return nil if value.nil?

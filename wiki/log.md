@@ -3213,3 +3213,10 @@ TTL config.
 - [[operating]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-05T22:33:41Z] wiki/post-commit — verify hv wiki residue commit
+
+**Action:** Refreshed planning/documentation coverage after commit `6ed10a39` touched only wiki pages (`[[cli]]`, `[[operating]]`, `[[testing]]`, `[[gaps]]`, and [[log]]) as a residual 6-review auto-commit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hv fallback launcher Apache Hive semver"` returned no indexed hits. Verified the committed wiki diff against current `bin/hv`, `bin/hive`, `lib/hive/cli.rb`, `lib/hive.rb`, and `test/unit/hv_test.rb`. The committed pages already match the source: `hv` probes only the documented install paths, rejects self-recursion, and execs only candidates whose `--version` is a bare `X.Y.Z`; `hv_test.rb` covers the override path and Apache-style `Hive 4.0.0` rejection. No page coverage change or new uncertainty beyond the existing live Apache-Hive collision smoke gap in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

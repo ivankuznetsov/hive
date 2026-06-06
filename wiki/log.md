@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T22:27:57Z] cli/install - pin `hv` Homebrew fallback validation
+
+**Action:** Addressed patrol finding `command-bin-hv-1`. `bin/hv` now keeps the explicit `HIVE_BIN_OVERRIDE` and XDG candidates as before, but requires the Homebrew-prefix and `/usr/local` fallback candidates to print a bare semver from `--version` before execing them. Added `test/unit/hv_test.rb` coverage for an Apache-style Homebrew candidate that prints `Hive 3.1.3` and must fall through to the existing exit-127 diagnostic. Refreshed [[cli]], [[operating]], [[testing]], and [[gaps]].
+
+**Refreshed pages:**
+- [[cli]]
+- [[operating]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
 
 **Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.

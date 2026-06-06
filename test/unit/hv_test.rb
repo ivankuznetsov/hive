@@ -35,4 +35,36 @@ class HvTest < Minitest::Test
       assert_equal "override:probe\n", out
     end
   end
+
+  def test_homebrew_candidate_skips_apache_hive_version_output
+    skip "/usr/local/bin/hive exists on this host" if File.executable?("/usr/local/bin/hive")
+
+    with_tmp_dir do |dir|
+      homebrew_prefix = File.join(dir, "homebrew")
+      candidate = File.join(homebrew_prefix, "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(candidate))
+      File.write(candidate, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo "Hive 3.1.3"
+          exit 0
+        fi
+        echo "apache:$1"
+      SH
+      FileUtils.chmod(0o755, candidate)
+
+      out, err, status = Open3.capture3(
+        {
+          "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
+          "HOMEBREW_PREFIX" => homebrew_prefix
+        },
+        HV_BIN,
+        "--version"
+      )
+
+      assert_equal 127, status.exitstatus, err
+      assert_equal "", out
+      assert_includes err, "hv: hive binary not found"
+    end
+  end
 end

@@ -19,6 +19,7 @@ UNSAFE_CONFIG_KEYS = [
   "core.sshcommand",
   "diff.external",
   "gpg.program",
+  "include.path",
   "sequence.editor",
   "ssh.variant",
   "uploadpack.packobjectshook"
@@ -61,6 +62,7 @@ UNSAFE_CONFIG_PREFIXES = [
   "gpg.",
   "hook.",
   "hooks.",
+  "includeif.",
   "pager.",
   "protocol.ext."
 ].freeze

@@ -71,6 +71,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "--paginate", "log"
       assert_stubbed env, "git", "--exec-path=/tmp/evil", "status"
       assert_stubbed env, "git", "grep", "--open-files-in-pager=sh", "needle"
+      assert_stubbed env, "git", "grep", "-Osh", "needle"
+      assert_stubbed env, "git", "-c", "core.sshCommand=sh -c echo-pwn", "remote", "show", "origin"
+      assert_stubbed env, "git", "-c", "credential.helper=!sh -c echo-pwn", "remote", "show", "origin"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
@@ -112,6 +115,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --paginate log skipped"
       assert_includes skipped, "git --exec-path=/tmp/evil status skipped"
       assert_includes skipped, "git grep --open-files-in-pager=sh needle skipped"
+      assert_includes skipped, "git grep -Osh needle skipped"
+      assert_includes skipped, "git -c core.sshCommand=sh -c echo-pwn remote show origin skipped"
+      assert_includes skipped, "git -c credential.helper=!sh -c echo-pwn remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"

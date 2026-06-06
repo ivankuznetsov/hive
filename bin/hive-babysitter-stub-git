@@ -11,13 +11,23 @@ end
 argv = ARGV.dup
 
 UNSAFE_CONFIG_KEYS = [
+  "core.askpass",
+  "core.editor",
   "core.fsmonitor",
   "core.hookspath",
   "core.pager",
-  "diff.external"
+  "core.sshcommand",
+  "diff.external",
+  "gpg.program",
+  "sequence.editor",
+  "ssh.variant",
+  "uploadpack.packobjectshook"
 ].freeze
 UNSAFE_CONFIG_PREFIXES = [
   "alias.",
+  "credential.",
+  "filter.",
+  "gpg.",
   "hook.",
   "hooks.",
   "pager.",
@@ -123,7 +133,8 @@ def unsafe_command_options?(rest)
   return false unless rest.first.to_s == "grep"
 
   rest[1..].to_a.any? do |arg|
-    arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=")
+    arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=") ||
+      arg.start_with?("-O")
   end
 end
 

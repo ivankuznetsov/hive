@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T19:58:29Z] babysitter/wiki - refresh dry-run git env scrub coverage
+
+**Action:** Refreshed wiki coverage after current HEAD `b23d9765` changed `bin/hive-babysitter-stub-git` to scrub unsafe inherited Git environment variables before read-only pass-through and detect bundled `git grep` short-option clusters whose non-leading `O` opens a pager. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "git env hooks grouped -O dry-run stub"` and `qmd search "babysitter dry-run GIT_EXTERNAL_DIFF GIT_CONFIG_COUNT"` had no indexed hits for the new details. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and the existing babysitter command/module/testing/gaps pages. Updated [[commands/babysit]] and [[modules/babysitter]] for the `GIT_*` scrub and grouped `-O` parsing, and updated [[gaps]] to note that focused unit assertions for the new env-scrub/non-leading-`O` cases were not found and the live dry-run smoke remains open. Ran `ruby -Itest test/unit/babysitter/dry_run_env_test.rb` successfully (2 runs, 216 assertions). No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-06T16:12:40Z] babysitter/wiki - audit residual dry-run stub wiki refresh
 
 **Action:** Audited commit `203f4bc8`, a wiki-only residual 6-review commit, after it updated babysitter command/module/testing/gaps/log coverage for the dry-run Git stub hardening. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub grep pager"` and `qmd search "hive babysit live-agent-smoked dry run"` returned existing log/gaps context. Verified the HEAD diff plus the underlying source commit `5176de4e`, current `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, and the refreshed [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]] pages. Found no stale page content: the expanded executable-affecting config key/prefix denylist and `git grep -O...` blocking are documented, and the existing [[gaps]] live-agent dry-run smoke uncertainty remains current. No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.

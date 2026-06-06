@@ -3240,3 +3240,11 @@ TTL config.
 - [[testing]]
 - [[gaps]]
 - [[log]]
+
+## [2026-06-06T18:21:52Z] wiki/post-commit — verify hive-init v2 residual wiki commit
+
+**Action:** Refreshed planning/documentation coverage after commit `be910753` touched only wiki pages (`[[cli]]`, `[[commands/init]]`, `[[decisions]]`, `[[gaps]]`, `[[modules/config]]`, `[[testing]]`, and [[log]]) as a residual 6-review auto-commit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hive-init schema patrol_reviewers init json"` returned stale indexed snippets still mentioning `hive-init.v1`, so verification used the committed diff plus direct reads. Checked current `lib/hive.rb`, `lib/hive/cli.rb`, `lib/hive/commands/init.rb`, `schemas/hive-init.v1.json`, `schemas/hive-init.v2.json`, `test/unit/schema_files_test.rb`, `test/integration/init_test.rb`, and `docs/cli.md`. The committed wiki pages accurately document `hive-init.v2`, the preserved `hive-init.v1` back-compat schema, and the ADR-025 schema-version policy application. Narrowed [[gaps]] entry 24 because `lib/hive/cli.rb` and `test/integration/init_test.rb` are now source-synced; only `docs/cli.md` still says `hive-init.v1`. Page coverage did not change, so [[index]] was left unchanged. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+- [[log]]

@@ -29,6 +29,22 @@ module Hive
     #                        process died before recording its PID in
     #                        the lock.
     #
+    # REVIEW_WORKING markers are healed on two analogous paths:
+    #   - `review_agent_died` — the review parent still holds a
+    #                        verified-live .lock but its Claude child died
+    #                        (live_task_lock == true, claude_pid_alive ==
+    #                        false). Terminate the wedged holder and clear
+    #                        the marker (issue #320).
+    #   - `review_orphaned`  — no verified-live lock holder
+    #                        (live_task_lock != true) and the marker is
+    #                        older than the grace window. A signal kill —
+    #                        daemon restart SIGTERM/SIGKILL, OOM, hard
+    #                        reboot — tore down the whole review tree
+    #                        before it could write a terminal marker;
+    #                        Stages::Review's in-process rescue never runs
+    #                        on a kill. Clear the marker + drop any stale
+    #                        lock so review re-dispatches.
+    #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
     #     is live; do not race it)
@@ -49,6 +65,7 @@ module Hive
         agent_died
         agent_orphaned
         review_agent_died
+        review_orphaned
         reviewer_tmux_session_terminated
       ].freeze
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
@@ -87,7 +104,7 @@ module Hive
           end
 
           if row.marker.to_s == "review_working"
-            heal_review_row_if_stale(row)
+            heal_review_row_if_stale(row, now: now)
             next
           end
 
@@ -204,8 +221,18 @@ module Hive
         File.join(row.folder.to_s, "reviews", "errors-#{format('%02d', pass)}.md")
       end
 
-      def heal_review_row_if_stale(row)
-        return unless row.live_task_lock == true
+      def heal_review_row_if_stale(row, now:)
+        if row.live_task_lock == true
+          heal_wedged_review_row(row)
+        else
+          heal_orphaned_review_row(row, now: now)
+        end
+      end
+
+      # Case A (issue #320): the review parent still holds a verified-live
+      # .lock but its Claude child died — terminate the wedged holder,
+      # drop the lock, and clear the marker so the daemon retries review.
+      def heal_wedged_review_row(row)
         return unless row.claude_pid_alive == false
 
         holder = task_lock_holder(row)
@@ -237,6 +264,47 @@ module Hive
                       slug: row.slug,
                       stage: row.stage,
                       reason: "review_agent_died",
+                      error: "#{e.class}: #{e.message}")
+      end
+
+      # Case B: no verified-live lock holder. A signal kill — daemon
+      # restart SIGTERM/SIGKILL, OOM, or a hard reboot — tore down the
+      # whole review process tree before it could write a terminal
+      # marker, orphaning REVIEW_WORKING. The in-process rescue in
+      # Stages::Review only runs for Ruby-level exceptions, never for a
+      # kill, and the wedged-holder path above requires a live holder, so
+      # nothing else reconciles this. Past the grace window — so we don't
+      # race a runner that just set REVIEW_WORKING but hasn't recorded its
+      # lock yet (controller.running_task? already excludes in-process
+      # dispatches) — clear the marker and drop any stale .lock so the
+      # daemon re-dispatches review under normal concurrency control.
+      def heal_orphaned_review_row(row, now:)
+        mtime = row.state_file_mtime
+        return unless mtime && (now - mtime) > @grace_sec
+
+        marker_attrs = review_marker_attrs(row)
+        return unless Hive::Markers.clear_current(
+          row.state_file,
+          expected_name: :review_working,
+          match_attrs: marker_attrs
+        )
+
+        release_task_lock(row)
+        @logger.event(:marker_healed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      prior_marker: row.marker,
+                      reason: "review_orphaned",
+                      state_file: row.state_file,
+                      phase: marker_attrs["phase"],
+                      pass: marker_attrs["pass"])
+      rescue StandardError => e
+        @logger.event(:marker_heal_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      reason: "review_orphaned",
                       error: "#{e.class}: #{e.message}")
       end
 

@@ -309,6 +309,89 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  # Case B: a signal kill (e.g. daemon restart SIGTERM/SIGKILL) tore down
+  # the whole review tree, leaving REVIEW_WORKING with a stale .lock whose
+  # holder is gone. live_task_lock is false. Past grace, the marker clears
+  # and the stale lock is removed so the daemon re-dispatches review.
+  def test_heals_orphaned_review_working_when_holder_is_gone_past_grace
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=triage pass=2 -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, { "pid" => 999_999, "claude_pid" => 999_998 }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        mtime: NOW - 1000,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "triage", "pass" => "2" },
+        action: "agent_running",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected orphaned review heal, got: #{@logger.events.inspect}"
+      assert_equal "review_orphaned", heal_event[1][:reason]
+      assert_equal "triage", heal_event[1][:phase]
+      assert_equal "2", heal_event[1][:pass]
+      refute File.exist?(lock_path), "stale review lock should be removed so the daemon re-dispatches"
+      refute_match(/REVIEW_WORKING|REVIEW_ERROR/, File.read(state_file),
+                   "orphaned REVIEW_WORKING should clear so review re-dispatches under the cap")
+    end
+  end
+
+  # Case B with no .lock at all (the holder died before/without recording
+  # one, or a restart removed it): claude_pid_alive and live_task_lock are
+  # both nil. Past grace, still healed; release_task_lock tolerates ENOENT.
+  def test_heals_orphaned_review_working_with_no_lock_file
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: NOW - 1000,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: nil
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected orphaned review heal with no lock, got: #{@logger.events.inspect}"
+      assert_equal "review_orphaned", heal_event[1][:reason]
+      refute_match(/REVIEW_WORKING/, File.read(state_file))
+    end
+  end
+
+  # Guard against racing a runner that just set REVIEW_WORKING but hasn't
+  # recorded its lock yet: within the grace window, leave it alone.
+  def test_leaves_orphaned_review_working_within_grace
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: NOW - 100,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "a freshly-set REVIEW_WORKING without a recorded lock yet must not be healed within grace"
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
+    end
+  end
+
   def test_auto_recovers_reviewer_partial_failure_when_errors_are_tmux_session_terminated
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")

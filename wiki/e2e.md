@@ -3,11 +3,11 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-06-05
 tags: [test, e2e, tui, artifacts]
 ---
 
-**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging.
+**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor wrapper has its own command contract for scenario inventory, run replay, cleanup, and structured JSON errors.
 
 ## Commands
 
@@ -21,6 +21,8 @@ bin/hive-e2e clean              # old run cleanup
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
 
+`bin/hive-e2e` defines `--json` as a Thor class option. The wrapper normalizes leading JSON class options before Thor dispatch, so both `bin/hive-e2e list --json` and `bin/hive-e2e --json list` reach the `list` command, and the same leading form is pinned for `clean` and `replay`. Unknown non-command tokens after leading `--json` still follow the default `run_scenarios` pattern path rather than being promoted to commands. The binary also rewrites `run --help` into Thor's help path and intercepts `--version` / `-v` before default-task dispatch.
+
 ## Layout
 
 | Path | Purpose |
@@ -29,7 +31,7 @@ bin/hive-e2e clean              # old run cleanup
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
-| `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
+| `bin/hive-e2e` | Thor shell for run/list/replay/clean/version, JSON class-option normalization, help rewriting, and structured error envelopes. |
 
 ## Scenario DSL
 

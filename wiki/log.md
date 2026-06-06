@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T16:45:00Z] e2e binary — refresh leading JSON dispatch coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `c6906632` fixed `bin/hive-e2e` dispatch when `--json` or `--no-json` appears before a known subcommand. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `.llm-wiki/config.json` points at `/home/asterio/wikis/master/wiki`, and `qmd search "hive-e2e --json subcommand dispatch e2e binary"` returned no indexed hits. Verified the committed diff plus `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], and [[testing]]. Documented the class-option normalization boundary, updated the executable contract test coverage map, and recorded that the original external caller path is not represented by an in-tree artifact. Ran `bundle exec ruby -Itest test/e2e/lib/hive_e2e_binary_test.rb` (16 runs, 85 assertions, 0 failures). Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
 **Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.

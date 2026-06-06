@@ -282,11 +282,10 @@ begin
   # Thor::Base#start rescues Thor::Error internally and either prints to
   # stderr + exit 1 (when exit_on_failure? is true) or warns + exit 0
   # (when false) — neither path lets bin/hive-e2e's outer rescue emit a
-  # JSON error envelope. Passing `debug: true` makes Thor re-raise instead,
-  # so when --json is set the rescue below can format the structured
-  # hive-e2e-error output. Without --json, preserve Thor's existing
-  # human-readable behavior.
-  Hive::E2E::Binary.start(ARGV, debug: json_requested?(ARGV))
+  # JSON error envelope or the documented usage exit code. Passing
+  # `debug: true` makes Thor re-raise instead, so the rescue below can
+  # format JSON output when requested and map text-mode usage errors to 64.
+  Hive::E2E::Binary.start(ARGV, debug: true)
 rescue Hive::E2E::PreflightError => e
   if json_requested?(ARGV)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,

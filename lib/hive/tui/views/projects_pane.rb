@@ -77,8 +77,10 @@ module Hive
         end
 
         def render_row(label, selected, inner_width)
-          truncated = Format.truncate(label, inner_width)
-          padded = truncated.ljust(inner_width)
+          # Cell-aware pad so wide (full-width) glyphs in a project name
+          # don't over-pad the row — matches TasksPane's Format.ljust_cells
+          # migration. String#ljust counts code units, not terminal cells.
+          padded = Format.ljust_cells(label, inner_width)
           selected ? Styles::CURSOR_HIGHLIGHT.render(padded) : padded
         end
 

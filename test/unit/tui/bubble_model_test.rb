@@ -907,6 +907,39 @@ class HiveTuiBubbleModelTest < Minitest::Test
     refute_includes out, "generated_at=2026-05-01"
   end
 
+  def test_header_strip_formats_snapshot_metadata_when_called_directly
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1, filter: "abc"),
+      dispatch: @dispatch
+    )
+
+    out = @model.send(:header_strip, 200)
+
+    assert_includes out, "hive tui"
+    assert_includes out, "scope=hive"
+    assert_includes out, "filter=abc"
+    assert_includes out, "generated_at=2026-05-01"
+  end
+
+  def test_header_strip_truncates_to_width
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1, filter: "abc"),
+      dispatch: @dispatch
+    )
+
+    out = @model.send(:header_strip, 20)
+
+    assert_operator Hive::Tui::Text.sanitize(out).length, :<=, 20
+  end
+
   def test_grid_mode_clamps_rendered_height_to_terminal_rows
     tasks = 20.times.map do |idx|
       { "slug" => "task-#{idx}", "stage" => "2-brainstorm", "action" => "ready_to_plan",

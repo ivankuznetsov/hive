@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -96,16 +96,21 @@ Fresh installs use XDG locations:
 `<project>/.hive-state/`; install and uninstall do not move completed pipeline
 work.
 
-Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
-bash installer creates `hv` when another `hive` is already earlier on PATH. The
-in-tree `bin/hv` fallback probes only `HIVE_BIN_OVERRIDE`,
+Apache Hive collision: the Homebrew formula installs an `hv` symlink. The bash
+installer always writes a working `${data_home}/gems/bin/hv` wrapper that
+delegates to its GEM_HOME-aware `hive` wrapper, and exposes it under the user
+bin directory when another `hive` is already earlier on PATH or when it is
+refreshing an existing owned symlink. The in-tree `bin/hv` fallback probes only
+`HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
 and `/usr/local/bin/hive`; it intentionally does not fall through to
 `/usr/bin/hive` or `/opt/hive/bin/hive`, because those are common Apache Hive
-locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. The AUR
-package does not ship the gem's `bin/hv` wrapper; its `conflicts=('hive'
-'apache-hive')` metadata blocks the parallel install before fallback aliasing is
-possible.
+locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. RubyGems
+does not advertise `hv` as a gem executable, because RubyGems would wrap the
+bash launcher in a Ruby binstub; install channels create the working `hv`
+wrapper/symlink themselves. The AUR package also uses an `hv -> hive` symlink;
+its `conflicts=('hive' 'apache-hive')` metadata blocks the parallel install
+before fallback aliasing is possible.
 
 Daemon autostart is part of install, not project enrollment. The bash installer
 runs `hive daemon install --json` after installing the gem. Agent-assisted

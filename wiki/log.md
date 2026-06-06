@@ -2,6 +2,56 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T22:04:03Z] wiki — refresh pass 02 patrol/archive/tui coverage
+
+**Action:** Refreshed wiki coverage after commit `217459fe` (`fix(review): apply pass 02 findings`). Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff archive filter tui format"` only surfaced the prior related log entry, so verification used the committed diff plus direct source reads. Checked `lib/hive/patrol/review_handoff.rb`, `lib/hive/archive_filter.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/archive_pane.rb`, `lib/hive/tui/views/format.rb`, and focused unit tests. Documented patrol handoff's sparse-finding normalization, archive filtering's nil-timestamp fail-open behavior, Archive-pane display-cell alignment, and the expanded unit-test edge cases. No page coverage changed, and no new uncertainty was found beyond existing patrol/archive live-smoke gaps. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/patrol]]
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+
+## [2026-06-05T22:00:24Z] wiki — audit residual handoff/format coverage commit
+
+**Action:** Audited commit `8d3c93ce` after it committed residual wiki changes from 6-review. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv tui executable fallback"` found prior testing/gaps/log context. Verified the committed wiki diff plus the `HEAD` versions of `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, and `test/unit/tui/views/format_test.rb`. Confirmed [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]] are source-synced for patrol `idea.md` provenance, nil/sparse evidence formatting, project-pane display-cell padding, and focused unit coverage. Page coverage did not change and no new uncertainty was found beyond existing [[gaps]] patrol live-smoke coverage; did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T21:54:00Z] patrol/tui — refresh handoff evidence and cell-format coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `b8d4c157` tightened patrol review handoff rendering and TUI project-row formatting. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff idea_text evidence TUI Format ljust_cells"` had no indexed hits for this exact cleanup. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, `test/unit/tui/views/format_test.rb`, [[commands/patrol]], [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]]. Documented the intentional `idea.md` body/`original_text` duplication for patrol tasks, nil-evidence handling, project-pane display-cell padding, and focused unit coverage. No new page coverage or new uncertainty was found; did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/patrol]]
+- [[commands/tui]]
+- [[state-model]]
+- [[testing]]
+
+## [2026-06-05T21:41:29Z] wiki - post-commit audit of `hv` documentation refresh
+
+**Action:** Audited commit `dba72bbd` after it refreshed wiki coverage for the RubyGem `hv` executable fix. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "RubyGem hv executable install wrapper"` found the updated operating-page context. Verified the committed wiki diff plus commit `02591fbb`, current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, `test/unit/hv_test.rb`, [[cli]], [[operating]], [[testing]], and the existing [[gaps]] channel-smoke entry. Confirmed the pages are source-synced and page coverage did not change; no new uncertainty was found beyond the already-recorded missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T21:10:00Z] wiki - audit RubyGem `hv` executable coverage
+
+**Action:** Audited commit `02591fbb` after it fixed the broken RubyGems `hv` executable surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv fallback command bin"` found prior `hv`/testing/gaps context. Verified the committed diff plus current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, [[cli]], [[operating]], and [[testing]]. Clarified that the bash installer always writes its internal `hv` wrapper and only conditionally exposes it in the user bin directory, and recorded the missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
+## [2026-06-05T20:52:02Z] release/install - remove `hv` from RubyGem executables
+
+**Action:** Fixed the RubyGem executable surface so `hive.gemspec` advertises only the Ruby `hive` entrypoint, not the bash `bin/hv` launcher that RubyGems would wrap in an unusable Ruby binstub. Adjusted `install.sh` so it no longer moves a gem-installed `hv` shim before writing its own working `hv` wrapper. Added focused assertions in `gemspec_test.rb` and `install_script_test.rb`; verified an isolated `gem build` + `gem install` creates `bin/hive` and no `bin/hv`. Refreshed `[[cli]]`, `[[operating]]`, and `[[testing]]` to document that channel installers own `hv` creation.
+
+**Refreshed pages:**
+- [[cli]]
+- [[operating]]
+- [[testing]]
 ## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
 
 **Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.

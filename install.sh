@@ -494,7 +494,6 @@ GEM_HOME="$gem_home" gem install \
 # keeps the gem-installed scripts intact for `hive update` to refresh.
 mkdir -p "${gem_home}/shims"
 mv "${gem_home}/bin/hive" "${gem_home}/shims/hive"
-mv "${gem_home}/bin/hv" "${gem_home}/shims/hv"
 cat > "${gem_home}/bin/hive" <<WRAPPER
 #!/usr/bin/env bash
 export GEM_HOME="${gem_home}"

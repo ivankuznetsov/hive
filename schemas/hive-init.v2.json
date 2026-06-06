@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v1.json",
-  "title": "hive init output (v1)",
-  "description": "Stable success contract emitted by `hive init --json`. Init precondition failures keep the legacy stderr + exit-code contract because several checks run before project state exists.",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v2.json",
+  "title": "hive init output (v2)",
+  "description": "Stable success contract emitted by `hive init --json`. v2 drops the `patrol_reviewers` field (both from `answers` and the top-level payload) that v1 required; patrol now derives its reviewer set elsewhere. Init precondition failures keep the legacy stderr + exit-code contract because several checks run before project state exists.",
   "$ref": "#/$defs/SuccessPayload",
   "$defs": {
     "LimitMap": {
@@ -42,7 +42,6 @@
         "claude_permission_mode",
         "development_agent",
         "enabled_reviewers",
-        "patrol_reviewers",
         "triage_bias",
         "budgets",
         "timeouts",
@@ -56,7 +55,6 @@
         "claude_permission_mode": { "type": "string", "enum": ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"] },
         "development_agent": { "type": "string" },
         "enabled_reviewers": { "type": "array", "items": { "type": "string" } },
-        "patrol_reviewers": { "type": "array", "items": { "type": "string" } },
         "triage_bias": { "type": "string", "enum": ["courageous", "safetyist"] },
         "budgets": { "$ref": "#/$defs/LimitMap" },
         "timeouts": { "$ref": "#/$defs/LimitMap" },
@@ -82,7 +80,6 @@
         "claude_mode",
         "development_agent",
         "enabled_reviewers",
-        "patrol_reviewers",
         "triage_bias",
         "budgets",
         "timeouts",
@@ -92,7 +89,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-init" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": true },
         "project": { "type": "string" },
         "path": { "type": "string" },
@@ -104,7 +101,6 @@
         "claude_mode": { "type": "string", "enum": ["tmux", "headless"] },
         "development_agent": { "type": "string" },
         "enabled_reviewers": { "type": "array", "items": { "type": "string" } },
-        "patrol_reviewers": { "type": "array", "items": { "type": "string" } },
         "triage_bias": { "type": "string", "enum": ["courageous", "safetyist"] },
         "budgets": { "$ref": "#/$defs/LimitMap" },
         "timeouts": { "$ref": "#/$defs/LimitMap" },

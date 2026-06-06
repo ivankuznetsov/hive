@@ -14,7 +14,7 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 3,
-      "hive-init" => 1,
+      "hive-init" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
       "hive-approve" => 2,

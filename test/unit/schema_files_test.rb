@@ -906,8 +906,23 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-init",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  # v1 (which required `patrol_reviewers`) is preserved for external
+  # validators pinned to the pre-patrol-reviewers-drop release. Loading by
+  # explicit version: must still resolve, and v1 must keep its original
+  # required-key set so pinned consumers don't break.
+  def test_hive_init_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init", version: 1)))
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
+                 "v1 schema must still declare schema_version: 1"
+    assert_includes doc.dig("$defs", "SuccessPayload", "required"), "patrol_reviewers",
+                    "v1 must keep patrol_reviewers required for pinned consumers"
+    assert_includes doc.dig("$defs", "Answers", "required"), "patrol_reviewers",
+                    "v1 Answers must keep patrol_reviewers required for pinned consumers"
   end
 
   def test_hive_init_required_keys_match_producer_emission
@@ -919,7 +934,7 @@ class SchemaFilesTest < Minitest::Test
       project schema schema_version timeouts triage_bias worktree_root
     ].sort
     assert_equal expected, schema_required,
-                 "schema/producer required-key drift in hive-init.v1.json"
+                 "schema/producer required-key drift in hive-init.v2.json"
 
     ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
     entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }

@@ -3258,3 +3258,17 @@ TTL config.
 
 **Refreshed pages:**
 - [[log]]
+
+## [2026-06-06T08:59:33Z] cli/patrol/archive — refresh pass-02 executable JSON and handoff coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `7dd27bc6` extracted Thor parse-error JSON routing from `bin/hive` into `Hive::ThorUsageJson`, added direct unit coverage for all parse-error routing rows and write-failure branches, added integration coverage for `status`/`prune` unknown-flag parse paths and the dead `daemon` map row, required `ArchiveFilter.hide?` callers to pass `folder_mtime:`, and hardened patrol `ReviewHandoff` idea rendering for symbol-keyed evidence plus exact body/frontmatter parity. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `.llm-wiki/config.json` points at `/home/asterio/wikis/master/wiki`, and `qmd search "ThorUsageJson parse-error JSON envelope archive_filter ReviewHandoff sparse evidence"` returned no indexed results, so this pass used direct source/wiki reads. Verified the committed diff plus current `bin/hive`, `lib/hive.rb`, `lib/hive/thor_usage_json.rb`, `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/patrol/review_handoff.rb`, and focused tests. No new pages were needed; remaining uncertainty is still the packaged/install-channel parse-error smoke in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/status]]
+- [[commands/patrol]]
+- [[modules/patrol]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+- [[log]]

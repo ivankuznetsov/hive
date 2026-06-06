@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -47,7 +47,7 @@ patrol:
 5. For each remaining finding (in order), create a dedicated `hive-patrol/...` worktree branch and run the fix agent. `max_prs_per_cycle` caps the number of PRs **opened** per scan, not the number of fix candidates: the loop keeps attempting candidates until that many PRs have actually opened, so a failed validation does not waste the budget on an otherwise-fixable later finding.
 6. Run configured validation commands in the fix worktree.
 7. Open a PR only when validation passed and the diff is not blocked by the secret scanner.
-8. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `idea.md` seeded from the original finding, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. `ReviewHandoff#idea_text` omits empty recommendation/evidence sections, falls back from a nil title to the finding id, coerces nil evidence with `Array(...)`, and renders location-only evidence entries as bullet lines.
+8. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `idea.md` seeded from the original finding, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. `ReviewHandoff#idea_text` omits empty recommendation/evidence sections, falls back from a nil title to the finding id, coerces nil evidence with `Array(...)`, accepts string-keyed and symbol-keyed evidence hashes, renders location-only evidence entries as bullet lines, and derives `idea.md` frontmatter `original_text` plus body from the same rendered string.
 9. Update `.hive-state/patrol/state.json` with `last_run_at` and `last_scanned_sha`.
 
 `--dry-run` stops after map + review + candidate selection. It updates scan state but does not create fix worktrees, push branches, or open PRs.

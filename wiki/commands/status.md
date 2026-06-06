@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive]
 ---
 
@@ -25,7 +25,7 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 
 ## Archived tasks
 
-`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), the row timestamp is present, and `(now - mtime) > 3 days`. The policy uses the task row's `mtime` (state-file mtime, the same timestamp rendered as row age) rather than `folder_mtime`, because sidecar updates such as `meta.yml` display-name backfills can touch the directory without making the archived task newly relevant. Older consumers that only have `folder_mtime` still get it as a fallback. Done rows with unresolved markers are hidden by the same age rule; `hive archive` remains the full view.
+`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), a timestamp is present, and the chosen timestamp is older than 3 days. Its API requires `folder_mtime:` so callers cannot accidentally ask for a hide decision with no timestamp and get a quiet false; optional `mtime:` is a row-level override when present. Status and TUI pass both values, so normal rows use the state-file `mtime` (the same timestamp rendered as row age) and older/partial payloads can still fall back to `folder_mtime`. Done rows with unresolved markers are hidden by the same age rule; `hive archive` remains the full view.
 
 The filter applies only to human daily surfaces: default `hive status` text and the TUI grid. Default `hive status --json` stays unfiltered so bots, daemons, and agents continue to see every task row. Text status prints `… and N archived >3d ago (hive archive to view)` when rows were hidden.
 
@@ -117,7 +117,7 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
-- `test/unit/commands/status_test.rb` — status row collection, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, old-archive hiding, and archive-mode listing.
+- `test/unit/commands/status_test.rb` and `test/unit/archive_filter_test.rb` — status row collection, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, old-archive hiding, `mtime` override vs `folder_mtime` fallback, and archive-mode listing.
 - `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 

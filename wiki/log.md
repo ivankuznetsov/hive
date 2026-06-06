@@ -3220,3 +3220,10 @@ TTL config.
 
 **Refreshed pages:**
 - [[log]]
+
+## [2026-06-06T18:04:12Z] wiki/post-commit — verify residual log-only refresh
+
+**Action:** Refreshed planning/documentation coverage after commit `6ccfbc89` touched only [[log]] as a residual 6-review auto-commit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hv fallback launcher Apache Hive semver"` returned no indexed hits. Verified the committed diff plus the prior wiki-refresh commit `6ed10a39` against current `bin/hv`, `bin/hive`, `lib/hive/cli.rb`, `lib/hive.rb`, `test/unit/hv_test.rb`, [[cli]], [[operating]], [[testing]], and [[gaps]]. The committed log entry accurately describes the already-refreshed hv coverage: the fallback probes the documented install paths, avoids self-recursion, requires bare-semver `--version` output before exec, and leaves only the existing live Apache-Hive collision smoke gap. Page coverage did not change, so [[index]] was left unchanged; no new uncertainty was found for [[gaps]]. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

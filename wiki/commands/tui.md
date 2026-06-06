@@ -120,9 +120,15 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 ## Data source
 
 `Hive::Tui::StateSource` polls at 1 Hz from a non-daemon background
-thread. It calls
+thread. TUI boot performs one synchronous `StateSource#refresh_now` before
+entering Bubbletea's render/input loop, then seeds the initial model with that
+snapshot so the first useful frame shows registered projects/tasks instead of a
+long-lived loading grid. This is necessary because bubbletea-ruby's raw input
+poll can starve Ruby background threads during startup; relying on the first
+background poll alone produced multi-second loading screens even when
+`hive status` itself was fast. After boot, the source calls
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-in-process for the first snapshot and whenever the cached mtime
+in-process whenever the cached mtime
 fingerprint changes; otherwise it reuses the previous `Snapshot` and
 only refreshes `current_seen_at`. The fingerprint watches the global
 project registry (`Hive::Config.global_config_path`), each visible
@@ -236,7 +242,7 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 - `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
 - `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `IdeaPreview`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
-- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0, and the charm smoke resizes a running PTY from 120 to 150 columns, sends `SIGWINCH`, and asserts the next frame expands.
+- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears without a multi-second loading grid on the startup path (a generous 5s regression bound, not a benchmark), `q` exits 0, and the charm smoke resizes a running PTY horizontally and vertically, sends `SIGWINCH`, and asserts the next frame expands while keeping the footer visible.
 
 No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing.
 

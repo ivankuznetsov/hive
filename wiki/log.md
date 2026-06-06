@@ -98,6 +98,44 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[commands/tui]]
 
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear without a
+multi-second loading grid (a generous 5s regression bound, not a benchmark).
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T22:12:41Z] wiki — audit TUI startup seed coverage
+
+**Action:** Audited commit `570beeba` after it added synchronous
+`StateSource#refresh_now` startup seeding for `hive tui`. Read `AGENTS.md`,
+`.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]]
+entries first; `qmd search "StateSource refresh_now TUI startup seed first
+useful paint"` returned no indexed hits, and the configured master wiki path had
+no matching TUI startup note. Inspected the committed diff and current
+`lib/hive/tui/app.rb`, `lib/hive/tui/state_source.rb`, TUI PTY smoke tests, and
+the existing Charm API solution note. Confirmed [[commands/tui]] already covered
+the boot-time synchronous refresh and updated the test-coverage documentation so
+the new state-source startup seed and first-useful-paint PTY assertion are not
+missing from the wiki. No page count or catalog coverage changed, so [[index]]
+did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[commands/tui]]
+- [[log]]
+
 ## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
 
 **Action:** Applied accepted `/ce-code-review` findings on the TUI/daemon latency-reduction work:

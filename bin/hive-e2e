@@ -271,6 +271,16 @@ def json_requested?(argv)
   argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(?:true|TRUE|t|T)\z/) }
 end
 
+def normalize_leading_class_options!(argv)
+  cmd_idx = argv.index { |arg| !arg.start_with?("-") }
+  return unless cmd_idx&.positive?
+
+  leading = argv[0...cmd_idx]
+  return unless leading.all? { |arg| %w[--json --no-json].include?(arg) }
+
+  argv.replace([ argv[cmd_idx], *leading, *argv[(cmd_idx + 1)..] ])
+end
+
 begin
   normalize_leading_class_options!(ARGV)
   rewrite_help_flag!(ARGV)

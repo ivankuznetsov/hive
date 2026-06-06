@@ -41,7 +41,17 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
-normalize_leading_json_options!(ARGV)
+def normalize_leading_class_options!(argv)
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return unless cmd_idx&.positive?
+
+  leading = argv[0...cmd_idx]
+  return unless leading.all? { |a| %w[--json --no-json].include?(a) }
+
+  argv.replace([ argv[cmd_idx], *leading, *argv[(cmd_idx + 1)..] ])
+end
+
+normalize_leading_class_options!(ARGV)
 rewrite_help_flag!(ARGV)
 
 def json_requested?(argv)

@@ -158,13 +158,22 @@ class E2EArtifactCaptureTest < Minitest::Test
       FileUtils.mkdir_p(log_dir)
       spawn_log = File.join(log_dir, "hive-tui-spawn-BIG.log")
       File.write(spawn_log, "x" * (Hive::E2E::ArtifactCapture::TUI_SPAWN_CAPTURE_MAX_BYTES + 10))
+      original_size = File.size(spawn_log)
 
       collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
 
       copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
-      assert File.size(copied_spawn) < File.size(spawn_log),
+      assert File.size(copied_spawn) < original_size,
              "artifact bundle should not copy oversized per-spawn captures wholesale"
       assert_includes File.read(copied_spawn, 128), "truncated to last"
+      refute File.exist?(spawn_log), "live oversized per-spawn capture should be removed before manifesting artifacts"
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      paths = manifest.fetch("files").map { |file| file.fetch("path") }
+      refute_includes paths, "tui-live/hive-tui-spawn-BIG.log",
+        "manifest should not include the untruncated live per-spawn capture"
+      assert_includes paths, "tui-subprocess/hive-tui-spawn-BIG.log",
+        "manifest should still include the bounded copied diagnostic"
     end
   end
 

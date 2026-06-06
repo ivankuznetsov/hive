@@ -3281,6 +3281,63 @@ TTL config.
 - [[modules/bot]]
 - [[state-model]]
 
+## [2026-06-05T15:14:59Z] babysitter — refresh dry-run git stub write guard coverage
+
+**Action:** Refreshed command/API and executable-stub wiki coverage after commit `29532639` changed `bin/hive-babysitter-stub-git`. Verified the committed diff plus the current git/gh dry-run stubs, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, [[commands/babysit]], [[modules/babysitter]], and [[gaps]]. Documented that otherwise read-only `git` commands now skip when they include `--output` / `--output=...`, while plain read forms such as `git diff --name-only` still pass through. Recorded that the change is unit-pinned but still lacks a live `hive babysit --once PROJECT --dry-run` agent smoke artifact. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+
+## [2026-06-05T16:45:15Z] wiki — audit babysitter dry-run refresh coverage
+
+**Action:** Audited residual wiki commit `e4d6fdab` after it committed the babysitter dry-run documentation refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output residual worktree"` only surfaced earlier babysitter wiki history, so verification used the committed diff plus direct source reads. Checked source commit `29532639` against `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/commands/babysit.rb`, and `lib/hive/babysitter/`. Confirmed existing [[commands/babysit]], [[modules/babysitter]], and [[gaps]] coverage matches the code: broad read-only `git` commands skip `--output` / `--output=...`, `git diff --name-only` still passes through, and live `hive babysit --once PROJECT --dry-run` agent smoke evidence remains absent. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:52:58+01:00] babysitter — refresh dry-run git exec/env stub coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `f748deed` changed `bin/hive-babysitter-stub-git` and `test/unit/babysitter/dry_run_env_test.rb`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git exec env bypass grep output pager config-env"` had no exact indexed hits, so verification used the committed diff plus direct source reads. Documented that dry-run git screening is now structurally scoped: config injection is screened only in global options, `--exec-path` is a global exec screen, `--output` is exact so `--output-indicator-*` passes, and grep pager execution includes bundled short flags such as `-nO...`; also documented scrubbing of `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and `GIT_CONFIG*`, plus the exit-127 diagnostic for invalid `HIVE_BABYSITTER_REAL_GIT`. The live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains open. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-05T17:26:02Z] wiki — audit patrol handoff residual log coverage
+
+**Action:** Audited residual wiki commit `a94719a0`, which only appended the previous babysitter dry-run audit entry to [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff opened PR residual wiki"` surfaced the existing patrol handoff coverage. Verified the residual commit diff directly, then checked the underlying patrol PR #312 source commit `598fd191` against `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/commands/patrol.rb`, `lib/hive/daemon/patrol_scheduler.rb`, `lib/hive/config.rb`, `templates/project_config.yml.erb`, and the focused patrol/config tests. Confirmed current [[commands/patrol]], [[modules/patrol]], [[modules/config]], [[stages/review]], [[state-model]], [[testing]], and [[gaps]] already match the code: patrol handoff is defaulted through `patrol.review_prs: true`, synthetic review slugs are globally unique across stages, handoff failures are retryable and surfaced in `review_handoff_errors`, successful handoff keeps the patrol worktree for `6-review`, and `patrol.trigger` is now `continuous` by default. No page-list or gap changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:00:00Z] babysit — dry-run git stub screens exec/write options across argv
+
+**Action:** Hardened `bin/hive-babysitter-stub-git` after a review pass found that the read-only allowlist plus the original-`argv` `exec` let several non-mutating-looking commands run arbitrary code via real git: `-c diff.external=<cmd>`/`*.textconv`/`core.pager` config injection (silently stripped by `stripped_global_options` yet preserved in the exec argv), `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` pager exec, and global-position `--output`. Replaced the one-entry `no_write_options?` (`--output` only, on the stripped `rest`) with `dangerous_option?` + `no_exec_or_write_options?` that screen the entire invocation — `-c`, `--config-env`, `--output`, `-O`, `--open-files-in-pager` — before exec, so the guard no longer trusts the stripped subcommand alone. Also guarded `stripped_global_options` against `shift(2)` on a trailing valueless option and made `log_skip` warn instead of silently swallowing `SystemCallError`. Added regression tests in `test/unit/babysitter/dry_run_env_test.rb` for each exec/write vector plus a passing `git grep needle`, and updated [[commands/babysit]] to document the broadened screening.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[log]]
+
+## [2026-06-05T18:30:39+01:00] wiki — refresh babysitter dry-run executable coverage after argv-wide guard
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `b5f53f98` hardened `bin/hive-babysitter-stub-git`. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config"` surfaced prior babysitter dry-run history, so verification used the committed diff plus direct source reads. Checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Updated [[commands/babysit]], [[modules/babysitter]], and [[gaps]] so command tests, module/boundary coverage, and live-smoke uncertainty mention `-c`, `--config-env`, `-O`, `--open-files-in-pager`, and `--output` screening across the original argv. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[commands/babysit]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-05T18:45:40+01:00] wiki — audit residual babysitter dry-run coverage commit
+
+**Action:** Audited residual wiki commit `557e6ef4`, which committed the previous babysitter dry-run documentation refresh as 6-review residue. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config residual"` surfaced prior babysitter dry-run history. Verified the committed diff, then checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Confirmed the current pages already match the code and tests: dry-run git allowlisted read subcommands still pass through only after argv-wide screening for config-injection, pager-exec, and output-file vectors; the live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains recorded in [[gaps]]. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
 ## [2026-06-05T14:22:45Z] cli/status — refresh no-target archive listing coverage
 
 **Action:** Refreshed command/API wiki coverage after commit `93fb45fb` changed `hive archive` from a target-required workflow-only command into a split surface: no target lists archived tasks through `Hive::Commands::Status.new(archive: true)`, while `hive archive <target>` still runs the `StageAction` promote-or-run workflow verb. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "archive status command"` found existing workflow/archive wiki context. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, and focused CLI/status tests. Documented no-target text and JSON archive listing, empty archive output, and the CLI overlay boundary. Recorded that live registered-project archive workflow evidence is still missing. Did not run `qmd update` or `qmd embed`.

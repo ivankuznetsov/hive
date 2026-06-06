@@ -60,8 +60,42 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "remote", "set-url", "origin", "git@example.com:owner/repo.git"
       assert_stubbed env, "git", "remote", "add", "upstream", "git@example.com:owner/upstream.git"
       assert_stubbed env, "git", "remote", "remove", "upstream"
+      assert_stubbed env, "git", "diff", "--output=patch.diff"
+      assert_stubbed env, "git", "diff", "--output", "patch.diff"
+      # Exec/write vectors that pass the subcommand allowlist but make real git
+      # run an arbitrary command or write a file must be screened across argv.
+      assert_stubbed env, "git", "-c", "diff.external=touch pwned", "diff"
+      assert_stubbed env, "git", "-c", "core.pager=touch pwned", "show"
+      assert_stubbed env, "git", "--config-env=diff.external=PWN", "diff"
+      # Two-token `--config-env KEY=VAL` form (not just the glued `=` spelling).
+      assert_stubbed env, "git", "--config-env", "diff.external=PWN", "diff"
+      # `--exec-path=<dir>` redirects git's helper-binary lookup (exec class).
+      assert_stubbed env, "git", "--exec-path=/tmp/evil", "diff"
+      assert_stubbed env, "git", "grep", "-Otouch pwned", "needle"
+      # Bundled short option (`-nO…`) must not slip past the `-O` pager screen.
+      assert_stubbed env, "git", "grep", "-nOtouch pwned", "needle"
+      assert_stubbed env, "git", "grep", "--open-files-in-pager=touch pwned", "needle"
+      # Bare `--open-files-in-pager` (no glued value) is equally a pager exec.
+      assert_stubbed env, "git", "grep", "--open-files-in-pager", "needle"
+      # Trailing bare two-token global option must not underflow / crash.
+      assert_stubbed env, "git", "-c"
+      assert_stubbed env, "git", "-C"
+      assert_stubbed env, "git", "--config-env"
+      assert_stubbed env, "git", "--output=patch.diff", "diff"
+      assert_stubbed env, "git", "log", "--output=log.txt"
+      assert_stubbed env, "git", "show", "--output=show.txt"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
+      assert_passes env, "git", "diff", "--name-only"
+      # Read-only diff orderfile (`-O<file>`) and formatting flags
+      # (`--output-indicator-*`) must pass — the pager screen is grep-scoped and
+      # `--output` is matched exactly.
+      assert_passes env, "git", "diff", "-Oorderfile", "--name-only"
+      assert_passes env, "git", "diff", "--output-indicator-new=>", "--name-only"
+      assert_passes env, "git", "grep", "needle"
+      # `git grep -c` (= --count) is read-only; `-c` is dangerous only as a
+      # global option, so it must pass here.
+      assert_passes env, "git", "grep", "-c", "needle"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
       assert_passes env, "git", "remote"
       assert_passes env, "git", "remote", "-v"
@@ -90,12 +124,24 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git remote set-url origin git@example.com:owner/repo.git skipped"
       assert_includes skipped, "git remote add upstream git@example.com:owner/upstream.git skipped"
       assert_includes skipped, "git remote remove upstream skipped"
+      assert_includes skipped, "git diff --output=patch.diff skipped"
+      assert_includes skipped, "git diff --output patch.diff skipped"
+      assert_includes skipped, "git -c diff.external=touch pwned diff skipped"
+      assert_includes skipped, "git -c core.pager=touch pwned show skipped"
+      assert_includes skipped, "git --config-env=diff.external=PWN diff skipped"
+      assert_includes skipped, "git grep -Otouch pwned needle skipped"
+      assert_includes skipped, "git grep --open-files-in-pager=touch pwned needle skipped"
+      assert_includes skipped, "git --output=patch.diff diff skipped"
+      assert_includes skipped, "git log --output=log.txt skipped"
+      assert_includes skipped, "git show --output=show.txt skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-git -C #{dir} status --short"
+      assert_includes real_invocations, "real-git diff --name-only"
+      assert_includes real_invocations, "real-git grep needle"
       assert_includes real_invocations, "real-git config --get remote.origin.url"
       assert_includes real_invocations, "real-git remote"
       assert_includes real_invocations, "real-git remote -v"

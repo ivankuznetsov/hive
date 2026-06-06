@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -32,7 +32,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 
 ```
 Phase 1 (CI fix)         once on entry
-Phase 2 (reviewers)      sequential, one adapter per spec in cfg.review.reviewers
+Phase 2 (reviewers)      sequential, one adapter per selected reviewer spec
 Phase 3 (triage)         courageous (default) | safetyist | review.triage.custom_prompt
 branch on triage:
   any [x]                → Phase 4 (fix) → loop to Phase 2 with pass++
@@ -40,7 +40,7 @@ branch on triage:
   all clean              → Phase 5 (browser test) → REVIEW_COMPLETE
 ```
 
-Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary and between reviewers inside `run_reviewers`; each reviewer that accepts a `deadline:` kwarg receives a rolling fair share of the remaining pass budget (`remaining_wall_clock / remaining_reviewers`, with unused time redistributed to later reviewers), so one hung early reviewer cannot consume the entire pass window. Shared Claude tmux readiness waits count against the current reviewer deadline. Exceeding the outer wall-clock cap sets `REVIEW_STALE reason=wall_clock`.
+Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary and between reviewers inside `run_reviewers`; each reviewer that accepts a `deadline:` kwarg receives the full remaining wall-clock budget, while its own `timeout_sec` remains the per-reviewer cap. Shared Claude tmux readiness waits count against the current reviewer deadline. Exceeding the outer wall-clock cap sets `REVIEW_STALE reason=wall_clock`.
 
 `mark_working(phase:, pass:)` doubles as the event-bracket emitter: each call closes the previously-open phase event (if any) and opens a new `agent_start` with agent label `phase=<name> pass=<NN>`. An `ensure` block at the bottom of `run!` calls `close_phase_event!` so the trailing `agent_end` always lands — return, raise, and `SystemExit` paths all keep the `events.jsonl` brackets balanced. Per-reviewer spawns nest underneath these phase pairs via their own `Hive::Agent#run!` agent_start/agent_end records (agent label `claude review-stub-reviewer-passNN`). See [[modules/events]].
 
@@ -52,13 +52,19 @@ Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is l
 
 ## Phase 2 — reviewers (`Hive::Reviewers::Agent`)
 
-For each spec in `cfg.review.reviewers`, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists (probed via the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy the check), falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings. When `cfg.default_branch` is unset AND `Hive::GitOps#origin_default_branch` returns nil (no origin/HEAD symref and neither `origin/main` nor `origin/master` exist), review preflight refuses to fall back to the worktree's current branch (which in a `git worktree add` is the task branch — diffing the task against itself produces zero or phantom findings) and exits 1 with the two remediation paths named: set `default_branch` in `.hive-state/config.yml`, or run `git remote set-head origin --auto` so origin/HEAD points at the project default.
+For each selected reviewer spec, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`. Normal tasks select specs from `cfg.review.reviewers`; synthetic patrol handoff tasks whose `task.md` frontmatter carries `source: patrol` select specs from `cfg.patrol.review.reviewers` instead, so patrol PRs can use the narrower Codex-only default without changing the normal feature-review policy. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists (probed via the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy the check), falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings. When `cfg.default_branch` is unset AND `Hive::GitOps#origin_default_branch` returns nil (no origin/HEAD symref and neither `origin/main` nor `origin/master` exist), review preflight refuses to fall back to the worktree's current branch (which in a `git worktree add` is the task branch — diffing the task against itself produces zero or phantom findings) and exits 1 with the two remediation paths named: set `default_branch` in `.hive-state/config.yml`, or run `git remote set-head origin --auto` so origin/HEAD points at the project default.
+
+The patrol selector is deliberately frontmatter-based and fail-soft:
+`reviewer_specs_for` reads YAML only when `task.md` starts with a
+frontmatter fence, treats malformed or unreadable frontmatter as absent,
+and falls back to the normal reviewer list unless `source` stringifies to
+`patrol`.
 
 After each reviewer file is written, `Review::GithubPublisher.publish!` posts a PR-level comment headed `### Reviewer: <name> - Pass NN` when `review.github_publish.enabled` is true. It reads `pr_url` from `pr.md`, skips duplicate headers on retry, scans for secrets before posting, and degrades to a stderr warning on GitHub failures so local files remain the source of truth.
 
 Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed` (the all-failed safety net is preserved). Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 
-CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/compound-engineering:ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. `templates/reviewer_pr_review_toolkit.md.erb` is a stand-in for the `pr-review-toolkit:code-reviewer` agent.
+CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. Legacy config values such as `/compound-engineering:ce-code-review` or `compound-engineering:ce-code-review` are normalized to the current bare CE skill before the prompt is rendered. The official `/code-review` command plugin is a separate PR-comment workflow and is not used here because Hive reviewers must write structured `reviews/<reviewer>-NN.md` artifacts for triage.
 
 Every reviewer prompt embeds the task's `plan.md` inline through `Hive::Reviewers::PlanContext.render(task_folder, user_supplied_tag)` — wired into `Agent#render_prompt` as the `plan_context_section` template binding and rendered between the `Pass:` header and the `Behavior:` block in all three reviewer templates. The section frames the plan as authoritative on scope and tells reviewers to drop candidate findings that flag deliberate plan-level scope boundaries (e.g. "feature X not implemented" when the plan defers X to a separate downstream task). It also carries a symmetric anti-finding rule: if the plan's **Goals** or **Requirements Trace** lists an item the diff does NOT implement and the plan does NOT defer it, the reviewer must raise that as a High-severity finding — the rule suppresses escalations on plan-deferred gaps, not on plan-required-but-missing gaps. Without this grounding, reviewers re-derive scope from the worktree alone and routinely escalate intentional gaps — driving the same task into REVIEW_STALE pass after pass because the fixer can't resolve a plan-by-design contradiction.
 
@@ -85,7 +91,8 @@ The escalations digest is mirrored to the PR with the same publisher path and du
 
 ## Branching after triage
 
-- `accepted.empty? && escalations.zero?` — Phase 2 produced zero findings — jump to Phase 5 (browser test).
+- `accepted.empty? && escalations.zero?` with `reviews/errors-NN.md` present — at least one reviewer failed while surviving reviewers found nothing; write `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=NN` so the task is recoverable/retryable rather than a user-input gate.
+- `accepted.empty? && escalations.zero?` without reviewer errors — Phase 2 produced zero findings — jump to Phase 5 (browser test).
 - `accepted.empty? && escalations > 0` — Pause for user gate: `REVIEW_WAITING escalations=N pass=NN`. The user ticks `[x]` on whatever escalations they want fixed and re-runs; the runner detects `:review_waiting` resume, skips Phase 2/3, jumps to Phase 4.
 - `accepted.any?` — Run Phase 4.
 
@@ -119,7 +126,7 @@ If `marker.attrs["matches"]` is missing or malformed (not a positive Integer str
 
 ## Phase 5 — browser test (`Hive::Stages::Review::BrowserTest`)
 
-Only when Phase 2 produced zero findings (`pass=NN-1` was clean). Spawns the configured CE skill (`/compound-engineering:ce-test-browser` via `cfg.review.browser_test.agent`) which the agent invokes against the worktree. Returns one of `:passed`, `:warned`, `:skipped`, `:failed`. `:failed` is treated as `:warned` after `review.browser_test.max_attempts` (default 2) — the runner writes `browser-blocked-NN.md` and sets `REVIEW_COMPLETE browser=warned` rather than blocking the loop indefinitely.
+Only when Phase 2 produced zero findings (`pass=NN-1` was clean). Spawns the configured CE skill (`/ce-test-browser` via `cfg.review.browser_test.agent`) which the agent invokes against the worktree. Returns one of `:passed`, `:warned`, `:skipped`, `:failed`. `:failed` is treated as `:warned` after `review.browser_test.max_attempts` (default 2) — the runner writes `browser-blocked-NN.md` and sets `REVIEW_COMPLETE browser=warned` rather than blocking the loop indefinitely.
 
 `review.browser_test.enabled: false` skips the phase entirely; `:skipped` lands `browser=skipped` on the terminal marker.
 
@@ -162,6 +169,7 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 
 - `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap.
 - `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` — phase-level unit coverage.
+- `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, and patrol-task selection of `patrol.review.reviewers`.
 - `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb` — adapter dispatch + agent-kind reviewer.
 - `test/unit/metrics_test.rb`, `test/integration/metrics_command_test.rb` — `hive metrics rollback-rate` against trailered fixture commits.
 

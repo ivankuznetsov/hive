@@ -115,7 +115,8 @@ class CommandsRunTest < Minitest::Test
 
     execute_stale = run.send(:json_next_action, t, marker(:execute_stale))
     guardrail = run.send(:json_next_action, t, marker(:review_waiting, "reason" => "fix_guardrail", "pass" => "3"))
-    partial = run.send(:json_next_action, t, marker(:review_waiting, "reason" => "reviewer_partial_failure", "pass" => "4"))
+    partial = run.send(:json_next_action, t,
+                       marker(:review_error, "reason" => "reviewer_partial_failure", "phase" => "reviewers", "pass" => "4"))
     scope_failure = run.send(
       :json_next_action,
       t,
@@ -131,7 +132,10 @@ class CommandsRunTest < Minitest::Test
     assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, execute_stale.fetch("kind")
     assert_equal "/tmp/task-folder/reviews/fix-guardrail-03.md", guardrail.fetch("target")
     assert_match(/checkbox count/, guardrail.fetch("instructions"))
+    assert_equal Hive::Schemas::NextActionKind::EDIT, partial.fetch("kind")
     assert_equal "/tmp/task-folder/reviews/errors-04.md", partial.fetch("target")
+    assert_equal "reviewer_partial_failure", partial.fetch("reason")
+    assert_equal "reviewers", partial.fetch("phase")
     assert_match(/partial coverage/, partial.fetch("instructions"))
     assert_equal Hive::Schemas::NextActionKind::EDIT, scope_failure.fetch("kind")
     assert_equal "/tmp/task-folder/reviews/auto-commit-scope-01.md", scope_failure.fetch("target")

@@ -198,7 +198,7 @@ class HiveCommandsDoctorTest < Minitest::Test
   def test_uses_config_defaults_when_skill_key_unset
     with_fake_home do |home|
       # No `skill:` key in config; doctor falls back to DEFAULTS
-      # ("/compound-engineering:ce-brainstorm" and Claude's "/plan").
+      # ("/ce-brainstorm" and Claude's "/plan").
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
       write_file("#{home}/.claude/commands/plan.md")
       out = StringIO.new
@@ -213,7 +213,7 @@ class HiveCommandsDoctorTest < Minitest::Test
         output: out
       ).call
       assert_equal 0, exit_code
-      assert_match(%r{/compound-engineering:ce-brainstorm}, out.string)
+      assert_match(%r{/ce-brainstorm}, out.string)
       assert_match(%r{/plan}, out.string)
     end
   end

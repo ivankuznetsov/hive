@@ -4,7 +4,7 @@ type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
 updated: 2026-06-05
-tags: [command, tui, observability, interactive, diagnostics, task-id]
+tags: [command, tui, observability, interactive, diagnostics, task-id, archive]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
@@ -18,8 +18,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 ## Layout
 
 ```
-┌─ Header: hive tui · scope=★ All projects · filter=- · generated_at=…  ──┐
-├─────────────────┬────────────────────────────────────────────────────────┤
+┌─────────────────┬────────────────────────────────────────────────────────┐
 │  ProjectsPane   │  TasksPane                                             │
 │  (left, 18-28)  │  (right, cols - left)                                  │
 │                 │                                                        │
@@ -34,6 +33,8 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 
 Pane focus is keyboard-only; the focused pane border is bright cyan, the inactive pane border is faint. Below 70 cols the project pane is suppressed and the tasks pane occupies the full width — narrow terminals still get a usable view, just without the left-pane drill-down.
 
+The dashboard intentionally has no persistent metadata header. Scope and filter context live in pane titles and prompt modes, while `generated_at` remains an internal snapshot field rather than always-on chrome. The composer computes pane height from `model.rows` minus any stalled banner and footer rows; both panes clip/pad to that budget. The project and task panes use cursor-following viewports, so vertical terminal shrink keeps the selected project/task visible and keeps the footer on-screen instead of letting rows overflow below it.
+
 ## Modes
 
 | Mode | Entered by | Exited by |
@@ -46,6 +47,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | New idea project picker | `n` from `★ All projects` scope | `Esc` / `q` (cancels) / `Enter` (selects and advances to title prompt) |
 | New idea prompt | `n` (single-project scope), or after picker selection (all-projects scope) | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Info panel | `i` on a selected right-pane task | `q` / `Esc` / `i` |
+| Archive pane | `z` | `q` / `Esc` |
 | Help overlay | `?` | any key |
 
 ## Keybindings (default mode)
@@ -68,6 +70,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `9-done` (or any stage). |
 | `i` | open the focused row's in-TUI info panel — no editor handoff, no marker change, no workflow dispatch. |
 | `s` | steer the focused task manually: open the configured `execute.agent` in the feature worktree with every existing stage folder for that slug passed as agent context, mark the row `MANUAL_STEERING`, and archive the slug under `archived-manual/` when the agent exits |
+| `z` | open the Archive pane, listing all `9-done` tasks across projects with no age cutoff |
 | `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -117,9 +120,15 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 ## Data source
 
 `Hive::Tui::StateSource` polls at 1 Hz from a non-daemon background
-thread. It calls
+thread. TUI boot performs one synchronous `StateSource#refresh_now` before
+entering Bubbletea's render/input loop, then seeds the initial model with that
+snapshot so the first useful frame shows registered projects/tasks instead of a
+long-lived loading grid. This is necessary because bubbletea-ruby's raw input
+poll can starve Ruby background threads during startup; relying on the first
+background poll alone produced multi-second loading screens even when
+`hive status` itself was fast. After boot, the source calls
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-in-process for the first snapshot and whenever the cached mtime
+in-process whenever the cached mtime
 fingerprint changes; otherwise it reuses the previous `Snapshot` and
 only refreshes `current_seen_at`. The fingerprint watches the global
 project registry (`Hive::Config.global_config_path`), each visible
@@ -145,7 +154,9 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
 
-`Hive::Tui::Snapshot::Row` carries `slug`, `id`, and `display_name` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+
+The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops only clean `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads; done rows with unresolved markers remain visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 
@@ -218,9 +229,9 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 
 ## Terminal hostility
 
-- **Resize:** Bubble Tea's runner installs its own SIGWINCH handler and synthesises a `WindowSizeMessage`; `BubbleModel#update` translates it into `Messages::WindowSized` so views can read `model.cols`/`model.rows` without poking the framework.
+- **Resize:** `App.run_charm` installs a Hive-owned `SIGWINCH` hook before `Runner#run`, seeds the current `STDOUT.winsize`, and dispatches `Messages::WindowSized` directly; Bubble Tea still chains through that hook and owns renderer sizing. `BubbleModel#update` also translates framework `WindowSizeMessage` values, so both the app hook and the framework path converge on `model.cols`/`model.rows`.
 - **Ctrl+Z / SIGTSTP:** Bubble Tea owns suspend/resume of the alt-screen and raw-mode toggling.
-- **SIGHUP:** trapped at boot in `App.run_charm`; the trap calls `runner.send(Messages::TERMINATE_REQUESTED)`, which the runner picks up at the top of the next loop tick. Update returns `Bubbletea.quit` so the runner exits cleanly. Cleanup runs in `App.run_charm`'s `ensure` (kill the polling thread, stop StateSource, restore the previous HUP handler, `SubprocessRegistry.kill_inflight!`, reap inflight auto-heal threads). All setup (StateSource boot, `Bubbletea::Runner` construction, HUP trap install, poller spawn) is performed *inside* the same `begin` so a constructor failure still hits the same nil-guarded cleanup path — the StateSource thread can no longer leak when `Bubbletea::Runner.new` raises.
+- **SIGHUP:** trapped at boot in `App.run_charm`; the trap calls `runner.send(Messages::TERMINATE_REQUESTED)`, which the runner picks up at the top of the next loop tick. Update returns `Bubbletea.quit` so the runner exits cleanly. Cleanup runs in `App.run_charm`'s `ensure` (kill the polling thread, stop StateSource, restore the previous HUP/WINCH handlers, `SubprocessRegistry.kill_inflight!`, reap inflight auto-heal threads). All setup (StateSource boot, `Bubbletea::Runner` construction, signal hook install, poller spawn) is performed *inside* the same `begin` so a constructor failure still hits the same nil-guarded cleanup path — the StateSource thread can no longer leak when `Bubbletea::Runner.new` raises.
 - **Crash-time cleanup:** there is no `at_exit` hook. Workflow-verb children are spawned with `pgroup: true` and intentionally **detached** — `dispatch_background` never registers them with `SubprocessRegistry`, and the registry's `kill_inflight!` is called only from `App.run_charm`'s normal-exit `ensure` block (not from `at_exit`). A signal that bypasses that ensure (`SIGKILL` of the TUI, kernel OOM kill, etc.) leaves the children running. That is the design — long-running background agents outlive an interrupted dashboard so the user can re-attach with `hive tui` and pick up the in-flight rows. Recovery for kill-class markers landing on a re-launched TUI happens via `auto_heal_kill_class_errors`, not via at-exit cleanup.
 - **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"invalid_task_path", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema, and `error_kind` matches the value other `InvalidTaskPath` emit sites already use).
 - **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.
@@ -231,7 +242,7 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 - `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
 - `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `IdeaPreview`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
-- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0.
+- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears without a multi-second loading grid on the startup path (a generous 5s regression bound, not a benchmark), `q` exits 0, and the charm smoke resizes a running PTY horizontally and vertically, sends `SIGWINCH`, and asserts the next frame expands while keeping the footer visible.
 
 No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing.
 

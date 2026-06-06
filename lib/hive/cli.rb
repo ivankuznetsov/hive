@@ -45,11 +45,12 @@ module Hive
            (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
         4. Development agent (drives 4-execute)                  — default codex
         5. Review agents (multi-select over 3 default reviewers) — default all
-        6. Triage bias (courageous / safetyist)                  — default courageous
-        7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        8. Daemon enrollment                                     — default enabled
-        9. Hive babysitter enrollment                            — default enabled
-       10. Daemon autostart                                      — default disabled
+        6. Patrol PR review agents                               — default codex only
+        7. Triage bias (courageous / safetyist)                  — default courageous
+        8. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        9. Daemon enrollment                                     — default enabled
+       10. Hive babysitter enrollment                            — default enabled
+       11. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -61,8 +62,8 @@ module Hive
 
         hive: using defaults — planning=claude, claude_mode=tmux,
         claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
-        triage=courageous, limits=defaults, daemon=enabled,
-        babysitter=enabled, daemon_autostart=disabled
+        patrol_reviewers=codex, triage=courageous, limits=defaults,
+        daemon=enabled, babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus
@@ -70,7 +71,10 @@ module Hive
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
-      for the schema). Piped STDIN is intentionally NOT consumed.
+      for the schema). Legacy Compound Engineering skill values such as
+      `/compound-engineering:ce-brainstorm` are normalized to the current
+      `/ce-brainstorm` form before prompts are rendered. Piped STDIN is
+      intentionally NOT consumed.
 
       Exit codes:
         0  — initialised successfully
@@ -355,11 +359,26 @@ module Hive
       run_stage_action("finalize", target)
     end
 
-    desc "archive TARGET", "Move a completed finalize task into done, or run an existing done task"
+    desc "archive [TARGET]", "List done tasks, or move a completed finalize task into done"
+    long_desc <<~DESC
+      With no TARGET, lists every task currently in 9-done across registered
+      projects. Pass --json for the same archive-scoped status payload.
+
+      With TARGET, preserves the workflow behavior: move a completed finalize
+      task into done, or run an existing done task.
+    DESC
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def archive(target)
+    def archive(target = nil)
+      if target.nil?
+        if options[:from]
+          warn "hive archive: --from is ignored when listing; it only disambiguates same-slug tasks for `hive archive TARGET`"
+        end
+        require "hive/commands/status"
+        return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
+      end
+
       run_stage_action("archive", target)
     end
 

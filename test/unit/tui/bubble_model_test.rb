@@ -24,11 +24,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
                     marker: "waiting", attrs: {}, folder: nil,
+                    folder_mtime: nil,
                     action_label: "Needs your input", next_action: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
-      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      folder_mtime: folder_mtime, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: action_label,
       suggested_command: suggested_command, next_action: next_action,
       diagnostic: nil
@@ -172,6 +173,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :filter, @model.hive_model.mode
   end
 
+  def test_z_opens_archive_pane
+    km = Bubbletea::KeyMessage.new(key_type: 0, runes: [ "z".ord ])
+    @model.update(km)
+    assert_equal :archive, @model.hive_model.mode
+  end
+
   # F2: full filter happy path through KeyMessage → KeyMap → Update.
   # Open filter, type chars, commit; assert filter committed and mode
   # back to :grid. Pins the regression we found in the /ce-code-review
@@ -263,6 +270,29 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
 
     assert_equal [ { project_slug: "demo" } ], scopes
+  end
+
+  def test_current_row_uses_archive_filtered_grid_projection
+    hidden = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      slug: "old-archived",
+      stage: "9-done",
+      marker: "complete",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    visible = make_task_row(action_key: "ready_to_plan", action_label: "Ready to plan", slug: "visible-row")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        snapshot: snapshot_with([ hidden, visible ]),
+        cursor: [ 0, 0 ]
+      ),
+      dispatch: @dispatch
+    )
+
+    row = @model.send(:current_row)
+
+    assert_equal "visible-row", row.slug
   end
 
   def test_usage_footer_defaults_to_all_scope_without_selection
@@ -417,7 +447,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       dispatch: @dispatch
     )
     out = with_zero_usage { @model.view }
-    assert_includes out, "hive tui"
+    assert_includes out, "Tasks ·"
+    assert_includes out, "tokens"
   end
 
   def test_view_renders_help_overlay_in_help_mode
@@ -651,6 +682,30 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "stale"
   end
 
+  def test_view_renders_archive_mode
+    row = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      slug: "archived-row",
+      stage: "9-done",
+      marker: "complete"
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :archive,
+        snapshot: snapshot_with([ row ]),
+        cols: 100,
+        rows: 20
+      ),
+      dispatch: @dispatch
+    )
+
+    out = @model.view
+
+    assert_includes out, "Archive · all done tasks"
+    assert_includes out, "archived-row"
+  end
+
   def test_view_renders_red_status_detail_mode
     row = make_task_row(
       action_key: "error", action_label: "Error", marker: "error",
@@ -682,7 +737,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     out = @model.view
 
-    assert_includes out, "hive tui"
+    assert_includes out, "Tasks ·"
   end
 
   # ---- v2 two-pane composition ----
@@ -730,6 +785,52 @@ class HiveTuiBubbleModelTest < Minitest::Test
                     "hint block must precede token block at wide width"
   end
 
+  def test_default_footer_omits_hidden_archived_notice
+    rows = 12.times.map do |idx|
+      make_task_row(
+        action_key: "archived",
+        action_label: "Archived",
+        slug: "old-archived-#{idx}",
+        stage: "9-done",
+        marker: "complete",
+        folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+      )
+    end
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snapshot_with(rows), mode: :grid),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 180) }
+
+    refute_includes out, "hidden — open Archive pane"
+  end
+
+  def test_default_footer_flash_takes_precedence_over_usage_hint
+    row = make_task_row(
+      action_key: "archived",
+      action_label: "Archived",
+      stage: "9-done",
+      marker: "complete",
+      folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        snapshot: snapshot_with([ row ]),
+        mode: :grid,
+        flash: "working",
+        flash_set_at: Time.now
+      ),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 180) }
+
+    assert_includes out, "working"
+    refute_includes out, "hidden — open Archive pane"
+    refute_includes out, "[Tab] switch"
+  end
+
   def test_default_footer_fits_full_hint_at_exact_boundary_width
     hint = @model.send(:footer_hint)
     usage = Hive::Tui::Views::UsageFooter.text(Hive::UsageDb.zero_aggregate)
@@ -765,6 +866,99 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "tokens"
     refute_includes out, "[Tab]"
     refute_includes out, "[?] help"
+  end
+
+  def test_default_footer_narrow_branch_omits_hidden_notice
+    rows = 12.times.map do |idx|
+      make_task_row(
+        action_key: "archived",
+        action_label: "Archived",
+        slug: "old-archived-#{idx}",
+        stage: "9-done",
+        marker: "complete",
+        folder_mtime: (Time.now - (5 * 86_400)).utc.iso8601
+      )
+    end
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snapshot_with(rows), mode: :grid),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.send(:default_footer, 76) }
+
+    assert_includes out, "tokens", "narrow footer must keep the usage block alongside the hidden notice"
+    refute_includes out, "hidden", "narrow footer must not burn space on archived-hidden status"
+    refute_includes out, "[Tab]", "narrow footer must drop key hints even when a hidden notice is present"
+  end
+
+  def test_grid_mode_omits_persistent_metadata_strip
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 100, scope: 1, filter: "abc"),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.view }
+
+    refute_includes out, "hive tui  scope="
+    refute_includes out, "generated_at=2026-05-01"
+  end
+
+  def test_header_strip_formats_snapshot_metadata_when_called_directly
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1, filter: "abc"),
+      dispatch: @dispatch
+    )
+
+    out = @model.send(:header_strip, 200)
+
+    assert_includes out, "hive tui"
+    assert_includes out, "scope=hive"
+    assert_includes out, "filter=abc"
+    assert_includes out, "generated_at=2026-05-01"
+  end
+
+  def test_header_strip_truncates_to_width
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1, filter: "abc"),
+      dispatch: @dispatch
+    )
+
+    out = @model.send(:header_strip, 20)
+
+    assert_operator Hive::Tui::Text.sanitize(out).length, :<=, 20
+  end
+
+  def test_grid_mode_clamps_rendered_height_to_terminal_rows
+    tasks = 20.times.map do |idx|
+      { "slug" => "task-#{idx}", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+        "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+    end
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => tasks } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 100, rows: 8, cursor: [ 0, 19 ]),
+      dispatch: @dispatch
+    )
+
+    out = with_zero_usage { @model.view }
+
+    assert_operator out.lines.count, :<=, 8
+    assert_includes out, "task-19", "viewport must follow the selected task after vertical resize"
+    refute_includes out, "task-0", "offscreen rows must be clipped instead of pushing the footer away"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols

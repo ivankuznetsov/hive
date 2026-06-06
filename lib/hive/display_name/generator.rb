@@ -16,9 +16,10 @@ module Hive
       TAIL_BYTES = 64 * 1024
       DEFAULT_TIMEOUT_SEC = 60
 
-      def initialize(task, cfg: nil)
+      def initialize(task, cfg: nil, commit: true)
         @task = task
         @cfg = cfg || Hive::Config.load(task.project_root)
+        @commit = commit
       end
 
       def call
@@ -31,7 +32,7 @@ module Hive
         return nil unless File.directory?(@task.folder)
 
         Hive::TaskMeta.update_display_name(@task.folder, name)
-        commit_name
+        commit_name if @commit
         name
       rescue StandardError
         nil

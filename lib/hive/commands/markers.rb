@@ -114,7 +114,7 @@ module Hive
           end
 
           match_attr_or_raise!(task, marker)
-          remove_marker_line!(task.state_file, marker.raw)
+          Hive::Markers.remove_marker(task.state_file, marker.raw)
         end
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -158,22 +158,6 @@ module Hive
 
           [ key, value ]
         end
-      end
-
-      # Atomic removal: read body, drop the matched marker substring
-      # and any trailing newline that the marker occupied alone on a
-      # line, then `Markers.write_atomic` the result. Mirrors the same
-      # safety guarantees as Markers.set's atomic write path.
-      def remove_marker_line!(state_file, raw_marker)
-        return unless File.exist?(state_file)
-
-        body = File.read(state_file, encoding: "UTF-8")
-        # Match the marker plus, optionally, a trailing newline if the
-        # marker sat on its own line (don't strip a newline that's
-        # part of surrounding prose). Anchor on Regexp.escape to match
-        # the exact marker comment we read.
-        cleaned = body.sub(/#{Regexp.escape(raw_marker)}\n?/, "")
-        Hive::Markers.write_atomic(state_file, cleaned)
       end
 
       def record_hive_commit(task, normalized)

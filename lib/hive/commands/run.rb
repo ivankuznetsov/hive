@@ -277,9 +277,6 @@ module Hive
           #   approval requires every checkbox `[x]` AND the count
           #   matches marker.matches AND the worktree HEAD still
           #   matches marker.head.
-          # - reason=reviewer_partial_failure: read reviews/errors-NN.md;
-          #   either fix the reviewer config and re-run, or clear the
-          #   marker to accept partial coverage.
           # - escalations-only (no reason or unknown reason): open the
           #   Q&A-style escalations file for the pass; answered Q/A
           #   blocks are consumed by the next fix pass.
@@ -296,14 +293,6 @@ module Hive
                                 "(partial ticks keep the pause), then re-run. " \
                                 "Approval is rejected if the file's checkbox count " \
                                 "differs from marker.matches or the worktree HEAD differs from marker.head.",
-              "rerun_with" => "hive run #{task.folder}" }
-          when "reviewer_partial_failure"
-            target = pass_suffix ? "#{task.folder}/reviews/errors-#{pass_suffix}.md" : task.folder
-            { "kind" => kind::EDIT,
-              "target" => target,
-              "instructions" => "one or more reviewers failed for this pass; either re-run hoping for " \
-                                "recovery or `hive markers clear #{task.folder} --name REVIEW_WAITING` " \
-                                "to accept the partial coverage, then re-run",
               "rerun_with" => "hive run #{task.folder}" }
           else
             target = pass_suffix ? "#{task.folder}/reviews/escalations-#{pass_suffix}.md" : task.folder
@@ -395,6 +384,24 @@ module Hive
             }
           end
 
+          if marker.attrs["reason"].to_s == "reviewer_partial_failure"
+            pass = marker.attrs["pass"].to_s
+            pass_suffix = pass.match?(/\A\d+\z/) ? format("%02d", pass.to_i) : nil
+            target = pass_suffix ? "#{task.folder}/reviews/errors-#{pass_suffix}.md" : task.folder
+            return {
+              "kind" => Hive::Schemas::NextActionKind::EDIT,
+              "target" => target,
+              "phase" => marker.attrs["phase"],
+              "reason" => marker.attrs["reason"],
+              "error" => marker.attrs,
+              "instructions" => "one or more reviewers failed for this pass; inspect " \
+                                "#{File.basename(target)} for the failing reviewer, then either re-run " \
+                                "hoping for recovery or clear the marker via " \
+                                "`hive markers clear #{task.folder} --name REVIEW_ERROR` to accept partial coverage",
+              "rerun_with" => "hive run #{task.folder}"
+            }
+          end
+
           {
             "kind" => Hive::Schemas::NextActionKind::NO_OP,
             "phase" => marker.attrs["phase"],
@@ -468,8 +475,16 @@ module Hive
             reason = marker.attrs["reason"]
             warn "  phase: #{phase}" if phase
             warn "  reason: #{reason}" if reason
-            warn "  next: investigate; clear the marker via " \
-                 "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+            if reason.to_s == "reviewer_partial_failure"
+              pass = marker.attrs["pass"].to_s
+              pass_suffix = pass.match?(/\A\d+\z/) ? format("%02d", pass.to_i) : nil
+              detail = pass_suffix ? "reviews/errors-#{pass_suffix}.md" : "reviews/"
+              warn "  next: inspect #{detail} for the failing reviewer, then re-run for recovery or clear " \
+                   "the marker via `hive markers clear #{task.folder} --name REVIEW_ERROR` to accept partial coverage"
+            else
+              warn "  next: investigate; clear the marker via " \
+                   "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+            end
           end
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
         end

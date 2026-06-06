@@ -60,13 +60,26 @@ module Hive
         state_source = nil
         bubble_model = nil
         prev_hup = nil
+        prev_winch = nil
         poller = nil
 
         begin
           state_source = Hive::Tui::StateSource.new
+          # Synchronous prime: refresh_now runs one in-process status parse
+          # and returns the seed snapshot BEFORE the background poller starts,
+          # so the first Bubbletea frame renders real rows instead of a loading
+          # grid. The input loop would otherwise starve the poll thread for
+          # seconds (see input_timeout note below). Capture both seed values
+          # here, ahead of `start`, so the model is seeded from a deterministic
+          # snapshot rather than racing the first background poll.
+          seed_snapshot = state_source.refresh_now
+          seed_error = state_source.last_error
           state_source.start
 
-          seed_model = Hive::Tui::Model.initial
+          seed_model = Hive::Tui::Model.initial.with(
+            snapshot: seed_snapshot,
+            last_error: seed_error
+          )
           bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
           # `input_timeout: 5` (ms) trades a tiny amount of GVL-yield
           # latency for substantially less escape-sequence fragmentation.
@@ -92,6 +105,7 @@ module Hive
           bubble_model.dispatch = runner.method(:send)
 
           prev_hup = install_terminate_hook(runner)
+          prev_winch = install_resize_hook(runner)
           poller = start_snapshot_poller(state_source, runner)
 
           runner.run
@@ -99,6 +113,7 @@ module Hive
           poller&.kill
           state_source&.stop
           restore_terminate_hook(prev_hup) if prev_hup
+          restore_resize_hook(prev_winch) if prev_winch
           Hive::Tui::SubprocessRegistry.kill_inflight!
           # F8: heal Threads spawned by auto-heal can outlive the
           # runner; reap them with a 2s join-then-kill so the process
@@ -169,6 +184,50 @@ module Hive
       def restore_terminate_hook(prev)
         Signal.trap("HUP", prev || "DEFAULT")
       rescue ArgumentError
+        nil
+      end
+
+      # Bubbletea-ruby installs its own SIGWINCH handler inside
+      # Runner#run. Installing Hive's hook first lets the runner chain
+      # back to us, so the app model receives a typed WindowSized even
+      # if the framework's private resize path changes.
+      def install_resize_hook(runner, output: $stdout)
+        previous = Signal.trap("WINCH") do
+          dispatch_terminal_size(runner, output: output)
+        end
+        dispatch_terminal_size(runner, output: output)
+        previous
+      rescue ArgumentError
+        nil
+      end
+
+      def restore_resize_hook(prev)
+        Signal.trap("WINCH", prev || "DEFAULT")
+      rescue ArgumentError
+        nil
+      end
+
+      def dispatch_terminal_size(runner, output: $stdout)
+        message = terminal_size_message(output: output)
+        return false unless message
+
+        runner.send(message)
+        true
+      rescue StandardError => e
+        Hive::Tui::Debug.log("resize", "ignored #{e.class.name}: #{e.message}")
+        false
+      end
+
+      def terminal_size_message(output: $stdout)
+        require "io/console"
+
+        rows, cols = output.winsize
+        rows = rows.to_i
+        cols = cols.to_i
+        return nil unless rows.positive? && cols.positive?
+
+        Hive::Tui::Messages::WindowSized.new(cols: cols, rows: rows)
+      rescue IOError, NoMethodError, SystemCallError
         nil
       end
     end

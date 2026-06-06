@@ -294,7 +294,11 @@ module Hive
       def cause_sentence_for(row)
         case row.marker.to_s.downcase
         when "review_error"
-          "The review agent crashed before it could finish."
+          if row.attrs.to_h.transform_keys(&:to_s)["reason"].to_s == "reviewer_partial_failure"
+            "Some reviewers failed; the reviewers that ran found nothing, so review coverage is incomplete."
+          else
+            "The review agent crashed before it could finish."
+          end
         when "execute_stale"
           "The execute agent stalled before it could finish."
         when "review_stale", "review_ci_stale"

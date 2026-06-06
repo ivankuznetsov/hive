@@ -37,6 +37,19 @@ class TuiSmokeCharmTest < Minitest::Test
     end
   end
 
+  def plain_terminal_lines(buffer)
+    text = buffer.dup.force_encoding("UTF-8").scrub
+    text = text
+      .gsub(/\e\[[0-9;?]*[ -\/]*[@-~]/, "")
+      .gsub(/\e\][^\a]*(?:\a|\e\\)/, "")
+      .gsub(/\e[=>]/, "")
+    text.split(/\r?\n/).map { |line| line.delete("\r") }
+  end
+
+  def max_plain_line_width(buffer)
+    plain_terminal_lines(buffer).map(&:length).max || 0
+  end
+
   def wait_for_pid_exit(pid, deadline_seconds:)
     deadline = Time.now + deadline_seconds
     loop do
@@ -46,6 +59,88 @@ class TuiSmokeCharmTest < Minitest::Test
 
       sleep 0.05
     end
+  end
+
+  def seed_brainstorm_task(project_root, slug)
+    folder = File.join(project_root, ".hive-state", "stages", "2-brainstorm", slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "brainstorm.md"), "# #{slug}\n\n<!-- COMPLETE -->\n")
+  end
+
+  def test_charm_tui_repaints_after_pty_resize
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "resize probe").call }
+
+        project_prefix = project[0, 12]
+
+        env = { "TERM" => "xterm-256color", "HIVE_TUI_BACKEND" => "charm" }
+        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+          reader.winsize = [ 30, 120 ]
+
+          initial = read_until(reader, deadline_seconds: 10.0) do |buf|
+            buf.include?(project_prefix)
+          end
+          assert_includes initial, project_prefix
+
+          reader.winsize = [ 30, 150 ]
+          Process.kill("WINCH", pid)
+
+          resized = read_until(reader, deadline_seconds: 5.0) do |buf|
+            max_plain_line_width(buf) >= 145
+          end
+          resized_width = max_plain_line_width(resized)
+          assert_operator resized_width, :>=, 145,
+                          "resized frame should expand to the 150-column PTY"
+
+          writer.write("q")
+          writer.flush
+          status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
+          refute_nil status, "charm TUI must exit within 3s of pressing 'q'"
+          assert_equal 0, status.exitstatus, "clean quit exits 0"
+        end
+      end
+    end
+  rescue Errno::EIO
+    raise unless $!.message.include?("Input/output error")
+  end
+
+  def test_charm_tui_vertical_resize_keeps_panes_footer_and_selected_row_visible
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        16.times { |idx| seed_brainstorm_task(dir, "rz#{format('%02d', idx)}") }
+
+        env = { "TERM" => "xterm-256color", "HIVE_TUI_BACKEND" => "charm" }
+        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+          reader.winsize = [ 30, 120 ]
+
+          initial = read_until(reader, deadline_seconds: 15.0) do |buf|
+            buf.include?("rz00")
+          end
+          assert_includes initial, "rz00"
+
+          reader.winsize = [ 9, 120 ]
+          Process.kill("WINCH", pid)
+
+          resized = read_until(reader, deadline_seconds: 5.0) do |buf|
+            buf.include?("[Tab] switch")
+          end
+          assert_includes initial, "Projects", "project pane must render before vertical resize"
+          assert_includes resized, "[Tab] switch", "footer must remain visible after vertical resize"
+
+          writer.write("q")
+          writer.flush
+          status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
+          refute_nil status, "charm TUI must exit within 3s of pressing 'q'"
+          assert_equal 0, status.exitstatus, "clean quit exits 0"
+        end
+      end
+    end
+  rescue Errno::EIO
+    raise unless $!.message.include?("Input/output error")
   end
 
   def test_charm_tui_boots_paints_first_frame_and_quits_on_q
@@ -66,12 +161,23 @@ class TuiSmokeCharmTest < Minitest::Test
           # explicitly size to 120x30 so the projects pane renders.
           reader.winsize = [ 30, 120 ]
 
+          started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
             buf.include?(project_prefix)
           end
+          first_useful_paint = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
           assert_includes buffer, project_prefix,
                           "a stable prefix of the seeded project name must appear in " \
                           "the first frame within 10s, got buffer:\n#{buffer.inspect[0, 500]}"
+          # Regression guard, not a benchmark: the seeded first frame paints
+          # in ~0.3s locally. A revert to waiting on the starved background
+          # poll reintroduces the multi-second loading grid this fixes. The
+          # bound is generous (5s, well above the synchronous prime + PTY
+          # spawn cost on a loaded CI host) so it catches that regression
+          # without flaking; the 10s read_until above is the hard gate.
+          assert_operator first_useful_paint, :<, 5.0,
+                          "seeded project should appear without a multi-second loading grid " \
+                          "on charm TUI startup; took #{format('%.3f', first_useful_paint)}s"
 
           writer.write("q")
           writer.flush

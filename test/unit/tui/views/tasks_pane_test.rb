@@ -14,6 +14,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 action_label: "Ready to plan", age: 120,
                 marker: "complete", attrs: {},
                 id: 42, display_name: nil,
+                mtime: "2026-05-01T00:00:00Z",
+                folder_mtime: "2026-05-01T00:00:00Z",
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -24,7 +26,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "state_file" => "/tmp/#{slug}/brainstorm.md",
       "marker" => marker,
       "attrs" => attrs,
-      "mtime" => "2026-05-01T00:00:00Z",
+      "mtime" => mtime,
+      "folder_mtime" => folder_mtime,
       "age_seconds" => age,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
@@ -64,6 +67,40 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap, scope: 2), width: 80)
     assert_includes out, "Tasks · myapp"
+  end
+
+  def test_render_omits_old_clean_archived_rows_but_keeps_visible_rows
+    old = (Time.now - (5 * 86_400)).utc.iso8601
+    recent = (Time.now - 86_400).utc.iso8601
+    snap = make_snapshot([
+                           { "name" => "hive", "tasks" => [
+                             make_task(
+                               slug: "old-archived",
+                               stage: "9-done",
+                               action: "archived",
+                               action_label: "Archived",
+                               marker: "complete",
+                               mtime: old,
+                               folder_mtime: old
+                             ),
+                             make_task(
+                               slug: "recent-archived",
+                               stage: "9-done",
+                               action: "archived",
+                               action_label: "Archived",
+                               marker: "complete",
+                               mtime: recent,
+                               folder_mtime: recent
+                             ),
+                             make_task(slug: "active-task", stage: "4-execute", marker: "execute_complete")
+                           ] }
+                         ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    refute_includes out, "old-archived"
+    assert_includes out, "recent-archived"
+    assert_includes out, "active-task"
   end
 
   # ---- Column rendering ----
@@ -401,6 +438,31 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "⚠",  "error rows must show warning icon"
   end
 
+  def test_action_icon_cells_have_consistent_display_width
+    icons = Hive::Tui::Views::TasksPane::ICONS.values + [ Hive::Tui::Views::TasksPane::DEFAULT_ICON ]
+    cells = icons.map { |icon| Hive::Tui::Views::Format.ljust_cells(icon, Hive::Tui::Views::TasksPane::ICON_WIDTH) }
+    assert cells.all? { |cell| Hive::Tui::Views::Format.display_width(cell) == Hive::Tui::Views::TasksPane::ICON_WIDTH },
+           "every action icon cell must consume the fixed icon column width"
+  end
+
+  def test_wide_icon_does_not_shift_the_id_column
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
+        make_task(slug: "ready-task", id: 8, action: "ready_to_plan", action_label: "Ready to plan")
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    rows = out.lines.grep(/running-task|ready-task/)
+
+    id_offsets = rows.map do |row|
+      prefix = row.split(/\d/, 2).first
+      Hive::Tui::Views::Format.display_width(prefix)
+    end
+    assert_equal [ 7, 7 ], id_offsets,
+                 "wide emoji icons must not shift fixed-width columns"
+  end
+
   # ---- Sort order ----
 
   def test_rows_sorted_by_action_label_order
@@ -516,6 +578,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     snap = make_snapshot([])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 80)
     assert_includes out, "no tasks"
+  end
+
+  def test_height_clips_task_rows_but_keeps_cursor_visible
+    tasks = 15.times.map { |idx| make_task(slug: "task-#{idx}", id: idx) }
+    snap = make_snapshot([ { "name" => "hive", "tasks" => tasks } ])
+
+    out = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, cursor: [ 0, 14 ]), width: 100, height: 8
+    )
+
+    assert_equal 8, out.lines.count
+    assert_includes out, "task-14", "task viewport must follow the selected cursor"
+    refute_includes out, "task-0", "offscreen tasks must be clipped instead of overflowing the pane"
   end
 
   # ---- compute_layout adaptive column dropping ----

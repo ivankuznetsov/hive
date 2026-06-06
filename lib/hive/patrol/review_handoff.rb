@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/task_counter"
 require "hive/task_meta"
 
 module Hive
@@ -22,6 +23,7 @@ module Hive
         task_folder = File.join(@project_root, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
         write_meta(task_folder, slug, finding)
+        write_idea_md(task_folder, slug, finding, now)
         write_task_md(task_folder, slug, finding, patch, pr_url, now)
         write_worktree_pointer(task_folder, patch, now)
         write_pr_md(task_folder, finding, pr_url)
@@ -33,10 +35,16 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: nil,
+          id: allocate_task_id,
           slug: slug,
           display_name: display_name(finding)
         )
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)
@@ -67,6 +75,23 @@ module Hive
 
           Branch: `#{patch.branch}`
           Fingerprint: `#{finding.fingerprint}`
+        MD
+        )
+      end
+
+      def write_idea_md(task_folder, slug, finding, now)
+        write_frontmatter_md(
+          File.join(task_folder, "idea.md"),
+          {
+            "slug" => slug,
+            "created_at" => now.utc.iso8601,
+            "source" => "patrol",
+            "patrol_finding_id" => finding.id,
+            "patrol_fingerprint" => finding.fingerprint,
+            "original_text" => idea_text(finding)
+          },
+          <<~MD
+          #{idea_text(finding)}
         MD
         )
       end
@@ -144,6 +169,24 @@ module Hive
 
       def display_name(finding)
         "Patrol: #{finding.title || finding.id}"
+      end
+
+      def idea_text(finding)
+        parts = []
+        parts << "# #{display_name(finding)}"
+        parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
+        parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
+        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
+        parts.join("\n\n")
+      end
+
+      def evidence_text(evidence)
+        evidence.map do |entry|
+          location = [ entry["file"], entry["line"] ].compact.join(":")
+          snippet = entry["snippet"].to_s.strip
+          line = location.empty? ? "- evidence" : "- `#{location}`"
+          snippet.empty? ? line : "#{line}: #{snippet}"
+        end.join("\n")
       end
 
       def pr_number(pr_url)

@@ -27,6 +27,7 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
     marker_name: :waiting,
     marker_attrs: {},
     mtime: Time.now,
+    folder_mtime: Time.now,
     claude_pid: nil,
     claude_pid_alive: nil,
     action_key: "ready_to_brainstorm",

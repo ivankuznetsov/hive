@@ -147,6 +147,7 @@ class SchemaFilesTest < Minitest::Test
       marker_name: :waiting,
       marker_attrs: {},
       mtime: Time.now,
+      folder_mtime: Time.now,
       claude_pid: nil,
       claude_pid_alive: nil,
       action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
@@ -914,7 +915,7 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     expected = %w[
       answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
-      default_branch development_agent enabled_reviewers hive_state_path ok path planning_agent
+      default_branch development_agent enabled_reviewers hive_state_path ok path patrol_reviewers planning_agent
       project schema schema_version timeouts triage_bias worktree_root
     ].sort
     assert_equal expected, schema_required,

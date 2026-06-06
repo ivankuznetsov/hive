@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "open3"
 require "time"
+require "yaml"
 require "hive/events"
 require "hive/config"
 require "hive/protected_files"
@@ -402,21 +403,21 @@ module Hive
             # the all-clean signal from the surviving reviewers is
             # NOT proof that the worktree is clean — it only proves
             # the reviewers that ran found nothing. Surface as a
-            # REVIEW_WAITING reason=reviewer_partial_failure so the
-            # user decides whether to (a) re-run hoping the failed
-            # reviewer recovers, (b) accept the partial coverage by
-            # clearing the marker, or (c) edit the reviewer config.
+            # recoverable REVIEW_ERROR rather than REVIEW_WAITING:
+            # no user answer is required; the right default action is
+            # clearing the error marker and rerunning reviewers.
             errors_path = File.join(
               ctx_pass.task_folder,
               "reviews",
               "errors-#{format('%02d', pass)}.md"
             )
             if File.exist?(errors_path)
-              Hive::Markers.set(task.state_file, :review_waiting,
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :reviewers,
                                 reason: "reviewer_partial_failure",
                                 pass: pass)
-              return { commit: "review_waiting_reviewer_partial_failure_pass_#{format('%02d', pass)}",
-                       status: :review_waiting }
+              return { commit: "review_error_reviewer_partial_failure_pass_#{format('%02d', pass)}",
+                       status: :review_error }
             end
 
             # Phase 2 produced zero findings → skip Phase 4, jump to Phase 5.
@@ -798,9 +799,15 @@ module Hive
       #                         the operator has not edited escalations
       #                         since; the runner moved past pass N cleanly.
       #   :triage_incomplete  — reviewer files for pass N exist but no
-      #                         `escalations-NN.md`. Triage never ran.
-      #                         Retry runs Phase 2/3 to re-derive
-      #                         escalations from existing reviewer files.
+      #                         `escalations-NN.md`, or escalations exist
+      #                         without a completed fix while
+      #                         `errors-NN.md` records reviewer infra
+      #                         failures for the pass. Retry runs Phase
+      #                         2/3 so failed reviewers get a fresh
+      #                         attempt and stale errors are cleared. A
+      #                         pass with a fresh `fix-success-NN.md` stays
+      #                         `:complete` even if `errors-NN.md` lingers,
+      #                         so an already-fixed pass is never re-run.
       #   :fix_incomplete     — reviewer files AND escalations-NN.md
       #                         exist, but neither the fix-success
       #                         sentinel nor any pass-N+1 reviewer file
@@ -824,13 +831,29 @@ module Hive
         return :complete if reviewer_files.empty?
 
         escalations_path = File.join(reviews_dir, "escalations-#{pass_suffix}.md")
+        errors_path = File.join(reviews_dir, "errors-#{pass_suffix}.md")
+
         unless File.exist?(escalations_path)
+          # No triage escalations yet (this includes the empty-findings
+          # partial-failure case, which writes no escalations). Retry Phase
+          # 2/3; an errors-NN.md here just means some reviewers also need a
+          # fresh attempt.
           return :triage_incomplete
         end
 
-        # Triage produced escalations. Was the fix completed?
+        # Triage produced escalations. A fresh fix-success sentinel means the
+        # pass is complete — even if errors-NN.md lingers from a partial
+        # reviewer failure earlier in the same pass. This check must come
+        # BEFORE the errors-NN.md retry below: otherwise an already-fixed
+        # pass that also carries errors-NN.md would re-run reviewers and
+        # clobber the operator's [x] marks (regression guarded here).
         fix_success = fix_success_path(task_folder, pass)
         return :complete if fix_success_fresh?(fix_success, escalations_path)
+
+        # Escalations exist but the fix isn't done. If reviewers recorded
+        # infra failures this pass, retry Phase 2/3 so they get a fresh
+        # attempt and the stale errors-NN.md is cleared.
+        return :triage_incomplete if File.exist?(errors_path)
 
         next_pass_suffix = format("%02d", pass + 1)
         next_pass_started = Dir[File.join(reviews_dir, "*-#{next_pass_suffix}.md")].any? do |path|
@@ -918,7 +941,7 @@ module Hive
       # gone — the partial results stay on disk for the next run to
       # consume.
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
-        specs = Array(cfg.dig("review", "reviewers"))
+        specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
         # promise "errors-NN.md reflects
@@ -928,7 +951,19 @@ module Hive
         # reviewers between runs.
         clear_reviewer_infra_errors(ctx)
 
-        return :ok if specs.empty?
+        if specs.empty?
+          # An empty NORMAL review.reviewers is an intentional opt-out, but a
+          # patrol task reaching here means patrol.review.reviewers resolved
+          # to [] — the patrol PR would clear 6-review with no reviewer run.
+          # That is operator-surprising, so make it observable rather than
+          # letting the review gate pass silently.
+          if patrol_task?(task)
+            warn "[hive.review] patrol task resolved to zero patrol.review.reviewers; " \
+                 "6-review will pass with no reviewers run — set patrol.review.reviewers " \
+                 "in .hive-state/config.yml to review patrol PRs"
+          end
+          return :ok
+        end
         if started_at && max_wall_clock_sec &&
            wall_clock_exceeded?(started_at, max_wall_clock_sec)
           return :wall_clock_exceeded
@@ -1009,6 +1044,47 @@ module Hive
                                        wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def reviewer_specs_for(cfg, task)
+        return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
+
+        Array(cfg.dig("review", "reviewers"))
+      end
+
+      def patrol_task?(task)
+        frontmatter = task_frontmatter(task.state_file)
+        # Normalize before comparing: the producer (Hive::Patrol::ReviewHandoff)
+        # writes a bare lowercase `source: patrol` via to_yaml, but matching
+        # exact-case-sensitively means any future producer drift (quoting,
+        # casing, trailing whitespace) would silently misroute a patrol PR
+        # to the broader normal reviewer set. strip + casecmp? tolerates that.
+        frontmatter["source"].to_s.strip.casecmp?("patrol") || false
+      rescue SystemCallError => e
+        # I/O failures reading task.state_file fall back to the normal
+        # reviewer set (the broader, safer direction), but must not be
+        # silent — a misrouted patrol PR is otherwise invisible. Psych
+        # parse errors are already absorbed by task_frontmatter; narrowing
+        # to SystemCallError lets genuine programmer errors (nil task,
+        # unknown stage) propagate instead of being swallowed.
+        warn "[hive.review] patrol_task? could not read #{task.state_file.inspect}: " \
+             "#{e.class}: #{e.message} — routing as a normal (non-patrol) task"
+        false
+      end
+
+      def task_frontmatter(path)
+        return {} unless File.exist?(path)
+
+        content = File.read(path)
+        return {} unless content.start_with?("---\n")
+
+        yaml = content.split(/^---\s*$/, 3)[1]
+        return {} if yaml.to_s.strip.empty?
+
+        data = YAML.safe_load(yaml, permitted_classes: [ Time ], aliases: false) || {}
+        data.is_a?(Hash) ? data : {}
+      rescue Psych::Exception
+        {}
       end
 
       def reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining:)

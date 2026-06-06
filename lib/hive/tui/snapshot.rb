@@ -1,4 +1,6 @@
 require "hive"
+require "time"
+require "hive/archive_filter"
 require "hive/commands/status"
 
 module Hive
@@ -50,6 +52,7 @@ module Hive
         :marker,
         :attrs,
         :mtime,
+        :folder_mtime,
         :age_seconds,
         :claude_pid,
         :claude_pid_alive,
@@ -72,9 +75,12 @@ module Hive
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
         def initialize(id: nil, display_name: nil, worktree_path: nil,
-                       live_task_lock: false, unanswered_questions: 0, **rest)
+                       folder_mtime: nil, live_task_lock: false,
+                       unanswered_questions: 0, **rest)
           super(id: id, display_name: display_name,
-                worktree_path: worktree_path, live_task_lock: live_task_lock,
+                worktree_path: worktree_path,
+                folder_mtime: folder_mtime,
+                live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
         end
       end
@@ -138,6 +144,7 @@ module Hive
           marker: payload["marker"],
           attrs: payload["attrs"],
           mtime: payload["mtime"],
+          folder_mtime: payload["folder_mtime"],
           age_seconds: payload["age_seconds"],
           claude_pid: payload["claude_pid"],
           claude_pid_alive: payload["claude_pid_alive"],
@@ -187,6 +194,18 @@ module Hive
         self.class.new(generated_at: @generated_at, projects: filtered)
       end
 
+      def without_old_archived(now: Time.now)
+        filtered = @projects.map do |project|
+          rows = project.rows.reject { |row| old_archived_row?(row, now: now) }
+          project.with(rows: rows.freeze)
+        end
+        self.class.new(generated_at: @generated_at, projects: filtered)
+      end
+
+      def hidden_old_archived_count(now: Time.now)
+        rows.count { |row| old_archived_row?(row, now: now) }
+      end
+
       # `n == 0` is "all projects" (returns self). `n` between 1 and
       # projects.size returns a single-project snapshot (1-indexed). Out
       # of range returns an empty-projects snapshot so the renderer can
@@ -199,6 +218,17 @@ module Hive
         else
           self.class.new(generated_at: @generated_at, projects: [])
         end
+      end
+
+      # The canonical "what the operator can see and act on" projection:
+      # scope to the focused project, apply the slug filter, then drop
+      # old archived rows. Centralised so every cursor/render site shares
+      # one definition — a projection that forgets `.without_old_archived`
+      # would let the cursor act on a hidden row.
+      def visible_projection(scope:, filter:, now: Time.now)
+        scope_to_project_index(scope)
+          .filter_by_slug(filter)
+          .without_old_archived(now: now)
       end
 
       # `cursor` is `[project_idx, row_idx]` (both 0-based) or nil. Returns
@@ -215,6 +245,30 @@ module Hive
         return nil unless row_idx.between?(0, project_rows.size - 1)
 
         project_rows[row_idx]
+      end
+
+      private
+
+      def old_archived_row?(row, now:)
+        Hive::ArchiveFilter.hide?(
+          stage: row.stage,
+          marker_name: row.marker,
+          mtime: parse_time(row.mtime),
+          folder_mtime: parse_folder_mtime(row.folder_mtime),
+          now: now
+        )
+      end
+
+      def parse_folder_mtime(value)
+        parse_time(value)
+      end
+
+      def parse_time(value)
+        return nil if value.nil? || value.to_s.strip.empty?
+
+        Time.iso8601(value.to_s)
+      rescue ArgumentError
+        nil
       end
     end
   end

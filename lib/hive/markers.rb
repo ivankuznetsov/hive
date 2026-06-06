@@ -98,6 +98,19 @@ module Hive
       new_marker
     end
 
+    def clear_current(state_file_path, expected_name:, match_attrs: {})
+      with_markers_lock(state_file_path) do
+        marker = current(state_file_path)
+        return false unless marker.name.to_s == expected_name.to_s.downcase
+
+        expected = match_attrs.to_h.transform_keys(&:to_s)
+        return false unless expected.all? { |key, value| marker.attrs[key].to_s == value.to_s }
+
+        remove_marker(state_file_path, marker.raw)
+        true
+      end
+    end
+
     # Serialize concurrent state-file writers via a sidecar `.markers-lock`
     # flock'd exclusively. Public so `hive markers clear` can wrap its own
     # read+match+rewrite under the same lock that `set` uses — without
@@ -212,6 +225,15 @@ module Hive
 
       last = matches.last
       [ body[0...last.begin(0)] + new_marker + body[last.end(0)..], 1 ]
+    end
+
+    def remove_marker(state_file_path, raw_marker)
+      return unless File.exist?(state_file_path)
+      return if raw_marker.to_s.empty?
+
+      body = File.read(state_file_path, encoding: "UTF-8")
+      cleaned = body.sub(/#{Regexp.escape(raw_marker)}\n?/, "")
+      write_atomic(state_file_path, cleaned)
     end
   end
 end

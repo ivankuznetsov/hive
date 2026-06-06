@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive]
 ---
 

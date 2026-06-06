@@ -3248,3 +3248,12 @@ TTL config.
 **Refreshed pages:**
 - [[gaps]]
 - [[log]]
+
+## [2026-06-06T18:31:54Z] docs/status — verify hive-init docs and archive rule cleanup
+
+**Action:** Refreshed planning/documentation coverage after commit `469ec06e` corrected two stale documentation statements: `docs/cli.md` now says `hive init --json` emits `hive-init.v2`, and [[commands/status]] no longer claims unresolved old `9-done` rows remain visible in daily status. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hive-init schema archive filter 9-done"` returned stale indexed snippets for older archive wording, so verification used the committed diff plus direct reads. Checked `docs/cli.md`, `lib/hive.rb`, `lib/hive/commands/init.rb`, `schemas/hive-init.v1.json`, `schemas/hive-init.v2.json`, `test/unit/schema_files_test.rb`, `test/integration/init_test.rb`, `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, `test/unit/commands/status_test.rb`, `test/unit/tui/snapshot_test.rb`, [[cli]], [[commands/init]], [[commands/status]], [[commands/tui]], and [[testing]]. The source and tests confirm the current contracts: init emits schema version 2 while preserving the explicit v1 schema for pinned consumers, and archive hiding applies to all old `9-done` rows by row `mtime` with `folder_mtime` only as a fallback. Closed [[gaps]] entry 24 because the remaining `docs/cli.md` v1 residue is fixed. Page coverage did not change, so [[index]] was left unchanged. Did not run focused tests, `qmd update`, or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[gaps]]
+- [[log]]

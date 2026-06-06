@@ -5,6 +5,19 @@ module Hive
       :description, :recommendation, :evidence, :fingerprint,
       keyword_init: true
     ) do
+      # Evidence arrives as unvalidated LLM JSON. The invariant is "an Array of
+      # entry Hashes", but the model sometimes emits a single unwrapped object
+      # (`"evidence": {…}`). Normalize once here, at the value-object boundary,
+      # so every consumer can treat `evidence` as an Array without re-coercing:
+      # a bare Hash becomes `[hash]` (one entry), not `Array(hash)`'s
+      # `[[k, v], …]` decomposition that renders as mangled bullets downstream.
+      def evidence
+        raw = self[:evidence]
+        return [ raw ] if raw.is_a?(Hash)
+
+        Array(raw)
+      end
+
       def to_h
         {
           "id" => id,
@@ -15,7 +28,7 @@ module Hive
           "title" => title,
           "description" => description,
           "recommendation" => recommendation,
-          "evidence" => Array(evidence),
+          "evidence" => evidence,
           "fingerprint" => fingerprint
         }.compact
       end
@@ -30,7 +43,7 @@ module Hive
           title: hash["title"],
           description: hash["description"],
           recommendation: hash["recommendation"],
-          evidence: Array(hash["evidence"]),
+          evidence: hash["evidence"],
           fingerprint: hash["fingerprint"]
         )
       end

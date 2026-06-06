@@ -124,7 +124,7 @@ module Hive
           title: raw["title"] || raw["summary"],
           description: raw["description"],
           recommendation: raw["recommendation"],
-          evidence: Array(raw["evidence"])
+          evidence: raw["evidence"]
         )
         # Stamp the fingerprint before persisting so the durable
         # findings/*.json record links back to dedup/PR state. Without

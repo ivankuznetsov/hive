@@ -392,24 +392,28 @@ class TuiSnapshotTest < Minitest::Test
                  "unknown labels keep their JSON order against each other"
   end
 
-  def test_without_old_archived_drops_only_clean_old_archived_rows
+  def test_without_old_archived_drops_old_archived_rows_by_task_mtime
     now = Time.utc(2026, 6, 4, 12, 0, 0)
     old_archived = sample_task(slug: "old-archived", stage: "9-done", marker: "complete")
     old_archived["action"] = "archived"
     old_archived["action_label"] = "Archived"
+    old_archived["mtime"] = (now - (5 * 86_400)).utc.iso8601
     old_archived["folder_mtime"] = (now - (5 * 86_400)).utc.iso8601
 
     recent_archived = sample_task(slug: "recent-archived", stage: "9-done", marker: "complete")
     recent_archived["action"] = "archived"
     recent_archived["action_label"] = "Archived"
+    recent_archived["mtime"] = (now - 86_400).utc.iso8601
     recent_archived["folder_mtime"] = (now - 86_400).utc.iso8601
 
     errored_archived = sample_task(slug: "errored-archived", stage: "9-done", marker: "error")
     errored_archived["action"] = "error"
     errored_archived["action_label"] = "Error"
+    errored_archived["mtime"] = (now - (10 * 86_400)).utc.iso8601
     errored_archived["folder_mtime"] = (now - (10 * 86_400)).utc.iso8601
 
     old_execute = sample_task(slug: "old-execute", stage: "4-execute", marker: "execute_complete")
+    old_execute["mtime"] = (now - (99 * 86_400)).utc.iso8601
     old_execute["folder_mtime"] = (now - (99 * 86_400)).utc.iso8601
 
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
@@ -430,16 +434,18 @@ class TuiSnapshotTest < Minitest::Test
 
     refute_includes filtered.rows.map(&:slug), "old-archived"
     assert_includes filtered.rows.map(&:slug), "recent-archived"
-    assert_includes filtered.rows.map(&:slug), "errored-archived"
+    refute_includes filtered.rows.map(&:slug), "errored-archived"
     assert_includes filtered.rows.map(&:slug), "old-execute"
-    assert_equal 1, snapshot.hidden_old_archived_count(now: now)
+    assert_equal 2, snapshot.hidden_old_archived_count(now: now)
   end
 
-  def test_without_old_archived_tolerates_blank_or_invalid_folder_mtime
+  def test_without_old_archived_tolerates_blank_or_invalid_mtime
     now = Time.utc(2026, 6, 4, 12, 0, 0)
     blank = sample_task(slug: "blank-mtime", stage: "9-done", marker: "complete")
+    blank["mtime"] = ""
     blank["folder_mtime"] = ""
     invalid = sample_task(slug: "invalid-mtime", stage: "9-done", marker: "complete")
+    invalid["mtime"] = "not-a-time"
     invalid["folder_mtime"] = "not-a-time"
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
                                                                  {

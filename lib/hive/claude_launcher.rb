@@ -55,6 +55,7 @@ module Hive
     ].freeze
     CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
     CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
+    CLAUDE_READY_FOOTER_MARKER = "for agents".freeze
     # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
     # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
     # context). A caret embedded mid-line is Claude's own output, not the
@@ -546,7 +547,8 @@ module Hive
 
       return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
       return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
-      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
+      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER) ||
+                          current_text.include?(CLAUDE_READY_FOOTER_MARKER)
 
       # The idle caret sits at the bottom of the input box: it is the last
       # non-blank line, or the line above it when a one-line hint footer
@@ -654,7 +656,18 @@ module Hive
       tmux_error_streak = 0
       last_tmux_error_msg = nil
       loop do
-        if File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
+        output_available = expected_output_available?(expected_output)
+
+        unless expected_output_session_alive?(runner)
+          return { status: :ok, log_label: log_label } if output_available && File.exist?(done_path(task))
+
+          return {
+            status: :error,
+            error_message: "tmux_session_terminated before writing expected output file: #{expected_output}"
+          }
+        end
+
+        if output_available
           return { status: :ok, log_label: log_label } if File.exist?(done_path(task))
 
           begin
@@ -686,6 +699,18 @@ module Hive
 
         sleep [ poll_interval, deadline - Time.now ].min
       end
+    end
+
+    def expected_output_available?(expected_output)
+      File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
+    end
+
+    def expected_output_session_alive?(runner)
+      return true unless runner.respond_to?(:session_exists?)
+
+      runner.session_exists?
+    rescue Hive::TmuxError
+      false
     end
 
     def wait_for_done_signal(task, _runner, timeout, log_label)

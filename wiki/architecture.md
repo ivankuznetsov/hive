@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-06
 tags: [architecture, overview]
 ---
 
@@ -73,6 +73,14 @@ profile-specific permission, add-dir, budget, and output-format flags.
 Claude, Codex, and Pi therefore share one subprocess wrapper while
 keeping their CLI-specific argv and status-detection contracts in
 `lib/hive/agent_profiles/`.
+
+Fresh project setup separates reviewer policy by source. Normal feature
+PRs use `review.reviewers`, populated by `hive init` from the normal
+reviewer prompt. Synthetic patrol PR tasks whose `task.md` frontmatter
+has `source: patrol` use `patrol.review.reviewers` instead; the fresh
+default is Codex CE code review only, with Claude CE code review as the
+init-time opt-in. The review runner selects between those lists at Phase
+2, before dispatching reviewer adapters.
 
 For the built-in Claude profile, the default headless argv is:
 
@@ -158,6 +166,7 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 - **`Hive::Tui::BubbleModel`** (`lib/hive/tui/bubble_model.rb`) — `Bubbletea::Model` adapter. Translates framework messages (`KeyMessage`, `WindowSizeMessage`, `RawTextInput`) into Hive Messages, then either delegates to `Update.apply` (pure path) or runs them through `#handle_side_effect` (impure path) for messages that need a runner reference (`DispatchCommand`) or perform synchronous I/O (`OpenLogTail`, `OpenInputEditor`, `NewIdeaSubmitted`, …). I/O lives here so Update stays pure.
 - **`Hive::Tui::PasteAwareRunner`** (`lib/hive/tui/paste_aware_runner.rb`) — `Bubbletea::Runner` subclass overriding `run_loop` / `process_input` to drain every raw read through `InputDecoder`. Pinned to bubbletea 0.1.4 (boot-time `VERSION` check) because the override touches private superclass instance variables.
 - **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
+- **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns.
 
 ### Key seams
 

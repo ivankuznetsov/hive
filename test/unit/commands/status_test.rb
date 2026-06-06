@@ -424,7 +424,7 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_render_project_keeps_old_archived_rows_with_unresolved_markers
+  def test_render_project_hides_old_archived_rows_with_unresolved_markers
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       create_status_task(hive_state, "9-done", "errored-archived-260604-abcd", marker: "ERROR", age_days: 10)
@@ -433,9 +433,9 @@ class CommandsStatusTest < Minitest::Test
         Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
       end
 
-      assert_includes out, "Error"
-      assert_includes out, "errored-archived-260604-abcd"
-      refute_includes out, "archived >3d ago"
+      refute_includes out, "Error"
+      refute_includes out, "errored-archived-260604-abcd"
+      assert_includes out, "… and 1 archived >3d ago (hive archive to view)"
     end
   end
 

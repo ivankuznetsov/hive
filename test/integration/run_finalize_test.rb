@@ -378,6 +378,25 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_summary_falls_back_to_configured_triage_bias
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, _pr_md = setup_finalize_task(dir)
+        File.write(File.join(task_dir, "reviews", "codex-01.md"), "- [x] fix\n")
+        task = Hive::Task.new(task_dir)
+
+        summary = Hive::Stages::Finalize.review_summary(
+          task,
+          { "review" => { "triage" => { "bias" => "safetyist" } } }
+        )
+
+        assert_match(/Review passes: 1\b/, summary)
+        assert_match(/Triage bias: safetyist\b/, summary)
+        refute_match(/\(unknown\)/, summary)
+      end
+    end
+  end
+
   def test_finalize_agent_tampering_sets_error_marker
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

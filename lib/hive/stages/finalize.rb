@@ -85,7 +85,7 @@ module Hive
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
 
-        write_summary(task, worktree_path, branch, pr_url)
+        write_summary(task, worktree_path, branch, pr_url, cfg)
         { commit: "pr_finalized", status: :complete }
       end
 
@@ -332,7 +332,7 @@ module Hive
         cfg.dig("timeout_sec", "finalize") || cfg.dig("timeout_sec", "pr") || 1800
       end
 
-      def write_summary(task, worktree_path, branch, pr_url)
+      def write_summary(task, worktree_path, branch, pr_url, cfg = nil)
         path = File.join(task.folder, "summary.md")
         body = Hive::Stages::Base.render(
           "finalize_summary.md.erb",
@@ -340,7 +340,7 @@ module Hive
             summary: extract_summary(task.state_file),
             pr_url: pr_url,
             commits: final_commits(worktree_path, branch),
-            review: review_summary(task),
+            review: review_summary(task, cfg),
             open_escalations: open_escalations(task),
             slug: task.slug
           )
@@ -371,18 +371,21 @@ module Hive
         status.success? ? out.strip : "(unable to read commits)"
       end
 
-      def review_summary(task)
+      def review_summary(task, cfg = nil)
         passes = Dir[File.join(task.reviews_dir, "*-*.md")].filter_map do |path|
           File.basename(path).match(/-(\d{2})\.md\z/)&.[](1)&.to_i
         end
         max_pass = passes.max || 0
-        bias = nil
+        bias = review_summary_triage_bias(task) || cfg&.dig("review", "triage", "bias") || "courageous"
+        "Review passes: #{max_pass}\nTriage bias: #{bias}"
+      end
+
+      def review_summary_triage_bias(task)
         triage_path = Dir[File.join(task.reviews_dir, "triage-*.md")].sort.last
         if triage_path
-          File.read(triage_path) =~ /^bias:\s*(\S+)/i and bias = Regexp.last_match(1)
+          File.read(triage_path) =~ /^bias:\s*(\S+)/i and return Regexp.last_match(1)
         end
-        bias_line = bias ? "Triage bias: #{bias}" : "Triage bias: (unknown)"
-        "Review passes: #{max_pass}\n#{bias_line}"
+        nil
       end
 
       def open_escalations(task)

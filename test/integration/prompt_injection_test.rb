@@ -260,7 +260,7 @@ class PromptInjectionTest < Minitest::Test
           skill_invocation: Hive::Config::DEFAULTS.dig("brainstorm", "skill")
         )
       )
-      assert_includes prompt, "/compound-engineering:ce-brainstorm",
+      assert_includes prompt, "/ce-brainstorm",
         "default skill must be the CE brainstorm skill"
       refute_match(/<%=/, prompt, "no unrendered ERB should leak through")
     end
@@ -282,7 +282,7 @@ class PromptInjectionTest < Minitest::Test
         )
       )
       assert_includes prompt, "Use the `/brainstorm` skill"
-      refute_includes prompt, "/compound-engineering:ce-brainstorm",
+      refute_includes prompt, "/ce-brainstorm",
         "overridden skill must replace the default; no leftover CE reference"
     end
   end
@@ -303,7 +303,7 @@ class PromptInjectionTest < Minitest::Test
       )
       assert_includes prompt, "use the `/plan` skill",
         "default plan skill is llm-wiki's `/plan` wrapper"
-      refute_includes prompt, "/compound-engineering:ce-plan",
+      refute_includes prompt, "/ce-plan",
         "default must NOT reference the CE skill — that's now invoked transitively via /plan"
       refute_match(/<%=/, prompt, "no unrendered ERB should leak through")
     end
@@ -324,7 +324,7 @@ class PromptInjectionTest < Minitest::Test
         )
       )
       assert_includes prompt, "use the `/plan` skill"
-      refute_includes prompt, "/compound-engineering:ce-plan",
+      refute_includes prompt, "/ce-plan",
         "overridden skill must replace the default; no leftover CE reference"
     end
   end
@@ -333,7 +333,7 @@ class PromptInjectionTest < Minitest::Test
     # Pins the DEFAULTS so a refactor that drops the skill defaults (or
     # changes the shipped skill name) trips this test. Hive ships
     # expecting both llm-wiki and compound-engineering to be installed.
-    assert_equal "/compound-engineering:ce-brainstorm",
+    assert_equal "/ce-brainstorm",
       Hive::Config::DEFAULTS.dig("brainstorm", "skill")
     assert_equal "/plan",
       Hive::Config::DEFAULTS.dig("plan", "skill_by_agent", "claude")

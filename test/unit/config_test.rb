@@ -38,6 +38,8 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("patrol", "commands", "test")
       assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
       assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
+      assert_equal %w[codex-ce-code-review],
+                   cfg.dig("patrol", "review", "reviewers").map { |entry| entry.fetch("name") }
     end
   end
 
@@ -89,8 +91,12 @@ class ConfigTest < Minitest::Test
       "poll_interval_sec: 30",
       "commands: []",
       "commands:\n    test: ''",
+      "review:",
       "review: []",
-      "review:\n    max_owned_files: 0"
+      "review:\n    max_owned_files: 0",
+      "review:\n    reviewers:",
+      "review:\n    reviewers: nope",
+      "review:\n    reviewers:\n      - name: codex-ce-code-review\n        kind: agent"
     ]
 
     cases.each do |body|

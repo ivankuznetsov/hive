@@ -62,10 +62,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   # on-disk marker name), not row.action, so we use the production-
   # accurate combo by default. Tests can override via the action: kwarg.
   def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
-               marker: "agent_working", action: "error", live_task_lock: nil)
+               marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil)
     Row.new(
       project: project, slug: slug, stage: stage,
-      marker: marker, folder: File.dirname(state_file), state_file: state_file,
+      marker: marker, marker_attrs: marker_attrs, folder: File.dirname(state_file), state_file: state_file,
       state_file_mtime: mtime,
       action: action, suggested_command: nil,
       claude_pid_alive: pid_alive, live_task_lock: live_task_lock, diagnostic: nil
@@ -177,6 +177,478 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
     end
+  end
+
+  def test_heals_wedged_review_working_lock_when_agent_child_is_dead
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+        with_replaced_singleton_method(@healer, :terminate_lock_holder, ->(_holder) { nil }) do
+          heal([ row ])
+        end
+      end
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected review marker_healed event, got: #{@logger.events.inspect}"
+      assert_equal "review_agent_died", heal_event[1][:reason]
+      assert_equal "reviewers", heal_event[1][:phase]
+      assert_equal "1", heal_event[1][:pass]
+      refute File.exist?(lock_path), "stale review lock should be removed so recovery can run"
+      refute_match(/REVIEW_WORKING|REVIEW_ERROR/, File.read(state_file),
+                   "auto-recoverable stale review markers should clear so daemon can retry review")
+    end
+  end
+
+  def test_review_working_live_lock_with_children_is_left_alone
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=fix pass=2 -->\n")
+      File.write(File.join(File.dirname(state_file), ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "fix", "pass" => "2" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [ 12_345 ] }) do
+        heal([ row ])
+      end
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
+    end
+  end
+
+  def test_review_working_heal_logs_failure_when_marker_clear_raises
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      File.write(File.join(File.dirname(state_file), ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      original = Hive::Markers.method(:clear_current)
+      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+        raise Errno::ENOSPC, "no space left" if path == state_file
+
+        original.call(path, *args)
+      end
+
+      begin
+        with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+          heal([ row ])
+        end
+      ensure
+        Hive::Markers.define_singleton_method(:clear_current, &original)
+      end
+
+      failure = @logger.events.find { |name, _| name == :marker_heal_failed }
+      assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
+      assert_equal "review_agent_died", failure[1][:reason]
+      assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_review_working_skips_when_child_inspection_fails
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
+      File.write(File.join(File.dirname(state_file), ".lock"), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { nil }) do
+        heal([ row ])
+      end
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_reviewer_partial_failure_when_errors_are_tmux_session_terminated
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      reviews_dir = File.join(File.dirname(state_file), "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(
+        File.join(reviews_dir, "errors-01.md"),
+        "# Reviewer infra errors for pass 01\n\n" \
+        "- [claude-ce-code-review] reviewer \"claude-ce-code-review\" failed: " \
+        "tmux_session_terminated before writing expected output file: " \
+        "#{File.join(reviews_dir, 'claude-ce-code-review-01.md')} after 2 attempt(s)\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "reviewer_tmux_session_terminated", heal_event[1][:reason]
+      refute_match(/REVIEW_ERROR/, File.read(state_file),
+                   "auto-recoverable reviewer tmux death should clear the marker so daemon can retry")
+    end
+  end
+
+  def test_does_not_auto_recover_reviewer_partial_failure_with_mixed_error_causes
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      reviews_dir = File.join(File.dirname(state_file), "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(
+        File.join(reviews_dir, "errors-01.md"),
+        "# Reviewer infra errors for pass 01\n\n" \
+        "- [claude-ce-code-review] reviewer \"claude-ce-code-review\" failed: " \
+        "tmux_session_terminated before writing expected output file: #{File.join(reviews_dir, 'claude.md')}\n" \
+        "- [codex-ce-code-review] reviewer \"codex-ce-code-review\" failed: quota exhausted\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_reviewer_partial_failure_when_errors_file_is_missing
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_reviewer_partial_failure_signature_falls_back_when_errors_file_disappears
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure pass=1 -->\n")
+      reviews_dir = File.join(File.dirname(state_file), "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      errors_path = File.join(reviews_dir, "errors-01.md")
+      File.write(
+        errors_path,
+        "- [claude-ce-code-review] reviewer \"claude-ce-code-review\" failed: " \
+        "tmux_session_terminated before writing expected output file: #{File.join(reviews_dir, 'claude.md')}\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "reviewer_partial_failure",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      original = File.method(:read)
+      File.define_singleton_method(:read) do |path, *args, **kwargs|
+        raise Errno::ENOENT, path if path == errors_path
+
+        original.call(path, *args, **kwargs)
+      end
+
+      begin
+        heal([ row ])
+      ensure
+        File.define_singleton_method(:read, &original)
+      end
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected auto-recovery event, got: #{@logger.events.inspect}"
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_review_error_review_agent_died
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected review_agent_died auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "review_agent_died", heal_event[1][:reason]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_review_error_review_agent_died_with_live_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: true
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recoverable_review_error_stays_red_after_retry_budget_is_exhausted
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      review_error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      heal([ row ])
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      heal([ row ])
+
+      assert_match(/REVIEW_ERROR/, File.read(state_file),
+                   "same auto-recoverable review error must stay red after budget exhaustion")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal 1, heals.first[1][:attempt]
+      assert_equal 1, heals.first[1][:max_attempts]
+    end
+  end
+
+  def test_review_error_auto_recovery_logs_failure_when_marker_clear_raises
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      original = Hive::Markers.method(:clear_current)
+      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+        raise Errno::ENOSPC, "no space left" if path == state_file
+
+        original.call(path, *args)
+      end
+
+      begin
+        heal([ row ])
+      ensure
+        Hive::Markers.define_singleton_method(:clear_current, &original)
+      end
+
+      failure = @logger.events.find { |name, _| name == :marker_heal_failed }
+      assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
+      assert_equal "reviewer_tmux_session_terminated", failure[1][:reason]
+      assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_private_stale_review_helpers_cover_process_and_lock_edges
+    row = make_row("/tmp/missing-task.md", pid_alive: false, live_task_lock: true)
+    assert_nil @healer.send(:task_lock_holder, row)
+    assert_nil @healer.send(:release_task_lock, row)
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+      [ "", "", Struct.new(:exitstatus) { def success? = false }.new(1) ]
+    }) do
+      assert_equal [], @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+      [ "101\nbad\n202\n", "", Struct.new(:exitstatus) { def success? = true }.new(0) ]
+    }) do
+      assert_equal [ 101, 202 ], @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+      [ "", "boom", Struct.new(:exitstatus) { def success? = false }.new(2) ]
+    }) do
+      assert_nil @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise Errno::ENOENT }) do
+      assert_nil @healer.send(:child_pids, 12_345)
+    end
+
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+      refute @healer.send(:pid_alive?, 12_345)
+    end
+
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+      assert @healer.send(:pid_alive?, 12_345)
+      assert_nil @healer.send(:terminate_lock_holder, { "pid" => 12_345 })
+    end
+
+    assert_nil @healer.send(:terminate_lock_holder, { "pid" => "not-a-pid" })
+  end
+
+  def test_terminate_lock_holder_sends_term_then_stops_when_process_exits
+    signals = []
+    alive_checks = 0
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+      signals << [ signal, pid ]
+      true
+    }) do
+      with_replaced_singleton_method(@healer, :pid_alive?, lambda { |_pid|
+        alive_checks += 1
+        alive_checks < 2
+      }) do
+        with_replaced_singleton_method(@healer, :sleep, ->(_seconds) { }) do
+          @healer.send(:terminate_lock_holder, { "pid" => 12_345 })
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 12_345 ] ], signals
+  end
+
+  def test_terminate_lock_holder_escalates_to_kill_after_deadline
+    signals = []
+    now = Time.utc(2026, 6, 5, 12, 0, 0)
+    times = [ now, now + 2 ]
+
+    with_replaced_singleton_method(Time, :now, -> { times.shift || now + 2 }) do
+      with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+        signals << [ signal, pid ]
+        true
+      }) do
+        with_replaced_singleton_method(@healer, :pid_alive?, ->(_pid) { true }) do
+          @healer.send(:terminate_lock_holder, { "pid" => 12_345 })
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 12_345 ], [ "KILL", 12_345 ] ], signals
   end
 
   def test_disk_failure_during_heal_does_not_crash_tick

@@ -60,6 +60,56 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_refresh_now_populates_current_without_background_thread
+    with_seeded_project do |project, _dir|
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+
+      snapshot = source.refresh_now
+
+      refute_nil snapshot, "refresh_now must synchronously seed the first snapshot"
+      assert_same snapshot, source.current
+      assert_nil source.instance_variable_get(:@thread),
+                 "refresh_now must not start the background polling thread"
+      assert_operator snapshot.rows.size, :>=, 1,
+                      "refresh_now must find at least one row for the seeded project"
+      assert_equal project, snapshot.rows.first.project_name
+      assert_nil source.last_error
+    end
+  end
+
+  # Boot path contract: when the synchronous prime fails, refresh_now must
+  # return nil and record last_error WITHOUT starting the background thread,
+  # so App can still seed the model (snapshot: nil, last_error: <err>) and
+  # render the stalled banner instead of crashing the TUI launch.
+  def test_refresh_now_records_last_error_and_stays_threadless_on_failure
+    with_seeded_project do |_project, _dir|
+      keep_raising = true
+      patch = Module.new do
+        define_method(:json_payload) do |projects|
+          raise StandardError, "synthetic refresh failure" if keep_raising
+
+          super(projects)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      begin
+        source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+
+        snapshot = source.refresh_now
+
+        assert_nil snapshot, "refresh_now must return nil when the prime fails"
+        assert_nil source.current, "a failed prime must leave current nil"
+        refute_nil source.last_error, "a failed prime must record last_error"
+        assert_match(/synthetic refresh failure/, source.last_error.message)
+        assert_nil source.instance_variable_get(:@thread),
+                   "refresh_now must not start the background thread, even on failure"
+      ensure
+        keep_raising = false
+      end
+    end
+  end
+
   def test_last_error_records_failure_and_clears_on_subsequent_success
     with_seeded_project do |_project, _dir|
       # Inject a one-shot raise into `Status#json_payload` via a

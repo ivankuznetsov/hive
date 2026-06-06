@@ -1,10 +1,14 @@
+require "digest"
+require "open3"
+require "yaml"
+require "hive/lock"
 require "hive/markers"
 
 module Hive
   module Daemon
-    # Tick-time healer for AGENT_WORKING markers whose backing agent
-    # isn't actually alive. Rewrites stale markers to ERROR with a
-    # `reason` attribute so the existing red-status surface in
+    # Tick-time healer for in-flight markers whose backing agent isn't
+    # actually alive. Rewrites stale markers to ERROR / REVIEW_ERROR with
+    # a `reason` attribute so the existing red-status surface in
     # Hive::TaskAction kicks in and the disk truth stops lying.
     #
     # Two failure modes are healed, distinguished by the row's
@@ -41,12 +45,21 @@ module Hive
       # ERROR markers. Consumers (TaskAction's synthetic diagnostic,
       # bot/notification rendering, future docs) can reference this
       # constant instead of hard-coding the literal strings.
-      REASONS = %i[agent_died agent_orphaned].freeze
+      REASONS = %i[
+        agent_died
+        agent_orphaned
+        review_agent_died
+        reviewer_tmux_session_terminated
+      ].freeze
+      REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
 
-      def initialize(controller:, logger:, grace_sec: 300)
+      def initialize(controller:, logger:, grace_sec: 300,
+                     review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT)
         @controller = controller
         @logger = logger
         @grace_sec = grace_sec
+        @review_error_auto_recovery_limit = review_error_auto_recovery_limit
+        @review_error_auto_recoveries = Hash.new(0)
       end
 
       # Walk the row set, heal stale agent_working markers in place.
@@ -65,9 +78,20 @@ module Hive
       # until *we* rewrite it, so it's the authoritative signal here.
       def heal(rows, now: Time.now, legacy_layout_projects: {})
         rows.each do |row|
-          next unless row.marker.to_s == "agent_working"
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
+
+          if row.marker.to_s == "review_error"
+            heal_review_error_if_auto_recoverable(row)
+            next
+          end
+
+          if row.marker.to_s == "review_working"
+            heal_review_row_if_stale(row)
+            next
+          end
+
+          next unless row.marker.to_s == "agent_working"
           # Externally-spawned `hive run` is holding the per-task .lock;
           # claude_pid_alive may still be nil because the runner has not
           # written its claude_pid yet (auto-rebase, etc.). Healing here
@@ -82,6 +106,210 @@ module Hive
       end
 
       private
+
+      def heal_review_error_if_auto_recoverable(row)
+        return if row.live_task_lock == true
+        return unless auto_recoverable_review_error?(row)
+
+        reason = auto_recoverable_review_error_reason(row)
+        marker_attrs = review_marker_attrs(row)
+        marker_attrs["reason"] = reason
+        recovery_key = review_error_auto_recovery_key(row, reason: reason)
+        attempts = @review_error_auto_recoveries[recovery_key]
+        return if attempts >= @review_error_auto_recovery_limit
+
+        return unless Hive::Markers.clear_current(
+          row.state_file,
+          expected_name: :review_error,
+          match_attrs: marker_attrs
+        )
+
+        attempts += 1
+        @review_error_auto_recoveries[recovery_key] = attempts
+        @logger.event(:marker_healed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      prior_marker: row.marker,
+                      reason: reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated",
+                      state_file: row.state_file,
+                      phase: marker_attrs["phase"],
+                      pass: marker_attrs["pass"],
+                      errors_path: reviewer_errors_path(row),
+                      attempt: attempts,
+                      max_attempts: @review_error_auto_recovery_limit)
+      rescue StandardError => e
+        @logger.event(:marker_heal_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      reason: "reviewer_tmux_session_terminated",
+                      error: "#{e.class}: #{e.message}")
+      end
+
+      def auto_recoverable_review_error_reason(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        attrs["reason"].to_s
+      end
+
+      def review_error_auto_recovery_key(row, reason:)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        [
+          row.project.to_s,
+          row.slug.to_s,
+          reason.to_s,
+          attrs["phase"].to_s,
+          attrs["pass"].to_s,
+          review_error_signature(row, reason: reason)
+        ]
+      end
+
+      def review_error_signature(row, reason:)
+        return reason.to_s unless reason.to_s == "reviewer_partial_failure"
+
+        path = reviewer_errors_path(row)
+        return reason.to_s unless path
+
+        Digest::SHA256.hexdigest(File.read(path))
+      rescue SystemCallError
+        reason.to_s
+      end
+
+      def auto_recoverable_review_error?(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        return true if attrs["reason"].to_s == "review_agent_died"
+
+        return false unless attrs["phase"].to_s == "reviewers"
+        return false unless attrs["reason"].to_s == "reviewer_partial_failure"
+        return false if attrs["pass"].to_s.empty?
+
+        path = reviewer_errors_path(row)
+        return false unless path
+
+        lines = File.readlines(path, chomp: true).grep(/\A- \[/)
+        return false if lines.empty?
+
+        lines.all? do |line|
+          line.include?("tmux_session_terminated before writing expected output file")
+        end
+      rescue SystemCallError
+        false
+      end
+
+      def reviewer_errors_path(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        pass = Integer(attrs["pass"], exception: false)
+        return nil unless pass
+
+        File.join(row.folder.to_s, "reviews", "errors-#{format('%02d', pass)}.md")
+      end
+
+      def heal_review_row_if_stale(row)
+        return unless row.live_task_lock == true
+        return unless row.claude_pid_alive == false
+
+        holder = task_lock_holder(row)
+        return unless wedged_review_lock_holder?(holder)
+
+        marker_attrs = review_marker_attrs(row)
+        return unless Hive::Markers.clear_current(
+          row.state_file,
+          expected_name: :review_working,
+          match_attrs: marker_attrs
+        )
+
+        terminate_lock_holder(holder)
+        release_task_lock(row)
+        @logger.event(:marker_healed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      prior_marker: row.marker,
+                      reason: "review_agent_died",
+                      state_file: row.state_file,
+                      phase: marker_attrs["phase"],
+                      pass: marker_attrs["pass"],
+                      lock_pid: holder["pid"],
+                      claude_pid: holder["claude_pid"])
+      rescue StandardError => e
+        @logger.event(:marker_heal_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      reason: "review_agent_died",
+                      error: "#{e.class}: #{e.message}")
+      end
+
+      def task_lock_holder(row)
+        lock_path = File.join(row.folder.to_s, ".lock")
+        data = YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) || {}
+        data.is_a?(Hash) ? data : nil
+      rescue StandardError
+        nil
+      end
+
+      def wedged_review_lock_holder?(holder)
+        return false unless holder.is_a?(Hash)
+
+        pid = holder["pid"]
+        return false unless pid.is_a?(Integer) && pid_alive?(pid)
+
+        recorded = holder["process_start_time"]
+        live = Hive::Lock.process_start_time(pid)
+        return false if recorded && live != recorded
+
+        children = child_pids(pid)
+        children && children.empty?
+      end
+
+      def review_marker_attrs(row)
+        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        out = {}
+        out["phase"] = attrs["phase"] if attrs["phase"]
+        out["pass"] = attrs["pass"] if attrs["pass"]
+        out
+      end
+
+      def pid_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+
+      def child_pids(pid)
+        out, _err, status = Open3.capture3("pgrep", "-P", pid.to_i.to_s)
+        return [] if status.exitstatus == 1
+        return nil unless status.success?
+
+        out.lines.filter_map { |line| Integer(line.strip, exception: false) }
+      rescue Errno::ENOENT
+        nil
+      end
+
+      def terminate_lock_holder(holder)
+        pid = holder["pid"]
+        return unless pid.is_a?(Integer)
+
+        Process.kill("TERM", pid)
+        deadline = Time.now + 1
+        while Time.now < deadline
+          return unless pid_alive?(pid)
+
+          sleep 0.05
+        end
+        Process.kill("KILL", pid) if pid_alive?(pid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+
+      def release_task_lock(row)
+        File.delete(File.join(row.folder.to_s, ".lock"))
+      rescue Errno::ENOENT
+        nil
+      end
 
       def classify_stale(row, now:)
         case row.claude_pid_alive

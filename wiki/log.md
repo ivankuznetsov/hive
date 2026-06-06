@@ -28,6 +28,19 @@ Append-only log of all wiki operations.
 ## [2026-06-06T00:00:00Z] review - voice-transcription fix pass ([[commands/bot]])
 
 **Action:** Applied 6-review auto-fix findings on the voice-note idea-capture branch. Code: normalized the Whisper language gate so full-name `language` output ("english"/"russian") matches ISO-code `supported_languages` ("en"/"ru") — the default config previously rejected every real voice note; derived `Transcriber::DEFAULT_CONFIG` from `Hive::Config::DEFAULTS["bot"]["transcription"]` (single source of truth); dropped Faraday `:raise_error` so the 4xx-vs-5xx handling runs in production as tested; narrowed the broad `rescue StandardError` to transport/parse errors so programmer bugs surface; added a `Transcriber::Result` STATUSES guard and `IdeaDraftStore` PHASES/ORIGINS validation; gated voice-draft reuse/clear on `origin == :voice` (data-loss fix); split the supervisor download-vs-staging rescue with accurate messages + chat_id-tagged failure logging; derived the unsupported-language hint from config; guarded oversize on the payload size before the getFile round-trip; extracted shared `IdeaKeyboards` (transcript/confirm/project helpers). Docs: corrected the `/idea` voice flow ordering (picker appears only after `Confirm`) and added the OpenAI-vs-OpenRouter (plan Q1) rationale. Added the checked-in `test/fixtures/voice/voice-idea.oga` speech fixture and made the voice E2E fail (not skip) when the Whisper secret is set but the fixture is absent.
+## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
+
+**Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.
+## [2026-06-06T12:12:34Z] agents - normalize legacy Compound Engineering invocations
+
+**Action:** Double-checked the installed Compound Engineering plugin metadata (`compound-engineering` v3.11.1): the CE workflows are still exposed as bare `/ce-*` skills such as `/ce-code-review`; the official `/code-review` command is a separate PR-comment workflow and does not satisfy Hive's reviewer-file contract. Updated Hive defaults, templates, and docs to emit `/ce-brainstorm`, `/ce-code-review`, `/ce-commit-push-pr`, and `/ce-test-browser` forms. Added `AgentProfile#format_skill_invocation` compatibility normalization so existing `compound-engineering:ce-*` config values still render to current CE syntax for Claude/Codex and `/skill:ce-*` for Pi.
+
+**Refreshed pages:**
+- [[modules/agent_profile]]
+- [[stages/brainstorm]]
+- [[stages/open-pr]]
+- [[stages/review]]
+- [[commands/doctor]]
 
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
@@ -113,6 +126,44 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:**
 - [[commands/tui]]
+
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear without a
+multi-second loading grid (a generous 5s regression bound, not a benchmark).
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T22:12:41Z] wiki — audit TUI startup seed coverage
+
+**Action:** Audited commit `570beeba` after it added synchronous
+`StateSource#refresh_now` startup seeding for `hive tui`. Read `AGENTS.md`,
+`.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]]
+entries first; `qmd search "StateSource refresh_now TUI startup seed first
+useful paint"` returned no indexed hits, and the configured master wiki path had
+no matching TUI startup note. Inspected the committed diff and current
+`lib/hive/tui/app.rb`, `lib/hive/tui/state_source.rb`, TUI PTY smoke tests, and
+the existing Charm API solution note. Confirmed [[commands/tui]] already covered
+the boot-time synchronous refresh and updated the test-coverage documentation so
+the new state-source startup seed and first-useful-paint PTY assertion are not
+missing from the wiki. No page count or catalog coverage changed, so [[index]]
+did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[commands/tui]]
+- [[log]]
 
 ## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
 
@@ -3177,6 +3228,24 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
+## [2026-06-05T16:05:00Z] tui — document display-cell formatting for task rows
+
+**Action:** Documented the TUI formatter's direct `unicode-display_width` dependency after task-pane icon alignment work. `Hive::Tui::Views::Format` now owns display-cell truncation and padding so emoji status icons and other wide glyphs do not shift fixed columns. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[dependencies]]
+
+## [2026-06-05T16:25:00Z] patrol/status — review-task idea context and archive age filtering
+
+**Action:** Documented two dogfood fixes: patrol review handoff now writes `idea.md` from the original patrol finding so the TUI idea preview has context, and archive hiding now uses row `mtime` rather than mutable `folder_mtime` so sidecar edits do not make old archived tasks reappear in daily views. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/patrol]]
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+
 ## [2026-06-03T13:20:00Z] task identity surfaces — document status, TUI, bot, and migration backfill
 
 **Action:** Extended the task-identity wiki refresh through commits `457c2f16` (`hive status` id/display_name schema v3), `d76be350` (TUI id/name columns), `5daa08c9` (Telegram display titles), and `1a4922c4` (`hive migrate` id backfill). Documented human rendering fallbacks, preserved slug-based callbacks/commands, diagnose schema v2, and migration counter seeding/idempotency. Did not run `qmd update` or `qmd embed`.
@@ -3188,6 +3257,63 @@ TTL config.
 - [[modules/bot]]
 - [[state-model]]
 
+## [2026-06-05T15:14:59Z] babysitter — refresh dry-run git stub write guard coverage
+
+**Action:** Refreshed command/API and executable-stub wiki coverage after commit `29532639` changed `bin/hive-babysitter-stub-git`. Verified the committed diff plus the current git/gh dry-run stubs, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, [[commands/babysit]], [[modules/babysitter]], and [[gaps]]. Documented that otherwise read-only `git` commands now skip when they include `--output` / `--output=...`, while plain read forms such as `git diff --name-only` still pass through. Recorded that the change is unit-pinned but still lacks a live `hive babysit --once PROJECT --dry-run` agent smoke artifact. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+
+## [2026-06-05T16:45:15Z] wiki — audit babysitter dry-run refresh coverage
+
+**Action:** Audited residual wiki commit `e4d6fdab` after it committed the babysitter dry-run documentation refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output residual worktree"` only surfaced earlier babysitter wiki history, so verification used the committed diff plus direct source reads. Checked source commit `29532639` against `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/commands/babysit.rb`, and `lib/hive/babysitter/`. Confirmed existing [[commands/babysit]], [[modules/babysitter]], and [[gaps]] coverage matches the code: broad read-only `git` commands skip `--output` / `--output=...`, `git diff --name-only` still passes through, and live `hive babysit --once PROJECT --dry-run` agent smoke evidence remains absent. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:52:58+01:00] babysitter — refresh dry-run git exec/env stub coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `f748deed` changed `bin/hive-babysitter-stub-git` and `test/unit/babysitter/dry_run_env_test.rb`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git exec env bypass grep output pager config-env"` had no exact indexed hits, so verification used the committed diff plus direct source reads. Documented that dry-run git screening is now structurally scoped: config injection is screened only in global options, `--exec-path` is a global exec screen, `--output` is exact so `--output-indicator-*` passes, and grep pager execution includes bundled short flags such as `-nO...`; also documented scrubbing of `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and `GIT_CONFIG*`, plus the exit-127 diagnostic for invalid `HIVE_BABYSITTER_REAL_GIT`. The live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains open. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-05T17:26:02Z] wiki — audit patrol handoff residual log coverage
+
+**Action:** Audited residual wiki commit `a94719a0`, which only appended the previous babysitter dry-run audit entry to [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff opened PR residual wiki"` surfaced the existing patrol handoff coverage. Verified the residual commit diff directly, then checked the underlying patrol PR #312 source commit `598fd191` against `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/commands/patrol.rb`, `lib/hive/daemon/patrol_scheduler.rb`, `lib/hive/config.rb`, `templates/project_config.yml.erb`, and the focused patrol/config tests. Confirmed current [[commands/patrol]], [[modules/patrol]], [[modules/config]], [[stages/review]], [[state-model]], [[testing]], and [[gaps]] already match the code: patrol handoff is defaulted through `patrol.review_prs: true`, synthetic review slugs are globally unique across stages, handoff failures are retryable and surfaced in `review_handoff_errors`, successful handoff keeps the patrol worktree for `6-review`, and `patrol.trigger` is now `continuous` by default. No page-list or gap changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:00:00Z] babysit — dry-run git stub screens exec/write options across argv
+
+**Action:** Hardened `bin/hive-babysitter-stub-git` after a review pass found that the read-only allowlist plus the original-`argv` `exec` let several non-mutating-looking commands run arbitrary code via real git: `-c diff.external=<cmd>`/`*.textconv`/`core.pager` config injection (silently stripped by `stripped_global_options` yet preserved in the exec argv), `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` pager exec, and global-position `--output`. Replaced the one-entry `no_write_options?` (`--output` only, on the stripped `rest`) with `dangerous_option?` + `no_exec_or_write_options?` that screen the entire invocation — `-c`, `--config-env`, `--output`, `-O`, `--open-files-in-pager` — before exec, so the guard no longer trusts the stripped subcommand alone. Also guarded `stripped_global_options` against `shift(2)` on a trailing valueless option and made `log_skip` warn instead of silently swallowing `SystemCallError`. Added regression tests in `test/unit/babysitter/dry_run_env_test.rb` for each exec/write vector plus a passing `git grep needle`, and updated [[commands/babysit]] to document the broadened screening.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[log]]
+
+## [2026-06-05T18:30:39+01:00] wiki — refresh babysitter dry-run executable coverage after argv-wide guard
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `b5f53f98` hardened `bin/hive-babysitter-stub-git`. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config"` surfaced prior babysitter dry-run history, so verification used the committed diff plus direct source reads. Checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Updated [[commands/babysit]], [[modules/babysitter]], and [[gaps]] so command tests, module/boundary coverage, and live-smoke uncertainty mention `-c`, `--config-env`, `-O`, `--open-files-in-pager`, and `--output` screening across the original argv. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[commands/babysit]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-05T18:45:40+01:00] wiki — audit residual babysitter dry-run coverage commit
+
+**Action:** Audited residual wiki commit `557e6ef4`, which committed the previous babysitter dry-run documentation refresh as 6-review residue. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config residual"` surfaced prior babysitter dry-run history. Verified the committed diff, then checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Confirmed the current pages already match the code and tests: dry-run git allowlisted read subcommands still pass through only after argv-wide screening for config-injection, pager-exec, and output-file vectors; the live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains recorded in [[gaps]]. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
 ## [2026-06-05T14:22:45Z] cli/status — refresh no-target archive listing coverage
 
 **Action:** Refreshed command/API wiki coverage after commit `93fb45fb` changed `hive archive` from a target-required workflow-only command into a split surface: no target lists archived tasks through `Hive::Commands::Status.new(archive: true)`, while `hive archive <target>` still runs the `StageAction` promote-or-run workflow verb. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "archive status command"` found existing workflow/archive wiki context. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, and focused CLI/status tests. Documented no-target text and JSON archive listing, empty archive output, and the CLI overlay boundary. Recorded that live registered-project archive workflow evidence is still missing. Did not run `qmd update` or `qmd embed`.
@@ -3213,6 +3339,22 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
+## [2026-06-05T17:42:09Z] migrate — backfill legacy display names for all task sources
+
+**Action:** Extended `hive migrate` beyond task-id repair so it also scans every canonical task folder with a missing/null `display_name` and runs `Hive::DisplayName::Generator` with commits disabled, then records successful name writes in a separate `.hive-state` commit. This uses the same agent-backed naming pipeline as `hive generate-name`, preserves existing names (including patrol handoff names), and leaves failed generations retryable. Added focused migration and generator tests and updated command/state docs.
+
+**Refreshed pages:**
+- [[commands/migrate]]
+- [[state-model]]
+- [[stages/inbox]]
+
+## [2026-06-05T18:02:00Z] patrol — allocate task ids for review handoff tasks
+
+**Action:** Changed `Hive::Patrol::ReviewHandoff` so synthetic `6-review/patrol-.../` tasks allocate a normal `Hive::TaskCounter` id instead of writing `id: nil` unconditionally. The fail-soft behavior now matches `hive new`: counter lock contention leaves the id null, but the task is still enqueued and `hive migrate` can repair it later. Added patrol handoff/opener coverage and corrected the task sidecar docs.
+
+**Refreshed pages:**
+- [[state-model]]
+
 ## [2026-06-05T20:05:00Z] tui — vertical resize viewport and reduced dashboard chrome
 
 **Action:** Made the grid composer height-aware: it subtracts footer/stalled-banner rows from `model.rows`, passes the remaining budget into `ProjectsPane` and `TasksPane`, and each pane clips/pads with a cursor-following viewport. Removed the persistent grid metadata strip and hidden-archive footer prefix so the first frame prioritizes panes and the footer stays visible under vertical terminal resize. Added focused pane viewport tests plus a PTY Charm smoke that performs a real vertical `winsize` + `SIGWINCH` resize and verifies the footer remains visible.
@@ -3230,4 +3372,46 @@ TTL config.
 - [[modules/config]]
 - [[architecture]]
 - [[dependencies]]
+## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
+
+**Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[modules/daemon]]
+- [[state-model]]
+- [[testing]]
+
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
+## [2026-06-06T10:14:41Z] patrol — scoped review reviewers for patrol PR handoff
+
+**Action:** Added a separate `patrol.review.reviewers` config list for synthetic `Patrol: ...` review tasks. Fresh `hive init` now asks for patrol PR reviewers separately from normal `review.reviewers`, defaults patrol PR review to `codex-ce-code-review` only, and lets operators opt into `claude-ce-code-review`; `pr-review-toolkit` is intentionally excluded from the patrol prompt. The 6-review runner selects `patrol.review.reviewers` when `task.md` frontmatter has `source: patrol`, while normal tasks continue using `review.reviewers`. Updated [[commands/init]], [[commands/patrol]], [[modules/config]], and [[stages/review]].
+
+## [2026-06-06T10:45:00Z] wiki — audit scoped patrol reviewer command/API coverage
+
+**Action:** Audited commit `464b64a9` after it touched CLI help, init prompts, config defaults/validation, the 6-review reviewer selector, the `hive-init.v1` schema, the project config template, and public architecture docs. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review reviewers config init"` found existing config/index/gaps context. Verified the committed diff plus `lib/hive/commands/init.rb`, `lib/hive/commands/init/prompts.rb`, `lib/hive/config.rb`, `lib/hive/stages/review.rb`, `templates/project_config.yml.erb`, `schemas/hive-init.v1.json`, and focused init/config/schema/review tests. Refreshed command/API coverage for the new `patrol_reviewers` init payload field, `patrol.review.reviewers` config surface, and patrol-sourced reviewer selection; recorded that the scoped patrol reviewer path is still not live-smoked through a real patrol PR plus daemon/TUI pickup. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[index]]
+- [[architecture]]
+- [[commands/init]]
+- [[commands/patrol]]
+- [[modules/config]]
+- [[stages/review]]
+- [[testing]]
 - [[gaps]]

@@ -7,7 +7,7 @@ updated: 2026-05-26
 tags: [command, preflight, skills, tmux]
 ---
 
-**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/compound-engineering:ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. When `claude.mode: tmux`, it also checks `tmux >= 3.0`; initialized projects also get a non-fatal `wiki/qmd` dependency row so missing/broken QMD and native Node ABI mismatches are visible. Legacy configs with `brainstorm.runtime` get an advisory warning. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
+**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. When `claude.mode: tmux`, it also checks `tmux >= 3.0`; initialized projects also get a non-fatal `wiki/qmd` dependency row so missing/broken QMD and native Node ABI mismatches are visible. Legacy configs with `brainstorm.runtime` get an advisory warning. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
 
 ## Usage
 
@@ -63,7 +63,7 @@ A new agent profile becomes "doctorable" by registering a `Hive::SkillCheck::*` 
 {
   "schema": "hive-doctor.v1",
   "checks": [
-    {"kind": "stage", "stage": "brainstorm", "label": "brainstorm", "agent": "claude", "configured_skill": "/compound-engineering:ce-brainstorm", "skill": "/compound-engineering:ce-brainstorm", "status": "present", "message": "..."},
+    {"kind": "stage", "stage": "brainstorm", "label": "brainstorm", "agent": "claude", "configured_skill": "/ce-brainstorm", "skill": "/ce-brainstorm", "status": "present", "message": "..."},
     {"kind": "stage", "stage": "plan", "label": "plan", "agent": "pi", "configured_skill": "/llm-wiki:wiki-plan", "skill": "/skill:wiki-plan", "status": "present", "message": "..."},
     {"kind": "reviewer", "stage": "6-review", "name": "claude-ce-code-review", "label": "6-review/claude-ce-code-review", "agent": "claude", "configured_skill": "ce-code-review", "skill": "/ce-code-review", "status": "missing", "message": "..."}
   ],

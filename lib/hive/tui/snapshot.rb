@@ -253,12 +253,17 @@ module Hive
         Hive::ArchiveFilter.hide?(
           stage: row.stage,
           marker_name: row.marker,
+          mtime: parse_time(row.mtime),
           folder_mtime: parse_folder_mtime(row.folder_mtime),
           now: now
         )
       end
 
       def parse_folder_mtime(value)
+        parse_time(value)
+      end
+
+      def parse_time(value)
         return nil if value.nil? || value.to_s.strip.empty?
 
         Time.iso8601(value.to_s)

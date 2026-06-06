@@ -121,6 +121,174 @@ class RunReviewersTest < Minitest::Test
     assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
   end
 
+  def test_reviewer_specs_for_normal_task_uses_standard_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ]
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: telegram\n---\n\n# Task\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_patrol_task_uses_patrol_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ]
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: patrol\n---\n\n# Patrol: Demo\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "patrol-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  # cfg with distinct normal vs patrol reviewer sets, reused by the
+  # task_frontmatter / patrol_task? edge-case tests below.
+  def scoped_reviewer_cfg
+    {
+      "review" => { "reviewers" => [ { "name" => "normal-reviewer" } ] },
+      "patrol" => { "review" => { "reviewers" => [ { "name" => "patrol-reviewer" } ] } }
+    }
+  end
+
+  def assert_routes_to_normal(task_md_contents)
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, task_md_contents)
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_routes_to_normal_when_state_file_missing
+    # task_frontmatter: File.exist? false → {} → not patrol → normal set.
+    with_tmp_dir do |dir|
+      task = Task.new(dir, File.join(dir, "task.md")) # never created
+      specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_routes_to_normal_without_frontmatter_marker
+    # task_frontmatter: content not starting with "---\n" → {} → normal.
+    assert_routes_to_normal("# Just a heading\n\nsource: patrol\n")
+  end
+
+  def test_reviewer_specs_for_routes_to_normal_on_empty_frontmatter_block
+    # task_frontmatter: empty YAML between the fences → {} → normal.
+    assert_routes_to_normal("---\n---\n\n# Body\n")
+  end
+
+  def test_reviewer_specs_for_routes_to_normal_on_non_hash_frontmatter
+    # task_frontmatter: top-level YAML is a list, not a Hash → {} → normal.
+    assert_routes_to_normal("---\n- patrol\n---\n\n# Body\n")
+  end
+
+  def test_reviewer_specs_for_routes_to_normal_on_malformed_yaml
+    # task_frontmatter: Psych::Exception is rescued → {} → normal.
+    assert_routes_to_normal("---\nsource: : : broken\n  bad: [unclosed\n---\n\n# Body\n")
+  end
+
+  def test_reviewer_specs_for_normalizes_patrol_source_casing_and_whitespace
+    # patrol_task? uses strip + casecmp?, so producer/consumer drift in
+    # casing or surrounding whitespace still routes to the patrol set.
+    [ "Patrol", "PATROL", "\"patrol\"", "  patrol  " ].each do |value|
+      with_tmp_dir do |dir|
+        task_file = File.join(dir, "task.md")
+        File.write(task_file, "---\nsource: #{value}\n---\n\n# Body\n")
+        task = Task.new(dir, task_file)
+
+        specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+        assert_equal [ "patrol-reviewer" ], specs.map { |spec| spec.fetch("name") },
+                     "source #{value.inspect} must normalize to a patrol task"
+      end
+    end
+  end
+
+  # A task whose state_file accessor raises, used to exercise patrol_task?'s
+  # rescue boundary.
+  RaisingStateFileTask = Struct.new(:folder, :error) do
+    def state_file
+      raise error
+    end
+  end
+
+  def test_patrol_task_io_error_falls_back_to_normal_with_warn
+    # An I/O failure reading state_file must NOT misroute silently: the
+    # narrowed SystemCallError rescue logs and falls back to the normal set.
+    # Point state_file at a directory so File.read raises Errno::EISDIR —
+    # the realistic shape (the path resolves, but the read fails).
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir) # state_file is a directory → File.read raises
+
+      specs = nil
+      _out, err = capture_io do
+        specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+      end
+
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+      assert_match(/patrol_task\? could not read/, err)
+      assert_match(/routing as a normal/, err)
+    end
+  end
+
+  def test_patrol_task_does_not_swallow_programmer_errors
+    # The rescue is intentionally narrowed to SystemCallError so genuine
+    # programmer errors surface instead of being masked as "not patrol".
+    task = RaisingStateFileTask.new("/nonexistent", RuntimeError.new("boom"))
+
+    assert_raises(RuntimeError) do
+      Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+    end
+  end
+
+  def test_empty_patrol_reviewers_warns_so_patrol_pr_is_not_silently_unreviewed
+    cfg = {
+      "review" => { "reviewers" => [ { "name" => "normal-reviewer" } ] },
+      "patrol" => { "review" => { "reviewers" => [] } } # explicit opt-out
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: patrol\n---\n\n# Patrol PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result, "empty patrol reviewers still returns :ok (intentional opt-out)"
+      assert_match(/zero patrol\.review\.reviewers/, err,
+                   "a patrol task with no reviewers must warn rather than pass silently")
+    end
+  end
+
   def test_reviewer_compare_ref_configured_branch_falls_back_to_local_with_warn
     # Configured branch is the explicit operator opt-in, so we use it
     # even when the remote ref is missing — but still warn so the

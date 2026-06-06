@@ -65,7 +65,7 @@ module Hive
       # CLI's installed skill names.
       "brainstorm" => {
         "agent" => "claude",
-        "skill" => "/compound-engineering:ce-brainstorm",
+        "skill" => "/ce-brainstorm",
         "runtime" => "headless"
       },
       "plan" => {
@@ -336,7 +336,19 @@ module Hive
         },
         "review" => {
           "max_context_files" => 24,
-          "max_owned_files" => 12
+          "max_owned_files" => 12,
+          "reviewers" => [
+            {
+              "name" => "codex-ce-code-review",
+              "kind" => "agent",
+              "agent" => "codex",
+              "skill" => "ce-code-review",
+              "output_basename" => "codex-ce-code-review",
+              "prompt_template" => "reviewer_codex_ce_code_review.md.erb",
+              "budget_usd" => 50,
+              "timeout_sec" => 5400
+            }
+          ]
         }
       },
       # Global Telegram bot settings. The bot is an operator surface
@@ -1227,12 +1239,16 @@ module Hive
               "review.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries; got #{reviewers.class}"
       end
 
+      validate_reviewer_entries!(reviewers, "review.reviewers", source_path)
+    end
+
+    def validate_reviewer_entries!(reviewers, label, source_path)
       seen_names = {}
       seen_basenames = {}
       reviewers.each_with_index do |entry, idx|
         unless entry.is_a?(Hash)
           raise ConfigError,
-                "review.reviewers[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
+                "#{label}[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
         end
 
         # Required fields: presence + non-empty. Missing or blank values
@@ -1245,13 +1261,13 @@ module Hive
           next unless missing
 
           raise ConfigError,
-                "review.reviewers[#{idx}].#{field} in #{describe_source(source_path)} is missing"
+                "#{label}[#{idx}].#{field} in #{describe_source(source_path)} is missing"
         end
 
         name = entry["name"]
         if name && (prev = seen_names[name])
           raise ConfigError,
-                "review.reviewers in #{describe_source(source_path)} has duplicate name #{name.inspect} " \
+                "#{label} in #{describe_source(source_path)} has duplicate name #{name.inspect} " \
                 "at indices [#{prev}, #{idx}]"
         end
         seen_names[name] = idx if name
@@ -1264,7 +1280,7 @@ module Hive
         normalized_basename = basename.is_a?(String) ? basename.strip : basename
         if basename.is_a?(String) && normalized_basename.empty?
           raise ConfigError,
-                "review.reviewers[#{idx}].output_basename in #{describe_source(source_path)} must not be empty " \
+                "#{label}[#{idx}].output_basename in #{describe_source(source_path)} must not be empty " \
                 "(would produce reviews/-NN.md filenames)"
         end
 
@@ -1283,7 +1299,7 @@ module Hive
              normalized_basename == "." ||
              normalized_basename == ".."
             raise ConfigError,
-                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "#{label}[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
                   "must be a single filename component without path separators (/, \\, null) " \
                   "and may not be '.' or '..'"
           end
@@ -1291,7 +1307,7 @@ module Hive
 
         if normalized_basename && (prev = seen_basenames[normalized_basename])
           raise ConfigError,
-                "review.reviewers in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \
+                "#{label} in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \
                 "at indices [#{prev}, #{idx}] (would cause concurrent file-write collisions)"
         end
         seen_basenames[normalized_basename] = idx if normalized_basename
@@ -1313,7 +1329,7 @@ module Hive
                        .map { |p| p.chomp("-") }
                        .join(", ")
             raise ConfigError,
-                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "#{label}[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
                   "starts with a reserved orchestrator-owned prefix; choose a different name " \
                   "(reserved prefixes: #{reserved})"
           end
@@ -1327,14 +1343,14 @@ module Hive
           max = entry["max_attempts"]
           unless max.is_a?(Integer) && max.positive?
             raise ConfigError,
-                  "review.reviewers[#{idx}].max_attempts in #{describe_source(source_path)} " \
+                  "#{label}[#{idx}].max_attempts in #{describe_source(source_path)} " \
                   "must be a positive Integer; got #{max.inspect}"
           end
         end
 
         validate_agent_name!(
           entry["agent"],
-          "review.reviewers[#{idx}].agent",
+          "#{label}[#{idx}].agent",
           source_path
         )
       end
@@ -1661,7 +1677,6 @@ module Hive
 
     def validate_patrol_review!(patrol, source_path)
       review = patrol["review"]
-      return if review.nil?
 
       unless review.is_a?(Hash)
         raise ConfigError,
@@ -1679,6 +1694,20 @@ module Hive
                 ">= #{min}; got #{value.inspect} (#{value.class})"
         end
       end
+
+      reviewers = review["reviewers"]
+      if reviewers.nil?
+        raise ConfigError,
+              "patrol.review.reviewers in #{describe_source(source_path)} is nil; " \
+              "either remove the key (defaults provide patrol reviewers) or supply an Array of reviewer entries"
+      end
+
+      unless reviewers.is_a?(Array)
+        raise ConfigError,
+              "patrol.review.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries; got #{reviewers.class}"
+      end
+
+      validate_reviewer_entries!(reviewers, "patrol.review.reviewers", source_path)
     end
 
     BOT_NUMERIC_BOUNDS = [

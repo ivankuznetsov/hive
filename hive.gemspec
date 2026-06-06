@@ -62,4 +62,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"
+  spec.add_dependency "unicode-display_width", "~> 3.2"
 end

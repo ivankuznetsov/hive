@@ -76,12 +76,17 @@ class TuiSmokeTest < Minitest::Test
           # projects pane renders and the project name surface is alive.
           reader.winsize = [ 30, 120 ]
 
+          started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
             buf.include?(project_prefix)
           end
+          first_useful_paint = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
           assert_includes buffer, project_prefix,
                           "a stable prefix of the seeded project name must appear in " \
                           "the first frame within 10s, got buffer:\n#{buffer.inspect[0, 500]}"
+          assert_operator first_useful_paint, :<, 2.0,
+                          "seeded project should appear quickly on TUI startup; " \
+                          "took #{format('%.3f', first_useful_paint)}s"
 
           writer.write("q")
           writer.flush

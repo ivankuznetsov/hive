@@ -65,9 +65,13 @@ module Hive
 
         begin
           state_source = Hive::Tui::StateSource.new
+          state_source.refresh_now
           state_source.start
 
-          seed_model = Hive::Tui::Model.initial
+          seed_model = Hive::Tui::Model.initial.with(
+            snapshot: state_source.current,
+            last_error: state_source.last_error
+          )
           bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
           # `input_timeout: 5` (ms) trades a tiny amount of GVL-yield
           # latency for substantially less escape-sequence fragmentation.

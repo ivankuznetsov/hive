@@ -65,7 +65,7 @@ module Hive
         babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
-      hive-init.v1 success payload containing the resolved answers plus
+      hive-init.v2 success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
 
       To set non-default values from automation, run init and then

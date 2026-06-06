@@ -7,7 +7,7 @@ Pass: <%= pass %>
 
 Behavior:
 
-1. Use the `/compound-engineering:ce-review` skill on the diff
+1. Use the `/compound-engineering:ce-code-review` skill on the diff
    `git diff <%= default_branch %>..HEAD` in the current worktree.
 2. Output structured findings to <%= task_folder %>/reviews/ce-review-<%= "%02d" % pass %>.md
    using GFM checkboxes grouped by severity:

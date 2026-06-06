@@ -170,6 +170,17 @@ backstop when no bot is running. To avoid reconnect floods,
 and collapses the overflow into one per-chat summary, removing the
 overflow files only after the summary sends.
 
+## Reload Behavior
+
+`Supervisor#reload_config_if_requested` reloads the global bot config,
+rebuilds the router, notification dispatcher, and voice transcriber, and
+updates the shared conversation TTL. Rebuilding the transcriber is
+required because `Hive::Bot::Transcriber` snapshots
+`bot.transcription.*` settings such as endpoint, model, retry/backoff,
+timeout, no-speech threshold, supported languages, and API-key env name
+at construction time; `hive bot reload` must apply those settings without
+a full bot restart.
+
 ## Eval harness
 
 `test/eval/` exercises this module through the same supervisor entrypoints production uses, with only Telegram and child-process I/O replaced by in-process fakes. The harness classifies outbound messages into the eval contract reasons (`agent_blocked_question`, `status_response`, `task_finished`, `fatal_error`) from observable status rows, handler intents, and child exits. That mapping stays test-only; production bot payloads are unchanged.

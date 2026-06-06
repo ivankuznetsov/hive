@@ -58,7 +58,7 @@ module Hive
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
                      dispatch_request_writer: nil, dispatch_result_state_home: nil,
-                     idea_draft_store: nil, transcriber: nil)
+                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil)
         @config = config
         @dry_run = dry_run
         # ADV-1: where the daemon drops dispatch-result failure notices.
@@ -82,10 +82,8 @@ module Hive
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900))
-        @transcriber = transcriber || Hive::Bot::Transcriber.new(
-          config: config.fetch("transcription", {}),
-          logger: @logger
-        )
+        @transcriber_factory = transcriber_factory || method(:default_transcriber)
+        @transcriber = transcriber || build_transcriber(config)
         @router = router || build_router(config)
         @child_supervisor = child_supervisor ||
           Hive::Bot::ChildSupervisor.new(logger: @logger, dry_run: dry_run)
@@ -502,7 +500,14 @@ module Hive
         case transcription.status
         when :ok
           draft = ensure_voice_draft(chat_id: chat_id)
-          @idea_draft_store.set_transcript(chat_id: chat_id, text: transcription.text)
+          unless draft && @idea_draft_store.set_transcript(chat_id: chat_id, text: transcription.text)
+            @logger.event(:send_failure, source: "transcribe_voice",
+                                          chat_id: update.chat_id,
+                                          error_class: "DraftExpired",
+                                          message: "voice draft expired before transcript could be stored")
+            return safe_send_message(chat_id: update.chat_id,
+                                     text: "That voice idea draft expired. Send the voice note again.")
+          end
           safe_send_message(chat_id: update.chat_id,
                             text: Hive::Bot::IdeaKeyboards.transcript_preview_text(transcription.text),
                             reply_markup: Hive::Bot::IdeaKeyboards.voice_confirm_keyboard(draft.token))
@@ -1416,6 +1421,7 @@ module Hive
 
         @config = Hive::Config.load_global_bot(require_runtime: true)
         @router = build_router(@config)
+        @transcriber = build_transcriber(@config)
         @notification_dispatcher = Hive::Bot::NotificationDispatcher.new(
           telegram: @telegram,
           logger: @logger,
@@ -1440,6 +1446,14 @@ module Hive
         Hive::Config.deprecated_bot_keys(@config).each do |entry|
           @logger.event(:deprecated_config, key: entry[:key], replacement: entry[:replacement])
         end
+      end
+
+      def build_transcriber(config)
+        @transcriber_factory.call(config.fetch("transcription", {}))
+      end
+
+      def default_transcriber(transcription_config)
+        Hive::Bot::Transcriber.new(config: transcription_config, logger: @logger)
       end
 
       def install_signal_handlers!

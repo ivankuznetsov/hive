@@ -2445,6 +2445,58 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_bot_rejects_non_boolean_transcription_enabled
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.enabled.*boolean/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_transcription_no_speech_threshold_above_one
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            no_speech_threshold: 1.2
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.no_speech_threshold.*between 0 and 1/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_bad_transcription_timeout_and_backoff_bounds
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            timeout_sec: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.timeout_sec.*integer >= 0/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            retry_backoff_sec: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.retry_backoff_sec.*integer >= 0/, err.message)
+    end
+  end
+
   def test_load_global_bot_rejects_scalar_transcription_languages
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)

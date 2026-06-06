@@ -530,6 +530,17 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/unsupported language/, @telegram.messages.last.fetch(:text))
   end
 
+  def test_unsupported_language_hint_uses_supported_language_names
+    @config["transcription"] = @config.fetch("transcription").merge("supported_languages" => %w[en ru])
+
+    assert_equal "That voice note uses an unsupported language. Try English or Russian.",
+                 @supervisor.send(:unsupported_language_text)
+
+    @config["transcription"] = @config.fetch("transcription").merge("supported_languages" => %w[de])
+    assert_equal "That voice note uses an unsupported language. Try German.",
+                 @supervisor.send(:unsupported_language_text)
+  end
+
   def test_transcribe_voice_failed_stages_audio_and_awaits_text
     @transcriber.results << TranscriptionResult.new(status: :failed)
     @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
@@ -553,6 +564,24 @@ class HiveBotSupervisorTest < Minitest::Test
     @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
   end
 
+  def test_transcribe_voice_staging_failure_clears_orphan_fallback_draft
+    @transcriber.results << TranscriptionResult.new(status: :failed)
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    @idea_draft_store.define_singleton_method(:ensure_staging_dir) do |chat_id:|
+      raise Hive::Tui::ComposerStaging::WriteError, "disk full"
+    end
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id" }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_nil @idea_draft_store.get(chat_id: 42)
+    assert_match(/Couldn't save that voice note/, @telegram.messages.last.fetch(:text))
+    assert(@logger.events.any? { |event| event.fetch(:payload).fetch(:error_class) == "Hive::Tui::ComposerStaging::WriteError" })
+  end
+
   def test_transcribe_voice_rechecks_remote_size_before_download
     downloaded = false
     @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 25 * 1024 * 1024 } }
@@ -566,6 +595,35 @@ class HiveBotSupervisorTest < Minitest::Test
     refute downloaded
     assert_match(/voice note is too large/, @telegram.messages.last.fetch(:text))
     assert_nil @idea_draft_store.get(chat_id: 42)
+  end
+
+  def test_transcribe_voice_rechecks_get_file_size_after_small_payload_size
+    downloaded = false
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 25 * 1024 * 1024 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| downloaded = true }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id", file_size: 5 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    refute downloaded
+    assert_match(/voice note is too large/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_transcribe_voice_logs_and_replies_when_draft_expires_before_transcript_store
+    @transcriber.results << TranscriptionResult.new(status: :ok, text: "voice idea", language: "en")
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    @idea_draft_store.define_singleton_method(:set_transcript) { |chat_id:, text:| nil }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id", file_size: 5 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/voice idea draft expired/, @telegram.messages.last.fetch(:text))
+    assert(@logger.events.any? { |event| event.fetch(:payload).fetch(:error_class) == "DraftExpired" })
   end
 
   def test_transcribe_voice_disabled_replies_without_transcribing
@@ -1897,6 +1955,46 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal [ 123 ], @conversation_store.ttl_updates
     assert_equal :config_reloaded, @logger.events.last.fetch(:name)
     assert_equal false, @supervisor.instance_variable_get(:@reload)
+  ensure
+    Hive::Config.define_singleton_method(:load_global_bot, original) if original
+  end
+
+  def test_reload_config_rebuilds_transcriber_from_reloaded_transcription_config
+    built_configs = []
+    factory = lambda do |transcription_config|
+      built_configs << transcription_config.dup
+      FakeTranscriber.new(results: [], calls: [])
+    end
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config.merge("transcription" => @config.fetch("transcription").merge("model" => "old-model")),
+      token: "test-token",
+      logger: @logger,
+      telegram: @telegram,
+      status_watcher: @status_watcher,
+      notification_dispatcher: @notification_dispatcher,
+      router: nil,
+      child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store,
+      idea_draft_store: @idea_draft_store,
+      dry_run: false,
+      dispatch_request_writer: @dispatch_request_writer,
+      transcriber_factory: factory
+    )
+    new_config = supervisor.instance_variable_get(:@config).merge(
+      "transcription" => @config.fetch("transcription").merge(
+        "model" => "new-model",
+        "endpoint" => "https://new.example"
+      )
+    )
+    original = Hive::Config.method(:load_global_bot)
+    Hive::Config.define_singleton_method(:load_global_bot) { |require_runtime:| new_config }
+
+    supervisor.request_reload!
+    supervisor.send(:reload_config_if_requested)
+
+    assert_equal "old-model", built_configs.first.fetch("model")
+    assert_equal "new-model", built_configs.last.fetch("model")
+    assert_equal "https://new.example", built_configs.last.fetch("endpoint")
   ensure
     Hive::Config.define_singleton_method(:load_global_bot, original) if original
   end

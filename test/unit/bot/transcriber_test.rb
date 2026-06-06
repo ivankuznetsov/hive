@@ -120,6 +120,23 @@ class HiveBotTranscriberTest < Minitest::Test
     assert_equal :no_speech, result.status
   end
 
+  def test_malformed_no_speech_probability_is_logged_and_ignored
+    http = FakeHttp.new([
+      Response.new(status: 200, body: JSON.generate(
+        "text" => "speech",
+        "language" => "english",
+        "segments" => [ { "no_speech_prob" => "abc" }, { "no_speech_prob" => 0.1 } ]
+      ))
+    ])
+
+    result = transcriber(http).call("bytes", filename: "voice.oga", content_type: "audio/ogg")
+
+    assert_equal :ok, result.status
+    assert(@logger.events.any? do |event, attrs|
+      event == :send_failure && attrs[:error_class] == "MalformedSegment"
+    end)
+  end
+
   def test_low_no_speech_probability_returns_ok
     http = FakeHttp.new([
       Response.new(status: 200, body: JSON.generate(

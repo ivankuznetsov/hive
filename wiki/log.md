@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T06:58:00Z] bot - apply transcription reload review fixes
+
+**Action:** Addressed pass-2 review findings on the voice-note branch. `Supervisor#reload_config_if_requested` now rebuilds `Hive::Bot::Transcriber` from the reloaded `bot.transcription` config so endpoint/model/retry/language settings apply on `hive bot reload`; the `:ok` transcription path now logs and replies if the draft disappears before transcript storage instead of sending a dead Confirm button. Added focused coverage for reload rebuild, unsupported-language hint wording, failed-fallback staging cleanup, secondary post-`getFile` size guard, malformed `no_speech_prob`, and transcription config validation branches. Refreshed [[modules/bot]] reload behavior.
+
+**Refreshed pages:**
+- [[modules/bot]]
+
 ## [2026-06-06T06:31:00Z] bot - voice fixture and draft-preservation review fix
 
 **Action:** Addressed 6-review pass-2 voice findings on the Telegram voice-note idea branch. Added the checked-in `test/fixtures/voice/voice-idea.oga` Ogg/Opus speech sample used by the secret-gated voice E2E, and documented it in [[testing]]. Guarded `Router`/`Supervisor` so a bare voice note sent while a non-voice idea draft is open replies with an explicit finish/discard prompt and preserves the existing draft instead of clearing it through `IdeaDraftStore#start`. Refreshed [[modules/bot]] and narrowed [[gaps]] to the remaining live Telegram/OpenAI smoke evidence.

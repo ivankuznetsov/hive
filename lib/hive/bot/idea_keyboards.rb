@@ -1,9 +1,8 @@
 module Hive
   module Bot
-    # Shared rendering for the voice/idea capture surface. The supervisor and
-    # the slash/callback handlers each used to carry byte-identical copies of
-    # these helpers, which drift the moment a wording or callback-data change
-    # lands in only one copy. Single source of truth lives here.
+    # Shared rendering for the voice/idea capture surface. Project picker
+    # rendering started in the slash handler; voice-specific helpers live here
+    # too so callback data and operator copy have one source of truth.
     module IdeaKeyboards
       module_function
 

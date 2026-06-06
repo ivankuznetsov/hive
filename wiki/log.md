@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T22:23:55Z] wiki - audit babysitter dry-run residue commit
+
+**Action:** Audited commit `6ef4c3d8` after it auto-committed residual wiki edits for the babysitter dry-run git unsafe-option refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output ext-diff external-diff"` returned no indexed results, so verification used the committed diff plus direct source reads. Checked the commit's changes to [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]], and [[log]] against `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, and commit `9d1e0fce`. Confirmed the pages now match the stub allowlist and the remaining uncertainty is still the live-agent `hive babysit --once PROJECT --dry-run` smoke gap in [[gaps]]. No index coverage changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-05T20:52:04Z] babysitter - refresh dry-run git unsafe-option coverage
 
 **Action:** Audited commit `9d1e0fce` after it changed `bin/hive-babysitter-stub-git` so read-only passthrough commands are skipped when their argv includes output-writing or external-command options (`--output`, `--output=<path>`, `--ext-diff`, `--external-diff`). Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git passthrough stub"` found prior babysitter dry-run coverage in [[testing]], [[gaps]], and [[log]]. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Updated module/test coverage and kept the live-agent dry-run uncertainty in [[gaps]]. Did not run `qmd update` or `qmd embed`.

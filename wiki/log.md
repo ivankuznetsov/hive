@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T16:05:00Z] babysitter/wiki - refresh dry-run git stub coverage after fix commit
+
+**Action:** Refreshed wiki coverage after commit `ac9bef19` changed babysitter/testing/gaps/log wiki pages as residual 6-review worktree documentation and commit `5176de4e` added the follow-up dry-run Git stub hardening. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysit bin hive e2e sudo"` had no hits, while `qmd search "hive babysit live-agent-smoked dry run"` returned the existing gaps context. Verified the committed diffs for `ac9bef19`, `9fb8e782`, and `5176de4e`, plus current `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, and `test/unit/babysitter/dry_run_env_test.rb`. Updated the babysitter command/module/testing/gaps coverage for the expanded executable-affecting config key/prefix denylist and `git grep -O...`. No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-06T15:49:29Z] babysitter/wiki - audit dry-run git executable-config coverage
 
 **Action:** Refreshed command/API surface coverage after commit `9fb8e782` touched the executable `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and babysitter wiki pages. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first, then checked `.llm-wiki/config.json` and [[architecture]] during the refresh; `qmd search "babysitter dry-run git stub executable config"` found existing babysitter command/module/testing/gaps context. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, and the focused dry-run test. The existing [[commands/babysit]] and [[modules/babysitter]] updates correctly document the new executable-affecting Git skip list; this refresh added the missing test-matrix coverage and carried the live-agent dry-run smoke uncertainty forward in [[gaps]]. No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.

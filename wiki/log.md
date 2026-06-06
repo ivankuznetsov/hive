@@ -3723,3 +3723,10 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[commands/tui]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-06T05:20:37Z] wiki — audit residual glued-field dry-run docs commit
+
+**Action:** Audited commit `89efd1aa` after it committed residual wiki changes from the babysitter dry-run glued-field refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run gh api glued inline field input payload"` had no indexed hits for this exact case, and `rg` found the local babysitter dry-run coverage. Verified the committed diff plus current [[commands/babysit]], [[modules/babysitter]], [[testing]], `bin/hive-babysitter-stub-gh`, and `test/unit/babysitter/dry_run_env_test.rb`. Confirmed the committed wiki pages still match the current stub/test behavior, the existing [[gaps]] entry already records the remaining live-agent dry-run smoke uncertainty, and [[index]] does not need a coverage change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

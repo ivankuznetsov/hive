@@ -7,9 +7,11 @@ require "hive/markers"
 module Hive
   module Daemon
     # Tick-time healer for in-flight markers whose backing agent isn't
-    # actually alive. Rewrites stale markers to ERROR / REVIEW_ERROR with
-    # a `reason` attribute so the existing red-status surface in
-    # Hive::TaskAction kicks in and the disk truth stops lying.
+    # actually alive, so the disk truth stops lying. The `agent_*` paths
+    # rewrite the marker to ERROR / REVIEW_ERROR with a `reason` attribute
+    # so the existing red-status surface in Hive::TaskAction kicks in; the
+    # REVIEW_WORKING paths instead CLEAR the marker (and drop the stale
+    # .lock) so the daemon simply re-dispatches review.
     #
     # Two failure modes are healed, distinguished by the row's
     # `claude_pid_alive` field (populated by Hive::Commands::Status from
@@ -33,8 +35,10 @@ module Hive
     #   - `review_agent_died` — the review parent still holds a
     #                        verified-live .lock but its Claude child died
     #                        (live_task_lock == true, claude_pid_alive ==
-    #                        false). Terminate the wedged holder and clear
-    #                        the marker (issue #320).
+    #                        false) AND the holder has no live child
+    #                        processes (the actual "wedged" signal).
+    #                        Terminate the wedged holder and clear the
+    #                        marker (issue #320).
     #   - `review_orphaned`  — no verified-live lock holder
     #                        (live_task_lock != true) and the marker is
     #                        older than the grace window. A signal kill —
@@ -376,6 +380,15 @@ module Hive
       def release_task_lock(row)
         File.delete(File.join(row.folder.to_s, ".lock"))
       rescue Errno::ENOENT
+        nil
+      rescue SystemCallError
+        # The marker heal has already succeeded by the time we drop the
+        # lock. A stale .lock we cannot delete (EACCES, EROFS, EISDIR, …)
+        # is non-fatal residue, not a failed heal — swallow it so it does
+        # not propagate to the caller's rescue and mislabel a succeeded
+        # heal as `marker_heal_failed` (which would also suppress the
+        # `marker_healed` success event). A later tick or the next
+        # dispatch reconciles the leaked lock.
         nil
       end
 

@@ -57,6 +57,7 @@ Append-only log of all wiki operations.
 - [[stages/review]]
 - [[testing]]
 - [[gaps]]
+
 - [[index]]
 
 ## [2026-06-05T09:45:00Z] patrol - hand opened PRs to 6-review
@@ -3322,3 +3323,7 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[stages/review]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-06T19:31:40Z] testing — reject hive-eval scenario traversal
+
+**Action:** Tightened `bin/hive-eval --scenario` to normalize only basename-style selectors and reject path separators/traversal before invoking `rake test:eval`. Updated the reporter CLI test to keep its intentional-failure fixture inside `test/eval/scenarios/` and added regression coverage for `../../unit/hv` so a non-eval test cannot produce a false-green eval run. Refreshed [[testing]] with the enforced selector contract.

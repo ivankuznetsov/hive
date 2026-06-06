@@ -1,4 +1,5 @@
 require "eval/eval_helper"
+require "fileutils"
 require "json"
 require "open3"
 
@@ -24,12 +25,12 @@ class HiveEvalReporterTest < Minitest::Test
     # s3_noise used to be the always-failing scenario the reporter exercised.
     # Now that daemon-gated ready_to_X suppression has landed (commit
     # 0aa16678), s3_noise passes — which is the correct production
-    # behavior. Write a tmpdir-scoped fixture that asserts a deliberate
-    # failure so we still exercise the reporter's failure path (exit
-    # nonzero + report shape + per-scenario "fail" status) without
+    # behavior. Write a temporary scenario fixture that asserts a deliberate
+    # failure so we still exercise the reporter's failure path without
     # coupling to any specific production bug.
     Dir.mktmpdir("hive-eval-report") do |dir|
-      fixture = File.join(dir, "intentional_failure_test.rb")
+      scenario_name = "intentional_failure_#{Process.pid}"
+      fixture = File.expand_path("../scenarios/#{scenario_name}_test.rb", __dir__)
       File.write(fixture, <<~RUBY)
         require "eval/eval_helper"
 
@@ -46,7 +47,7 @@ class HiveEvalReporterTest < Minitest::Test
 
       _out, _err, status = Open3.capture3(
         { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", fixture, "--no-judge", "--report", report
+        "bin/hive-eval", "--scenario", scenario_name, "--no-judge", "--report", report
       )
 
       refute status.success?, "fixture asserts false; reporter CLI must exit nonzero on failure"
@@ -56,6 +57,23 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal "fail", entry.fetch("status")
       assert_match(/intentional failure for HiveEvalReporterTest fixture/,
                    entry.fetch("failures").join("\n"))
+    ensure
+      FileUtils.rm_f(fixture) if fixture
+    end
+  end
+
+  def test_cli_rejects_scenario_path_traversal
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "traversal.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "../../unit/hv", "--no-judge", "--report", report
+      )
+
+      refute status.success?, "path traversal selector must not run as a passing eval"
+      assert_match(/scenario must be a basename/, err)
+      refute File.exist?(report), "invalid scenario selectors must not write an eval report"
     end
   end
 end

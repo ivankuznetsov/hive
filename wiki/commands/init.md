@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-06
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
@@ -15,7 +15,7 @@ tags: [command, bootstrap, git, prompts, llm-wiki]
 hive init [PROJECT_PATH] [--force] [--json]
 ```
 
-`PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits a single `hive-init.v1` success document on stdout with project metadata and the resolved prompt answers.
+`PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits a single current `hive-init.v2` success document on stdout with project metadata and the resolved prompt answers.
 
 ## Preconditions
 
@@ -48,7 +48,7 @@ hive init [PROJECT_PATH] [--force] [--json]
 9. **Commit llm-wiki bootstrap files** via `GitOps#commit_llm_wiki_bootstrap!`, committing tracked project context as `chore: initialize llm-wiki` so future Hive worktrees inherit wiki context.
 10. **Install runtime wiki hooks** via `Hive::LlmWikiBootstrap.install_runtime_hooks!`: adds/replaces only the managed block in `.git/hooks/post-commit`, writes Linux user systemd service/timer files for daily refresh, and enables the timer through `timers.target.wants`.
 11. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into the XDG global config path (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml`).
-12. Print a human summary, or with `--json` emit `hive-init.v1`: `schema`, `schema_version`, `ok`, `project`, `path`, `default_branch`, `hive_state_path`, `worktree_root`, `answers`, plus top-level `planning_agent`, `claude_mode`, `development_agent`, `enabled_reviewers`, `triage_bias`, `budgets`, `timeouts`, `daemon_enabled`, `babysitter_enabled`, and `daemon_autostart_requested`. In JSON mode the non-TTY defaults line is suppressed so stdout remains one JSON document.
+12. Print a human summary, or with `--json` emit current `hive-init.v2`: `schema`, `schema_version`, `ok`, `project`, `path`, `default_branch`, `hive_state_path`, `worktree_root`, `answers`, plus top-level `planning_agent`, `claude_mode`, `development_agent`, `enabled_reviewers`, `triage_bias`, `budgets`, `timeouts`, `daemon_enabled`, `babysitter_enabled`, and `daemon_autostart_requested`. In JSON mode the non-TTY defaults line is suppressed so stdout remains one JSON document. `schemas/hive-init.v1.json` is kept as the frozen previous contract and still requires `patrol_reviewers`; v2 drops `patrol_reviewers` from both `answers` and the top-level payload because patrol derives its reviewer set outside the init success envelope.
 13. Ensure the global daemon service unit exists via `Hive::Commands::Daemon::ServiceInstaller`, recording `daemon.autostart` from the prompt answer in the global config and enabling/starting the platform service only when requested. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
 14. Run the non-fatal `hive doctor` skill preflight; missing skills warn on stderr without failing init.
 
@@ -116,7 +116,7 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 - `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including non-default answer mirroring and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, the rendered template's stage-agent/runtime blocks, daemon and babysitter enrollment defaults, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, and the U5 piped-input + abort + already-initialized-guard scenarios.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
-- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, limit-pair edge re-prompts, the Claude mode and permission-mode prompts, daemon/babysitter/autostart prompts, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins `schemas/hive-init.v1.json` to the producer's success payload.
+- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, limit-pair edge re-prompts, the Claude mode and permission-mode prompts, daemon/babysitter/autostart prompts, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins the current `schemas/hive-init.v2.json` required keys to `Init#success_payload` and keeps an explicit back-compat assertion that `schemas/hive-init.v1.json` still requires `patrol_reviewers`.
 
 ## Backlinks
 

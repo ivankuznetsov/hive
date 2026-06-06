@@ -3227,3 +3227,16 @@ TTL config.
 
 **Refreshed pages:**
 - [[log]]
+
+## [2026-06-06T18:10:17Z] schemas/init — document hive-init v2 compatibility bump
+
+**Action:** Refreshed command/API wiki coverage after commit `cc45f88f` bumped `Hive::Schemas::SCHEMA_VERSIONS["hive-init"]` to 2, restored `schemas/hive-init.v1.json` with `patrol_reviewers` required for pinned consumers, and added `schemas/hive-init.v2.json` without `patrol_reviewers` because the current producer no longer emits it. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hive-init schema patrol_reviewers init json"` found existing init/config/testing wiki coverage. Verified the committed diff plus current `lib/hive.rb`, `lib/hive/commands/init.rb`, `lib/hive/cli.rb`, `schemas/hive-init.v1.json`, `schemas/hive-init.v2.json`, `test/unit/schema_files_test.rb`, and `test/integration/init_test.rb`. Documented the current `hive-init.v2` JSON surface, the preserved v1 back-compat contract, and the ADR-025 schema-version policy application. Recorded follow-up uncertainty that `lib/hive/cli.rb`, `docs/cli.md`, and `test/integration/init_test.rb` still contain v1 residue; no focused tests were run during this wiki refresh. Page coverage did not change, so [[index]] was left unchanged. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/init]]
+- [[modules/config]]
+- [[decisions]]
+- [[testing]]
+- [[gaps]]
+- [[log]]

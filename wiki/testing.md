@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [test, minitest, fixtures]
 ---
 
@@ -68,13 +68,14 @@ task default: :test
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, and `gh api` implicit-POST payload flag blocking. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives are hidden from daily text/grid views by row `mtime`, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
+| `schema_files_test.rb` | Published JSON Schema contracts under `schemas/` — every current `Hive::Schemas::SCHEMA_VERSIONS` entry resolves to a file, current schema required keys match producer payloads, explicit historical schema versions remain loadable where back-compat is promised, and `hive-init.v1` keeps `patrol_reviewers` required while current `hive-init.v2` matches `Init#success_payload`. |
 | `tui/app_test.rb` | `Hive::Tui::App` — charm-only backend selection, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, and signal-handler restore failure tolerance. |
 
 ## Integration suite (`test/integration/`)
 
 | File | Covers |
 |------|--------|
-| `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init. |
+| `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, and JSON success-payload validation. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |

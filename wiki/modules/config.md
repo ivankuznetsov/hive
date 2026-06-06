@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [config, yaml, validation]
 ---
 
@@ -143,7 +143,7 @@ exceed Telegram's hosted Bot API file-download cap, `bot.idea_attachment_max_cou
 defaults to 10, and `bot.idea_draft_ttl_sec` defaults to 900 seconds. See
 [[commands/bot]] and [[modules/bot]].
 
-The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
+The current `hive init` JSON summary envelope (`schemas/hive-init.v2.json`) carries the chosen value as a required `claude_permission_mode` string inside `answers` (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. `schemas/hive-init.v1.json` remains published for pinned consumers and still requires `patrol_reviewers`; v2 drops that field because patrol derives reviewer selection from project config instead of the init envelope. See [[commands/init]].
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

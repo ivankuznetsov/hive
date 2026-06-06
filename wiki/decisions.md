@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-26
+updated: 2026-06-06
 tags: [decisions, adr]
 ---
 
@@ -299,13 +299,15 @@ Hive's JSON envelopes are consumed by:
 2. Agent tooling (subagent scripts, CE skills, `gh pr view --json` callers) — typically running against the same `hive` binary that wrote the envelope.
 3. The e2e harness, which validates every emitted envelope against `schemas/hive-run.v1.json` via `json_schemer`.
 
-There is no third-party consumer that pins to a different `hive` version. The producer and the schema move together by construction: a `schema_version: 1` envelope from version `X` is read by tooling on the same version `X`.
+At the time of PR #69 there was no known third-party consumer pinned to a different `hive` version, so the producer and the current schema generally moved together by construction: a `schema_version: 1` envelope from version `X` was read by tooling on the same version `X`. Once a schema file is published under `schemas/`, though, the file itself is still treated as a contract for pinned validators; later breaking changes add a new numbered schema file instead of rewriting the old one.
 
 **Decision:**
 1. **New fields are added as `required` from the moment they ship.** No "opt-in" phase. The schema lists every field every producer must emit; missing-field bugs are caught at e2e validation time, not deferred to runtime parsing in consumers.
 2. **`additionalProperties: false` on every object.** Typos in field names fail schema validation immediately rather than being silently ignored by consumers.
 3. **Enums are closed.** `rebase.reason`, `marker`, `next_action.kind`, `error_kind`, etc. all enumerate every allowed value. Adding a new value is a deliberate code change (new enum entry + new producer code + new docstring) — not an accidental drift where the producer emits `"foo_failed"` while consumers never learn about it.
-4. **Bumping the major version is the escape hatch.** If a future change must drop a required field or break consumer parsing, the right move is `hive-run.v2.json` with `schema_version: 2` — not loosening v1's required list.
+4. **Bumping the major version is the escape hatch.** If a future change must drop a required field or break consumer parsing, the right move is a new numbered file such as `hive-run.v2.json` with `schema_version: 2` — not loosening v1's required list.
+
+2026-06-06 application: commit `cc45f88f` applied this policy to `hive-init` after the current producer stopped emitting `patrol_reviewers`. `schemas/hive-init.v1.json` was restored to the published v1 shape with `patrol_reviewers` required, `schemas/hive-init.v2.json` was added without that required field, and `Hive::Schemas::SCHEMA_VERSIONS["hive-init"]` now points at 2. See [[commands/init]] and [[cli]].
 
 **Why required-and-closed beats optional-and-open:**
 

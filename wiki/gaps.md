@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [gap, todo]
 ---
 
@@ -54,6 +54,7 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 21. **Daemon/TUI latency reductions are unit-pinned but not live-smoked.** Commits `0f4d9373`, `c1a63370`, and `7375c51d` remove the daemon SUCCESS cooldown, add the `daemon.fast_poll_sec` cheap child-reap/state-file mtime probe, and make `Hive::Tui::StateSource` skip `Status#json_payload` reparses when its watched mtime fingerprint is unchanged. Unit tests cover the controller, dispatcher, config bounds, and TUI state source. This refresh did not find an in-tree artifact showing a live daemon plus `hive tui` run where a completed child advances to the next stage within the intended ~1s window and the TUI avoids unchanged-status reparse work under real project load.
 22. **Patrol-to-review handoff is unit-pinned but not live-smoked.** Commit `4d0541d6` adds `Hive::Patrol::ReviewHandoff`, defaults `patrol.review_prs` to true, and updates `PrOpener` so opened patrol PRs keep their local worktree and create synthetic `.hive-state/stages/6-review/patrol-.../` tasks with `task.md`, `worktree.yml`, `pr.md`, `reviews/`, and `meta.yml` display names. `test/unit/patrol/pr_opener_test.rb`, `test/unit/config_test.rb`, and `test/integration/patrol_command_test.rb` cover the config and handoff shape, but no in-tree artifact was found showing a real `hive patrol PROJECT` run opening a GitHub PR and the daemon/TUI subsequently picking up the synthetic review task.
 23. **Archive listing is unit-pinned but not live-smoked.** Commits `01e86e1a` through `93fb45fb` add `Hive::ArchiveFilter`, required `tasks[].folder_mtime`, daily text/TUI hiding for old `9-done` rows, an unfiltered TUI Archive pane, and no-target `hive archive` listing/JSON filtering through `Hive::Commands::Status`. Focused unit/integration tests cover the policy, status text/JSON boundaries, TUI projection/cursor behavior, CLI routing, and empty archive message. This refresh did not find an in-tree live artifact from a real registered project showing the full operator workflow (`hive status`, `hive tui` -> `z`, `hive archive --json`) after aged done folders exist.
+24. **`hive-init.v2` source-doc/test residue needs a follow-up decision or fix.** Commit `cc45f88f` correctly bumps `Hive::Schemas::SCHEMA_VERSIONS["hive-init"]` to 2, restores `schemas/hive-init.v1.json` with `patrol_reviewers` required, and adds `schemas/hive-init.v2.json` without that field. This refresh also found stale non-wiki references still saying or asserting v1: `lib/hive/cli.rb`'s init long description says `hive-init.v1`, `docs/cli.md` says `hive init --json` emits v1, and `test/integration/init_test.rb` still asserts `payload.fetch("schema_version") == 1`. `test/unit/schema_files_test.rb` covers the current schema contract, but a focused integration test run was not performed during this wiki refresh, so whether the stale integration assertion is already addressed elsewhere is unverified.
 
 ## Release install follow-ups
 

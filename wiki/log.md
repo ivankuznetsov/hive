@@ -3486,3 +3486,13 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[stages/review]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-06T19:45:07Z] openclaw — guided Hive setup through umbrella skill
+
+**Action:** Updated the OpenClaw skill model so the umbrella `/hive` skill is the first-use setup path instead of hard-failing when the Hive CLI is missing. The umbrella skill is now always visible, declares macOS Homebrew installer metadata, detects strict Hive CLI versions via `hive` or `hv`, guides confirmed platform install commands, runs `hive daemon install`, and optionally initializes the current project. Shortcut skills remain gated on the `hive` binary so workflow shortcuts only appear after setup. Refreshed the OpenClaw README, top-level README, [[operating]], and [[gaps]] to distinguish ClawHub skill installation from guided setup.
+
+**Follow-up:** During ClawHub preflight, `clawhub inspect hive` showed the naked `hive` slug is already owned by another publisher and describes a different integration. Updated the intended umbrella ClawHub slug to `hive-cli`; the installed skill still exposes `/hive`, and shortcut listings remain `hive-*`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]

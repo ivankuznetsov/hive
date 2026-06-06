@@ -37,7 +37,7 @@ class OpenClawSkillsTest < Minitest::Test
   ].freeze
 
   EXPECTED_SKILLS = {
-    "hive" => { description: "Drive any Hive CLI workflow from OpenClaw.", command: "hive" },
+    "hive" => { description: "Install, set up, or drive any Hive CLI workflow from OpenClaw.", command: "hive" },
     "hive-new" => { cli: "new_task", command: "hive new" },
     "generate-name" => { cli: "generate_name", command: "hive generate-name" },
     "brainstorm" => { cli: "brainstorm", command: "hive brainstorm" },
@@ -73,7 +73,9 @@ class OpenClawSkillsTest < Minitest::Test
   }.freeze
 
   EXPECTED_CLAWHUB_SLUGS = EXPECTED_SKILLS.keys.to_h do |skill|
-    slug = if skill == "hive" || skill.start_with?("hive-")
+    slug = if skill == "hive"
+             "hive-cli"
+    elsif skill.start_with?("hive-")
              skill
     else
              "hive-#{skill}"
@@ -124,11 +126,24 @@ class OpenClawSkillsTest < Minitest::Test
                    metadata.fetch("description")
       assert_equal "0.1.0", metadata.fetch("version")
       assert_equal true, metadata.fetch("user-invocable")
-      assert_equal HOMEPAGE, metadata.dig("metadata", "openclaw", "homepage")
-      assert_equal [ "hive" ], metadata.dig("metadata", "openclaw", "requires", "bins"),
-                   "#{skill} must declare hive in metadata.openclaw.requires.bins"
+      openclaw_metadata = metadata.fetch("metadata").fetch("openclaw")
+      assert_equal HOMEPAGE, openclaw_metadata.fetch("homepage")
 
-      assert_includes body, "command -v hive", "#{skill} must fail loudly when hive is missing"
+      if skill == "hive"
+        assert_equal true, openclaw_metadata.fetch("always"), "umbrella skill must remain visible for setup"
+        refute openclaw_metadata.dig("requires", "bins"), "umbrella skill must not be gated before setup"
+
+        installer = openclaw_metadata.fetch("install").find { |entry| entry.fetch("id") == "homebrew" }
+        refute_nil installer, "umbrella skill must expose macOS dependency installer metadata"
+        assert_equal "brew", installer.fetch("kind")
+        assert_equal "ivankuznetsov/hive/hive", installer.fetch("formula")
+        assert_equal [ "hive" ], installer.fetch("bins")
+      else
+        assert_equal [ "hive" ], openclaw_metadata.dig("requires", "bins"),
+                     "#{skill} must declare hive in metadata.openclaw.requires.bins"
+        assert_includes body, "command -v hive", "#{skill} must fail loudly when hive is missing"
+      end
+
       assert_includes body, expected.fetch(:command), "#{skill} must document its CLI dispatch"
       assert_includes body, "Pass arguments safely", "#{skill} must avoid shell interpolation"
     end
@@ -199,6 +214,12 @@ class OpenClawSkillsTest < Minitest::Test
 
     assert_includes body, "restate the effect"
     assert_includes body, "explicit user confirmation"
+    assert_includes body, "/hive setup"
+    assert_includes body, "brew install ivankuznetsov/hive/hive"
+    assert_includes body, "yay -S --noconfirm --needed hive-bin"
+    assert_includes body, "v0.2.0/install.sh"
+    assert_includes body, "daemon install"
+    assert_includes body, "init . --json </dev/null"
     assert_includes body, "hive daemon start --detach"
     assert_includes body, "hive daemon tail"
     assert_includes body, "hive bot start --foreground"

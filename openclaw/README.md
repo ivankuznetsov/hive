@@ -22,7 +22,7 @@ OpenClaw Plugin:
 
 | Path | Install command | Fit |
 |---|---|---|
-| ClawHub skills | `openclaw skills install hive` plus optional shortcuts | Best fit: text instructions that call `hive`, no Node runtime |
+| ClawHub skills | `openclaw skills install hive-cli` plus optional shortcuts | Best fit: text instructions that guide setup or call `hive`, no Node runtime |
 | OpenClaw plugin | `openclaw plugins install clawhub:<package>` | Too much machinery for this surface; plugins are for TypeScript runtime code, tools, providers, channels, and hooks |
 | Direct local skill | `openclaw skills install ./openclaw/skills/hive --as hive` | Useful for testing, but no marketplace discoverability or ClawHub update tracking |
 
@@ -33,16 +33,32 @@ one-command entry point, plus optional shortcut skills such as `/plan`, `/work`,
 and `/ce-review` for frequent workflows. Shortcuts that would collide with
 OpenClaw core commands keep the `hive-` prefix.
 
-## Prerequisite
+## Setup Model
 
-Install the Hive CLI first. The skills deliberately do not install Ruby, git,
-GitHub CLI, agent CLIs, or Hive itself.
+`openclaw skills install hive-cli` installs the OpenClaw skill folder. It does not
+run arbitrary setup commands during the install itself. The published umbrella
+skill is always visible, even before the Hive CLI is installed, and guides the
+user through setup on first use:
+
+```text
+/hive setup
+```
+
+That guided setup asks for confirmation, installs the Hive CLI through the
+documented platform channel, verifies `hive`/`hv`, runs `hive daemon install`,
+and optionally initializes the current project. The macOS Skills UI can also use
+the umbrella skill's Homebrew installer metadata to install the `hive` binary.
+
+Shortcut skills such as `/plan`, `/work`, and `/ce-review` remain gated on the
+`hive` binary, so they become useful after setup has completed. To verify an
+already-installed Hive CLI:
 
 ```bash
 hive --version
 ```
 
-If `hive` is missing, install it from the main project README and retry.
+If Apache Hive shadows the command, use `hv --version` and let the umbrella
+skill prefer `hv` when it prints Hive CLI's bare `X.Y.Z` version.
 
 ## Local Install For Testing
 
@@ -72,7 +88,7 @@ The intended published slugs are:
 
 | ClawHub slug | Slash command | Hive command |
 |---|---|---|
-| `hive` | `/hive` | Any `hive ...` command |
+| `hive-cli` | `/hive` | Any `hive ...` command |
 | `hive-new` | `/hive-new` | `hive new` |
 | `hive-generate-name` | `/generate-name` | `hive generate-name` |
 | `hive-brainstorm` | `/brainstorm` | `hive brainstorm` |
@@ -118,7 +134,7 @@ Dry-run every skill before publishing:
 for skill in openclaw/skills/*; do
   name="$(basename "$skill")"
   if [ "$name" = "hive" ]; then
-    slug="hive"
+    slug="hive-cli"
   elif [ "${name#hive-}" != "$name" ]; then
     slug="$name"
   else

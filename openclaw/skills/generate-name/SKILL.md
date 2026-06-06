@@ -10,7 +10,7 @@ metadata: {"openclaw": {"homepage": "https://github.com/ivankuznetsov/hive", "re
 
 Use this skill to run `hive generate-name TARGET` for a task that needs a human-readable display title.
 
-Before running anything, check `command -v hive`. If it is missing, stop and tell the user to install Hive with Homebrew, AUR, RubyGems, or the installer in https://github.com/ivankuznetsov/hive.
+Before running anything, check `command -v hive`. If it is missing, tell the user to run the umbrella `/hive setup` guided setup flow first.
 
 Treat the user's slash-command text as arguments for `hive generate-name`. If the task target is missing, ask one concise question. Run the command from the current project/workspace directory unless the user gives another path. Pass arguments safely; do not interpolate raw user text into a shell string.
 

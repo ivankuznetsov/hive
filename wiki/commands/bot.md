@@ -42,7 +42,7 @@ hive bot install [--force] [--json]
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
-| `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
+| `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
 | `/details <slug>` | Dispatches `hive status --diagnose <slug> --project <project> --stage <stage> --json` — same payload as the inline "Show details" button. |
@@ -78,6 +78,16 @@ file-collection `Done` step. If transcription is disabled, the bot asks
 for `/idea <text>` instead. If transcription fails after download, Hive
 stages the original `.oga` as an idea attachment and asks for the idea
 text, preserving the audio handoff.
+
+Voice notes sent while an `/answer` conversation is active are audio
+answers rather than new ideas. The router carries the active
+conversation's project/slug/question into `transcribe_voice`; on a
+successful transcript, the supervisor writes the transcript into the
+current `brainstorm.md` answer slot through `BrainstormAnswerWriter`.
+Reply-to reattach works the same way for voice as for typed answers.
+No-speech, unsupported-language, disabled transcription, and transcription
+failure paths reply with a retry/text fallback and do not create an idea
+draft.
 
 The `/status` (and `/queue`) reply lists actionable rows as
 `Title — Stage` text, and attaches an **inline keyboard** with one
@@ -200,7 +210,7 @@ Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
 audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.
 `supported_languages: []` disables the language filter. The same
 `idea_attachment_max_bytes` cap gates the Telegram download before
-transcription.
+transcription for both voice ideas and voice answers.
 
 **Why OpenAI, not OpenRouter (plan Q1 / Risk 1):** the default
 `endpoint`/`api_key_env` deliberately point at OpenAI's

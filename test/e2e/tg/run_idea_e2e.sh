@@ -4,13 +4,14 @@
 # with the Telethon user-client, asserts the ack, then restores the scratch
 # project's state repo to its pre-test HEAD. Never touches the production bot.
 set -uo pipefail
-REPO="/home/asterio/Dev/hive"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO="${HIVE_E2E_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
 HERE="$REPO/test/e2e/tg"
 cd "$REPO" || exit 1
 
 set -a
 # shellcheck source=/dev/null  # .env is gitignored, not present at lint time
-. ./.env
+[ ! -f ./.env ] || . ./.env
 set +a
 : "${HIVE_TEST_BOT_TOKEN:?}"; : "${TG_API_ID:?}"; : "${TG_API_HASH:?}"; : "${TG_DRIVER_ID:?}"
 export HIVE_TEST_ALLOWLIST="$TG_DRIVER_ID"
@@ -20,6 +21,7 @@ export TG_IDEA_MODE="${TG_IDEA_MODE:-text}"
 export TG_VOICE_EXPECT="${TG_VOICE_EXPECT:-voice idea}"
 if [ "$TG_IDEA_MODE" = "voice" ]; then
   export TG_VOICE_FIXTURE="${TG_VOICE_FIXTURE:-$REPO/test/fixtures/voice/voice-idea.oga}"
+  export TG_VOICE_ANSWER_EXPECT="${TG_VOICE_ANSWER_EXPECT:-$TG_VOICE_EXPECT}"
   if [ -z "${HIVE_WHISPER_API_KEY:-}" ]; then
     echo "voice E2E requested but HIVE_WHISPER_API_KEY is unset; driver will fail voice mode"
   fi
@@ -37,6 +39,26 @@ fi
 BASELINE="$(git -C "$STATE_REPO" rev-parse HEAD)"
 echo "scratch state repo: $STATE_REPO @ baseline $BASELINE"
 
+if [ "$TG_IDEA_MODE" = "voice" ]; then
+  export TG_VOICE_ANSWER_SLUG="${TG_VOICE_ANSWER_SLUG:-voice-answer-e2e-$(date +%s)}"
+  export TG_VOICE_ANSWER_PATH="$STATE_REPO/stages/2-brainstorm/$TG_VOICE_ANSWER_SLUG/brainstorm.md"
+  mkdir -p "$(dirname "$TG_VOICE_ANSWER_PATH")"
+  cat >"$TG_VOICE_ANSWER_PATH" <<MARKDOWN
+## Round 1
+
+### Q1. What answer should the voice E2E write?
+
+### A1.
+
+### Q2. What should happen next?
+
+### A2.
+
+<!-- WAITING -->
+MARKDOWN
+  echo "seeded voice-answer task: $TG_VOICE_ANSWER_SLUG"
+fi
+
 # shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT`
 cleanup() {
   [ -n "${BOT_PID:-}" ] && kill "$BOT_PID" 2>/dev/null
@@ -46,6 +68,9 @@ cleanup() {
   if [ -n "${BASELINE:-}" ]; then
     git -C "$STATE_REPO" reset --hard "$BASELINE" >/dev/null 2>&1
     git -C "$STATE_REPO" clean -fdq stages/1-inbox 2>/dev/null
+    if [ -n "${TG_VOICE_ANSWER_SLUG:-}" ]; then
+      git -C "$STATE_REPO" clean -fdq "stages/2-brainstorm/$TG_VOICE_ANSWER_SLUG" 2>/dev/null
+    fi
     echo "restored $STATE_REPO to $BASELINE"
   fi
   rm -f /tmp/hive-e2e-bot.log /tmp/hive-e2e-bot.last_seen /tmp/hive-e2e-bot.alerts /tmp/hive-e2e-bot.pid /tmp/hive-e2e-bot.out

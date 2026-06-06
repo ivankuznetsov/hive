@@ -46,6 +46,7 @@ module Hive
         idea_voice
         idea_voice_during_draft
         idea_voice_edit_text
+        answer_voice
         idea_media
         idea_text_capture
         free_text_answer
@@ -133,7 +134,11 @@ module Hive
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         else
-          return :free_text_answer if @conversation_store.get(chat_id: update.chat_id) || reattach_target(update)
+          if answer_context(update)
+            return :answer_voice if update.respond_to?(:voice?) && update.voice?
+
+            return :free_text_answer
+          end
           draft = @idea_draft_store.get(chat_id: update.chat_id)
           if draft&.phase == :awaiting_transcript_confirm && draft.origin == :voice
             return :idea_voice if update.respond_to?(:voice?) && update.voice?
@@ -232,8 +237,37 @@ module Hive
         reply_text = update.respond_to?(:reply_to_text) ? update.reply_to_text.to_s : ""
         return nil if reply_text.empty?
 
-        reply_text.match(%r{(?:\A|\s)(?<project>[A-Za-z0-9_.-]+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\s*\(}) ||
-          reply_text.match(/\AAnswer mode started for (?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\./)
+        if (match = reply_text.match(%r{(?:\A|\s)(?<project>[A-Za-z0-9_.-]+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\s*\(}))
+          return { project: match[:project], slug: match[:slug] }
+        end
+
+        if (match = reply_text.match(/\AAnswer mode started for (?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\./))
+          return { project: nil, slug: match[:slug] }
+        end
+
+        nil
+      end
+
+      def answer_context(update)
+        state = @conversation_store.get(chat_id: update.chat_id)
+        if state
+          return {
+            project: state.project,
+            slug: state.slug,
+            question_n: state.question_n,
+            mode: state.mode
+          }
+        end
+
+        reattached = reattach_target(update)
+        return nil unless reattached
+
+        {
+          project: reattached[:project],
+          slug: reattached.fetch(:slug),
+          question_n: nil,
+          mode: :path_b
+        }
       end
 
       def effective_text(update)
@@ -253,6 +287,7 @@ module Hive
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
         when :idea_voice then @slash_handlers.voice(update)
+        when :answer_voice then answer_voice(update)
         when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
@@ -261,6 +296,21 @@ module Hive
         when :unknown then Result.new(action: :reply, text: "I did not understand that. Send /help for commands.")
         else @callback_handlers.handle(intent, update)
         end
+      end
+
+      def answer_voice(update)
+        context = answer_context(update)
+        return Result.new(action: :reply, text: "Send /answer <slug> before sending a voice answer.") unless context
+
+        result = @slash_handlers.voice(update)
+        return result unless result.action == :transcribe_voice
+
+        result.project = context[:project]
+        result.slug = context.fetch(:slug)
+        result.question_n = context[:question_n]
+        result.mode = context[:mode] || :path_b
+        result.attachment = result.attachment.merge(purpose: :answer)
+        result
       end
     end
   end

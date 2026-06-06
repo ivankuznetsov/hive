@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T19:07:48Z] bot - cover audio ideas and audio answers in live E2E
+
+**Action:** Added voice-answer coverage to the Telegram voice-note branch. The router now routes voice notes sent during active or reattached `/answer` conversations to `transcribe_voice` with answer context; `Supervisor#execute_transcribe_voice` writes successful answer transcripts through the existing brainstorm answer writer instead of creating an idea draft. Extended `test/e2e/tg/run_idea_e2e.sh` so `TG_IDEA_MODE=voice` drives both a new audio idea and a seeded audio `/answer` path with the checked-in voice fixture. Added focused router, supervisor, and in-process bot scenario coverage. Refreshed [[commands/bot]], [[modules/bot]], [[testing]], and [[gaps]].
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-06T06:58:00Z] bot - apply transcription reload review fixes
 
 **Action:** Addressed pass-2 review findings on the voice-note branch. `Supervisor#reload_config_if_requested` now rebuilds `Hive::Bot::Transcriber` from the reloaded `bot.transcription` config so endpoint/model/retry/language settings apply on `hive bot reload`; the `:ok` transcription path now logs and replies if the draft disappears before transcript storage instead of sending a dead Confirm button. Added focused coverage for reload rebuild, unsupported-language hint wording, failed-fallback staging cleanup, secondary post-`getFile` size guard, malformed `no_speech_prob`, and transcription config validation branches. Refreshed [[modules/bot]] reload behavior.

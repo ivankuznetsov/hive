@@ -456,6 +456,36 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "Confirm", @telegram.messages.last.fetch(:reply_markup).first.first[:text]
   end
 
+  def test_transcribe_voice_answer_writes_transcript_into_active_conversation
+    content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
+    with_brainstorm_file(content: content) do |path, _project|
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_b, project: "hive")
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      @transcriber.results << TranscriptionResult.new(status: :ok, text: "spoken answer", language: "en")
+      @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+      @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+      result = FakeRouter::Result.new(
+        action: :transcribe_voice,
+        project: "hive",
+        slug: "task",
+        question_n: 1,
+        mode: :path_b,
+        attachment: { chat_id: 42, file_id: "voice-id", file_size: 5, purpose: :answer }
+      )
+
+      @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+      assert_equal [ { bytes: "audio-bytes", filename: "voice.oga", content_type: "audio/ogg" } ], @transcriber.calls
+      assert_includes File.read(path), "spoken answer"
+      assert_nil @idea_draft_store.get(chat_id: 42),
+                 "answer transcription must not create or mutate an idea draft"
+      text = @telegram.messages.last.fetch(:text)
+      assert_match(/Got Q1\./, text)
+      assert_match(/Q2: Cadence\?/, text)
+      assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
+    end
+  end
+
   def test_transcribe_voice_edit_replaces_existing_transcript
     @idea_draft_store.start(chat_id: 42, phase: :awaiting_transcript_confirm,
                             text: "old", token: "tok", origin: :voice)

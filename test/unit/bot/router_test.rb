@@ -282,6 +282,40 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "answer body", result.answer_text
   end
 
+  def test_voice_inside_active_conversation_transcribes_as_answer
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd", question_n: 1)
+
+    result = @router.handle(update(voice: {
+      file_id: "voice-answer",
+      file_size: 2345
+    }))
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "hive", result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_equal 1, result.question_n
+    assert_equal :path_b, result.mode
+    assert_equal :answer, result.attachment.fetch(:purpose)
+    assert_equal "voice-answer", result.attachment.fetch(:file_id)
+    assert_equal 2345, result.attachment.fetch(:file_size)
+  end
+
+  def test_voice_reply_can_reattach_to_slug_after_restart
+    result = @router.handle(
+      update(
+        reply_to_text: "hive/slug-260514-abcd (2-brainstorm)",
+        voice: { file_id: "voice-answer", file_size: 2345 }
+      )
+    )
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "hive", result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_nil result.question_n
+    assert_equal :path_b, result.mode
+    assert_equal :answer, result.attachment.fetch(:purpose)
+  end
+
   def test_free_text_inside_path_a_conversation_continues_codex
     @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd",
                  question_n: 1, mode: :path_a)

@@ -10,14 +10,15 @@ The shared send -> tap -> assert sequence lives in _drive.py.
 
 Env: TG_API_ID, TG_API_HASH, TG_BOT_USERNAME, TG_CAPTURE_PROJECT (default shipped).
 Set TG_IDEA_MODE=voice with TG_VOICE_FIXTURE and HIVE_WHISPER_API_KEY for the
-real voice-note transcription path.
+real voice-note transcription path. When TG_VOICE_ANSWER_SLUG is present,
+voice mode also answers that seeded brainstorm task by voice.
 """
 import os
 import sys
 
 from telethon.sync import TelegramClient
 
-from _drive import drive, drive_voice
+from _drive import drive, drive_voice, drive_voice_answer
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
@@ -26,6 +27,9 @@ PROJECT = os.environ.get("TG_CAPTURE_PROJECT", "shipped")
 MODE = os.environ.get("TG_IDEA_MODE", "text")
 VOICE_FIXTURE = os.environ.get("TG_VOICE_FIXTURE")
 VOICE_EXPECT = os.environ.get("TG_VOICE_EXPECT", "voice idea")
+VOICE_ANSWER_SLUG = os.environ.get("TG_VOICE_ANSWER_SLUG")
+VOICE_ANSWER_PATH = os.environ.get("TG_VOICE_ANSWER_PATH")
+VOICE_ANSWER_EXPECT = os.environ.get("TG_VOICE_ANSWER_EXPECT", VOICE_EXPECT)
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION = os.path.join(HERE, "hive_e2e")
 
@@ -51,7 +55,11 @@ def main():
                       "U8 requires a checked-in speech sample saying "
                       f"{VOICE_EXPECT!r} (default test/fixtures/voice/voice-idea.oga)")
                 return 1
-            return drive_voice(client, BOT, PROJECT, VOICE_FIXTURE, VOICE_EXPECT)
+            result = drive_voice(client, BOT, PROJECT, VOICE_FIXTURE, VOICE_EXPECT)
+            if result != 0 or not VOICE_ANSWER_SLUG:
+                return result
+            return drive_voice_answer(client, BOT, VOICE_ANSWER_SLUG, VOICE_FIXTURE,
+                                      VOICE_ANSWER_EXPECT, answer_path=VOICE_ANSWER_PATH)
         return drive(client, BOT, PROJECT)
     finally:
         client.disconnect()

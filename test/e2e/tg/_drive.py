@@ -136,6 +136,53 @@ def drive_voice(client, bot, project, fixture_path, expected_text):
     return 0 if ok else 1
 
 
+def drive_voice_answer(client, bot, slug, fixture_path, expected_text, answer_path=None):
+    """Start /answer for a seeded brainstorm task, answer Q1 by voice, assert disk write."""
+    if not client.is_user_authorized():
+        print("FAIL driver not authorized; run login.py first")
+        return 1
+
+    baseline = max((m.id for m in client.iter_messages(bot, limit=1)), default=0)
+    print(f"VOICE_ANSWER_SLUG={slug}")
+    client.send_message(bot, f"/answer {slug}")
+
+    prompt = wait_for(
+        client,
+        bot,
+        lambda m: "Q1:" in (m.message or "") and "Reply with your answer" in (m.message or ""),
+        after_id=baseline,
+    )
+    if not prompt:
+        print(f"FAIL no answer prompt appeared for {slug!r}")
+        return 1
+
+    client.send_file(bot, fixture_path, voice_note=True)
+    ack = wait_for(
+        client,
+        bot,
+        lambda m: "Got Q1." in (m.message or ""),
+        timeout=90,
+        after_id=prompt.id,
+    )
+    if not ack:
+        print("FAIL no answer acknowledgment after sending voice note")
+        return 1
+
+    if answer_path:
+        try:
+            with open(answer_path, encoding="utf-8") as fh:
+                content = fh.read()
+        except OSError as exc:
+            print(f"FAIL could not read answer file {answer_path!r}: {exc}")
+            return 1
+        if expected_text.lower() not in content.lower():
+            print(f"FAIL transcript {expected_text!r} not found in {answer_path!r}")
+            return 1
+
+    print(f"PASS voice_answer_ack={ack.message!r}")
+    return 0
+
+
 def drive_nudge(client, bot, version, command, after_id=0):
     """Assert the bot proactively pushes the update nudge.
 

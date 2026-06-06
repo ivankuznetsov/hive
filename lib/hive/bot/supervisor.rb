@@ -444,14 +444,15 @@ module Hive
       end
 
       def execute_transcribe_voice(result, update)
+        answer_voice = voice_answer_result?(result)
         unless transcription_config.fetch("enabled", true)
           return safe_send_message(chat_id: update.chat_id,
-                                   text: "Voice transcription is disabled. Send /idea <text> instead.")
+                                   text: voice_transcription_disabled_text(answer_voice: answer_voice))
         end
 
         payload = result.attachment || {}
         chat_id = payload.fetch(:chat_id, update.chat_id)
-        if non_voice_draft?(chat_id: chat_id)
+        if !answer_voice && non_voice_draft?(chat_id: chat_id)
           return safe_send_message(chat_id: update.chat_id,
                                    text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         end
@@ -470,7 +471,11 @@ module Hive
 
         bytes = @telegram.download_file(file_path: info.fetch(:file_path))
         transcription = @transcriber.call(bytes, filename: "voice.oga", content_type: "audio/ogg")
-        handle_transcription(transcription, update: update, chat_id: chat_id, bytes: bytes)
+        if answer_voice
+          handle_answer_transcription(transcription, result: result, update: update)
+        else
+          handle_transcription(transcription, update: update, chat_id: chat_id, bytes: bytes)
+        end
       rescue Hive::Bot::Telegram::DownloadError, KeyError => e
         # Download phase only (getFile / file download / payload key). Staging
         # failures are handled inside handle_failed_transcription so they can't
@@ -481,6 +486,46 @@ module Hive
                                               message: e.message)
         safe_send_message(chat_id: update.chat_id,
                           text: "Couldn't download that voice note - please send it again.")
+      end
+
+      def voice_transcription_disabled_text(answer_voice:)
+        if answer_voice
+          "Voice transcription is disabled. Reply with your answer as a text message."
+        else
+          "Voice transcription is disabled. Send /idea <text> instead."
+        end
+      end
+
+      def voice_answer_result?(result)
+        purpose = result.attachment || {}
+        (purpose[:purpose] || purpose["purpose"]).to_s == "answer"
+      end
+
+      def handle_answer_transcription(transcription, result:, update:)
+        case transcription.status
+        when :ok
+          text = transcription.text.to_s.strip
+          return safe_send_message(chat_id: update.chat_id,
+                                   text: "I couldn't hear any speech - try recording again.") if text.empty?
+
+          write_result = result.dup
+          write_result.action = :write_answer_then_reply
+          write_result.answer_text = text
+          execute_answer_write(write_result, update)
+        when :no_speech
+          safe_send_message(chat_id: update.chat_id,
+                            text: "I couldn't hear any speech - try recording again.")
+        when :unsupported_language
+          safe_send_message(chat_id: update.chat_id, text: unsupported_language_text)
+        else
+          @logger.event(:transcription_failed, source: "transcribe_voice",
+                                                purpose: "answer",
+                                                chat_id: update.chat_id,
+                                                error_class: transcription.error_class,
+                                                message: transcription.message)
+          safe_send_message(chat_id: update.chat_id,
+                            text: "Couldn't transcribe that voice answer - try again or reply with text.")
+        end
       end
 
       def handle_transcription(transcription, update:, chat_id:, bytes:)

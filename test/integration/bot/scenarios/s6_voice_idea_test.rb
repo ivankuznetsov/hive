@@ -1,4 +1,5 @@
 require "test_helper"
+require "fileutils"
 require "hive/bot/supervisor"
 require "hive/commands/init"
 
@@ -125,6 +126,26 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
     Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "*")]
   end
 
+  def write_brainstorm(project_root, slug)
+    folder = File.join(project_root, ".hive-state", "stages", "2-brainstorm", slug)
+    FileUtils.mkdir_p(folder)
+    path = File.join(folder, "brainstorm.md")
+    File.write(path, <<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. What should we build first?
+
+      ### A1.
+
+      ### Q2. How will we know it worked?
+
+      ### A2.
+
+      <!-- WAITING -->
+    MARKDOWN
+    path
+  end
+
   def test_voice_happy_path_captures_transcript_only
     setup_project do |dir, project|
       telegram = FakeTelegram.new
@@ -210,6 +231,28 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
       assert_includes idea, "fallback idea text"
       assert_includes idea, "[voice-1.oga](assets/voice-1.oga)"
       assert_equal "raw-audio", File.binread(File.join(inbox.first, "assets", "voice-1.oga"))
+    end
+  end
+
+  def test_voice_answer_writes_transcript_to_current_brainstorm_question
+    setup_project do |dir, _project|
+      slug = "voice-answer-260606-e2e"
+      brainstorm = write_brainstorm(dir, slug)
+      telegram = FakeTelegram.new
+      transcriber = FakeTranscriber.new(
+        results: [ TranscriptionResult.new(status: :ok, text: "spoken answer", language: "en") ],
+        calls: []
+      )
+      bot = supervisor(transcriber: transcriber, telegram: telegram)
+
+      bot.process_update(message_update(text: "/answer #{slug}"))
+      bot.process_update(message_update(voice: voice_payload))
+
+      content = File.read(brainstorm)
+      assert_includes content, "spoken answer"
+      assert_empty inbox_dirs(dir)
+      assert_match(/Got Q1\./, telegram.messages.last.fetch(:text))
+      assert_match(/Q2: How will we know it worked\?/, telegram.messages.last.fetch(:text))
     end
   end
 

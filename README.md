@@ -62,21 +62,31 @@ To have Claude Code, Codex, or another agent CLI install Hive for you (with OS d
 
 ## Works with OpenClaw.ai
 
-Hive includes OpenClaw skill definitions under [openclaw/skills](openclaw/skills) so OpenClaw agents can invoke Hive through slash commands such as `/hive`, `/plan`, `/work`, and `/ce-review`.
+Hive includes OpenClaw skill definitions under [openclaw/skills](openclaw/skills) so OpenClaw agents can install, set up, and invoke Hive through slash commands such as `/hive`, `/plan`, `/work`, and `/ce-review`.
 
-Install the Hive CLI first using one of the channels above, then install the umbrella skill from a checkout:
+Install the umbrella skill from a checkout:
 
 ```bash
 openclaw skills install ./openclaw/skills/hive --as hive
 ```
 
-After the skills are published to ClawHub, the intended marketplace install is:
+Then ask OpenClaw to run the guided setup:
 
-```bash
-openclaw skills install hive
+```text
+/hive setup
 ```
 
-Optional shortcut skills are published as separate ClawHub slugs, for example `hive-plan`, `hive-work`, and `hive-ce-review`. The bundle ships 22 slash commands in total; see [openclaw/README.md](openclaw/README.md) for the full skill table, local install loop, and publish checklist.
+The guided setup installs the Hive CLI through the documented platform channel, verifies `hive`/`hv`, runs `hive daemon install`, and optionally initializes the current project. After the skills are published to ClawHub, the intended marketplace bootstrap is:
+
+```bash
+openclaw skills install hive-cli
+```
+
+```text
+/hive setup
+```
+
+Optional shortcut skills are published as separate ClawHub slugs, for example `hive-plan`, `hive-work`, and `hive-ce-review`. Shortcuts are useful after the Hive CLI is installed. The bundle ships 25 slash commands in total; see [openclaw/README.md](openclaw/README.md) for the full skill table, local install loop, and publish checklist.
 
 ## Five-Minute TUI Getting Started
 

@@ -148,11 +148,17 @@ core install still succeeds without it:
 | Pi | `pi install ivankuznetsov/hive-skills` |
 
 OpenClaw support now lives in-tree under `openclaw/skills/`. It is a skill
-bundle, not a TypeScript plugin: `/hive` is the umbrella command, while
-shortcuts such as `/plan`, `/work`, and `/ce-review` map to the existing
-`hive plan`, `hive develop`, and `hive review` CLI verbs. ClawHub publishing is
-still an external maintainer step; until it is live, use local checkout installs
-from `openclaw/README.md`.
+bundle, not a TypeScript plugin: `/hive` is the umbrella command and setup
+entry point, while shortcuts such as `/plan`, `/work`, and `/ce-review` map to
+the existing `hive plan`, `hive develop`, and `hive review` CLI verbs. The
+umbrella skill is always visible and guides `/hive setup` through a confirmed
+Hive install, strict `hive`/`hv` version verification, `hive daemon install`,
+and optional `hive init`; shortcut skills remain gated on the `hive` binary so
+they become useful after setup. The intended ClawHub umbrella listing is
+`hive-cli` because the naked `hive` slug is already owned by another publisher;
+the installed skill still exposes the `/hive` slash command. ClawHub publishing
+is still an external maintainer step; until it is live, use local checkout
+installs from `openclaw/README.md`.
 
 ## Release verification
 

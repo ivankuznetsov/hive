@@ -28,6 +28,14 @@ class HiveEvalReporterTest < Minitest::Test
     # behavior. Write a temporary scenario fixture that asserts a deliberate
     # failure so we still exercise the reporter's failure path without
     # coupling to any specific production bug.
+    # Defensive sweep: a prior run killed with SIGKILL (or otherwise hard-
+    # interrupted) can orphan an intentional_failure_*_test.rb fixture in the
+    # real scenarios dir, where it would poison every later eval run. Remove
+    # any stragglers before writing our own so the suite self-heals.
+    Dir.glob(File.expand_path("../scenarios/intentional_failure_*_test.rb", __dir__)).each do |stale|
+      FileUtils.rm_f(stale)
+    end
+
     Dir.mktmpdir("hive-eval-report") do |dir|
       scenario_name = "intentional_failure_#{Process.pid}"
       fixture = File.expand_path("../scenarios/#{scenario_name}_test.rb", __dir__)

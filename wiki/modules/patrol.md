@@ -21,7 +21,7 @@ tags: [module, patrol, review, worktree, pr]
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — records fingerprint-to-PR state, invokes `ReviewHandoff` for opened PRs, and records `review_handoff_failed` when a PR opens but the synthetic review task cannot be created. |
-| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. The generated `idea.md` renders the patrol finding once, stores the same rendered text in frontmatter `original_text` for TUI provenance, omits blank description/recommendation sections, falls back from nil title to finding id, and accepts either string-keyed or symbol-keyed evidence entries. |
+| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 
@@ -40,7 +40,7 @@ Patrol state is deliberately inspectable and removable:
   dismissed.json
 ```
 
-The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>` or `Patrol: <finding id>` when the finding has no title. The synthetic task's `idea.md` is derived from the original patrol finding rather than the PR body: non-blank description, non-blank recommendation, and optional evidence become the markdown body, and the identical body is intentionally duplicated into frontmatter `original_text` so [[commands/tui]] info panels can show the same source context they show for `hive new` tasks. Evidence formatting accepts both JSON/string-keyed entries and Ruby/symbol-keyed entries. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
+The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
 
 ## Daemon triggers
 

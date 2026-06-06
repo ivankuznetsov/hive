@@ -138,12 +138,22 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_call_can_skip_commit_after_updating_display_name
+    with_generator(commit: false) do |gen, task|
+      gen.define_singleton_method(:generate_name) { "A Readable Name" }
+      gen.define_singleton_method(:commit_name) { raise "commit should not run" }
+
+      assert_equal "A Readable Name", gen.call
+      assert_equal "A Readable Name", Hive::TaskMeta.read(task.folder)[:display_name]
+    end
+  end
+
   private
 
   # Builds a real task folder (valid PATH_RE) plus a config that points the
   # execute-stage agent's bin at a throwaway script, yields a Generator and
   # its Task. `.hive-state` is intentionally NOT a git repo here.
-  def with_generator(**config_overrides)
+  def with_generator(commit: true, **config_overrides)
     with_tmp_dir do |root|
       slug = "sample-task-260603-aaaa"
       folder = File.join(root, ".hive-state", "stages", "1-inbox", slug)
@@ -159,7 +169,7 @@ class DisplayNameGeneratorTest < Minitest::Test
       }.merge(config_overrides.transform_keys(&:to_s))
 
       task = Hive::Task.new(folder)
-      gen = Hive::DisplayName::Generator.new(task, cfg: cfg)
+      gen = Hive::DisplayName::Generator.new(task, cfg: cfg, commit: commit)
       yield gen, task
     end
   end

@@ -26,10 +26,7 @@ module Hive
         # Truncate `label` to `max_width` terminal cells, appending an
         # ellipsis (U+2026) when truncation occurs. `max_width < 2`
         # falls back to a hard cut without ellipsis (no room for the
-        # suffix); because the cut is cell-aware, `max_width == 1` with a
-        # wide (2-cell) leading glyph yields "" — the glyph won't fit and
-        # there is no narrower prefix to keep. Used by pane/table
-        # renderers for column fitting.
+        # suffix). Used by pane/table renderers for column fitting.
         def truncate(label, max_width)
           return "" if max_width <= 0
 

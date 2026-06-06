@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/task_counter"
 require "hive/task_meta"
 
 module Hive
@@ -34,10 +35,16 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: nil,
+          id: allocate_task_id,
           slug: slug,
           display_name: display_name(finding)
         )
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)
@@ -73,7 +80,6 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
-        body = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -82,13 +88,10 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            # Deliberately stores the full rendered body again as the
-            # `original_text` provenance scalar; the duplication with the
-            # markdown body below is intentional, not a bug.
-            "original_text" => body
+            "original_text" => idea_text(finding)
           },
           <<~MD
-          #{body}
+          #{idea_text(finding)}
         MD
         )
       end
@@ -169,22 +172,18 @@ module Hive
       end
 
       def idea_text(finding)
-        evidence = Array(finding.evidence)
         parts = []
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
-        parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
+        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
         parts.join("\n\n")
       end
 
       def evidence_text(evidence)
         evidence.map do |entry|
-          # Read both string and symbol keys so a symbol-keyed evidence
-          # entry still renders its real location, matching the sibling
-          # patrol consumer in pr_opener.rb (`e['file'] || e[:file]`).
-          location = [ entry["file"] || entry[:file], entry["line"] || entry[:line] ].compact.join(":")
-          snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
+          location = [ entry["file"], entry["line"] ].compact.join(":")
+          snippet = entry["snippet"].to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"
           snippet.empty? ? line : "#{line}: #{snippet}"
         end.join("\n")

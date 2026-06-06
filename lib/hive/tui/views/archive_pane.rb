@@ -46,9 +46,9 @@ module Hive
         end
 
         def render_row(row, inner_width)
-          slug = Format.ljust_cells(row.slug.to_s, SLUG_WIDTH)
-          project = Format.ljust_cells(row.project_name.to_s, PROJECT_WIDTH)
-          age = Format.rjust_cells(Format.age(row.age_seconds), AGE_WIDTH)
+          slug = Format.truncate(row.slug.to_s, SLUG_WIDTH).ljust(SLUG_WIDTH)
+          project = Format.truncate(row.project_name.to_s, PROJECT_WIDTH).ljust(PROJECT_WIDTH)
+          age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
           Format.truncate("#{slug} #{project} #{age}", inner_width)
         end
       end

@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-06
 tags: [architecture, overview]
 ---
 
@@ -73,6 +73,14 @@ profile-specific permission, add-dir, budget, and output-format flags.
 Claude, Codex, and Pi therefore share one subprocess wrapper while
 keeping their CLI-specific argv and status-detection contracts in
 `lib/hive/agent_profiles/`.
+
+Fresh project setup separates reviewer policy by source. Normal feature
+PRs use `review.reviewers`, populated by `hive init` from the normal
+reviewer prompt. Synthetic patrol PR tasks whose `task.md` frontmatter
+has `source: patrol` use `patrol.review.reviewers` instead; the fresh
+default is Codex CE code review only, with Claude CE code review as the
+init-time opt-in. The review runner selects between those lists at Phase
+2, before dispatching reviewer adapters.
 
 For the built-in Claude profile, the default headless argv is:
 

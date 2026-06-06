@@ -11,9 +11,9 @@ options = {
   no_judge: false
 }
 
-parser = OptionParser.new do |opts|
-  opts.banner = "Usage: bin/hive-eval [--scenario NAME] [--report PATH] [--no-judge]"
-  opts.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
+OptionParser.new do |parser|
+  parser.banner = "Usage: bin/hive-eval [SCENARIO] [--scenario NAME] [--report PATH] [--no-judge]"
+  parser.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
     options[:scenario] = value
   end
   opts.on("--report PATH", "Write JSON report to PATH") do |value|
@@ -37,6 +37,12 @@ unless remaining.empty?
   warn parser
   exit 64
 end
+
+if ARGV.length > 1 || (ARGV.any? && options[:scenario])
+  warn "hive-eval: unexpected arguments: #{ARGV.join(" ")}"
+  exit 64
+end
+options[:scenario] ||= ARGV.shift
 
 def scenario_path(root, value)
   return nil if value.nil?

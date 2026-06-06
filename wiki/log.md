@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T22:41:09Z] wiki - post-commit audit of `hv` fallback validation
+
+**Action:** Audited commit `fccac93d` after it changed the executable `bin/hv` fallback launcher and its unit coverage. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hv Homebrew Apache Hive fallback version validation wrapper"` found the current [[cli]], [[operating]], [[gaps]], and prior `hv` log context. Verified the committed diff plus current `bin/hv`, `test/unit/hv_test.rb`, [[cli]], [[operating]], and [[testing]]. Confirmed the content pages are source-synced: explicit `HIVE_BIN_OVERRIDE` and XDG candidates remain direct trust paths, Homebrew-prefix and `/usr/local` fallbacks now require bare-semver `--version` output, Apache-style `Hive 3.1.3` is skipped, and the remaining uncertainty is already recorded in [[gaps]] as missing live Apache-Hive collision smoke evidence. Page coverage did not change. Verified with `bundle exec ruby -Itest test/unit/hv_test.rb` (3 runs, 12 assertions). Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-06T22:27:57Z] cli/install - pin `hv` Homebrew fallback validation
 
 **Action:** Addressed patrol finding `command-bin-hv-1`. `bin/hv` now keeps the explicit `HIVE_BIN_OVERRIDE` and XDG candidates as before, but requires the Homebrew-prefix and `/usr/local` fallback candidates to print a bare semver from `--version` before execing them. Added `test/unit/hv_test.rb` coverage for an Apache-style Homebrew candidate that prints `Hive 3.1.3` and must fall through to the existing exit-127 diagnostic. Refreshed [[cli]], [[operating]], [[testing]], and [[gaps]].

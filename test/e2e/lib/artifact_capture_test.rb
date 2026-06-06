@@ -164,7 +164,25 @@ class E2EArtifactCaptureTest < Minitest::Test
       copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
       assert File.size(copied_spawn) < File.size(spawn_log),
              "artifact bundle should not copy oversized per-spawn captures wholesale"
+      assert File.size("#{copied_spawn}.tail") <= File.size(copied_spawn),
+             "tail companion should be derived from the truncated bundle copy"
       assert_includes File.read(copied_spawn, 128), "truncated to last"
+    end
+  end
+
+  def test_manifest_excludes_live_tui_subprocess_logs
+    with_dirs do |scenario_dir, sandbox, run_home|
+      log_dir = File.join(scenario_dir, "tui-subprocess-live")
+      FileUtils.mkdir_p(log_dir)
+      File.write(File.join(log_dir, "hive-tui-spawn-LIVE.log"), "LIVE\n")
+
+      collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      paths = manifest["files"].map { |file| file["path"] }
+      refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
+        "manifest should publish only curated tui-subprocess copies, not live logs"
+      assert_includes paths, "tui-subprocess/hive-tui-spawn-LIVE.log"
     end
   end
 

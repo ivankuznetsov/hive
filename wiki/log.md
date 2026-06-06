@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
+
+**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
 
 **Action:** Refreshed command/API surface coverage after commit `dc0f540f` (`fix(babysitter): detect stale runtime`) changed `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, and existing babysitter wiki notes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "command API surface routes handlers README entrypoint"` surfaced prior command/API refresh context, and the configured master wiki path had only generic route/command guidance. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[cli]], and [[operating]]. Documented the new `hive babysit restart` lifecycle subcommand, the boundary that `reload` refreshes config/log settings but not loaded Ruby source, the source-mtime stale-process recommendation printed by `status`, and the remaining lack of a live detached-process stale-runtime smoke artifact. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

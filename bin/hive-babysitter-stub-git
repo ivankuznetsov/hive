@@ -10,6 +10,63 @@ end
 
 argv = ARGV.dup
 
+UNSAFE_CONFIG_KEYS = [
+  "core.fsmonitor",
+  "core.hookspath",
+  "core.pager",
+  "diff.external"
+].freeze
+UNSAFE_CONFIG_PREFIXES = [
+  "alias.",
+  "hook.",
+  "hooks.",
+  "pager.",
+  "protocol.ext."
+].freeze
+
+def unsafe_config_key?(assignment)
+  key = assignment.to_s.split("=", 2).first.to_s.downcase
+  UNSAFE_CONFIG_KEYS.include?(key) ||
+    UNSAFE_CONFIG_PREFIXES.any? { |prefix| key.start_with?(prefix) }
+end
+
+def unsafe_global_options?(argv)
+  rest = argv.dup
+  loop do
+    case rest.first
+    when "-C", "--git-dir", "--work-tree"
+      rest.shift(2)
+    when "-c"
+      return true if unsafe_config_key?(rest[1])
+
+      rest.shift(2)
+    when /\A-c(.+)\z/
+      return true if unsafe_config_key?(Regexp.last_match(1))
+
+      rest.shift
+    when "--config-env"
+      return true if unsafe_config_key?(rest[1])
+
+      rest.shift(2)
+    when /\A--config-env=(.+)\z/
+      return true if unsafe_config_key?(Regexp.last_match(1))
+
+      rest.shift
+    when "-p", "--paginate"
+      return true
+    when /\A--exec-path(?:=|\z)/
+      return true
+    when /\A--git-dir=/, /\A--work-tree=/
+      rest.shift
+    when /\A-/
+      rest.shift
+    else
+      break
+    end
+  end
+  false
+end
+
 def stripped_global_options(argv)
   rest = argv.dup
   loop do
@@ -29,7 +86,7 @@ end
 
 def read_only_remote?(rest)
   args = rest[1..] || []
-  args.shift while ["-v", "--verbose"].include?(args.first)
+  args.shift while [ "-v", "--verbose" ].include?(args.first)
   return true if args.empty?
 
   case args.first
@@ -39,7 +96,7 @@ def read_only_remote?(rest)
     args.all? { |arg| !arg.start_with?("-") }
   when "get-url"
     args.shift
-    args.shift while ["--push", "--all"].include?(args.first)
+    args.shift while [ "--push", "--all" ].include?(args.first)
     args.length == 1 && !args.first.start_with?("-")
   else
     false
@@ -62,9 +119,17 @@ def read_only?(rest)
   end
 end
 
+def unsafe_command_options?(rest)
+  return false unless rest.first.to_s == "grep"
+
+  rest[1..].to_a.any? do |arg|
+    arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=")
+  end
+end
+
 rest = stripped_global_options(argv)
 
-unless read_only?(rest)
+if unsafe_global_options?(argv) || unsafe_command_options?(rest) || !read_only?(rest)
   log_skip(argv)
   warn "[dry-run] git #{argv.join(' ')} skipped"
   exit 0

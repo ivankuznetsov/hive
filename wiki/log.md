@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T15:39:48Z] babysitter - block executable-affecting dry-run git pass-through
+
+**Action:** Tightened `bin/hive-babysitter-stub-git` so dry-run read-only pass-through rejects executable-affecting Git globals and options before `exec`ing the real binary. The stub now skips unsafe `-c` / `--config-env` keys such as `diff.external`, `core.fsmonitor`, `core.pager`, `core.hooksPath`, `alias.*`, `pager.*`, `protocol.ext.*`, and hook-related prefixes, plus global pager/exec-path controls and `git grep --open-files-in-pager`. Added regression coverage in `test/unit/babysitter/dry_run_env_test.rb`; `ruby -Itest test/unit/babysitter/dry_run_env_test.rb` and `bundle exec rake test` passed.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+
 ## [2026-06-06T12:12:34Z] agents - normalize legacy Compound Engineering invocations
 
 **Action:** Double-checked the installed Compound Engineering plugin metadata (`compound-engineering` v3.11.1): the CE workflows are still exposed as bare `/ce-*` skills such as `/ce-code-review`; the official `/code-review` command is a separate PR-comment workflow and does not satisfy Hive's reviewer-file contract. Updated Hive defaults, templates, and docs to emit `/ce-brainstorm`, `/ce-code-review`, `/ce-commit-push-pr`, and `/ce-test-browser` forms. Added `AgentProfile#format_skill_invocation` compatibility normalization so existing `compound-engineering:ce-*` config values still render to current CE syntax for Claude/Codex and `/skill:ce-*` for Pi.

@@ -106,6 +106,49 @@ class CliParseErrorTest < Minitest::Test
            "parse error envelope must validate (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
   end
 
+  # `status` and `prune` accept a bare invocation (no required positional),
+  # so they are absent from PARSE_ERROR_COMMANDS — but an *unknown flag*
+  # still makes Thor raise before the command body runs, routing them
+  # through `emit_thor_usage_json`. These rows were previously untested
+  # (wiki/gaps.md #24); pin that the routed envelope is contract-valid.
+  UNKNOWN_FLAG_THOR_ROUTED = {
+    "status" => "hive-status",
+    "prune" => "hive-prune"
+  }.freeze
+
+  def test_unknown_flag_on_bare_invocation_commands_routes_through_usage_json
+    UNKNOWN_FLAG_THOR_ROUTED.each do |command, schema_name|
+      out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", HIVE_BIN, command, "--bogus", "--json")
+
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus,
+                   "`hive #{command} --bogus --json` must exit USAGE on the unknown-flag parse error"
+      assert_empty err, "`hive #{command} --bogus --json` must not write to stderr on the JSON path"
+
+      payload = JSON.parse(out)
+      assert_equal schema_name, payload.fetch("schema")
+      assert_equal false, payload.fetch("ok")
+
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema_name))))
+      assert schemer.valid?(payload),
+             "`hive #{command} --bogus --json` envelope must validate against #{schema_name} " \
+             "(errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_daemon_unknown_subcommand_is_a_dead_map_entry_emitting_stderr
+    # The `daemon` map row is retained defensively but unreachable: an
+    # unknown daemon subcommand raises a command-local Hive::Error caught
+    # by bin/hive's *lower* `rescue Hive::Error`, so no stdout JSON
+    # envelope is built from the map. Pin that current behavior so a
+    # future refactor that routes it through the Thor path (double-emit)
+    # is caught.
+    out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", HIVE_BIN, "daemon", "--bogus", "--json")
+
+    assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+    assert_empty out.strip, "the dead daemon map row must not emit a stdout JSON envelope"
+    assert_includes err, "unknown subcommand"
+  end
+
   def test_unknown_command_exits_usage
     out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", HIVE_BIN, "frobnicate")
 

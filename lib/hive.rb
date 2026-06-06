@@ -369,11 +369,26 @@ module Hive
 
   # A Thor-level usage error (missing required argument, unknown flag)
   # surfaced through `bin/hive`'s top-level rescue when a command is
-  # invoked with `--json`. Lives in the Hive:: namespace so library code
-  # can name and rescue it, and carries the USAGE (64) exit code.
-  # Distinct from InvalidTaskPath, whose "bad path" semantics are a poor
-  # fit for a malformed flag or missing positional.
+  # invoked with `--json`. Instantiated only in `bin/hive` today; it
+  # lives in the Hive:: namespace (rather than inline in the binary) so
+  # it shares the gem's exception taxonomy and carries the USAGE (64)
+  # exit code. `error_kind` mirrors the sibling command-local
+  # `UsageError`s (Commands::{Forget,Daemon,Metrics}) so the kind can
+  # travel on the exception instead of being threaded out-of-band.
+  #
+  # In-process this is distinct from InvalidTaskPath (whose "bad path"
+  # semantics fit a malformed flag poorly), but note that on the wire it
+  # serialises to `"error_class":"UsageError"` (last `::` segment) just
+  # like those siblings — JSON consumers cannot tell the four apart, so
+  # the distinction is for rescue clarity, not a consumer-facing signal.
   class UsageError < Error
+    attr_reader :error_kind
+
+    def initialize(message, error_kind: nil)
+      super(message)
+      @error_kind = error_kind
+    end
+
     def exit_code
       ExitCodes::USAGE
     end

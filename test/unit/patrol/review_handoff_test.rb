@@ -109,6 +109,79 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_enqueue_idea_md_renders_symbol_keyed_evidence_like_string_keyed
+    with_tmp_dir do |dir|
+      # A direct `Finding.new` (unlike `from_h`) does not coerce evidence
+      # keys, so a symbol-keyed entry must render identically to the
+      # string-keyed primary flow rather than degrading to `- evidence`.
+      sym = Hive::Patrol::Finding.new(
+        id: "f11", feature_id: "feature", category: "bug", severity: "low",
+        confidence: "low", title: "Sym", description: "d", recommendation: "",
+        fingerprint: "fp11", evidence: [ { file: "y.rb", line: 3, snippet: "code" } ]
+      )
+
+      folder = handoff(dir).enqueue(
+        finding: sym, patch: patch(dir),
+        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      assert_includes idea, "- `y.rb:3`: code",
+                      "symbol-keyed evidence must render the same as string-keyed"
+    end
+  end
+
+  def test_enqueue_idea_md_renders_bare_heading_only_body_for_empty_finding
+    with_tmp_dir do |dir|
+      # The degenerate case: a blank title AND a nil description (no
+      # recommendation, no evidence) collapses to a single `# Patrol: <id>`
+      # heading with nothing trailing it but the heredoc's newline.
+      empty = Hive::Patrol::Finding.new(
+        id: "f0", feature_id: "feature", category: "bug", severity: "low",
+        confidence: "low", title: nil, description: nil, recommendation: "",
+        evidence: nil, fingerprint: "fp0"
+      )
+
+      folder = handoff(dir).enqueue(
+        finding: empty, patch: patch(dir),
+        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
+      )
+
+      body = File.read(File.join(folder, "idea.md")).split("---\n\n", 2).last
+      assert_equal "# Patrol: f0\n", body,
+                   "an all-empty finding renders only the id heading"
+    end
+  end
+
+  def test_enqueue_idea_md_body_is_exactly_the_rendered_idea_text
+    with_tmp_dir do |dir|
+      # Pin the exact rendered body (not just substrings) so a
+      # leading/trailing-whitespace regression in the heredoc is caught.
+      folder = handoff(dir).enqueue(
+        finding: finding, patch: patch(dir),
+        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
+      )
+
+      body = File.read(File.join(folder, "idea.md")).split("---\n\n", 2).last
+      expected = <<~MD
+        # Patrol: Fix bug
+
+        ## Finding
+
+        bug details
+
+        ## Recommendation
+
+        fix it
+
+        ## Evidence
+
+        - `app.rb:1`: puts
+      MD
+      assert_equal expected, body
+    end
+  end
+
   def test_enqueue_writes_idea_md_from_original_finding
     with_tmp_dir do |dir|
       folder = handoff(dir).enqueue(

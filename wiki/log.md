@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T19:16:56Z] review - pass-02 fix: extract ThorUsageJson + close test gaps
+
+**Action:** Applied accepted 6-review pass-02 findings for `patrol-command-bin-hive`. **Extraction:** moved the Thor parse-error `--json` routing out of `bin/hive` into `Hive::ThorUsageJson` (`lib/hive/thor_usage_json.rb`) — the positional `[schema, error_kind, extras]` tuples became a labeled `Envelope` struct, a **load-time guard** now rejects any mapped schema missing from `SCHEMA_VERSIONS` (a typo'd schema would otherwise `KeyError` from `ErrorEnvelope.build` on the `--json` path, escaping the top-level rescue as a raw backtrace), and `command_token` / `json_requested?` / `emit` are now unit-testable with injectable `io`/`warn_io`. `Hive::UsageError` gained the sibling `error_kind` accessor so the kind travels on the exception; its doc comment was corrected (instantiated only in `bin/hive`; serialises to `"error_class":"UsageError"` like the three command-local siblings, so the InvalidTaskPath distinction is in-process only). The stale `bin/hive` "subcommand group / enroll" comment was dropped with the extraction. **ReviewHandoff:** `evidence_text` now defends symbol keys (`entry["file"] || entry[:file]`) like `pr_opener`/`fingerprint`; `idea.md` renders `idea_text` once (frontmatter `original_text` + body share one source). **ArchiveFilter:** `hide?` restored `folder_mtime:` as a required keyword so a no-timestamp call can't silently return `false`. **Tests:** new `test/unit/thor_usage_json_test.rb` round-trips ALL mapped rows (incl. defensively-retained `forget`/`prune`/`status`/`patrol`/`daemon`/`archive`) against their schemas and covers EPIPE/GeneratorError/flag-ordering; `cli_parse_error_test` gained an unknown-flag matrix (`status`/`prune`) + a `daemon` dead-row pin; added symbol-keyed-evidence, empty-finding, and exact-body `idea.md` assertions, an ArchiveFilter folder_mtime-fallback case, and direct `ljust/rjust` over-budget + nil-input `format` cases. Updated [[cli]] and [[gaps]] #24. rubocop pending; touched suites green.
+
+**Refreshed pages:**
+- [[cli]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
 **Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.
@@ -3241,4 +3250,11 @@ TTL config.
 - [[modules/patrol]]
 - [[testing]]
 - [[gaps]]
+- [[log]]
+
+## [2026-06-05T19:08:41Z] wiki — verify residual patrol/cli/tui documentation commit
+
+**Action:** Refreshed the LLM wiki after commit `10bd26ba` touched only wiki pages as a residual worktree cleanup. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `.llm-wiki/config.json` points at `/home/asterio/wikis/master/wiki`, and `qmd search "parse-error JSON envelopes Thor --json bin/hive ReviewHandoff sparse evidence archive marker agnostic"` returned no indexed results, so this pass used direct source/wiki reads. Verified the committed diff against current `bin/hive`, `lib/hive/patrol/review_handoff.rb`, `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/format.rb`, and the focused CLI/patrol/archive/TUI tests. The existing [[cli]], [[commands/patrol]], [[modules/patrol]], [[commands/tui]], [[testing]], and [[gaps]] updates remain source-backed; no new pages or index changes were needed, and no new uncertainty beyond the existing install/live-smoke gaps was found. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
 - [[log]]

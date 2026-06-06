@@ -4,53 +4,7 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
 require "hive/cli"
-
-# Per-command map for the Thor parse-error path: when Thor raises while
-# parsing arguments (missing required positional, unknown flag) *before*
-# the command body runs, `emit_thor_usage_json` rebuilds the same
-# versioned `--json` envelope the command's own emitter would have, so
-# agent consumers get a contract-valid document instead of a bare Thor
-# string. Each value is `[schema, error_kind, extras]`; `extras` is
-# merged into the envelope and carries any schema-*required* field the
-# in-command emitter supplies (e.g. `hive-stage-action`'s `verb`).
-#
-# Note on subcommand groups: `command` below is only the group name
-# (`daemon`), so the `daemon` entry is best-effort for the group's
-# default subcommand (`enroll`). A non-enroll daemon subcommand
-# (status/stop/reload/queue/install) validates inline and raises
-# Hive::Error — caught by the lower rescue — so it never reaches this
-# map in practice; the mapping would otherwise mis-label it.
-STAGE_ACTION_SCHEMA = "hive-stage-action"
-
-# The hive-stage-action `verb` enum keys off the canonical verb, not the
-# invoked command alias: `hive pr` dispatches the `open-pr` verb.
-def stage_action_extras(verb)
-  [ STAGE_ACTION_SCHEMA, "invalid_task_path", { "verb" => verb } ]
-end
-
-JSON_PARSE_ERROR_ENVELOPES = {
-  "run" => [ "hive-run", "invalid_task_path" ],
-  "approve" => [ "hive-approve", "invalid_task_path" ],
-  "findings" => [ "hive-findings", "invalid_task_path" ],
-  "accept-finding" => [ "hive-findings", "invalid_task_path" ],
-  "reject-finding" => [ "hive-findings", "invalid_task_path" ],
-  "brainstorm" => stage_action_extras("brainstorm"),
-  "plan" => stage_action_extras("plan"),
-  "develop" => stage_action_extras("develop"),
-  "open-pr" => stage_action_extras("open-pr"),
-  "pr" => stage_action_extras("open-pr"),
-  "review" => stage_action_extras("review"),
-  "artifacts" => stage_action_extras("artifacts"),
-  "finalize" => stage_action_extras("finalize"),
-  "archive" => stage_action_extras("archive"),
-  "drop" => [ "hive-drop", "invalid_task_path" ],
-  "markers" => [ "hive-markers-clear", "invalid_task_path" ],
-  "forget" => [ "hive-forget", "missing_name" ],
-  "prune" => [ "hive-prune", "usage" ],
-  "status" => [ "hive-status", "error" ],
-  "patrol" => [ "hive-patrol", "error" ],
-  "daemon" => [ "hive-daemon-enroll", "missing_project" ]
-}.freeze
+require "hive/thor_usage_json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
@@ -74,55 +28,13 @@ def rewrite_help_flag!(argv)
   argv.unshift("help", cmd)
 end
 
-def emit_thor_usage_json(argv, error)
-  command = argv.find { |arg| !arg.start_with?("-") }
-  schema, error_kind, extras = JSON_PARSE_ERROR_ENVELOPES[command]
-  usage_error = Hive::UsageError.new(error.message)
-
-  payload = if schema
-    Hive::Schemas::ErrorEnvelope.build(
-      schema: schema,
-      error: usage_error,
-      error_kind: error_kind,
-      extras: extras || {}
-    )
-  else
-    # No versioned schema exists for an unknown/typo'd command (or a
-    # command without a `--json` contract), so we cannot route under a
-    # `schema` key — but keep the rest of the shape consistent with
-    # `ErrorEnvelope.build` (same last-`::`-segment `error_class`) and
-    # use the semantically-correct `usage` kind rather than the
-    # misleading `invalid_task_path`.
-    {
-      "ok" => false,
-      "error_class" => usage_error.class.name.split("::").last,
-      "error_kind" => "usage",
-      "exit_code" => Hive::ExitCodes::USAGE,
-      "message" => usage_error.message
-    }
-  end
-
-  require "json"
-  puts JSON.generate(payload)
-rescue Errno::EPIPE
-  # Downstream closed the pipe before we finished writing — nothing
-  # more we can do, and the broken pipe is not our failure to report.
-rescue JSON::GeneratorError => e
-  # The envelope itself could not be serialised (a real defect). Don't
-  # exit silently with empty stdout: surface both the serialisation
-  # failure and the original Thor usage text so the caller still learns
-  # what they typed wrong.
-  warn error.message
-  warn "hive: failed to serialise JSON error envelope: #{e.message}"
-end
-
 rewrite_help_flag!(ARGV)
 
 begin
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
-  if ARGV.include?("--json")
-    emit_thor_usage_json(ARGV, e)
+  if Hive::ThorUsageJson.json_requested?(ARGV)
+    Hive::ThorUsageJson.emit(ARGV, e)
   else
     warn e.message
   end

@@ -67,4 +67,25 @@ class HiveTuiViewsFormatTest < Minitest::Test
     assert_equal 5, Format.display_width(padded)
     assert padded.end_with?("世")
   end
+
+  def test_ljust_cells_over_budget_label_clamps_padding_to_zero
+    # An over-budget label is first truncated to fit, so the
+    # `[width - display_width, 0].max` clamp must never emit negative
+    # padding (a `" " * -n` would raise). Pin the clamped, exact width.
+    padded = Format.ljust_cells(WIDE, 3)
+    assert_equal 3, Format.display_width(padded),
+                 "an over-budget label must be clamped to exactly the cell budget"
+  end
+
+  def test_rjust_cells_over_budget_label_clamps_padding_to_zero
+    padded = Format.rjust_cells(WIDE, 3)
+    assert_equal 3, Format.display_width(padded)
+  end
+
+  def test_truncate_and_take_cells_coerce_nil_input_via_to_s_guard
+    # `nil.to_s` ("") flows through the same fit logic and yields "" rather
+    # than raising on `nil.each_grapheme_cluster` / `display_width(nil)`.
+    assert_equal "", Format.truncate(nil, 5)
+    assert_equal "", Format.take_cells(nil, 5)
+  end
 end

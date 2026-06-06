@@ -73,6 +73,10 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
+        # Render once: the frontmatter `original_text` and the markdown
+        # body are the same rendered idea, so deriving both from a single
+        # `idea_text` call keeps them from drifting.
+        body = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -81,10 +85,10 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            "original_text" => idea_text(finding)
+            "original_text" => body
           },
           <<~MD
-          #{idea_text(finding)}
+          #{body}
         MD
         )
       end
@@ -176,8 +180,12 @@ module Hive
 
       def evidence_text(evidence)
         evidence.map do |entry|
-          location = [ entry["file"], entry["line"] ].compact.join(":")
-          snippet = entry["snippet"].to_s.strip
+          # Defend both key types like the sibling consumers of
+          # `finding.evidence` (`pr_opener.rb`, `fingerprint.rb`): the
+          # primary flow is JSON-parsed (string keys), but a direct
+          # symbol-keyed entry must not silently degrade to `- evidence`.
+          location = [ entry["file"] || entry[:file], entry["line"] || entry[:line] ].compact.join(":")
+          snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"
           snippet.empty? ? line : "#{line}: #{snippet}"
         end.join("\n")

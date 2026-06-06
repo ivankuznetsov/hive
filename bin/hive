@@ -10,6 +10,20 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   exit 0
 end
 
+# Thor treats a class option before the subcommand as input to its help path.
+# Keep `hive --json status` equivalent to `hive status --json`.
+def normalize_leading_json_options!(argv)
+  json_options = %w[--json --no-json --skip-json]
+  leading = []
+  leading << argv.shift while json_options.include?(argv.first)
+  return if leading.empty?
+
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return argv.unshift(*leading) unless cmd_idx
+
+  argv.insert(cmd_idx + 1, *leading)
+end
+
 # Thor only honours `--help` *before* the subcommand name (`hive help approve`);
 # `hive approve --help` would be consumed as the TARGET positional. Intercept
 # the help flag before Thor dispatch so the convention agents try first works.
@@ -26,6 +40,7 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
+normalize_leading_json_options!(ARGV)
 rewrite_help_flag!(ARGV)
 
 begin

@@ -33,4 +33,44 @@ class E2EAsciinemaDriverTest < Minitest::Test
       ENV["HIVE_ASCIINEMA_BIN"] = old
     end
   end
+
+  def test_uses_window_size_arg_for_v3_binary
+    Dir.mktmpdir("asciinema") do |dir|
+      script = File.join(dir, "asciinema")
+      cast = File.join(dir, "cast.json")
+      args = File.join(dir, "args.json")
+      File.write(script, <<~RUBY)
+        #!/usr/bin/env ruby
+        require "json"
+
+        if ARGV == ["--version"]
+          puts "asciinema 3.2.0"
+          exit 0
+        end
+
+        if ARGV.first == "rec"
+          File.write(#{args.inspect}, JSON.dump(ARGV))
+          File.write(ARGV.last, %({"version":2,"width":200,"height":50}\\n))
+          sleep 30
+        end
+      RUBY
+      File.chmod(0o755, script)
+
+      old = ENV["HIVE_ASCIINEMA_BIN"]
+      ENV["HIVE_ASCIINEMA_BIN"] = script
+      driver = Hive::E2E::AsciinemaDriver.new(socket_name: "fake", session_name: "fake", cast_path: cast)
+      driver.start
+      deadline = Time.now + 2
+      sleep 0.05 until File.exist?(args) || Time.now >= deadline
+      driver.stop
+
+      argv = JSON.parse(File.read(args))
+      assert_includes argv, "--window-size"
+      assert_includes argv, "200x50"
+      refute_includes argv, "--rows"
+      refute_includes argv, "--cols"
+    ensure
+      ENV["HIVE_ASCIINEMA_BIN"] = old
+    end
+  end
 end

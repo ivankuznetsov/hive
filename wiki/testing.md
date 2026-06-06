@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-06
+updated: 2026-06-07
 tags: [test, minitest, fixtures]
 ---
 
@@ -72,7 +72,7 @@ task default: :test
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, and `gh api` implicit-POST payload flag blocking. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
 | `stages/review/run_reviewers_test.rb` | `Hive::Stages::Review.run_reviewers` — reviewer list selection for normal vs patrol-sourced tasks, per-reviewer failures, wall-clock deadlines, shared Claude tmux sessions, and GitHub comment mirroring. |
-| `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, clean old archives are hidden only from daily text/grid views, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
+| `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
 | `tui/app_test.rb`, `tui/state_source_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, mtime-gated refresh reuse, and liveness-fallback reparsing. |
 
 ## Integration suite (`test/integration/`)

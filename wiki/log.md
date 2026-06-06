@@ -3723,3 +3723,10 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[commands/tui]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-06T05:14:00Z] babysitter/wiki - audit residual dry-run docs commit
+
+**Action:** Audited commit `28b52eac` after it committed residual wiki updates for the babysitter dry-run `git config` allowlist. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git config allowlist"` confirmed the existing indexed babysit/gaps coverage. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Confirmed the docs correctly state that only first-argument `git config --get KEY`, `--get-all KEY`, and `--list` shapes pass through, while later read flags on write-shaped forms still skip. No page coverage changed, and the existing [[gaps]] live-agent-smoke uncertainty remains accurate. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]

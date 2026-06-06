@@ -11,20 +11,65 @@ require "hive/daemon/dispatch_baselines"
 class HiveDaemonConcurrencyControllerTest < Minitest::Test
   T0 = Time.utc(2026, 5, 6, 12, 0, 0)
 
-  def make(global: 3, per_project: 1, daily: 50)
+  def make(global: 3, per_project: 1, daily: 50, patrol_scans: 1)
     Hive::Daemon::ConcurrencyController.new(
       max_concurrent_runs: global,
       max_concurrent_per_project: per_project,
-      max_runs_per_day_per_project: daily
+      max_runs_per_day_per_project: daily,
+      max_concurrent_patrol_scans: patrol_scans
     )
   end
 
-  def dispatch(c, pid, project, slug, mtime: T0 - 60, started_at: T0)
+  def dispatch(c, pid, project, slug, mtime: T0 - 60, started_at: T0, kind: :task)
     c.record_dispatch(
       pid: pid, project: project, slug: slug,
       stage: "6-review", command: "hive run #{slug}",
-      started_at: started_at, state_file_mtime: mtime
+      started_at: started_at, state_file_mtime: mtime, kind: kind
     )
+  end
+
+  # ── patrol-scan separate budget ────────────────────────────────────────
+
+  def test_patrol_scan_does_not_count_against_task_global_cap
+    c = make(global: 2, per_project: 5)
+    dispatch(c, 100, "hive", "patrol-scan", kind: :patrol_scan)
+    # Scan is running, but task slots are untouched: two tasks still fit.
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0)
+    dispatch(c, 101, "p1", "s1")
+    assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s2", now: T0)
+    dispatch(c, 102, "p2", "s2")
+    # Now both TASK slots are full (scan excluded) → global_cap.
+    assert_equal :global_cap, c.can_dispatch?(project: "p3", slug: "s3", now: T0)
+  end
+
+  def test_patrol_scan_excluded_from_per_project_cap
+    c = make(global: 5, per_project: 1)
+    dispatch(c, 100, "hive", "patrol-scan", kind: :patrol_scan)
+    # A scan for project "hive" does not consume hive's per-project task slot.
+    assert_equal :ok, c.can_dispatch?(project: "hive", slug: "s1", now: T0)
+  end
+
+  def test_can_dispatch_patrol_scan_respects_its_own_budget
+    c = make(patrol_scans: 1)
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
+    dispatch(c, 100, "hive", "patrol-scan", kind: :patrol_scan)
+    assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
+  end
+
+  def test_running_tasks_do_not_block_a_patrol_scan
+    c = make(global: 2, patrol_scans: 1)
+    dispatch(c, 100, "p1", "s1")
+    dispatch(c, 101, "p2", "s2") # task global cap full
+    # Task cap is full, but a scan is on its own budget → still allowed.
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
+  end
+
+  def test_patrol_scan_slot_frees_on_completion
+    c = make(patrol_scans: 1)
+    dispatch(c, 100, "hive", "patrol-scan", kind: :patrol_scan)
+    assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
+    c.record_completion(pid: 100, exit_code: 0, completed_at: T0)
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
   end
 
   # ── caps ──────────────────────────────────────────────────────────────

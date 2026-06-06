@@ -268,6 +268,9 @@ module Hive
         "max_concurrent_runs" => 3,
         "max_concurrent_per_project" => 3,
         "max_runs_per_day_per_project" => 50,
+        # Patrol scans (`hive patrol PROJECT`) run on their own budget so a
+        # long codex-backed scan never consumes a task-dispatch slot.
+        "max_concurrent_patrol_scans" => 1,
         "transient_retry_backoff_sec" => 60,
         "shutdown_grace_sec" => 600,
         # R-02: per-child wall-clock timeout for daemon-spawned `hive`
@@ -1477,6 +1480,7 @@ module Hive
       [ "pr_merge_poll_interval_sec", 60 ],
       [ "max_concurrent_runs", 1 ],
       [ "max_concurrent_per_project", 1 ],
+      [ "max_concurrent_patrol_scans", 1 ],
       [ "max_runs_per_day_per_project", 1 ],
       [ "transient_retry_backoff_sec", 1 ],
       [ "shutdown_grace_sec", 0 ],

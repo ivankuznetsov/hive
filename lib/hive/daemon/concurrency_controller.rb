@@ -34,10 +34,15 @@ module Hive
       attr_reader :max_concurrent_runs, :max_concurrent_per_project, :max_runs_per_day_per_project
 
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
-                     dispatch_state: nil)
+                     max_concurrent_patrol_scans: 1, dispatch_state: nil)
         @max_concurrent_runs = max_concurrent_runs
         @max_concurrent_per_project = max_concurrent_per_project
         @max_runs_per_day_per_project = max_runs_per_day_per_project
+        # Patrol SCANS (`hive patrol PROJECT`) run on a SEPARATE budget so a
+        # long codex-backed scan never consumes a task-dispatch slot. They
+        # are tagged `kind: :patrol_scan` in @running and excluded from the
+        # task caps below; this counter bounds them independently.
+        @max_concurrent_patrol_scans = max_concurrent_patrol_scans
         # Optional Hive::Daemon::DispatchBaselines store. When present, the
         # `[project, slug] => mtime` baseline map survives daemon restarts so
         # an already-answered needs_input row isn't re-stranded on first sight
@@ -88,14 +93,39 @@ module Hive
 
         external_global = [ @external_running_global, external_global_count.to_i ].max
         external_project = [ @external_running_by_project[project].to_i, external_project_count.to_i ].max
-        active_global_count = @running.size + external_global
-        active_project_count = @running.count { |_pid, entry| entry[:project] == project } + external_project
+        # Task caps count only task-kind runs; patrol scans live on their
+        # own budget (see can_dispatch_patrol_scan?) so a running scan never
+        # eats a task slot.
+        active_global_count = task_running_count + external_global
+        active_project_count = task_running_count(project: project) + external_project
 
         return :global_cap  if active_global_count >= @max_concurrent_runs
         return :project_cap if active_project_count >= @max_concurrent_per_project
         return :daily_cap   if daily_count_for(project, now) >= @max_runs_per_day_per_project
 
         :ok
+      end
+
+      # Gate for a patrol SCAN dispatch. Scans have their own concurrency
+      # budget so they never compete with task dispatch for the global cap.
+      #   :ok | :project_dropped | :patrol_scan_cap
+      def can_dispatch_patrol_scan?(project:, now: Time.now)
+        return :project_dropped if @dropped_projects.include?(project)
+
+        scan_count = @running.count { |_pid, entry| entry[:kind] == :patrol_scan }
+        return :patrol_scan_cap if scan_count >= @max_concurrent_patrol_scans
+
+        :ok
+      end
+
+      # Number of running task-kind dispatches (patrol scans excluded),
+      # optionally scoped to one project.
+      def task_running_count(project: nil)
+        @running.count do |_pid, entry|
+          next false if entry[:kind] == :patrol_scan
+
+          project.nil? || entry[:project] == project
+        end
       end
 
       # Refresh counts for active agent rows discovered from `hive status`
@@ -143,14 +173,15 @@ module Hive
       # slot for the (project, today) pair (refunded later if the run
       # exits with TEMPFAIL — see record_completion).
       def record_dispatch(pid:, project:, slug:, stage:, command:,
-                          started_at:, state_file_mtime:)
+                          started_at:, state_file_mtime:, kind: :task)
         @running[pid] = {
           project: project,
           slug: slug,
           stage: stage,
           command: command,
           started_at: started_at,
-          state_file_mtime_at_dispatch: state_file_mtime
+          state_file_mtime_at_dispatch: state_file_mtime,
+          kind: kind
         }
         @daily_counts[[ project, started_at.to_date ]] += 1
         if state_file_mtime

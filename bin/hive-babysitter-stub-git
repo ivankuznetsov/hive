@@ -23,6 +23,37 @@ UNSAFE_CONFIG_KEYS = [
   "ssh.variant",
   "uploadpack.packobjectshook"
 ].freeze
+# Environment-variable equivalents of the unsafe config keys above, plus the
+# config-injection channels (GIT_CONFIG_COUNT/KEY_*/VALUE_*, GIT_CONFIG_PARAMETERS).
+# Even an allowlisted read-only command would otherwise run these hooks/programs
+# because git reads them from the inherited environment, not just argv.
+UNSAFE_ENV_VARS = [
+  "GIT_ASKPASS",
+  "GIT_CONFIG",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_EDITOR",
+  "GIT_EXTERNAL_DIFF",
+  "GIT_PAGER",
+  "GIT_PROXY_COMMAND",
+  "GIT_SEQUENCE_EDITOR",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND"
+].freeze
+UNSAFE_ENV_PREFIXES = [
+  "GIT_CONFIG_KEY_",
+  "GIT_CONFIG_VALUE_"
+].freeze
+
+def scrub_unsafe_env!
+  UNSAFE_ENV_VARS.each { |name| ENV.delete(name) }
+  ENV.keys.each do |name|
+    ENV.delete(name) if UNSAFE_ENV_PREFIXES.any? { |prefix| name.start_with?(prefix) }
+  end
+end
+
 UNSAFE_CONFIG_PREFIXES = [
   "alias.",
   "credential.",
@@ -129,12 +160,27 @@ def read_only?(rest)
   end
 end
 
+# git grep short options that consume the rest of a bundled cluster as their
+# value, so any "O" appearing after them is data, not the pager flag.
+GREP_VALUE_SHORT_OPTS = %w[e f m A B C].freeze
+
+def short_cluster_opens_pager?(arg)
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  arg[1..].to_s.each_char do |char|
+    return true if char == "O"
+
+    break if GREP_VALUE_SHORT_OPTS.include?(char)
+  end
+  false
+end
+
 def unsafe_command_options?(rest)
   return false unless rest.first.to_s == "grep"
 
   rest[1..].to_a.any? do |arg|
     arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=") ||
-      arg.start_with?("-O")
+      short_cluster_opens_pager?(arg)
   end
 end
 
@@ -151,4 +197,5 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
   exit 127
 end
-exec(real, *argv)
+scrub_unsafe_env!
+Kernel.exec(real, *argv)

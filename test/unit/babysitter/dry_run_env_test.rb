@@ -58,6 +58,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
 
+      # Glued/inline @file payload forms must be caught on explicit GET too,
+      # not just the space-separated `-F q=@secret` form: each branch
+      # reimplements the @-prefix check, so they need independent coverage.
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-Fq=@secret"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--field=q=@secret"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input=payload.json"
+      # Glued/inline forms with scalar values stay read-only on explicit GET.
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-Fstate=open"
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--field=state=open"
+      # A trailing `-F` with no argument must not crash the stub; with no
+      # payload value it stays read-only on explicit GET.
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F"
+
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
       assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
       assert_stubbed env, "git", "merge", "feature"
@@ -186,6 +199,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input payload.json skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues -F q=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues -Fq=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues --field=q=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input=payload.json skipped"
       assert_includes skipped, "gh workflow run release.yml skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"

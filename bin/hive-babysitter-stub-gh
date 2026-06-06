@@ -27,6 +27,15 @@ def stripped_global_options(argv)
   rest
 end
 
+# `-F`/`--field name=@file` (and the glued `-Fname=@file` / `--field=name=@file`
+# forms) reads the value from a file, which gh sends as a request body even on a
+# GET — so it must be treated as an unsafe payload. The `.to_s` guards cover a
+# nil value (a trailing `-F` with no argument) and an empty split result, which
+# would otherwise raise `NoMethodError` on `nil.start_with?`.
+def field_uses_file?(value)
+  value.to_s.split("=", 2).last.to_s.start_with?("@")
+end
+
 def api_read_only?(rest)
   return false unless rest.first == "api"
 
@@ -51,7 +60,7 @@ def api_read_only?(rest)
       index += 2
     when "-F", "--field"
       payload = true
-      unsafe_payload ||= rest[index + 1].to_s.split("=", 2).last.start_with?("@")
+      unsafe_payload ||= field_uses_file?(rest[index + 1])
       index += 2
     when "--input"
       payload = true
@@ -62,11 +71,11 @@ def api_read_only?(rest)
       index += 1
     when /\A-F(.+)\z/
       payload = true
-      unsafe_payload ||= Regexp.last_match(1).split("=", 2).last.start_with?("@")
+      unsafe_payload ||= field_uses_file?(Regexp.last_match(1))
       index += 1
     when /\A--field=(.+)\z/
       payload = true
-      unsafe_payload ||= Regexp.last_match(1).split("=", 2).last.start_with?("@")
+      unsafe_payload ||= field_uses_file?(Regexp.last_match(1))
       index += 1
     when /\A--input=.+\z/
       payload = true

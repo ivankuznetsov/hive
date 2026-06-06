@@ -214,6 +214,33 @@ patrol:
     lint: null
     typecheck: null
     test: null
+  # Review handoff for patrol-created PRs uses a narrower reviewer set
+  # than normal feature PRs. Keep Codex on by default; optionally add
+  # Claude during init when you want broader patrol review coverage.
+  review:
+    max_context_files: 24
+    max_owned_files: 12
+    reviewers:
+<% if patrol_reviewers.include?("codex-ce-code-review") -%>
+      - name: codex-ce-code-review
+        kind: agent
+        agent: codex
+        skill: ce-code-review
+        output_basename: codex-ce-code-review
+        prompt_template: reviewer_codex_ce_code_review.md.erb
+        budget_usd: 50
+        timeout_sec: 5400
+<% end -%>
+<% if patrol_reviewers.include?("claude-ce-code-review") -%>
+      - name: claude-ce-code-review
+        kind: agent
+        agent: claude
+        skill: ce-code-review
+        output_basename: claude-ce-code-review
+        prompt_template: reviewer_claude_ce_code_review.md.erb
+        budget_usd: 50
+        timeout_sec: 5400
+<% end -%>
 
 # Auto-rebase pre-step for `hive run` (plan
 # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).

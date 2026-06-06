@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "open3"
 require "time"
+require "yaml"
 require "hive/events"
 require "hive/config"
 require "hive/protected_files"
@@ -940,7 +941,7 @@ module Hive
       # gone — the partial results stay on disk for the next run to
       # consume.
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
-        specs = Array(cfg.dig("review", "reviewers"))
+        specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
         # promise "errors-NN.md reflects
@@ -1031,6 +1032,34 @@ module Hive
                                        wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def reviewer_specs_for(cfg, task)
+        return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
+
+        Array(cfg.dig("review", "reviewers"))
+      end
+
+      def patrol_task?(task)
+        frontmatter = task_frontmatter(task.state_file)
+        frontmatter["source"].to_s == "patrol"
+      rescue StandardError
+        false
+      end
+
+      def task_frontmatter(path)
+        return {} unless File.exist?(path)
+
+        content = File.read(path)
+        return {} unless content.start_with?("---\n")
+
+        yaml = content.split(/^---\s*$/, 3)[1]
+        return {} if yaml.to_s.strip.empty?
+
+        data = YAML.safe_load(yaml, permitted_classes: [ Time ], aliases: false) || {}
+        data.is_a?(Hash) ? data : {}
+      rescue Psych::Exception
+        {}
       end
 
       def reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining:)

@@ -121,6 +121,50 @@ class RunReviewersTest < Minitest::Test
     assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
   end
 
+  def test_reviewer_specs_for_normal_task_uses_standard_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ]
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: telegram\n---\n\n# Task\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_patrol_task_uses_patrol_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ]
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: patrol\n---\n\n# Patrol: Demo\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "patrol-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
   def test_reviewer_compare_ref_configured_branch_falls_back_to_local_with_warn
     # Configured branch is the explicit operator opt-in, so we use it
     # even when the remote ref is missing — but still warn so the

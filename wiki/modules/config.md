@@ -7,7 +7,7 @@ updated: 2026-06-05
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol enrollment and PR handoff). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers` and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol enrollment and PR handoff). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -85,12 +85,16 @@ tags: [config, yaml, validation]
     "include" => [],
     "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
     "commands" => { "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil },
-    "review" => { "max_context_files" => 24, "max_owned_files" => 12 }
+    "review" => {
+      "max_context_files" => 24,
+      "max_owned_files" => 12,
+      "reviewers" => [ { "name" => "codex-ce-code-review", "agent" => "codex", ... } ]
+    }
   }
 }
 ```
 
-`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list.
+`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the narrower patrol list, Codex CE code review only; fresh init can optionally add Claude CE code review for patrol PRs.
 
 ## Module functions
 
@@ -121,7 +125,7 @@ Closes doc-review F3 (P0). The previous implementation was a **single-level** `H
 Rules:
 
 - **Hash + Hash** → recurse, key-by-key.
-- **Array** (any depth) → replace wholesale. Per-element merge has ambiguous semantics for ordered lists (e.g. `review.reviewers`), so all Array-typed settings replace wholesale. (Earlier wiki/code comments misattributed this to ADR-018, which is actually the per-CLI-isolation trust-model amendment — unrelated.)
+- **Array** (any depth) → replace wholesale. Per-element merge has ambiguous semantics for ordered lists (e.g. `review.reviewers` and `patrol.review.reviewers`), so all Array-typed settings replace wholesale. (Earlier wiki/code comments misattributed this to ADR-018, which is actually the per-CLI-isolation trust-model amendment — unrelated.)
 - **Scalar / nil / type mismatch** → override wins.
 
 ## Validation (`Config.validate!`)
@@ -135,7 +139,7 @@ Runs after merge so a default value can never trigger a failure — only user in
 5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
 6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 7. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
-8. **`validate_patrol!`** — `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run.
+8. **`validate_patrol!`** — `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not

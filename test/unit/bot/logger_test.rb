@@ -55,6 +55,26 @@ class HiveBotLoggerTest < Minitest::Test
     end
   end
 
+  # Regression for a missing-whitelist crash: a `.event(:foo, ...)` call whose
+  # symbol is absent from EVENTS raises ArgumentError on the failure path it
+  # guards (often the only path that ever runs it), so the operator gets a
+  # silent no-reply crash instead of the intended message. Scan every event
+  # symbol emitted under lib/hive/bot/ (where @logger is always this Logger)
+  # and assert it is a known event — a future missing-event can't hide behind
+  # a permissive stub logger anymore.
+  def test_every_bot_event_symbol_is_whitelisted
+    bot_dir = File.expand_path("../../../lib/hive/bot", __dir__)
+    emitted = Dir[File.join(bot_dir, "**", "*.rb")].flat_map do |file|
+      File.read(file).scan(/\.event\(:([a-z_][a-z0-9_]*)/).flatten.map(&:to_sym)
+    end.uniq
+
+    refute_empty emitted, "expected to find at least one .event(:symbol) call under lib/hive/bot/"
+    unknown = emitted - Hive::Bot::Logger::EVENTS
+    assert_empty unknown,
+                 "these event symbols are emitted under lib/hive/bot/ but missing from Logger::EVENTS " \
+                 "(every failure path that emits them would raise ArgumentError): #{unknown.inspect}"
+  end
+
   def test_logger_rotates_past_size_threshold
     with_tmp_dir do |dir|
       path = File.join(dir, "rot.log")

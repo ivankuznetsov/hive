@@ -19,6 +19,25 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
     assert_equal [], draft.attachments
   end
 
+  def test_start_rejects_unknown_phase
+    assert_raises(ArgumentError, "an unknown phase must be rejected at start") do
+      @store.start(chat_id: 1, phase: :bogus_phase)
+    end
+  end
+
+  def test_start_rejects_unknown_origin
+    assert_raises(ArgumentError, "an unknown origin must be rejected at start") do
+      @store.start(chat_id: 1, phase: :awaiting_text, origin: :sms)
+    end
+  end
+
+  def test_start_rejects_transcript_confirm_phase_with_non_voice_origin
+    assert_raises(ArgumentError,
+                  ":awaiting_transcript_confirm must require origin :voice") do
+      @store.start(chat_id: 1, phase: :awaiting_transcript_confirm, origin: nil)
+    end
+  end
+
   def test_set_transcript_and_confirm_transcript
     @store.start(chat_id: 1, phase: :awaiting_text, token: "tok", origin: :voice)
 

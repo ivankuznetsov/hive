@@ -10,7 +10,7 @@ class HiveBotTranscriberTest < Minitest::Test
 
     def initialize
       @headers = {}
-      @options = Struct.new(:timeout).new
+      @options = Struct.new(:timeout, :open_timeout).new
     end
 
     def options
@@ -30,7 +30,7 @@ class HiveBotTranscriberTest < Minitest::Test
       request = FakeRequest.new
       yield request
       @calls << { url: url, headers: request.headers.dup, body: request.body,
-                  timeout: request.options.timeout }
+                  timeout: request.options.timeout, open_timeout: request.options.open_timeout }
       response = @responses.shift
       raise response if response.is_a?(Exception)
 
@@ -93,6 +93,8 @@ class HiveBotTranscriberTest < Minitest::Test
     assert_equal "whisper-test", http.calls.first.fetch(:body).fetch(:model)
     assert_equal "verbose_json", http.calls.first.fetch(:body).fetch(:response_format)
     assert_equal 120, http.calls.first.fetch(:timeout)
+    assert_equal 10, http.calls.first.fetch(:open_timeout),
+                 "open_timeout must bound the TCP connect so a hung connect can't stall the poll thread"
   end
 
   def test_full_language_name_is_accepted_against_iso_supported_list
@@ -241,13 +243,77 @@ class HiveBotTranscriberTest < Minitest::Test
     refute_includes @logger.events.inspect, "sk-test-secret", "API key must never be logged on the malformed-JSON path"
   end
 
+  # Directly exercise Result's self-validating invariants so a refactor that
+  # loosens any guard fails here, not silently downstream in parse_response.
+  def test_result_rejects_contradictory_states
+    cases = {
+      "unknown status" => { status: :bogus },
+      ":ok with empty text" => { status: :ok, text: "  " },
+      ":failed carrying text" => { status: :failed, text: "oops", message: "boom" },
+      ":failed without error_class or message" => { status: :failed },
+      "benign status carrying error metadata" => { status: :no_speech, error_class: "X" }
+    }
+
+    cases.each do |label, kwargs|
+      assert_raises(ArgumentError, "Result should reject: #{label}") do
+        Hive::Bot::Transcriber::Result.new(**kwargs)
+      end
+    end
+  end
+
   def test_non_transient_400_fails_without_retry
-    http = FakeHttp.new([ Response.new(status: 400, body: "bad") ])
+    http = FakeHttp.new([ Response.new(status: 400, body: "invalid_api_key") ])
 
     result = transcriber(http).call("bytes", filename: "voice.oga", content_type: "audio/ogg")
 
     assert_equal :failed, result.status
     assert_equal 1, http.calls.size
+    assert_includes result.message, "400", "the HTTP status must reach the failure message"
+    assert_includes result.message, "invalid_api_key",
+                    "the 4xx response body reason must reach result.message for debuggability"
     refute_includes @logger.events.inspect, "sk-test-secret", "API key must never be logged on the 4xx path"
+  end
+
+  def test_missing_api_key_emits_distinct_signal
+    # Empty env -> the key env is unset, so the transcriber emits a distinct
+    # ApiKeyNotConfigured signal at call time rather than letting it look like a
+    # generic upstream 401.
+    @env = {}
+    http = FakeHttp.new([ Response.new(status: 401, body: "unauthorized") ])
+
+    result = transcriber(http).call("bytes", filename: "voice.oga", content_type: "audio/ogg")
+
+    assert_equal :failed, result.status
+    assert(@logger.events.any? do |event, attrs|
+      event == :transcription_failed && attrs[:error_class] == "ApiKeyNotConfigured"
+    end, "an unset api key env must emit a distinct ApiKeyNotConfigured signal")
+  end
+
+  def test_all_malformed_segments_falls_back_to_ok
+    http = FakeHttp.new([
+      Response.new(status: 200, body: JSON.generate(
+        "text" => "speech",
+        "language" => "english",
+        "segments" => [ { "no_speech_prob" => "abc" }, { "no_speech_prob" => "xyz" } ]
+      ))
+    ])
+
+    result = transcriber(http).call("bytes", filename: "voice.oga", content_type: "audio/ogg")
+
+    assert_equal :ok, result.status,
+                 "all-malformed probs leave the mean empty, which must read as speech (:ok), not no_speech"
+    assert_equal "speech", result.text
+  end
+
+  def test_blank_language_with_supported_list_still_transcribes
+    http = FakeHttp.new([
+      Response.new(status: 200, body: JSON.generate("text" => "hello there", "language" => ""))
+    ])
+
+    result = transcriber(http).call("bytes", filename: "voice.oga", content_type: "audio/ogg")
+
+    assert_equal :ok, result.status,
+                 "a non-empty transcript with a blank/unknown language must not be dropped as unsupported"
+    assert_equal "hello there", result.text
   end
 end

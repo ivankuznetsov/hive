@@ -109,7 +109,13 @@ module Hive
           # No manual Content-Type header: the :multipart middleware sets it
           # with the boundary the server needs. A hand-set value here would be
           # overwritten anyway.
-          req.options.timeout = timeout_sec if req.respond_to?(:options) && req.options.respond_to?(:timeout=)
+          if req.respond_to?(:options)
+            req.options.timeout = timeout_sec if req.options.respond_to?(:timeout=)
+            # Bound the TCP connect separately. Without open_timeout a hung
+            # connect is unbounded (timeout_sec only caps an established
+            # request), and this call runs inline on the serial poll thread.
+            req.options.open_timeout = open_timeout_sec if req.options.respond_to?(:open_timeout=)
+          end
           req.body = {
             file: Faraday::Multipart::FilePart.new(StringIO.new(bytes.to_s.b), content_type, filename),
             model: model,
@@ -173,7 +179,14 @@ module Hive
         supported = Array(@config["supported_languages"]).filter_map { |entry| normalize_language(entry) }
         return false if supported.empty?
 
-        !supported.include?(normalize_language(language))
+        normalized = normalize_language(language)
+        # Only drop a transcript when the language is KNOWN and not in the list.
+        # A blank/unrecognized language (normalize_language -> nil) must not be
+        # treated as unsupported, or a non-empty transcript whose verbose_json
+        # omitted `language` would be silently discarded.
+        return false if normalized.nil?
+
+        !supported.include?(normalized)
       end
 
       # Whisper's verbose_json reports `language` as a full English name
@@ -198,7 +211,7 @@ module Hive
       end
 
       def success?(response)
-        status(response) >= 200 && status(response) < 300
+        (200...300).cover?(status(response))
       end
 
       def transient_status?(response)
@@ -266,6 +279,7 @@ module Hive
       def max_retries = @config.fetch("max_retries").to_i
       def retry_backoff_sec = @config.fetch("retry_backoff_sec").to_i
       def timeout_sec = @config.fetch("timeout_sec").to_i
+      def open_timeout_sec = @config.fetch("open_timeout_sec").to_i
       def no_speech_threshold = @config.fetch("no_speech_threshold").to_f
     end
   end

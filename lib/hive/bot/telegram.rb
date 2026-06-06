@@ -30,11 +30,13 @@ module Hive
           !callback_data.nil?
         end
 
-        # Intentionally excludes voice. A voice note IS routed separately via
-        # voice? (checked before effective_text is ever consulted), so it must
-        # NOT count as media here — otherwise effective_text would flip to the
-        # voice note's caption and the voice-note idea flow would break. (Voice
-        # notes can carry a caption; this guard does not rely on their absence.)
+        # Intentionally excludes voice. Router#classify consults effective_text
+        # unconditionally at the top of the method, BEFORE it reaches the voice?
+        # check. If media? included voice, effective_text would resolve to the
+        # voice note's caption, and a captioned voice note could misroute
+        # through slash-command matching before the voice branch is ever
+        # reached. (Voice notes can carry a caption; this guard does not rely on
+        # their absence.)
         def media?
           !photo.nil? || !document.nil?
         end

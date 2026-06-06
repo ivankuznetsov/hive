@@ -367,6 +367,10 @@ module Hive
           "max_retries" => 3,
           "retry_backoff_sec" => 2,
           "timeout_sec" => 120,
+          # Bound the TCP connect separately from the overall request. Without
+          # it a hung connect is unbounded and stalls the serial poll thread
+          # well past timeout_sec.
+          "open_timeout_sec" => 10,
           "no_speech_threshold" => 0.6,
           "supported_languages" => %w[en ru]
         },
@@ -1817,6 +1821,7 @@ module Hive
       [ "max_retries", 0, nil, true ],
       [ "retry_backoff_sec", 0, nil, true ],
       [ "timeout_sec", 0, nil, true ],
+      [ "open_timeout_sec", 0, nil, true ],
       [ "no_speech_threshold", 0, 1, false ]
     ].freeze
 

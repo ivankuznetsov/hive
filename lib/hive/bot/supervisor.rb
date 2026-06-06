@@ -457,9 +457,10 @@ module Hive
         end
 
         # Guard on the size Telegram advertised in the message payload BEFORE
-        # the getFile round-trip. The payload's voice.file_size is authoritative;
-        # getFile's info[:file_size] is sometimes omitted (yielding a missed
-        # cap), so the post-getFile check below is a secondary defense only.
+        # the getFile round-trip. The payload's voice.file_size is checked first
+        # because it's always present and avoids the round-trip; getFile's
+        # info[:file_size] is sometimes omitted, so the post-getFile check below
+        # is a fallback.
         if remote_file_too_large?(payload[:file_size])
           return reply_voice_too_large(update)
         end
@@ -522,6 +523,15 @@ module Hive
                                               error_class: transcription.error_class,
                                               message: transcription.message)
         draft = ensure_voice_draft(chat_id: chat_id)
+        # Mirror the :ok path's `draft && ...` guard. ensure_voice_draft returns
+        # nil for a non-voice draft; without this the await_text/stage below
+        # would capture the operator's next text against an orphan. Currently
+        # unreachable (serial poll thread + non_voice_draft? guard), kept for
+        # defensive symmetry with the success path.
+        unless draft
+          return safe_send_message(chat_id: update.chat_id,
+                                   text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
+        end
         @idea_draft_store.await_text(chat_id: chat_id)
         begin
           stage_voice_fallback(chat_id: chat_id, bytes: bytes)

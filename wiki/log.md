@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T12:47:00Z] babysitter - block git dry-run output-file writes
+
+**Action:** Tightened `bin/hive-babysitter-stub-git` so otherwise read-only git commands are skipped when they carry `--output` or `--output=...`, closing the dry-run bypass where `git diff`, `git show`, or `git log` could write files while being passed through to the real git binary. Added focused regression coverage in `test/unit/babysitter/dry_run_env_test.rb`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
 **Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.

@@ -46,7 +46,13 @@ def read_only_remote?(rest)
   end
 end
 
+def writes_output_file?(rest)
+  rest.any? { |arg| arg == "--output" || arg.start_with?("--output=") }
+end
+
 def read_only?(rest)
+  return false if writes_output_file?(rest)
+
   case rest.first.to_s
   when "branch"
     rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")

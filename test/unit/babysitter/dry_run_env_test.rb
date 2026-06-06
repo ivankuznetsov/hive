@@ -60,6 +60,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "remote", "set-url", "origin", "git@example.com:owner/repo.git"
       assert_stubbed env, "git", "remote", "add", "upstream", "git@example.com:owner/upstream.git"
       assert_stubbed env, "git", "remote", "remove", "upstream"
+      assert_stubbed env, "git", "diff", "HEAD", "--output=#{File.join(dir, "diff.patch")}"
+      assert_stubbed env, "git", "show", "HEAD", "--output", File.join(dir, "show.patch")
+      assert_stubbed env, "git", "log", "--output=#{File.join(dir, "log.txt")}"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
       assert_passes env, "git", "config", "--get", "remote.origin.url"
@@ -90,6 +93,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git remote set-url origin git@example.com:owner/repo.git skipped"
       assert_includes skipped, "git remote add upstream git@example.com:owner/upstream.git skipped"
       assert_includes skipped, "git remote remove upstream skipped"
+      assert_includes skipped, "git diff HEAD --output=#{File.join(dir, "diff.patch")} skipped"
+      assert_includes skipped, "git show HEAD --output #{File.join(dir, "show.patch")} skipped"
+      assert_includes skipped, "git log --output=#{File.join(dir, "log.txt")} skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"

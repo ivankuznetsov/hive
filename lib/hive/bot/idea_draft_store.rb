@@ -8,6 +8,12 @@ module Hive
     class IdeaDraftStore
       DEFAULT_TTL_SEC = 900
 
+      # Shown when a voice note arrives while a non-voice draft is open. The
+      # router short-circuits this case to a reply before any transcribe step
+      # runs, but the supervisor keeps the same guard as defense-in-depth, so
+      # both reference this single constant to avoid the copy drifting.
+      VOICE_DURING_DRAFT_MESSAGE = "Finish or discard the current idea draft before sending a voice note."
+
       # The Draft is a mutable Struct handed live to callers, so the
       # phase/origin contract is enforced at the transition methods rather
       # than by the type. PHASES enumerates every legal phase; ORIGINS the
@@ -29,6 +35,7 @@ module Hive
       def start(chat_id:, phase:, text: nil, token: nil, origin: nil)
         validate_phase!(phase)
         validate_origin!(origin)
+        validate_phase_origin!(phase, origin)
         clear(chat_id: chat_id)
         now = @now.call
         draft = Draft.new(
@@ -150,6 +157,17 @@ module Hive
         return if origin.nil? || ORIGINS.include?(origin)
 
         raise ArgumentError, "unknown idea draft origin #{origin.inspect} (valid: nil, #{ORIGINS.inspect})"
+      end
+
+      # :awaiting_transcript_confirm only makes sense for a voice-origin draft:
+      # router.rb treats that phase as voice-confirm only when origin == :voice,
+      # so starting it with any other origin would create a draft the router
+      # cannot route. Enforce the coupling here instead of leaving it implicit.
+      def validate_phase_origin!(phase, origin)
+        return unless phase == :awaiting_transcript_confirm && origin != :voice
+
+        raise ArgumentError,
+              "phase :awaiting_transcript_confirm requires origin :voice (got #{origin.inspect})"
       end
 
       def update(chat_id:)

@@ -467,7 +467,7 @@ module Hive
         chat_id = payload.fetch(:chat_id, update.chat_id)
         if non_voice_draft?(chat_id: chat_id)
           return safe_send_message(chat_id: update.chat_id,
-                                   text: "Finish or discard the current idea draft before sending a voice note.")
+                                   text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         end
 
         # Guard on the size Telegram advertised in the message payload BEFORE

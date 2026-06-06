@@ -43,6 +43,15 @@ module Hive
           if status == :ok && text.to_s.strip.empty?
             raise ArgumentError, ":ok transcription requires non-empty text"
           end
+          # Inverse invariants: a failure carries no transcript, and the
+          # non-error outcomes carry no error metadata. Keeps the four statuses
+          # from quietly representing contradictory states.
+          if status == :failed && !text.to_s.strip.empty?
+            raise ArgumentError, ":failed transcription must not carry text"
+          end
+          if %i[no_speech unsupported_language].include?(status) && (error_class || message)
+            raise ArgumentError, "#{status.inspect} transcription must not carry error_class/message"
+          end
 
           super
         end

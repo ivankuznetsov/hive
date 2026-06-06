@@ -253,7 +253,7 @@ module Hive
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
         when :idea_voice then @slash_handlers.voice(update)
-        when :idea_voice_during_draft then Result.new(action: :reply, text: "Finish or discard the current idea draft before sending a voice note.")
+        when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)

@@ -234,6 +234,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :dispatched)
   end
 
+  def test_dispatches_later_pipeline_stages_first
+    # Rows supplied in pipeline order; the dispatcher must flip them so the
+    # task closest to done (8-finalize) claims a slot before earlier-stage
+    # work (6-review), draining the pipeline rather than starving it.
+    rows = [
+      row(slug: "rev", stage: "6-review", action: "ready_to_plan", command: "hive run rev"),
+      row(slug: "art", stage: "7-artifacts", action: "ready_to_plan", command: "hive run art"),
+      row(slug: "fin", stage: "8-finalize", action: "ready_to_plan", command: "hive run fin")
+    ]
+    dispatcher, sup, = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %w[8-finalize 7-artifacts 6-review], sup.spawned.map { |s| s[:stage] },
+                 "tasks closer to the end of the pipeline must dispatch first"
+  end
+
+  def test_dispatch_priority_order_is_later_stage_first_and_stable
+    rows = [
+      row(slug: "a", stage: "2-brainstorm"),
+      row(slug: "b", stage: "7-artifacts"),
+      row(slug: "c", stage: "6-review"),
+      row(slug: "d", stage: "7-artifacts"),
+      row(slug: "e", stage: "9-done")
+    ]
+    dispatcher, = make_dispatcher
+
+    ordered = dispatcher.send(:dispatch_priority_order, rows)
+
+    assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
+                 ordered.map(&:stage), "later stages first"
+    assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
+                 "stable within a stage — original status order preserved"
+  end
+
   def test_advance_action_skips_when_task_folder_vanished_after_snapshot
     missing = File.join(Dir.tmpdir, "hive-dispatcher-missing-#{Process.pid}-#{rand(1_000_000)}")
     FileUtils.rm_rf(missing)

@@ -34,7 +34,7 @@ end
 
 def read_only_remote?(rest)
   args = rest[1..] || []
-  args.shift while ["-v", "--verbose"].include?(args.first)
+  args.shift while [ "-v", "--verbose" ].include?(args.first)
   return true if args.empty?
 
   case args.first
@@ -44,7 +44,7 @@ def read_only_remote?(rest)
     args.all? { |arg| !arg.start_with?("-") }
   when "get-url"
     args.shift
-    args.shift while ["--push", "--all"].include?(args.first)
+    args.shift while [ "--push", "--all" ].include?(args.first)
     args.length == 1 && !args.first.start_with?("-")
   else
     false

@@ -81,11 +81,36 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/no-such/, payload["message"])
   end
 
+  def test_unknown_command_with_json_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "no-such", "--json=true")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json=true is set"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no-such/, payload["message"])
+  end
+
   # Missing required positional args + --json must also emit an envelope
   # rather than Thor's "ERROR: ... was called with no arguments" prose.
   def test_missing_required_args_with_json_emits_envelope_on_stdout
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json")
     assert_equal 64, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  def test_missing_required_args_with_json_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--json=true")
+    refute_equal 0, status.exitstatus
     assert_empty err
 
     payload = JSON.parse(out)

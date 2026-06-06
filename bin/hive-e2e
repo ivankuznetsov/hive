@@ -261,6 +261,10 @@ def normalize_leading_class_options!(argv)
   argv.insert(1, *leading_class_options)
 end
 
+def json_requested?(argv)
+  argv.any? { |arg| arg == "--json" || arg == "--json=true" || arg == "--json=1" }
+end
+
 begin
   normalize_leading_class_options!(ARGV)
   rewrite_help_flag!(ARGV)
@@ -269,8 +273,16 @@ begin
   # instead so the rescue below can preserve human/JSON formatting while
   # mapping usage failures to BinaryExit::USAGE.
   Hive::E2E::Binary.start(ARGV, debug: true)
+  # Thor::Base#start rescues Thor::Error internally and either prints to
+  # stderr + exit 1 (when exit_on_failure? is true) or warns + exit 0
+  # (when false) — neither path lets bin/hive-e2e's outer rescue emit a
+  # JSON error envelope. Passing `debug: true` makes Thor re-raise instead,
+  # so when --json is set the rescue below can format the structured
+  # hive-e2e-error output. Without --json, preserve Thor's existing
+  # human-readable behavior.
+  Hive::E2E::Binary.start(ARGV, debug: json_requested?(ARGV))
 rescue Hive::E2E::PreflightError => e
-  if ARGV.include?("--json")
+  if json_requested?(ARGV)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::CONFIG))
   else
@@ -278,7 +290,7 @@ rescue Hive::E2E::PreflightError => e
   end
   exit Hive::E2E::BinaryExit::CONFIG
 rescue Thor::Error => e
-  if ARGV.include?("--json")
+  if json_requested?(ARGV)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
@@ -286,7 +298,7 @@ rescue Thor::Error => e
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e
-  if ARGV.include?("--json")
+  if json_requested?(ARGV)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::FAILURE))
   else

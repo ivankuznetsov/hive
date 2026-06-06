@@ -500,6 +500,13 @@ Refreshed [[commands/tui]] and [[modules/daemon]]. Tests + rubocop clean. Did no
 - [[testing]]
 - [[gaps]]
 
+## [2026-06-06T23:28:10+01:00] wiki — audit residual babysitter pathspec-doc commit
+
+**Action:** Audited residual wiki commit `5a7991ef`, which only updated [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]], and [[log]] for the prior source commit `caa84006`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry run git diff no-ext-diff no-textconv stub pathspec"` returned no indexed hits. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]]. Confirmed current pages match the code and tests: the git dry-run stub inserts `--no-ext-diff --no-textconv` immediately after `diff`/`log`/`show`, dangerous git options remain region-scoped, repo/global/system config remains neutralized, pathspec diff safety-flag placement is documented, and the missing live-agent `hive babysit --once PROJECT --dry-run` smoke remains recorded in [[gaps]]. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-03T13:20:00Z] bot/wiki - refresh PR #281 suppress-while-answering follow-up coverage
 
 **Action:** Refreshed bot wiki coverage after the PR #281 follow-up changed `ConversationStore`, `NotificationDispatcher`, `Logger`, `hive-bot-log.v1`, and focused bot tests. Verified the current staged source diff while resolving the wiki rebase conflict. Documented that `ConversationStore` is now mutex-guarded because the Telegram poll thread mutates conversations while the status-poll thread reads/prunes through `active_for_slug?`; that active-conversation suppression is scoped by project+slug with a lenient nil fallback; and that suppression now emits `notification_skipped_active_conversation` in the bot log schema. Preserved the unrelated babysitter wiki entries from the other side of the conflict. No page count changed, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

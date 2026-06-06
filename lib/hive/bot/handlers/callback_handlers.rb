@@ -1,3 +1,4 @@
+require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
 
 module Hive
@@ -6,12 +7,16 @@ module Hive
       class CallbackHandlers
         def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:,
                        idea_draft_store: nil,
+                       projects_provider: -> { [] },
+                       last_project: -> { nil },
                        logger: nil)
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
           @conversation_store = conversation_store
           @result_class = result_class
           @idea_draft_store = idea_draft_store
+          @projects_provider = projects_provider
+          @last_project = last_project
           @logger = logger
         end
 
@@ -27,6 +32,8 @@ module Hive
           when :callback_refresh_diagnose then refresh_diagnose(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
+          when :callback_idea_voice_confirm then idea_voice_confirm(data)
+          when :callback_idea_voice_discard then idea_voice_discard(data)
           when :callback_idea_done then commit_idea(data)
           when :callback_idea_skip then commit_idea(data)
           # Codex-draft flow is retired (deterministic Q-by-Q answering only).
@@ -163,6 +170,12 @@ module Hive
           return @result_class.new(action: :reply, text: "That idea picker expired. Send /idea again.") unless draft
 
           @idea_draft_store.set_project(chat_id: draft.chat_id, project: project)
+          if draft.origin == :voice && draft.attachments.empty?
+            @set_last_project.call(project)
+            return @result_class.new(action: :commit_idea, project: project,
+                                     attachment: { chat_id: draft.chat_id }, clear_keyboard: true)
+          end
+
           @idea_draft_store.enter_collecting(chat_id: draft.chat_id)
           @set_last_project.call(project)
           @result_class.new(
@@ -170,6 +183,36 @@ module Hive
             text: "Send any files now, or press Done.",
             reply_markup: done_keyboard(token)
           )
+        end
+
+        def idea_voice_confirm(data)
+          _prefix, token = split_callback(data, 2)
+          draft = @idea_draft_store&.find_by_token(token)
+          return @result_class.new(action: :reply, text: "That voice idea draft expired. Send the voice note again.") unless draft
+
+          projects = @projects_provider.call
+          if projects.empty?
+            # No project to capture into: clear the voice draft now rather than
+            # leaving it live in :awaiting_transcript_confirm, where the still-
+            # shown Confirm/Discard keyboard would re-hit this same dead end.
+            @idea_draft_store.clear(chat_id: draft.chat_id)
+            return @result_class.new(action: :reply,
+                                     text: "No Hive projects are registered yet. Run `hive init` on a laptop, then send the voice note again.")
+          end
+
+          @idea_draft_store.confirm_transcript(chat_id: draft.chat_id)
+          @result_class.new(
+            action: :reply,
+            text: "Pick a project for the idea.",
+            reply_markup: Hive::Bot::IdeaKeyboards.project_keyboard(projects, token, last_project: @last_project.call)
+          )
+        end
+
+        def idea_voice_discard(data)
+          _prefix, token = split_callback(data, 2)
+          draft = @idea_draft_store&.find_by_token(token)
+          @idea_draft_store.clear(chat_id: draft.chat_id) if draft
+          @result_class.new(action: :reply, text: "Discarded - nothing captured.")
         end
 
         def commit_idea(data)

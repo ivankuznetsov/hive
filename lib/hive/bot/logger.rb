@@ -41,6 +41,7 @@ module Hive
         deprecated_config
         update_nudge_pushed
         update_nudge_error
+        transcription_failed
         fatal
       ].freeze
 

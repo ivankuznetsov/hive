@@ -31,6 +31,8 @@ module Hive
         callback_refresh_diagnose
         callback_answer
         callback_idea_project_pick
+        callback_idea_voice_confirm
+        callback_idea_voice_discard
         callback_idea_done
         callback_idea_skip
         callback_path_a_yes
@@ -41,6 +43,10 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        idea_voice
+        idea_voice_during_draft
+        idea_voice_edit_text
+        answer_voice
         idea_media
         idea_text_capture
         free_text_answer
@@ -56,7 +62,7 @@ module Hive
       ALLOWED_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
         write_answer_then_reply start_codex confirm_codex_draft
-        stage_attachment commit_idea
+        stage_attachment transcribe_voice commit_idea
       ].freeze
 
       UNAUTHORIZED_LOG_TTL_SEC = 3600
@@ -72,7 +78,7 @@ module Hive
         @now = now
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: bot_config.fetch("idea_draft_ttl_sec", PENDING_IDEA_TTL_SEC),
-                                        now: @now)
+                                        now: @now, logger: @logger)
         @projects_provider = projects_provider
         @unauthorized_logged = {}
         @pending_ideas = {}
@@ -95,6 +101,8 @@ module Hive
           conversation_store: @conversation_store,
           result_class: Result,
           idea_draft_store: @idea_draft_store,
+          projects_provider: @projects_provider,
+          last_project: -> { @last_project },
           logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
@@ -126,9 +134,23 @@ module Hive
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         else
-          return :free_text_answer if @conversation_store.get(chat_id: update.chat_id) || reattach_target(update)
+          if answer_context(update)
+            return :answer_voice if update.respond_to?(:voice?) && update.voice?
+
+            return :free_text_answer
+          end
+          draft = @idea_draft_store.get(chat_id: update.chat_id)
+          if draft&.phase == :awaiting_transcript_confirm && draft.origin == :voice
+            return :idea_voice if update.respond_to?(:voice?) && update.voice?
+            return :idea_voice_edit_text if update.respond_to?(:text?) && update.text?
+          end
+          if update.respond_to?(:voice?) && update.voice?
+            return :idea_voice_during_draft if draft && draft.origin != :voice
+
+            return :idea_voice
+          end
           return :idea_media if update.respond_to?(:media?) && update.media?
-          return :idea_text_capture if @idea_draft_store.get(chat_id: update.chat_id)&.phase == :awaiting_text
+          return :idea_text_capture if draft&.phase == :awaiting_text
 
           :unknown
         end
@@ -195,6 +217,8 @@ module Hive
         when /\Arefresh_diagnose:/ then :callback_refresh_diagnose
         when /\Aanswer:/ then :callback_answer
         when /\Aidea_project:/ then :callback_idea_project_pick
+        when /\Aidea_voice_confirm:/ then :callback_idea_voice_confirm
+        when /\Aidea_voice_discard:/ then :callback_idea_voice_discard
         when /\Aidea_done:/ then :callback_idea_done
         when /\Aidea_skip:/ then :callback_idea_skip
         when /\Apath_a_yes:/ then :callback_path_a_yes
@@ -213,8 +237,37 @@ module Hive
         reply_text = update.respond_to?(:reply_to_text) ? update.reply_to_text.to_s : ""
         return nil if reply_text.empty?
 
-        reply_text.match(%r{(?:\A|\s)(?<project>[A-Za-z0-9_.-]+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\s*\(}) ||
-          reply_text.match(/\AAnswer mode started for (?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\./)
+        if (match = reply_text.match(%r{(?:\A|\s)(?<project>[A-Za-z0-9_.-]+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\s*\(}))
+          return { project: match[:project], slug: match[:slug] }
+        end
+
+        if (match = reply_text.match(/\AAnswer mode started for (?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\./))
+          return { project: nil, slug: match[:slug] }
+        end
+
+        nil
+      end
+
+      def answer_context(update)
+        state = @conversation_store.get(chat_id: update.chat_id)
+        if state
+          return {
+            project: state.project,
+            slug: state.slug,
+            question_n: state.question_n,
+            mode: state.mode
+          }
+        end
+
+        reattached = reattach_target(update)
+        return nil unless reattached
+
+        {
+          project: reattached[:project],
+          slug: reattached.fetch(:slug),
+          question_n: nil,
+          mode: :path_b
+        }
       end
 
       def effective_text(update)
@@ -233,12 +286,31 @@ module Hive
         when :slash_details then @slash_handlers.details(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
+        when :idea_voice then @slash_handlers.voice(update)
+        when :answer_voice then answer_voice(update)
+        when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
+        when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
         when :unknown then Result.new(action: :reply, text: "I did not understand that. Send /help for commands.")
         else @callback_handlers.handle(intent, update)
         end
+      end
+
+      def answer_voice(update)
+        context = answer_context(update)
+        return Result.new(action: :reply, text: "Send /answer <slug> before sending a voice answer.") unless context
+
+        result = @slash_handlers.voice(update)
+        return result unless result.action == :transcribe_voice
+
+        result.project = context[:project]
+        result.slug = context.fetch(:slug)
+        result.question_n = context[:question_n]
+        result.mode = context[:mode] || :path_b
+        result.attachment = result.attachment.merge(purpose: :answer)
+        result
       end
     end
   end

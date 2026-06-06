@@ -25,6 +25,7 @@ module Hive
       CallbackAnswer = Struct.new(:callback_query_id, :text, :show_alert, :t, keyword_init: true)
 
       attr_reader :sent, :edits, :answered_callbacks
+      attr_accessor :downloads
 
       def initialize(now: -> { Time.now })
         @now = now
@@ -32,6 +33,7 @@ module Hive
         @edits = []
         @answered_callbacks = []
         @updates = []
+        @downloads = {}
       end
 
       def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
@@ -86,6 +88,38 @@ module Hive
         )
         @updates << update
         update
+      end
+
+      def inject_voice(file_id:, update_id:, bytes: "audio-bytes".b,
+                       chat_id: DEFAULT_CHAT_ID, from_id: DEFAULT_USER_ID,
+                       message_id: update_id, file_size: nil, duration: 3,
+                       mime_type: "audio/ogg")
+        @downloads[file_id] = bytes
+        update = Hive::Bot::Telegram::Update.new(
+          update_id: update_id,
+          chat_id: chat_id,
+          from_id: from_id,
+          message_id: message_id,
+          voice: {
+            file_id: file_id,
+            file_unique_id: "unique-#{file_id}",
+            duration: duration,
+            mime_type: mime_type,
+            file_size: file_size || bytes.bytesize
+          }
+        )
+        @updates << update
+        update
+      end
+
+      def get_file(file_id:)
+        bytes = @downloads.fetch(file_id)
+        { file_path: "fake/#{file_id}.oga", file_size: bytes.bytesize }
+      end
+
+      def download_file(file_path:)
+        file_id = File.basename(file_path, ".oga")
+        @downloads.fetch(file_id)
       end
 
       def tap_button(callback_data:, update_id:, chat_id: DEFAULT_CHAT_ID,

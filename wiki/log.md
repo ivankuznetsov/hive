@@ -2,6 +2,52 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
+
+**Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[log]]
+
+## [2026-06-06T19:07:48Z] bot - cover audio ideas and audio answers in live E2E
+
+**Action:** Added voice-answer coverage to the Telegram voice-note branch. The router now routes voice notes sent during active or reattached `/answer` conversations to `transcribe_voice` with answer context; `Supervisor#execute_transcribe_voice` writes successful answer transcripts through the existing brainstorm answer writer instead of creating an idea draft. Extended `test/e2e/tg/run_idea_e2e.sh` so `TG_IDEA_MODE=voice` drives both a new audio idea and a seeded audio `/answer` path with the checked-in voice fixture. Added focused router, supervisor, and in-process bot scenario coverage. Refreshed [[commands/bot]], [[modules/bot]], [[testing]], and [[gaps]].
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-06T06:58:00Z] bot - apply transcription reload review fixes
+
+**Action:** Addressed pass-2 review findings on the voice-note branch. `Supervisor#reload_config_if_requested` now rebuilds `Hive::Bot::Transcriber` from the reloaded `bot.transcription` config so endpoint/model/retry/language settings apply on `hive bot reload`; the `:ok` transcription path now logs and replies if the draft disappears before transcript storage instead of sending a dead Confirm button. Added focused coverage for reload rebuild, unsupported-language hint wording, failed-fallback staging cleanup, secondary post-`getFile` size guard, malformed `no_speech_prob`, and transcription config validation branches. Refreshed [[modules/bot]] reload behavior.
+
+**Refreshed pages:**
+- [[modules/bot]]
+
+## [2026-06-06T06:45:00Z] bot - hard-fail missing voice E2E secret
+
+**Action:** Resolved the pass-2 voice E2E review escalation by making explicit `TG_IDEA_MODE=voice` fail when `HIVE_WHISPER_API_KEY` is unset instead of reporting a green skip. Updated the shell wrapper message, the voice fixture README, and [[testing]] so the documented contract matches the driver.
+
+**Refreshed pages:**
+- [[testing]]
+
+## [2026-06-06T06:31:00Z] bot - voice fixture and draft-preservation review fix
+
+**Action:** Addressed 6-review pass-2 voice findings on the Telegram voice-note idea branch. Added the checked-in `test/fixtures/voice/voice-idea.oga` Ogg/Opus speech sample used by the secret-gated voice E2E, and documented it in [[testing]]. Guarded `Router`/`Supervisor` so a bare voice note sent while a non-voice idea draft is open replies with an explicit finish/discard prompt and preserves the existing draft instead of clearing it through `IdeaDraftStore#start`. Refreshed [[modules/bot]] and narrowed [[gaps]] to the remaining live Telegram/OpenAI smoke evidence.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-06T00:00:00Z] review - voice-transcription fix pass ([[commands/bot]])
+
+**Action:** Applied 6-review auto-fix findings on the voice-note idea-capture branch. Code: normalized the Whisper language gate so full-name `language` output ("english"/"russian") matches ISO-code `supported_languages` ("en"/"ru") — the default config previously rejected every real voice note; derived `Transcriber::DEFAULT_CONFIG` from `Hive::Config::DEFAULTS["bot"]["transcription"]` (single source of truth); dropped Faraday `:raise_error` so the 4xx-vs-5xx handling runs in production as tested; narrowed the broad `rescue StandardError` to transport/parse errors so programmer bugs surface; added a `Transcriber::Result` STATUSES guard and `IdeaDraftStore` PHASES/ORIGINS validation; gated voice-draft reuse/clear on `origin == :voice` (data-loss fix); split the supervisor download-vs-staging rescue with accurate messages + chat_id-tagged failure logging; derived the unsupported-language hint from config; guarded oversize on the payload size before the getFile round-trip; extracted shared `IdeaKeyboards` (transcript/confirm/project helpers). Docs: corrected the `/idea` voice flow ordering (picker appears only after `Confirm`) and added the OpenAI-vs-OpenRouter (plan Q1) rationale. Added the checked-in `test/fixtures/voice/voice-idea.oga` speech fixture and made the voice E2E fail (not skip) when the Whisper secret is set but the fixture is absent.
+
 ## [2026-06-05T22:04:03Z] wiki — refresh pass 02 patrol/archive/tui coverage
 
 **Action:** Refreshed wiki coverage after commit `217459fe` (`fix(review): apply pass 02 findings`). Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff archive filter tui format"` only surfaced the prior related log entry, so verification used the committed diff plus direct source reads. Checked `lib/hive/patrol/review_handoff.rb`, `lib/hive/archive_filter.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/archive_pane.rb`, `lib/hive/tui/views/format.rb`, and focused unit tests. Documented patrol handoff's sparse-finding normalization, archive filtering's nil-timestamp fail-open behavior, Archive-pane display-cell alignment, and the expanded unit-test edge cases. No page coverage changed, and no new uncertainty was found beyond existing patrol/archive live-smoke gaps. Did not run `qmd update` or `qmd embed`.
@@ -52,6 +98,7 @@ Append-only log of all wiki operations.
 - [[cli]]
 - [[operating]]
 - [[testing]]
+
 ## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
 
 **Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.
@@ -3386,6 +3433,16 @@ TTL config.
 **Refreshed pages:**
 - [[commands/tui]]
 
+## [2026-06-05T22:45:00Z] bot — refresh voice idea command/API coverage
+
+**Action:** Refreshed command/API wiki coverage after the voice-idea implementation series (`e96e024b`, `1e61c1ff`, `9a79198a`, `a740bab7`, `21813bb2`, `b09a18db`, `6f7aa97b`, `89937845`) added Telegram voice metadata parsing, an OpenAI-compatible transcriber, transcription config validation, transcript-confirm draft state, router/callback confirm-edit-discard handling, supervisor transcription execution, transcript-only capture integration coverage, fallback audio retention, fake Telegram voice injection, and opt-in live Telegram voice E2E hooks. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "telegram voice idea confirmation bot router callback slash handlers"` returned no indexed hits, so verification used direct wiki/source reads. Inspected the committed diffs plus `lib/hive/bot/router.rb`, `lib/hive/bot/handlers/slash_handlers.rb`, `lib/hive/bot/handlers/callback_handlers.rb`, `lib/hive/bot/supervisor.rb`, `lib/hive/bot/transcriber.rb`, `lib/hive/bot/telegram.rb`, `lib/hive/bot/idea_draft_store.rb`, `lib/hive/config.rb`, `test/integration/bot/scenarios/s6_voice_idea_test.rb`, `test/eval/support/fake_telegram.rb`, and `test/e2e/tg/drive_idea.py`. Documented bare voice-note idea capture, transcript confirm/discard/edit/re-record callbacks, immediate commit after project selection for voice-only drafts, failed-transcription audio fallback, transcription config validation, Faraday multipart usage, env-only `HIVE_WHISPER_API_KEY`, and secret-gated E2E behavior. Recorded that live Telegram download and live OpenAI transcription smoke evidence is still missing unless the opt-in E2E is run with a real fixture/key. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[modules/config]]
+- [[architecture]]
+- [[dependencies]]
 ## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
 
 **Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.

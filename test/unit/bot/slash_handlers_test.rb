@@ -16,6 +16,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
   MediaUpdate = Struct.new(:text, :chat_id, :effective_text, keyword_init: true) do
     def media? = true
   end
+  VoiceUpdate = Struct.new(:chat_id, :voice, keyword_init: true)
   PolicyResult = Struct.new(:status, :file_id, :file_size, :ext, keyword_init: true)
 
   FakeAttachmentPolicy = Struct.new(:result, keyword_init: true) do
@@ -379,6 +380,13 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "Use /idea <text> to capture a new idea.", result.text
   end
 
+  def test_voice_without_file_id_replies_without_transcribe_action
+    result = @handlers.voice(VoiceUpdate.new(chat_id: 1, voice: {}))
+
+    assert_equal :reply, result.action
+    assert_match(/Couldn't read that voice note/, result.text)
+  end
+
   def test_idea_with_text_uses_default_clock_for_legacy_pending_idea
     pending = {}
     handlers = Hive::Bot::Handlers::SlashHandlers.new(
@@ -441,9 +449,14 @@ class HiveBotSlashHandlersTest < Minitest::Test
   end
 
   def test_media_reply_copy_matches_draft_phase
-    %i[awaiting_project collecting_files other].each do |phase|
+    # awaiting_transcript_confirm is a valid phase that media_after_stage_reply
+    # does not special-case, so it exercises the generic "Attached." fallback.
+    %i[awaiting_project collecting_files awaiting_transcript_confirm].each do |phase|
       store = Hive::Bot::IdeaDraftStore.new
-      store.start(chat_id: 9, phase: phase, text: "fix", token: "tok")
+      # :awaiting_transcript_confirm is coupled to a voice-origin draft
+      # (validate_phase_origin!), so it must be started with origin: :voice.
+      origin = phase == :awaiting_transcript_confirm ? :voice : nil
+      store.start(chat_id: 9, phase: phase, text: "fix", token: "tok", origin: origin)
       handlers = idea_handlers(
         draft_store: store,
         policy: FakeAttachmentPolicy.new(
@@ -456,7 +469,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       expected = {
         awaiting_project: "Pick a project for the idea.",
         collecting_files: "Attached. Send more files, or press Done.",
-        other: "Attached."
+        awaiting_transcript_confirm: "Attached."
       }.fetch(phase)
       assert_equal expected, result.text
     end

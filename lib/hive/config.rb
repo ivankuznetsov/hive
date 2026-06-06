@@ -371,6 +371,21 @@ module Hive
         "idea_attachment_max_bytes" => 20 * 1024 * 1024,
         "idea_attachment_max_count" => 10,
         "idea_draft_ttl_sec" => 900,
+        "transcription" => {
+          "enabled" => true,
+          "endpoint" => "https://api.openai.com/v1/audio/transcriptions",
+          "model" => "whisper-1",
+          "api_key_env" => "HIVE_WHISPER_API_KEY",
+          "max_retries" => 3,
+          "retry_backoff_sec" => 2,
+          "timeout_sec" => 120,
+          # Bound the TCP connect separately from the overall request. Without
+          # it a hung connect is unbounded and stalls the serial poll thread
+          # well past timeout_sec.
+          "open_timeout_sec" => 10,
+          "no_speech_threshold" => 0.6,
+          "supported_languages" => %w[en ru]
+        },
         "codex_budget_usd" => 1,
         "codex_timeout_sec" => 120,
         "shutdown_grace_sec" => 60,
@@ -1733,6 +1748,7 @@ module Hive
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
+      validate_bot_transcription!(bot, source_path)
     end
 
     def validate_bot_runtime!(bot, source_path)
@@ -1827,6 +1843,81 @@ module Hive
                 "got #{value.inspect}"
         end
         bot[key] = File.expand_path(value)
+      end
+    end
+
+    TRANSCRIPTION_NUMERIC_BOUNDS = [
+      [ "max_retries", 0, nil, true ],
+      [ "retry_backoff_sec", 0, nil, true ],
+      [ "timeout_sec", 0, nil, true ],
+      [ "open_timeout_sec", 0, nil, true ],
+      [ "no_speech_threshold", 0, 1, false ]
+    ].freeze
+
+    def validate_bot_transcription!(bot, source_path)
+      transcription = bot["transcription"]
+      return if transcription.nil?
+
+      unless transcription.is_a?(Hash)
+        raise ConfigError,
+              "bot.transcription in #{describe_source(source_path)} must be a Hash; " \
+              "got #{transcription.inspect} (#{transcription.class})"
+      end
+
+      enabled = transcription["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "bot.transcription.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      %w[endpoint model api_key_env].each do |key|
+        value = transcription[key]
+        next if value.nil?
+
+        unless value.is_a?(String) && !value.strip.empty?
+          raise ConfigError,
+                "bot.transcription.#{key} in #{describe_source(source_path)} must be a non-empty String; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+
+      validate_bot_transcription_numbers!(transcription, source_path)
+      validate_bot_transcription_languages!(transcription, source_path)
+    end
+
+    def validate_bot_transcription_numbers!(transcription, source_path)
+      TRANSCRIPTION_NUMERIC_BOUNDS.each do |key, min, max, integer_only|
+        value = transcription[key]
+        next if value.nil?
+
+        valid_type = integer_only ? value.is_a?(Integer) : value.is_a?(Numeric)
+        unless valid_type && value >= min && (max.nil? || value <= max)
+          bound = max ? "between #{min} and #{max}" : ">= #{min}"
+          type = integer_only ? "integer" : "number"
+          raise ConfigError,
+                "bot.transcription.#{key} in #{describe_source(source_path)} must be a #{type} #{bound}; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+    end
+
+    def validate_bot_transcription_languages!(transcription, source_path)
+      languages = transcription["supported_languages"]
+      return if languages.nil?
+
+      unless languages.is_a?(Array)
+        raise ConfigError,
+              "bot.transcription.supported_languages in #{describe_source(source_path)} " \
+              "must be an Array of Strings; got #{languages.inspect} (#{languages.class})"
+      end
+
+      languages.each_with_index do |entry, idx|
+        next if entry.is_a?(String) && !entry.strip.empty?
+
+        raise ConfigError,
+              "bot.transcription.supported_languages[#{idx}] in #{describe_source(source_path)} " \
+              "must be a non-empty String; got #{entry.inspect} (#{entry.class})"
       end
     end
 

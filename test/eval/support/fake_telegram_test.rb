@@ -27,4 +27,18 @@ class HiveEvalFakeTelegramTest < Minitest::Test
     assert_equal "details:hive:slug", updates.last.callback_data
     assert_equal 3, updates.last.message_id
   end
+
+  def test_inject_voice_queues_voice_update_and_download_bytes
+    telegram = Hive::Eval::FakeTelegram.new
+    telegram.inject_voice(file_id: "voice-1", update_id: 12, bytes: "raw-audio".b)
+
+    update = telegram.poll_updates(timeout: 0, since_update_id: 12).first
+
+    assert update.voice?
+    assert_equal "voice-1", update.voice.fetch(:file_id)
+    assert_equal 9, update.voice.fetch(:file_size)
+    file = telegram.get_file(file_id: "voice-1")
+    assert_equal({ file_path: "fake/voice-1.oga", file_size: 9 }, file)
+    assert_equal "raw-audio", telegram.download_file(file_path: file.fetch(:file_path))
+  end
 end

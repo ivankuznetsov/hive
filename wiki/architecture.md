@@ -203,10 +203,13 @@ verbs with `--from <stage> --json`; recovery buttons call
 in-process writes are intentionally scoped: brainstorm answer insertion,
 which is limited to `### A<N>.` blocks under
 `Hive::Lock.with_task_lock`, and Telegram idea-draft submission with
-attachments, which downloads allowed media into a temp staging dir and
-then calls `Hive::Commands::New#call!` with a body override plus
-`attachments:` tuples. Final task files are still written through the
-same `hive new` command path.
+attachments or voice-note transcripts. Attachment capture downloads
+allowed media into a temp staging dir; voice capture downloads the
+Telegram voice file, transcribes it through `Hive::Bot::Transcriber`,
+keeps only the confirmed transcript on the happy path, then calls
+`Hive::Commands::New#call!` with the same body/attachment arguments as
+other idea drafts. Final task files are still written through the same
+`hive new` command path.
 
 Path A brainstorm help uses Codex as a short-lived subprocess per turn
 through `Hive::Bot::CodexConversation`. Telegram-sourced text is wrapped

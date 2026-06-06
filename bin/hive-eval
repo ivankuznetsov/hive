@@ -4,6 +4,8 @@ require "fileutils"
 require "English"
 require "optparse"
 
+SAFE_SCENARIO_BASENAME = /\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z/
+
 root = File.expand_path("..", __dir__)
 options = {
   report: File.join(root, "tmp", "hive-eval-report.json"),
@@ -41,12 +43,15 @@ end
 def scenario_path(root, value)
   return nil if value.nil?
   if value.include?("/") || value.include?("\\")
-    raise ArgumentError, "scenario must be a basename under test/eval/scenarios"
+    raise ArgumentError,
+          "scenario must be a basename under test/eval/scenarios; scenario must be a safe basename matching " \
+          "#{SAFE_SCENARIO_BASENAME.source} (got #{value.inspect})"
   end
 
   basename = File.basename(value, ".rb").sub(/_test\z/, "")
-  unless basename.match?(/\A[\w-]+\z/)
-    raise ArgumentError, "scenario must be a safe basename under test/eval/scenarios"
+  unless SAFE_SCENARIO_BASENAME.match?(basename)
+    raise ArgumentError,
+          "scenario must be a safe basename matching #{SAFE_SCENARIO_BASENAME.source} (got #{value.inspect})"
   end
 
   File.join(scenario_root(root), "#{basename}_test.rb")

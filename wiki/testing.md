@@ -32,7 +32,7 @@ In CI (`CI=true`), tests that exercise backgrounding commands must force a foreg
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
+  t.test_files = FileList["test/{unit,integration,babysitter}/**/*_test.rb"]
   t.warning = false
 end
 task default: :test
@@ -125,7 +125,7 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 
 `test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
 
-`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--scenario` accepts only basename-style selectors (`s1_status`, `s1_status_test`, or `s1_status_test.rb`); path separators and traversal are rejected before the eval rake task runs. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
+`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--scenario` accepts only basename-style selectors (`s1_status`, `s1_status_test`, or `s1_status_test.rb`); the runner normalizes the suffix, maps it under `test/eval/scenarios/`, and rejects path separators/traversal with exit 64 before report creation or `rake test:eval` dispatch. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is now a passing daemon-enabled signal/noise contract: noisy `ready_to_*` rows must not produce proactive Telegram alerts while `needs_input` and fatal/error paths remain proactive.
 
 ## Lint
 

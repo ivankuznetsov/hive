@@ -52,6 +52,21 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_positional_and_scenario_flag_conflict
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "conflict.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "s1_status", "--scenario", "s2_noise", "--no-judge", "--report", report
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_match(/unexpected arguments: s1_status/, err)
+      refute File.exist?(report)
+    end
+  end
+
   def test_cli_reports_failing_scenario_and_exits_nonzero
     # s3_noise used to be the always-failing scenario the reporter exercised.
     # Now that daemon-gated ready_to_X suppression has landed (commit

@@ -3723,3 +3723,11 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[commands/tui]]
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-06T02:10:00Z] wiki — audit eval refresh residue commit
+
+**Action:** Audited commit `7f69450c` after it committed residual wiki changes from the `6-review` task. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hive-eval positional scenario eval runner"` found the original eval-harness log entry. Verified the committed wiki diff plus source commit `2aea9a7c`, current `bin/hive-eval`, `Rakefile`, and `test/eval/support/reporter_test.rb`. Confirmed the positional-vs-`--scenario` CLI behavior is documented in [[testing]], refreshed [[gaps]] to match the executable-level reporter assertions for positional, extra-argument, and mixed-selector cases, and updated [[index]] metadata for the refreshed date. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+- [[index]]

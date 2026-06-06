@@ -106,7 +106,9 @@ transcription fails after the file is downloaded, the `.oga` is staged as
 create operation is `Hive::Commands::New#call!`, so slug validation,
 `assets/` copying, rollback-on-write-failure, and `hive/state` commit
 behavior remain shared with the CLI/TUI capture surface. Draft cleanup
-removes the staging directory.
+removes the staging directory. A bare voice note is refused while a
+non-voice idea draft is open, preserving the existing typed/media draft
+instead of clearing it through the voice transcription path.
 
 ## Single-dispatcher invariant (plan 2026-05-28-002)
 

@@ -475,6 +475,29 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/new transcript/, @telegram.messages.last.fetch(:text))
   end
 
+  def test_transcribe_voice_during_non_voice_draft_does_not_clear_or_download
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "typed idea", token: "tok")
+    get_file_called = false
+    @telegram.define_singleton_method(:get_file) do |file_id:|
+      get_file_called = true
+      { file_path: "voice/file.oga", file_size: 5 }
+    end
+    result = FakeRouter::Result.new(
+      action: :transcribe_voice,
+      attachment: { chat_id: 42, file_id: "voice-id", file_size: 5 }
+    )
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    refute get_file_called
+    assert_empty @transcriber.calls
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal :collecting_files, draft.phase
+    assert_equal "typed idea", draft.text
+    assert_equal "tok", draft.token
+    assert_match(/Finish or discard the current idea draft/, @telegram.messages.last.fetch(:text))
+  end
+
   def test_transcribe_voice_no_speech_clears_draft
     @idea_draft_store.start(chat_id: 42, phase: :awaiting_transcript_confirm,
                             text: "old", token: "tok", origin: :voice)

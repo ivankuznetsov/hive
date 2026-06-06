@@ -173,6 +173,22 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "voice-two", result.attachment.fetch(:file_id)
   end
 
+  def test_voice_while_non_voice_draft_is_open_preserves_current_draft
+    @draft_store.start(chat_id: 12345, phase: :collecting_files, text: "typed idea", token: "tok")
+
+    result = @router.handle(update(voice: {
+      file_id: "voice-two",
+      file_size: 222
+    }))
+
+    assert_equal :reply, result.action
+    assert_match(/Finish or discard the current idea draft/, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal :collecting_files, draft.phase
+    assert_equal "typed idea", draft.text
+    assert_equal "tok", draft.token
+  end
+
   def test_text_while_awaiting_text_after_voice_fallback_routes_to_capture
     # After a transcription failure the supervisor leaves a voice-origin draft
     # in :awaiting_text. Plain text must route to idea text capture, not the

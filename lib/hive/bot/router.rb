@@ -44,6 +44,7 @@ module Hive
         callback_findings_reject_all
         callback_idea_project_new
         idea_voice
+        idea_voice_during_draft
         idea_voice_edit_text
         idea_media
         idea_text_capture
@@ -133,14 +134,18 @@ module Hive
         when %r{\A/help\b} then :slash_help
         else
           return :free_text_answer if @conversation_store.get(chat_id: update.chat_id) || reattach_target(update)
-          transcript_draft = @idea_draft_store.get(chat_id: update.chat_id)
-          if transcript_draft&.phase == :awaiting_transcript_confirm
+          draft = @idea_draft_store.get(chat_id: update.chat_id)
+          if draft&.phase == :awaiting_transcript_confirm && draft.origin == :voice
             return :idea_voice if update.respond_to?(:voice?) && update.voice?
             return :idea_voice_edit_text if update.respond_to?(:text?) && update.text?
           end
-          return :idea_voice if update.respond_to?(:voice?) && update.voice?
+          if update.respond_to?(:voice?) && update.voice?
+            return :idea_voice_during_draft if draft && draft.origin != :voice
+
+            return :idea_voice
+          end
           return :idea_media if update.respond_to?(:media?) && update.media?
-          return :idea_text_capture if @idea_draft_store.get(chat_id: update.chat_id)&.phase == :awaiting_text
+          return :idea_text_capture if draft&.phase == :awaiting_text
 
           :unknown
         end
@@ -248,6 +253,7 @@ module Hive
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
         when :idea_voice then @slash_handlers.voice(update)
+        when :idea_voice_during_draft then Result.new(action: :reply, text: "Finish or discard the current idea draft before sending a voice note.")
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)

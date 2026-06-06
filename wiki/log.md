@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T06:31:00Z] bot - voice fixture and draft-preservation review fix
+
+**Action:** Addressed 6-review pass-2 voice findings on the Telegram voice-note idea branch. Added the checked-in `test/fixtures/voice/voice-idea.oga` Ogg/Opus speech sample used by the secret-gated voice E2E, and documented it in [[testing]]. Guarded `Router`/`Supervisor` so a bare voice note sent while a non-voice idea draft is open replies with an explicit finish/discard prompt and preserves the existing draft instead of clearing it through `IdeaDraftStore#start`. Refreshed [[modules/bot]] and narrowed [[gaps]] to the remaining live Telegram/OpenAI smoke evidence.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-06T00:00:00Z] review - voice-transcription fix pass ([[commands/bot]])
 
 **Action:** Applied 6-review auto-fix findings on the voice-note idea-capture branch. Code: normalized the Whisper language gate so full-name `language` output ("english"/"russian") matches ISO-code `supported_languages` ("en"/"ru") — the default config previously rejected every real voice note; derived `Transcriber::DEFAULT_CONFIG` from `Hive::Config::DEFAULTS["bot"]["transcription"]` (single source of truth); dropped Faraday `:raise_error` so the 4xx-vs-5xx handling runs in production as tested; narrowed the broad `rescue StandardError` to transport/parse errors so programmer bugs surface; added a `Transcriber::Result` STATUSES guard and `IdeaDraftStore` PHASES/ORIGINS validation; gated voice-draft reuse/clear on `origin == :voice` (data-loss fix); split the supervisor download-vs-staging rescue with accurate messages + chat_id-tagged failure logging; derived the unsupported-language hint from config; guarded oversize on the payload size before the getFile round-trip; extracted shared `IdeaKeyboards` (transcript/confirm/project helpers). Docs: corrected the `/idea` voice flow ordering (picker appears only after `Confirm`) and added the OpenAI-vs-OpenRouter (plan Q1) rationale. Added the checked-in `test/fixtures/voice/voice-idea.oga` speech fixture and made the voice E2E fail (not skip) when the Whisper secret is set but the fixture is absent.

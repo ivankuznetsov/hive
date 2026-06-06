@@ -467,6 +467,11 @@ module Hive
 
         payload = result.attachment || {}
         chat_id = payload.fetch(:chat_id, update.chat_id)
+        if non_voice_draft?(chat_id: chat_id)
+          return safe_send_message(chat_id: update.chat_id,
+                                   text: "Finish or discard the current idea draft before sending a voice note.")
+        end
+
         # Guard on the size Telegram advertised in the message payload BEFORE
         # the getFile round-trip. The payload's voice.file_size is authoritative;
         # getFile's info[:file_size] is sometimes omitted (yielding a missed
@@ -553,6 +558,11 @@ module Hive
         size.positive? && size > idea_attachment_max_bytes
       end
 
+      def non_voice_draft?(chat_id:)
+        draft = @idea_draft_store.get(chat_id: chat_id)
+        draft && draft.origin != :voice
+      end
+
       def idea_attachment_max_bytes
         @config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024).to_i
       end
@@ -568,6 +578,7 @@ module Hive
       def ensure_voice_draft(chat_id:)
         existing = @idea_draft_store.get(chat_id: chat_id)
         return existing if existing&.origin == :voice
+        return nil if existing
 
         @idea_draft_store.start(chat_id: chat_id, phase: :awaiting_transcript_confirm,
                                 token: SecureRandom.hex(4), origin: :voice)

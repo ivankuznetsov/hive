@@ -191,6 +191,59 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_diff_submodule_disables_submodule_configured_external_diff
+    # `git diff --submodule=diff` recurses into each submodule and honours that
+    # submodule's own diff.external, which the top-level injected --no-ext-diff
+    # does not reach. The stub forces an empty diff.external via GIT_CONFIG so the
+    # helper is neutralised across every config scope, submodule included.
+    with_tmp_git_repo do |outer|
+      Dir.mktmpdir("hive-submodule") do |subsrc|
+        run!("git", "-C", subsrc, "init", "-b", "master", "--quiet")
+        run!("git", "-C", subsrc, "config", "user.email", "test@example.com")
+        run!("git", "-C", subsrc, "config", "user.name", "Test")
+        run!("git", "-C", subsrc, "config", "commit.gpgsign", "false")
+        File.write(File.join(subsrc, "f.txt"), "a\n")
+        run!("git", "-C", subsrc, "add", ".")
+        run!("git", "-C", subsrc, "commit", "-m", "c1", "--quiet")
+        File.write(File.join(subsrc, "f.txt"), "b\n")
+        run!("git", "-C", subsrc, "add", ".")
+        run!("git", "-C", subsrc, "commit", "-m", "c2", "--quiet")
+
+        run!("git", "-C", outer, "-c", "protocol.file.allow=always",
+             "submodule", "add", "--quiet", subsrc, "sub")
+        run!("git", "-C", outer, "commit", "-m", "add sub", "--quiet")
+
+        sub = File.join(outer, "sub")
+        # Roll the submodule worktree back a commit so the superproject sees a diff
+        # that --submodule=diff will try to render with the submodule's diff.external.
+        run!("git", "-C", sub, "checkout", "--quiet", "HEAD~1")
+
+        marker = File.join(outer, "submodule-diff-ran")
+        external_diff = File.join(outer, "submodule-external-diff")
+        File.write(external_diff, <<~SH)
+          #!/bin/sh
+          touch #{marker.shellescape}
+          exit 0
+        SH
+        FileUtils.chmod("+x", external_diff)
+        run!("git", "-C", sub, "config", "diff.external", external_diff)
+
+        env = {
+          "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
+          "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(outer, "skipped.log")
+        }
+        out, err, status = Open3.capture3(
+          env, stub_path("git"), "-C", outer, "diff", "--submodule=diff"
+        )
+
+        assert status.success?, err
+        assert_includes out, "Submodule sub"
+        refute_path_exists marker
+        refute_path_exists File.join(outer, "skipped.log")
+      end
+    end
+  end
+
   def test_git_diff_with_pathspec_does_not_misplace_safety_flags
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "README.md"), "changed\n")

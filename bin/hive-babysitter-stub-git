@@ -246,13 +246,23 @@ end
 # also reads repository/global/system config after the stub's allowlist passes,
 # so force safe config for helpers that can spawn commands from read-looking
 # operations.
+#
+# diff.external is forced empty here (not just via the injected --no-ext-diff)
+# because `git diff/show/log --submodule=diff` recurses into each submodule and
+# honours that submodule's own diff.external — the top-level --no-ext-diff does
+# not propagate into the recursion, so a malicious submodule config could still
+# spawn a helper. GIT_CONFIG_KEY/VALUE injection has command-level precedence and
+# applies across every config scope (including the submodule's), so an empty
+# diff.external neutralises both the submodule and top-level external-diff paths.
 %w[GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV["GIT_CONFIG_NOSYSTEM"] = "1"
 ENV["GIT_CONFIG_GLOBAL"] = File::NULL
-ENV["GIT_CONFIG_COUNT"] = "1"
+ENV["GIT_CONFIG_COUNT"] = "2"
 ENV["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
 ENV["GIT_CONFIG_VALUE_0"] = "false"
+ENV["GIT_CONFIG_KEY_1"] = "diff.external"
+ENV["GIT_CONFIG_VALUE_1"] = ""
 ENV["GIT_PAGER"] = ""
 
 begin

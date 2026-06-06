@@ -9,6 +9,24 @@ set -euo pipefail
 
 self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
+# A misbehaving candidate must not hang `hv`: one that blocks reading
+# stdin, or a slow/JVM-based Apache Hive that takes seconds to boot,
+# would otherwise stall the probe indefinitely with no fallback. We
+# always close the probe's stdin (</dev/null) and, when `timeout` is
+# available, cap each probe so a slow candidate falls through to the
+# next instead of hanging. `timeout` is absent on stock macOS, so the
+# cap is best-effort — stdin redirection covers the common blocking case
+# even without it.
+timeout_bin="$(command -v timeout 2>/dev/null || true)"
+
+probe_version() {
+  if [[ -n "$timeout_bin" ]]; then
+    "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null
+  else
+    "$1" --version </dev/null 2>/dev/null
+  fi
+}
+
 candidates=(
   "${HIVE_BIN_OVERRIDE:-}"
   "${XDG_BIN_HOME:-${HOME}/.local/bin}/hive"
@@ -24,7 +42,7 @@ for candidate in "${candidates[@]}"; do
   # Guard against `hv -> hv` chains: never exec into our own script.
   [[ "$resolved" != "$self" ]] || continue
 
-  if ! version="$("$candidate" --version 2>/dev/null)" || [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if ! version="$(probe_version "$candidate")" || [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     continue
   fi
 

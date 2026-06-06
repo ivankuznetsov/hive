@@ -90,6 +90,15 @@ Append-only log of all wiki operations.
 - [[operating]]
 - [[gaps]]
 
+## [2026-06-06T20:24:46Z] openclaw — publish as one ClawHub skill
+
+**Action:** Corrected the OpenClaw publishing model after live ClawHub preflight showed that installing one skill folder is the right user surface. Hive now documents and tests a single ClawHub listing, `hive-cli`, whose installed `SKILL.md` still exposes `/hive`; all workflows are invoked as `/hive ...` arguments rather than separate shortcut listings. Deleted the accidental `ivankuznetsov` ClawHub shortcut listings `hive-accept-finding`, `hive-archive`, `hive-artifacts`, and `hive-babysit`; `hive-bot` never published because ClawHub rejected it at the new-skill rate limit. Refreshed the README, OpenClaw README, [[index]], [[operating]], and [[gaps]] so future publication uses only `clawhub skill publish openclaw/skills/hive --slug hive-cli`.
+
+**Refreshed pages:**
+- [[index]]
+- [[operating]]
+- [[gaps]]
+
 ## [2026-06-05T20:52:02Z] release/install - remove `hv` from RubyGem executables
 
 **Action:** Fixed the RubyGem executable surface so `hive.gemspec` advertises only the Ruby `hive` entrypoint, not the bash `bin/hv` launcher that RubyGems would wrap in an unusable Ruby binstub. Adjusted `install.sh` so it no longer moves a gem-installed `hv` shim before writing its own working `hv` wrapper. Added focused assertions in `gemspec_test.rb` and `install_script_test.rb`; verified an isolated `gem build` + `gem install` creates `bin/hive` and no `bin/hv`. Refreshed `[[cli]]`, `[[operating]]`, and `[[testing]]` to document that channel installers own `hv` creation.

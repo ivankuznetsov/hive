@@ -1,44 +1,51 @@
-# Hive OpenClaw Skills
+# Hive OpenClaw Skill
 
-This directory contains OpenClaw-ready skills for driving the `hive` CLI from
-an OpenClaw agent. Each skill is a folder with a `SKILL.md` file and optional
-metadata, matching OpenClaw's documented skill format:
+This directory contains the OpenClaw skill for driving the `hive` CLI from an
+OpenClaw agent. The published ClawHub surface is intentionally one skill:
 
-- Skills are directories containing `SKILL.md` with YAML frontmatter and
-  markdown instructions:
-  <https://docs.openclaw.ai/tools/creating-skills>
-- ClawHub installs one skill slug into a workspace with
-  `openclaw skills install <skill-slug>`:
-  <https://docs.openclaw.ai/tools/skills>
-- ClawHub publishes one skill folder with
-  `clawhub skill publish ./my-skill --slug my-skill --version 1.0.0`:
-  <https://github.com/openclaw/clawhub/blob/main/docs/quickstart.md>
+```bash
+openclaw skills install hive-cli
+```
 
-## Recommendation
+That listing installs a skill whose frontmatter name is `hive`, so users invoke
+it in OpenClaw as:
 
-Hive's OpenClaw surface is a set of prompt-shaped slash commands that shell out
-to the existing `hive` binary. That fits OpenClaw Skills better than an
-OpenClaw Plugin:
+```text
+/hive setup
+/hive status --json
+/hive new . "build this feature"
+/hive plan <task-slug>
+/hive develop <task-slug>
+/hive review <task-slug>
+```
 
-| Path | Install command | Fit |
-|---|---|---|
-| ClawHub skills | `openclaw skills install hive-cli` plus optional shortcuts | Best fit: text instructions that guide setup or call `hive`, no Node runtime |
-| OpenClaw plugin | `openclaw plugins install clawhub:<package>` | Too much machinery for this surface; plugins are for TypeScript runtime code, tools, providers, channels, and hooks |
-| Direct local skill | `openclaw skills install ./openclaw/skills/hive --as hive` | Useful for testing, but no marketplace discoverability or ClawHub update tracking |
+Do not publish one ClawHub listing per Hive command. Subcommands and options
+belong after `/hive ...`.
 
-OpenClaw's documented grouping support is a filesystem organization feature
-(`skills/<group>/<skill>/SKILL.md`), not a single marketplace slug that installs
-many slash commands. The bundle therefore ships an umbrella `/hive` skill for a
-one-command entry point, plus optional shortcut skills such as `/plan`, `/work`,
-and `/ce-review` for frequent workflows. Shortcuts that would collide with
-OpenClaw core commands keep the `hive-` prefix.
+## Shape
+
+OpenClaw skills are directories containing a `SKILL.md` file with YAML
+frontmatter and markdown instructions:
+
+- Creating skills: <https://docs.openclaw.ai/tools/creating-skills>
+- Installing skills: <https://docs.openclaw.ai/tools/skills>
+- Publishing skills: <https://github.com/openclaw/clawhub/blob/main/docs/quickstart.md>
+
+Hive ships one source skill folder:
+
+```text
+openclaw/skills/hive/SKILL.md
+```
+
+The ClawHub slug is `hive-cli` because the public `hive` slug is already owned
+by another publisher. The installed slash command is still `/hive` because
+OpenClaw reads `name: hive` from `SKILL.md`.
 
 ## Setup Model
 
-`openclaw skills install hive-cli` installs the OpenClaw skill folder. It does not
-run arbitrary setup commands during the install itself. The published umbrella
-skill is always visible, even before the Hive CLI is installed, and guides the
-user through setup on first use:
+`openclaw skills install hive-cli` installs the OpenClaw skill folder. It does
+not run arbitrary setup commands during the install itself. The `/hive` skill is
+always visible, even before the Hive CLI is installed, and guides first use:
 
 ```text
 /hive setup
@@ -46,113 +53,36 @@ user through setup on first use:
 
 That guided setup asks for confirmation, installs the Hive CLI through the
 documented platform channel, verifies `hive`/`hv`, runs `hive daemon install`,
-and optionally initializes the current project. The macOS Skills UI can also use
-the umbrella skill's Homebrew installer metadata to install the `hive` binary.
-
-Shortcut skills such as `/plan`, `/work`, and `/ce-review` remain gated on the
-`hive` binary, so they become useful after setup has completed. To verify an
-already-installed Hive CLI:
-
-```bash
-hive --version
-```
-
-If Apache Hive shadows the command, use `hv --version` and let the umbrella
-skill prefer `hv` when it prints Hive CLI's bare `X.Y.Z` version.
+and optionally initializes the current project with non-interactive defaults.
+The macOS Skills UI can also use the skill's Homebrew installer metadata to
+install the `hive` binary.
 
 ## Local Install For Testing
 
-From the Hive repository root, install every checked-in skill in a single
-loop (set `DRY_RUN=1` to preview the commands without writing):
-
-```bash
-for skill in openclaw/skills/*; do
-  name="$(basename "$skill")"
-  if [ "${DRY_RUN:-0}" = "1" ]; then
-    echo openclaw skills install "$skill" --as "$name"
-  else
-    openclaw skills install "$skill" --as "$name"
-  fi
-done
-```
-
-To install one skill on its own (e.g. while iterating on the umbrella):
+From the Hive repository root:
 
 ```bash
 openclaw skills install ./openclaw/skills/hive --as hive
 ```
 
-## Planned ClawHub Slugs
-
-The intended published slugs are:
-
-| ClawHub slug | Slash command | Hive command |
-|---|---|---|
-| `hive-cli` | `/hive` | Any `hive ...` command |
-| `hive-new` | `/hive-new` | `hive new` |
-| `hive-generate-name` | `/generate-name` | `hive generate-name` |
-| `hive-brainstorm` | `/brainstorm` | `hive brainstorm` |
-| `hive-plan` | `/plan` | `hive plan` |
-| `hive-work` | `/work` | `hive develop` |
-| `hive-open-pr` | `/open-pr` | `hive open-pr` |
-| `hive-ce-review` | `/ce-review` | `hive review` |
-| `hive-artifacts` | `/artifacts` | `hive artifacts` |
-| `hive-finalize` | `/finalize` | `hive finalize` |
-| `hive-archive` | `/archive` | `hive archive` |
-| `hive-status` | `/hive-status` | `hive status` |
-| `hive-findings` | `/findings` | `hive findings` |
-| `hive-accept-finding` | `/accept-finding` | `hive accept-finding` |
-| `hive-reject-finding` | `/reject-finding` | `hive reject-finding` |
-| `hive-approve` | `/hive-approve` | `hive approve` |
-| `hive-run` | `/run` | `hive run` |
-| `hive-markers` | `/markers` | `hive markers` |
-| `hive-rebase-status` | `/rebase-status` | `hive rebase-status` |
-| `hive-doctor` | `/doctor` | `hive doctor` |
-| `hive-daemon` | `/daemon` | `hive daemon` |
-| `hive-patrol` | `/patrol` | `hive patrol` |
-| `hive-babysit` | `/babysit` | `hive babysit` |
-| `hive-bot` | `/bot` | `hive bot` |
-| `hive-init` | `/init` | `hive init` |
-
-`/hive-new`, `/hive-approve`, and `/hive-status` are prefixed because OpenClaw
-already has built-in `/new`, `/approve`, and `/status` commands. `hive tui` is
-intentionally not shipped as a skill — it is a human-only interactive dashboard
-and rejects `--json` with EX_USAGE (64); agents should drive the same data via
-`hive status --json` and the typed workflow verbs. `hive version` is omitted
-from the bundle because `hive --version` (already exposed through the umbrella
-`/hive`) covers that need without a dedicated slug. Destructive or rarely used admin
-commands such as `hive drop`, `hive uninstall`, `hive update`,
-`hive forget`, `hive prune`, `hive migrate`, and `hive metrics` remain
-available through `/hive ...`, where the agent sees the complete
-command before execution.
+Then run `/hive setup` from OpenClaw.
 
 ## Publish Checklist
 
-Dry-run every skill before publishing:
-
-```bash
-for skill in openclaw/skills/*; do
-  name="$(basename "$skill")"
-  if [ "$name" = "hive" ]; then
-    slug="hive-cli"
-  elif [ "${name#hive-}" != "$name" ]; then
-    slug="$name"
-  else
-    slug="hive-$name"
-  fi
-
-  clawhub skill publish "$skill" \
-    --slug "$slug" \
-    --version 0.1.0 \
-    --changelog "Initial Hive OpenClaw skill bundle" \
-    --dry-run
-done
-```
-
-Actual publish is intentionally manual and requires maintainer confirmation:
+Publish exactly the umbrella skill:
 
 ```bash
 clawhub login
 clawhub whoami
-# Re-run the loop above without --dry-run after confirming the namespace.
+
+clawhub skill publish openclaw/skills/hive \
+  --slug hive-cli \
+  --name "Hive CLI" \
+  --owner ivankuznetsov \
+  --version 0.1.0 \
+  --changelog "Initial Hive OpenClaw skill with guided setup"
 ```
+
+Do not run `clawhub sync` for this repository, and do not publish folders such
+as `openclaw/skills/plan` or slugs such as `hive-plan`. Those shortcut listings
+are intentionally not part of the public surface.

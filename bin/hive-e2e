@@ -261,8 +261,13 @@ def normalize_leading_class_options!(argv)
   argv.insert(1, *leading_class_options)
 end
 
+# Mirror Thor's boolean grammar for --json so the envelope/prose decision
+# matches what the inner commands actually parse. Thor treats bare `--json`
+# and `--json=<true|false>` (case-insensitive) as the boolean, but rejects
+# `--json=1` as a stray positional — so we accept only the spellings Thor
+# honors as truthy and let `--json=false`/`--no-json` fall through to prose.
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg == "--json=true" || arg == "--json=1" }
+  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=true\z/i) }
 end
 
 begin

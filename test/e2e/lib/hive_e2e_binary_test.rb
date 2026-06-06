@@ -94,6 +94,35 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/no-such/, payload["message"])
   end
 
+  # `--json=TRUE` (uppercase) must be honored: Thor parses booleans
+  # case-insensitively, so json_requested? does too — otherwise an error
+  # under this spelling would leak prose to stderr and exit 1 instead of
+  # emitting the envelope.
+  def test_unknown_command_with_json_uppercase_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "no-such", "--json=TRUE")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json=TRUE is set"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no-such/, payload["message"])
+  end
+
+  # Falsy/non-boolean spellings must NOT trigger the JSON envelope — they
+  # fall through to Thor's human-readable prose on stderr. A naive
+  # `start_with?("--json")` refactor would silently regress this.
+  def test_negative_json_spellings_fall_through_to_prose
+    %w[--json=false --json=0 --no-json].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "no-such", flag)
+      refute_equal 0, status.exitstatus, "#{flag}: unknown command must still exit non-zero"
+      refute_includes out, "hive-e2e-error",
+                       "#{flag}: must not emit a JSON envelope on stdout when JSON is not requested"
+      refute_empty err, "#{flag}: human prose must go to stderr when JSON is not requested"
+    end
+  end
+
   # Missing required positional args + --json must also emit an envelope
   # rather than Thor's "ERROR: ... was called with no arguments" prose.
   def test_missing_required_args_with_json_emits_envelope_on_stdout

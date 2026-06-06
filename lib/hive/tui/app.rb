@@ -65,12 +65,20 @@ module Hive
 
         begin
           state_source = Hive::Tui::StateSource.new
-          state_source.refresh_now
+          # Synchronous prime: refresh_now runs one in-process status parse
+          # and returns the seed snapshot BEFORE the background poller starts,
+          # so the first Bubbletea frame renders real rows instead of a loading
+          # grid. The input loop would otherwise starve the poll thread for
+          # seconds (see input_timeout note below). Capture both seed values
+          # here, ahead of `start`, so the model is seeded from a deterministic
+          # snapshot rather than racing the first background poll.
+          seed_snapshot = state_source.refresh_now
+          seed_error = state_source.last_error
           state_source.start
 
           seed_model = Hive::Tui::Model.initial.with(
-            snapshot: state_source.current,
-            last_error: state_source.last_error
+            snapshot: seed_snapshot,
+            last_error: seed_error
           )
           bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
           # `input_timeout: 5` (ms) trades a tiny amount of GVL-yield

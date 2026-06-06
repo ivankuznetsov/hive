@@ -241,6 +241,16 @@ Append-only log of all wiki operations.
 - [[modules/babysitter]]
 - [[gaps]]
 
+## [2026-06-06T23:19:09+01:00] wiki — audit babysitter dry-run git-stub hardening commit
+
+**Action:** Audited commit `3855b4b6` after it touched the babysitter git dry-run stub, focused unit coverage, and existing wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git diff external no-ext-diff no-textconv pager config"` returned no indexed hits, so verification used the committed diff plus direct source/wiki reads. Checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Confirmed the command/module pages already describe the new real-git handoff constraints: system/global config disabled, `core.fsmonitor=false`, pagers disabled, and `--no-ext-diff --no-textconv` injected for `diff`/`log`/`show`. Page coverage did not change, so [[index]] needed no edit. Resolved the stale local-index-health entry in [[gaps]] because `git status --short` now succeeds cleanly in this checkout. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-06T20:24:46Z] openclaw — publish as one ClawHub skill
 
 **Action:** Corrected the OpenClaw publishing model after live ClawHub preflight showed that installing one skill folder is the right user surface. Hive now documents and tests a single ClawHub listing, `hive-cli`, whose installed `SKILL.md` still exposes `/hive`; all workflows are invoked as `/hive ...` arguments rather than separate shortcut listings. Deleted the accidental `ivankuznetsov` ClawHub shortcut listings `hive-accept-finding`, `hive-archive`, `hive-artifacts`, and `hive-babysit`; `hive-bot` never published because ClawHub rejected it at the new-skill rate limit. Refreshed the README, OpenClaw README, [[index]], [[operating]], and [[gaps]] so future publication uses only `clawhub skill publish openclaw/skills/hive --slug hive-cli`.

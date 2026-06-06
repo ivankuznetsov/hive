@@ -165,6 +165,8 @@ class E2EArtifactCaptureTest < Minitest::Test
       assert File.size(copied_spawn) < File.size(spawn_log),
              "artifact bundle should not copy oversized per-spawn captures wholesale"
       assert_includes File.read(copied_spawn, 128), "truncated to last"
+      assert File.size("#{copied_spawn}.tail") <= File.size(copied_spawn),
+             "tail companion should be derived from the capped artifact copy"
     end
   end
 

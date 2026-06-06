@@ -133,7 +133,7 @@ module Hive
         sources.each do |source|
           dest = File.join(dest_root, File.basename(source))
           copy_tui_diagnostic(source, dest)
-          File.write("#{dest}.tail", tail_lines(source, LOG_TAIL_LINES))
+          File.write("#{dest}.tail", tail_lines(dest, LOG_TAIL_LINES))
         end
       end
 

@@ -151,6 +151,23 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal "idea_project:hive:tok", result.reply_markup.first.first[:callback_data]
   end
 
+  def test_voice_confirm_without_registered_projects_clears_draft
+    store = Hive::Bot::IdeaDraftStore.new
+    store.start(chat_id: 55, phase: :awaiting_transcript_confirm,
+                text: "ship by voice", token: "tok", origin: :voice)
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      idea_draft_store: store
+    )
+
+    result = handlers.handle(:callback_idea_voice_confirm, update("idea_voice_confirm:tok"))
+
+    assert_equal :reply, result.action
+    assert_match(/No Hive projects are registered/, result.text)
+    assert_nil store.get(chat_id: 55)
+  end
+
   def test_voice_discard_clears_draft
     store = Hive::Bot::IdeaDraftStore.new
     store.start(chat_id: 55, phase: :awaiting_transcript_confirm,

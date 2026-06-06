@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -11,9 +11,9 @@ tags: [command, bot, telegram, mobile, json]
 human-input gates. It long-polls Telegram, ignores chats outside the
 global allowlist, renders waiting/status rows with inline buttons,
 captures new ideas including supported Telegram attachments and voice
-notes, and
-dispatches the same `hive` workflow verbs the daemon and CLI already
-use. It is not a second approval engine.
+notes, accepts typed or transcribed voice brainstorm answers, and
+dispatches the same `hive` workflow verbs the daemon and CLI already use.
+It is not a second approval engine.
 
 ## Subcommands
 

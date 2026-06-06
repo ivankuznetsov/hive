@@ -2517,6 +2517,20 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_bot_rejects_blank_transcription_language_entries
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          transcription:
+            supported_languages: ["en", " "]
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.transcription\.supported_languages\[1\].*non-empty String/, err.message)
+    end
+  end
+
   def test_load_global_bot_rejects_blank_transcription_endpoint
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)

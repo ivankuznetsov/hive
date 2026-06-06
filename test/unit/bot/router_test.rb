@@ -316,6 +316,33 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :answer, result.attachment.fetch(:purpose)
   end
 
+  def test_voice_reply_can_reattach_to_legacy_answer_mode_prompt
+    result = @router.handle(
+      update(
+        reply_to_text: "Answer mode started for slug-260514-abcd.",
+        voice: { file_id: "voice-answer", file_size: 2345 }
+      )
+    )
+
+    assert_equal :transcribe_voice, result.action
+    assert_nil result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_equal :answer, result.attachment.fetch(:purpose)
+  end
+
+  def test_unmatched_voice_reply_remains_a_new_voice_idea
+    result = @router.handle(
+      update(
+        reply_to_text: "plain old message",
+        voice: { file_id: "voice-idea", file_size: 2345 }
+      )
+    )
+
+    assert_equal :transcribe_voice, result.action
+    assert_nil result.slug
+    assert_nil result.attachment[:purpose]
+  end
+
   def test_free_text_inside_path_a_conversation_continues_codex
     @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd",
                  question_n: 1, mode: :path_a)

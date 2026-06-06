@@ -486,6 +486,111 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_transcribe_voice_rejects_payload_size_before_get_file
+    get_file_called = false
+    @telegram.define_singleton_method(:get_file) do |file_id:|
+      get_file_called = true
+      { file_path: "voice/file.oga", file_size: 5 }
+    end
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id",
+                                                          file_size: 25 * 1024 * 1024 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    refute get_file_called
+    assert_match(/voice note is too large/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_transcribe_voice_download_error_logs_and_replies
+    @telegram.define_singleton_method(:get_file) do |file_id:|
+      raise Hive::Bot::Telegram::DownloadError, "expired"
+    end
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :transcribe_voice,
+                                            attachment: { chat_id: 42, file_id: "voice-id" }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/Couldn't download that voice note/, @telegram.messages.last.fetch(:text))
+    event = @logger.events.last
+    assert_equal :transcription_failed, event.fetch(:name)
+    assert_equal "Hive::Bot::Telegram::DownloadError", event.fetch(:payload).fetch(:error_class)
+  end
+
+  def test_disabled_transcription_for_voice_answer_asks_for_text_answer
+    disabled = Hive::Bot::Supervisor.new(
+      config: @config.merge("transcription" => { "enabled" => false }),
+      token: "test-token",
+      logger: @logger,
+      telegram: @telegram,
+      status_watcher: @status_watcher,
+      notification_dispatcher: @notification_dispatcher,
+      router: FakeRouter.new,
+      child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store,
+      idea_draft_store: @idea_draft_store,
+      transcriber: @transcriber,
+      dry_run: false,
+      dispatch_request_writer: @dispatch_request_writer
+    )
+
+    disabled.send(:execute_result,
+                  FakeRouter::Result.new(action: :transcribe_voice,
+                                         attachment: { chat_id: 42, file_id: "voice-id", purpose: :answer }),
+                  Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/Reply with your answer as a text message/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_answer_transcription_rejects_no_speech_and_unsupported_language
+    result = FakeRouter::Result.new(action: :transcribe_voice,
+                                    attachment: { chat_id: 42, purpose: :answer })
+    update = Update.new(chat_id: 42, update_id: 1)
+
+    @supervisor.send(:handle_answer_transcription,
+                     TranscriptionResult.new(status: :no_speech),
+                     result: result, update: update)
+    assert_match(/couldn't hear any speech/, @telegram.messages.last.fetch(:text))
+
+    @supervisor.send(:handle_answer_transcription,
+                     TranscriptionResult.new(status: :unsupported_language, language: "de"),
+                     result: result, update: update)
+    assert_match(/unsupported language/, @telegram.messages.last.fetch(:text))
+  end
+
+  def test_answer_transcription_failure_logs_and_does_not_stage_idea_audio
+    result = FakeRouter::Result.new(action: :transcribe_voice,
+                                    attachment: { chat_id: 42, purpose: :answer })
+    update = Update.new(chat_id: 42, update_id: 1)
+
+    @supervisor.send(:handle_answer_transcription,
+                     TranscriptionResult.new(status: :failed, error_class: "Boom", message: "nope"),
+                     result: result, update: update)
+
+    assert_match(/Couldn't transcribe that voice answer/, @telegram.messages.last.fetch(:text))
+    assert_nil @idea_draft_store.get(chat_id: 42)
+    event = @logger.events.last
+    assert_equal :transcription_failed, event.fetch(:name)
+    assert_equal "answer", event.fetch(:payload).fetch(:purpose)
+    assert_equal "Boom", event.fetch(:payload).fetch(:error_class)
+  end
+
+  def test_failed_idea_transcription_with_non_voice_draft_preserves_existing_draft
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "typed idea", token: "tok")
+    @supervisor.define_singleton_method(:ensure_voice_draft) { |chat_id:| nil }
+
+    @supervisor.send(:handle_failed_transcription,
+                     TranscriptionResult.new(status: :failed, error_class: "Boom", message: "nope"),
+                     update: Update.new(chat_id: 42, update_id: 1),
+                     chat_id: 42,
+                     bytes: "audio-bytes".b)
+
+    assert_match(/Finish or discard the current idea draft/, @telegram.messages.last.fetch(:text))
+    assert_equal "typed idea", @idea_draft_store.get(chat_id: 42).text
+  end
+
   def test_transcribe_voice_edit_replaces_existing_transcript
     @idea_draft_store.start(chat_id: 42, phase: :awaiting_transcript_confirm,
                             text: "old", token: "tok", origin: :voice)

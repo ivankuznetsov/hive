@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
+
+**Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[log]]
+
 ## [2026-06-06T19:07:48Z] bot - cover audio ideas and audio answers in live E2E
 
 **Action:** Added voice-answer coverage to the Telegram voice-note branch. The router now routes voice notes sent during active or reattached `/answer` conversations to `transcribe_voice` with answer context; `Supervisor#execute_transcribe_voice` writes successful answer transcripts through the existing brainstorm answer writer instead of creating an idea draft. Extended `test/e2e/tg/run_idea_e2e.sh` so `TG_IDEA_MODE=voice` drives both a new audio idea and a seeded audio `/answer` path with the checked-in voice fixture. Added focused router, supervisor, and in-process bot scenario coverage. Refreshed [[commands/bot]], [[modules/bot]], [[testing]], and [[gaps]].

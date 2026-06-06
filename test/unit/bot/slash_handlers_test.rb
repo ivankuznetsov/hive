@@ -16,6 +16,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
   MediaUpdate = Struct.new(:text, :chat_id, :effective_text, keyword_init: true) do
     def media? = true
   end
+  VoiceUpdate = Struct.new(:chat_id, :voice, keyword_init: true)
   PolicyResult = Struct.new(:status, :file_id, :file_size, :ext, keyword_init: true)
 
   FakeAttachmentPolicy = Struct.new(:result, keyword_init: true) do
@@ -377,6 +378,13 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_equal "Use /idea <text> to capture a new idea.", result.text
+  end
+
+  def test_voice_without_file_id_replies_without_transcribe_action
+    result = @handlers.voice(VoiceUpdate.new(chat_id: 1, voice: {}))
+
+    assert_equal :reply, result.action
+    assert_match(/Couldn't read that voice note/, result.text)
   end
 
   def test_idea_with_text_uses_default_clock_for_legacy_pending_idea

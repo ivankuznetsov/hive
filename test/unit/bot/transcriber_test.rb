@@ -56,6 +56,13 @@ class HiveBotTranscriberTest < Minitest::Test
     @sleeps = []
   end
 
+  def test_default_client_builds_faraday_connection_and_value_fallback_handles_unknown_objects
+    instance = transcriber(nil)
+
+    assert_kind_of Faraday::Connection, instance.send(:client)
+    assert_nil instance.send(:value, Object.new, :missing)
+  end
+
   def transcriber(http, config = {})
     Hive::Bot::Transcriber.new(
       config: {

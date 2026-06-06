@@ -256,8 +256,10 @@ module Hive
           dispatch_patrol_with_gates(patrol_dispatch, now: now)
         end
 
-        # 4. Per-row dispatch
-        result.rows.each { |row| handle_row(row, now: now) }
+        # 4. Per-row dispatch, later pipeline stages first (see
+        # dispatch_priority_order) so work nearest completion drains
+        # ahead of newer earlier-stage work when slots are scarce.
+        dispatch_priority_order(result.rows).each { |row| handle_row(row, now: now) }
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -817,6 +819,25 @@ module Hive
           now: now,
           trigger: trigger
         )
+      end
+
+      # Order rows so tasks closer to the end of the pipeline dispatch
+      # first: a 7-artifacts row before a 6-review row, an 8-finalize
+      # before both. When concurrency slots are scarce this drains work
+      # nearest completion ahead of newer earlier-stage work (a WIP-limit
+      # — don't start a fresh review while finalizes wait on a slot).
+      # Stable within a stage (original status order preserved), and
+      # unranked/unknown stages sort last.
+      def dispatch_priority_order(rows)
+        rows.each_with_index
+            .sort_by { |row, idx| [ -stage_rank(row.stage), idx ] }
+            .map(&:first)
+      end
+
+      # Pipeline position of a stage dir (higher = closer to done); -1 for
+      # an unrecognized stage so it deprioritizes behind every known stage.
+      def stage_rank(stage)
+        Hive::Stages::DIRS.index(stage.to_s) || -1
       end
 
       def observe_external_running_rows(rows)

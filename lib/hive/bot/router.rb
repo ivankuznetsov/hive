@@ -77,7 +77,7 @@ module Hive
         @now = now
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: bot_config.fetch("idea_draft_ttl_sec", PENDING_IDEA_TTL_SEC),
-                                        now: @now)
+                                        now: @now, logger: @logger)
         @projects_provider = projects_provider
         @unauthorized_logged = {}
         @pending_ideas = {}

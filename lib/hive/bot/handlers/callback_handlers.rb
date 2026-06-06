@@ -191,7 +191,14 @@ module Hive
           return @result_class.new(action: :reply, text: "That voice idea draft expired. Send the voice note again.") unless draft
 
           projects = @projects_provider.call
-          return @result_class.new(action: :reply, text: "No Hive projects are registered yet.") if projects.empty?
+          if projects.empty?
+            # No project to capture into: clear the voice draft now rather than
+            # leaving it live in :awaiting_transcript_confirm, where the still-
+            # shown Confirm/Discard keyboard would re-hit this same dead end.
+            @idea_draft_store.clear(chat_id: draft.chat_id)
+            return @result_class.new(action: :reply,
+                                     text: "No Hive projects are registered yet. Run `hive init` on a laptop, then send the voice note again.")
+          end
 
           @idea_draft_store.confirm_transcript(chat_id: draft.chat_id)
           @result_class.new(

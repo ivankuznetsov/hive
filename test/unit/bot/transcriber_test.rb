@@ -133,7 +133,7 @@ class HiveBotTranscriberTest < Minitest::Test
 
     assert_equal :ok, result.status
     assert(@logger.events.any? do |event, attrs|
-      event == :send_failure && attrs[:error_class] == "MalformedSegment"
+      event == :transcription_failed && attrs[:error_class] == "MalformedSegment"
     end)
   end
 
@@ -227,7 +227,7 @@ class HiveBotTranscriberTest < Minitest::Test
 
     assert_equal :failed, result.status
     assert_equal 3, http.calls.size
-    assert_equal :send_failure, @logger.events.first.first
+    assert_equal :transcription_failed, @logger.events.first.first
     refute_includes @logger.events.inspect, "sk-test-secret"
   end
 

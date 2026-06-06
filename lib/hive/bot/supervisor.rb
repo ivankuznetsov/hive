@@ -9,6 +9,7 @@ require "hive/commands/new"
 require "hive/bot/logger"
 require "hive/bot/telegram"
 require "hive/bot/transcriber"
+require "hive/bot/languages"
 require "hive/bot/idea_keyboards"
 require "hive/bot/status_watcher"
 require "hive/bot/notification_dispatcher"
@@ -32,16 +33,6 @@ require "hive/update_check/state"
 module Hive
   module Bot
     class Supervisor
-      # ISO code → human name for the unsupported-language hint. Unmapped
-      # tokens (including full names already written in config) fall back to
-      # a capitalized form, so the hint reads naturally for any config.
-      LANGUAGE_DISPLAY = {
-        "en" => "English", "ru" => "Russian", "es" => "Spanish", "fr" => "French",
-        "de" => "German", "it" => "Italian", "pt" => "Portuguese", "nl" => "Dutch",
-        "pl" => "Polish", "uk" => "Ukrainian", "tr" => "Turkish", "ar" => "Arabic",
-        "zh" => "Chinese", "ja" => "Japanese", "ko" => "Korean", "hi" => "Hindi"
-      }.freeze
-
       BOT_COMMANDS = [
         { command: "idea",    description: "Capture a new idea with optional files" },
         { command: "status",  description: "Show active tasks" },
@@ -81,7 +72,7 @@ module Hive
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
         @idea_draft_store = idea_draft_store ||
-          Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900))
+          Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900), logger: @logger)
         @transcriber_factory = transcriber_factory || method(:default_transcriber)
         @transcriber = transcriber || build_transcriber(config)
         @router = router || build_router(config)
@@ -390,11 +381,6 @@ module Hive
         nil
       end
 
-      ALLOWED_RESULT_ACTIONS = %i[
-        noop reply dispatch_then_reply dispatch_commands start_answer
-        write_answer_then_reply stage_attachment transcribe_voice commit_idea
-      ].freeze
-
       def execute_result(result, update)
         case result.action
         when :noop
@@ -488,10 +474,10 @@ module Hive
         # Download phase only (getFile / file download / payload key). Staging
         # failures are handled inside handle_failed_transcription so they can't
         # masquerade as a download failure here.
-        @logger.event(:send_failure, source: "transcribe_voice",
-                                      chat_id: update.chat_id,
-                                      error_class: e.class.name,
-                                      message: e.message)
+        @logger.event(:transcription_failed, source: "transcribe_voice",
+                                              chat_id: update.chat_id,
+                                              error_class: e.class.name,
+                                              message: e.message)
         safe_send_message(chat_id: update.chat_id,
                           text: "Couldn't download that voice note - please send it again.")
       end
@@ -500,11 +486,15 @@ module Hive
         case transcription.status
         when :ok
           draft = ensure_voice_draft(chat_id: chat_id)
+          # set_transcript does a second, independent get that can return nil
+          # if the draft TTL-expires between ensure_voice_draft and here. The
+          # `draft && set_transcript(...)` guard is load-bearing for that
+          # boundary — do NOT collapse it to a single call on a "simplify" pass.
           unless draft && @idea_draft_store.set_transcript(chat_id: chat_id, text: transcription.text)
-            @logger.event(:send_failure, source: "transcribe_voice",
-                                          chat_id: update.chat_id,
-                                          error_class: "DraftExpired",
-                                          message: "voice draft expired before transcript could be stored")
+            @logger.event(:transcription_failed, source: "transcribe_voice",
+                                                  chat_id: update.chat_id,
+                                                  error_class: "DraftExpired",
+                                                  message: "voice draft expired before transcript could be stored")
             return safe_send_message(chat_id: update.chat_id,
                                      text: "That voice idea draft expired. Send the voice note again.")
           end
@@ -527,10 +517,10 @@ module Hive
         # Surface the transcriber's failure WITH chat context so a user's
         # failure is debuggable from bot.log alone, without cross-correlating
         # two log files by timestamp.
-        @logger.event(:send_failure, source: "transcribe_voice",
-                                      chat_id: update.chat_id,
-                                      error_class: transcription.error_class,
-                                      message: transcription.message)
+        @logger.event(:transcription_failed, source: "transcribe_voice",
+                                              chat_id: update.chat_id,
+                                              error_class: transcription.error_class,
+                                              message: transcription.message)
         draft = ensure_voice_draft(chat_id: chat_id)
         @idea_draft_store.await_text(chat_id: chat_id)
         begin
@@ -540,10 +530,10 @@ module Hive
           # failed. Tear down the half-created :awaiting_text draft so the
           # operator's next unrelated text isn't captured against an orphan,
           # and report accurately (NOT "couldn't download").
-          @logger.event(:send_failure, source: "transcribe_voice",
-                                        chat_id: update.chat_id,
-                                        error_class: e.class.name,
-                                        message: e.message)
+          @logger.event(:transcription_failed, source: "transcribe_voice",
+                                                chat_id: update.chat_id,
+                                                error_class: e.class.name,
+                                                message: e.message)
           @idea_draft_store.clear(chat_id: chat_id)
           return safe_send_message(chat_id: update.chat_id,
                                    text: "Couldn't save that voice note - please send it again.")
@@ -636,7 +626,10 @@ module Hive
 
       def humanize_language(token)
         normalized = token.to_s.strip.downcase
-        LANGUAGE_DISPLAY[normalized] || (normalized.empty? ? "" : normalized.capitalize)
+        # ISO code → human name for the hint. Unmapped tokens (including full
+        # names already written in config) fall back to a capitalized form, so
+        # the hint reads naturally for any config.
+        Hive::Bot::Languages::ISO_TO_NAME[normalized] || (normalized.empty? ? "" : normalized.capitalize)
       end
 
       def execute_idea_commit(result, update)

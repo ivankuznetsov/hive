@@ -69,11 +69,21 @@ module Hive
 
         def voice(update)
           voice = update.voice || {}
+          file_id = voice[:file_id]
+          # A voice payload with no file_id can't be fetched. This runs inside
+          # the router, before execute_transcribe_voice's rescue, so a raised
+          # KeyError would escape to the poll loop and leave the operator with
+          # no reply at all. Reply gracefully instead of a silent no-reply.
+          if file_id.to_s.empty?
+            return @result_class.new(action: :reply,
+                                     text: "Couldn't read that voice note - please send it again.")
+          end
+
           @result_class.new(
             action: :transcribe_voice,
             attachment: {
               chat_id: update.chat_id,
-              file_id: voice.fetch(:file_id),
+              file_id: file_id,
               file_size: voice[:file_size]
             }
           )

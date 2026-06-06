@@ -26,9 +26,10 @@ module Hive
                          :counter, :staging_dir, :staging_tmp_root,
                          :origin, :created_at, :updated_at, keyword_init: true)
 
-      def initialize(ttl_sec: DEFAULT_TTL_SEC, now: -> { Time.now })
+      def initialize(ttl_sec: DEFAULT_TTL_SEC, now: -> { Time.now }, logger: nil)
         @ttl_sec = ttl_sec
         @now = now
+        @logger = logger
         @drafts = {}
       end
 
@@ -74,6 +75,13 @@ module Hive
 
       def set_transcript(chat_id:, text:)
         update(chat_id: chat_id) do |draft|
+          # A successful transcript supersedes any audio a prior failed
+          # transcription staged as a fallback (stage_voice_fallback leaves the
+          # draft in :awaiting_text with voice-N.oga staged). Re-transcribing
+          # the same draft must drop that staging, or the confirmed idea would
+          # divert into the file-collection flow and link the leftover audio —
+          # breaking the transcript-only guarantee (R6/AE1).
+          discard_staging!(draft)
           draft.text = text
           assign_phase!(draft, :awaiting_transcript_confirm)
         end
@@ -144,7 +152,22 @@ module Hive
 
       def assign_phase!(draft, phase)
         validate_phase!(phase)
+        # Enforce the phase/origin coupling at the transition too, not only at
+        # start: driving a non-voice draft into :awaiting_transcript_confirm
+        # (e.g. via set_transcript) would create a draft the router cannot
+        # route, bypassing the invariant the type advertises.
+        validate_phase_origin!(phase, draft.origin)
         draft.phase = phase
+      end
+
+      # Drop any staged fallback audio and reset the staging bookkeeping. Used
+      # when a transcript replaces a prior failed-transcription fallback.
+      def discard_staging!(draft)
+        cleanup_draft(draft)
+        draft.attachments = []
+        draft.counter = 0
+        draft.staging_dir = nil
+        draft.staging_tmp_root = nil
       end
 
       def validate_phase!(phase)
@@ -190,7 +213,13 @@ module Hive
           draft.staging_dir,
           tmproot: draft.staging_tmp_root || Dir.tmpdir
         )
-      rescue StandardError
+      rescue StandardError => e
+        # Never raise out of teardown (clear/prune must always complete), but
+        # don't swallow silently either: a failed removal leaks a temp dir, so
+        # log it for an operator tailing bot.log.
+        @logger&.event(:send_failure, source: "idea_draft_cleanup",
+                                      staging_dir: draft.staging_dir,
+                                      error_class: e.class.name, message: e.message)
         nil
       end
     end

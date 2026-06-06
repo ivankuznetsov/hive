@@ -475,6 +475,36 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/new transcript/, @telegram.messages.last.fetch(:text))
   end
 
+  def test_transcribe_voice_retranscribe_after_fallback_drops_staged_audio
+    # First voice note fails to transcribe → fallback stages voice-1.oga and
+    # leaves the draft in :awaiting_text.
+    @transcriber.results << TranscriptionResult.new(status: :failed, error_class: "Boom", message: "nope")
+    @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
+    @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    voice_result = FakeRouter::Result.new(action: :transcribe_voice,
+                                          attachment: { chat_id: 42, file_id: "voice-id" })
+    @supervisor.send(:execute_result, voice_result, Update.new(chat_id: 42, update_id: 1))
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal :awaiting_text, draft.phase
+    assert_equal 1, draft.attachments.size
+    staged_path = draft.attachments.first.fetch(:staging_path)
+    assert_path_exists staged_path
+
+    # Operator sends a NEW voice note that transcribes OK. The successful
+    # transcript must supersede the staged fallback audio, or the confirmed
+    # idea would link assets/voice-1.oga (R6/AE1 transcript-only violation).
+    @transcriber.results << TranscriptionResult.new(status: :ok, text: "the real idea", language: "en")
+    @supervisor.send(:execute_result, voice_result, Update.new(chat_id: 42, update_id: 2))
+
+    draft = @idea_draft_store.get(chat_id: 42)
+    assert_equal :awaiting_transcript_confirm, draft.phase
+    assert_equal "the real idea", draft.text
+    assert_empty draft.attachments, "re-transcription must drop the prior fallback audio"
+    refute_path_exists staged_path, "stale fallback staging dir must be cleaned up"
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
   def test_transcribe_voice_during_non_voice_draft_does_not_clear_or_download
     @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "typed idea", token: "tok")
     get_file_called = false
@@ -504,6 +534,11 @@ class HiveBotSupervisorTest < Minitest::Test
     @transcriber.results << TranscriptionResult.new(status: :no_speech)
     @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
     @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    # The reject path (no_speech) must capture nothing — unlike the AE4
+    # fallback it must NOT stage the audio. ensure_staging_dir is the gate for
+    # any staging, so assert it is never reached.
+    staged = false
+    @idea_draft_store.define_singleton_method(:ensure_staging_dir) { |chat_id:| staged = true; nil }
 
     @supervisor.send(:execute_result,
                      FakeRouter::Result.new(action: :transcribe_voice,
@@ -511,6 +546,7 @@ class HiveBotSupervisorTest < Minitest::Test
                      Update.new(chat_id: 42, update_id: 1))
 
     assert_nil @idea_draft_store.get(chat_id: 42)
+    refute staged, "no_speech reject must not stage any audio"
     assert_match(/couldn't hear any speech/, @telegram.messages.last.fetch(:text))
   end
 
@@ -520,6 +556,10 @@ class HiveBotSupervisorTest < Minitest::Test
     @transcriber.results << TranscriptionResult.new(status: :unsupported_language, language: "de")
     @telegram.define_singleton_method(:get_file) { |file_id:| { file_path: "voice/file.oga", file_size: 5 } }
     @telegram.define_singleton_method(:download_file) { |file_path:| "audio-bytes".b }
+    # The reject path (unsupported_language) must capture nothing — no audio
+    # staging, unlike the AE4 fallback. ensure_staging_dir gates any staging.
+    staged = false
+    @idea_draft_store.define_singleton_method(:ensure_staging_dir) { |chat_id:| staged = true; nil }
 
     @supervisor.send(:execute_result,
                      FakeRouter::Result.new(action: :transcribe_voice,
@@ -527,6 +567,7 @@ class HiveBotSupervisorTest < Minitest::Test
                      Update.new(chat_id: 42, update_id: 1))
 
     assert_nil @idea_draft_store.get(chat_id: 42)
+    refute staged, "unsupported_language reject must not stage any audio"
     assert_match(/unsupported language/, @telegram.messages.last.fetch(:text))
   end
 

@@ -71,7 +71,10 @@ module Hive
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
-      for the schema). Piped STDIN is intentionally NOT consumed.
+      for the schema). Legacy Compound Engineering skill values such as
+      `/compound-engineering:ce-brainstorm` are normalized to the current
+      `/ce-brainstorm` form before prompts are rendered. Piped STDIN is
+      intentionally NOT consumed.
 
       Exit codes:
         0  — initialised successfully

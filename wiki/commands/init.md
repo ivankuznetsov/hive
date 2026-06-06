@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-06
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive and `--json` emits the resolved bootstrap contract: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) and permission mode (`claude.permission_mode`) to use, what budget+timeout sanity caps to set, whether this project should be enrolled for daemon dispatch, whether it should be enrolled for the experimental PR babysitter, and whether daemon autostart should be enabled, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service unit exists.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive and `--json` emits the resolved bootstrap contract: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / normal review / patrol PR review, which project-global Claude launch mode (`claude.mode`) and permission mode (`claude.permission_mode`) to use, what budget+timeout sanity caps to set, whether this project should be enrolled for daemon dispatch, whether it should be enrolled for the experimental PR babysitter, and whether daemon autostart should be enabled, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service unit exists.
 
 ## Usage
 
@@ -116,9 +116,9 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 ## Tests
 
-- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including non-default answer mirroring and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, the rendered template's stage-agent/runtime blocks, daemon and babysitter enrollment defaults, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, and the U5 piped-input + abort + already-initialized-guard scenarios.
+- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including non-default answer mirroring and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, the rendered template's stage-agent/runtime blocks, normal and patrol reviewer rendering, daemon and babysitter enrollment defaults, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, and the U5 piped-input + abort + already-initialized-guard scenarios.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
-- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, limit-pair edge re-prompts, the Claude mode and permission-mode prompts, daemon/babysitter/autostart prompts, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins `schemas/hive-init.v1.json` to the producer's success payload.
+- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, normal reviewer and patrol reviewer multi-select parsing, rejection of `pr-review-toolkit` for patrol reviewers, limit-pair edge re-prompts, the Claude mode and permission-mode prompts, daemon/babysitter/autostart prompts, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins `schemas/hive-init.v1.json` to the producer's success payload, including the required `patrol_reviewers` keys.
 
 ## Backlinks
 

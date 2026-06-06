@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [command, patrol, review, pr, json]
 ---
 

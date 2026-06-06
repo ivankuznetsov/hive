@@ -23,11 +23,12 @@ claude:
 # be installed alongside your agent CLI. Plan defaults are agent-aware:
 # claude → `/plan`, codex → `/llm-wiki:wiki-plan`, pi →
 # `/skill:wiki-plan` after profile formatting. Brainstorm defaults to
-# `/compound-engineering:ce-brainstorm`. Override here to pin a
+# `/ce-brainstorm`. Legacy `/compound-engineering:ce-*` values are
+# normalized before prompts are rendered. Override here to pin a
 # different skill per project.
 brainstorm:
   agent: <%= planning_agent %>
-  # skill: /compound-engineering:ce-brainstorm
+  # skill: /ce-brainstorm
   # Legacy configs may still carry brainstorm.runtime; new projects use
   # the project-global claude.mode setting above.
 plan:

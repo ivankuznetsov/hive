@@ -65,7 +65,7 @@ module Hive
       # CLI's installed skill names.
       "brainstorm" => {
         "agent" => "claude",
-        "skill" => "/compound-engineering:ce-brainstorm",
+        "skill" => "/ce-brainstorm",
         "runtime" => "headless"
       },
       "plan" => {

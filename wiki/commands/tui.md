@@ -18,8 +18,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 ## Layout
 
 ```
-┌─ Header: hive tui · scope=★ All projects · filter=- · generated_at=…  ──┐
-├─────────────────┬────────────────────────────────────────────────────────┤
+┌─────────────────┬────────────────────────────────────────────────────────┐
 │  ProjectsPane   │  TasksPane                                             │
 │  (left, 18-28)  │  (right, cols - left)                                  │
 │                 │                                                        │
@@ -33,6 +32,8 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 ```
 
 Pane focus is keyboard-only; the focused pane border is bright cyan, the inactive pane border is faint. Below 70 cols the project pane is suppressed and the tasks pane occupies the full width — narrow terminals still get a usable view, just without the left-pane drill-down.
+
+The dashboard intentionally has no persistent metadata header. Scope and filter context live in pane titles and prompt modes, while `generated_at` remains an internal snapshot field rather than always-on chrome. The composer computes pane height from `model.rows` minus any stalled banner and footer rows; both panes clip/pad to that budget. The project and task panes use cursor-following viewports, so vertical terminal shrink keeps the selected project/task visible and keeps the footer on-screen instead of letting rows overflow below it.
 
 ## Modes
 
@@ -119,9 +120,15 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 ## Data source
 
 `Hive::Tui::StateSource` polls at 1 Hz from a non-daemon background
-thread. It calls
+thread. TUI boot performs one synchronous `StateSource#refresh_now` before
+entering Bubbletea's render/input loop, then seeds the initial model with that
+snapshot so the first useful frame shows registered projects/tasks instead of a
+long-lived loading grid. This is necessary because bubbletea-ruby's raw input
+poll can starve Ruby background threads during startup; relying on the first
+background poll alone produced multi-second loading screens even when
+`hive status` itself was fast. After boot, the source calls
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-in-process for the first snapshot and whenever the cached mtime
+in-process whenever the cached mtime
 fingerprint changes; otherwise it reuses the previous `Snapshot` and
 only refreshes `current_seen_at`. The fingerprint watches the global
 project registry (`Hive::Config.global_config_path`), each visible
@@ -149,7 +156,7 @@ the last dispatched snapshot. Identical snapshots do not redraw.
 
 `Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
 
-The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The footer shows `+N hidden - open Archive pane` when the full snapshot contains hidden rows and no flash is active. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
+The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops only clean `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads; done rows with unresolved markers remain visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 
@@ -235,7 +242,7 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 - `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
 - `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `IdeaPreview`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
-- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0, and the charm smoke resizes a running PTY from 120 to 150 columns, sends `SIGWINCH`, and asserts the next frame expands.
+- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears without a multi-second loading grid on the startup path (a generous 5s regression bound, not a benchmark), `q` exits 0, and the charm smoke resizes a running PTY horizontally and vertically, sends `SIGWINCH`, and asserts the next frame expands while keeping the footer visible.
 
 No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing.
 

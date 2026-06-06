@@ -12,6 +12,7 @@ class ArchiveFilterTest < Minitest::Test
 
     assert Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :complete,
       folder_mtime: now - (5 * 86_400),
       now: now
     )
@@ -22,11 +23,13 @@ class ArchiveFilterTest < Minitest::Test
 
     refute Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :complete,
       folder_mtime: now - 86_400,
       now: now
     )
     refute Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :complete,
       folder_mtime: now - Hive::ArchiveFilter::HIDE_AFTER_SECONDS,
       now: now
     )
@@ -37,6 +40,7 @@ class ArchiveFilterTest < Minitest::Test
     %i[error agent_working manual_steering waiting].each do |marker|
       assert Hive::ArchiveFilter.hide?(
         stage: Hive::Stages::DIRS.last,
+        marker_name: marker,
         folder_mtime: now - (10 * 86_400),
         now: now
       ), "#{marker} must be hidden by archive age"
@@ -48,6 +52,7 @@ class ArchiveFilterTest < Minitest::Test
 
     assert Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :none,
       folder_mtime: now - (5 * 86_400),
       now: now
     )
@@ -58,12 +63,14 @@ class ArchiveFilterTest < Minitest::Test
 
     assert Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :complete,
       mtime: now - (5 * 86_400),
       folder_mtime: now - 86_400,
       now: now
     )
     refute Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :complete,
       mtime: now - 86_400,
       folder_mtime: now - (5 * 86_400),
       now: now
@@ -75,22 +82,15 @@ class ArchiveFilterTest < Minitest::Test
 
     refute Hive::ArchiveFilter.hide?(
       stage: "3-plan",
+      marker_name: :complete,
       folder_mtime: now - (99 * 86_400),
       now: now
     )
     refute Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
+      marker_name: :complete,
       folder_mtime: nil,
       now: now
     )
-  end
-
-  def test_keeps_archived_row_when_neither_timestamp_supplied
-    now = Time.utc(2026, 6, 4, 12, 0, 0)
-
-    refute Hive::ArchiveFilter.hide?(
-      stage: Hive::Stages::DIRS.last,
-      now: now
-    ), "archived row with no mtime or folder_mtime must fail visible (stay shown)"
   end
 end

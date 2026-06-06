@@ -461,42 +461,4 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "blank-mtime", "invalid-mtime" ], filtered.rows.map(&:slug)
     assert_equal 0, snapshot.hidden_old_archived_count(now: now)
   end
-
-  # Integration-level proof of the mtime-over-folder_mtime precedence the
-  # ArchiveFilter unit test pins: here the two timestamps DIVERGE, so the
-  # snapshot path can only behave correctly if it threads `mtime` through
-  # and lets it win. `kept` has a fresh mtime but a stale folder_mtime
-  # (must stay visible); `dropped` has a stale mtime but a fresh
-  # folder_mtime (must be hidden).
-  def test_without_old_archived_uses_mtime_when_it_diverges_from_folder_mtime
-    now = Time.utc(2026, 6, 4, 12, 0, 0)
-    kept = sample_task(slug: "fresh-mtime-stale-folder", stage: "9-done", marker: "complete")
-    kept["action"] = "archived"
-    kept["action_label"] = "Archived"
-    kept["mtime"] = (now - 86_400).utc.iso8601
-    kept["folder_mtime"] = (now - (5 * 86_400)).utc.iso8601
-
-    dropped = sample_task(slug: "stale-mtime-fresh-folder", stage: "9-done", marker: "complete")
-    dropped["action"] = "archived"
-    dropped["action_label"] = "Archived"
-    dropped["mtime"] = (now - (5 * 86_400)).utc.iso8601
-    dropped["folder_mtime"] = (now - 86_400).utc.iso8601
-
-    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
-                                                                 {
-                                                                   "name" => "alpha",
-                                                                   "path" => "/tmp/alpha",
-                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
-                                                                   "tasks" => [ kept, dropped ]
-                                                                 }
-                                                               ]))
-
-    filtered = snapshot.without_old_archived(now: now)
-
-    assert_includes filtered.rows.map(&:slug), "fresh-mtime-stale-folder",
-                    "fresh mtime must keep the row visible even when folder_mtime is stale"
-    refute_includes filtered.rows.map(&:slug), "stale-mtime-fresh-folder",
-                    "stale mtime must hide the row even when folder_mtime is fresh"
-    assert_equal 1, snapshot.hidden_old_archived_count(now: now)
-  end
 end

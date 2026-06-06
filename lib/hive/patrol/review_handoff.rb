@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/task_counter"
 require "hive/task_meta"
 
 module Hive
@@ -34,10 +35,16 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: nil,
+          id: allocate_task_id,
           slug: slug,
           display_name: display_name(finding)
         )
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)
@@ -73,7 +80,6 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
-        text = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -82,9 +88,11 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            "original_text" => text
+            "original_text" => idea_text(finding)
           },
-          "#{text}\n"
+          <<~MD
+          #{idea_text(finding)}
+        MD
         )
       end
 
@@ -164,26 +172,18 @@ module Hive
       end
 
       def idea_text(finding)
-        # `Finding` is a plain Struct that applies no coercion to `evidence`,
-        # so a finding built without `evidence:` yields nil; `Array(...)`
-        # mirrors Finding.from_h's own guard and keeps this nil-safe.
-        evidence = Array(finding.evidence)
         parts = []
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
-        parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
+        parts << "## Evidence\n\n#{evidence_text(finding.evidence)}" unless finding.evidence.empty?
         parts.join("\n\n")
       end
 
       def evidence_text(evidence)
         evidence.map do |entry|
-          # Evidence entries may arrive string- or symbol-keyed depending
-          # on the source; accept both, matching fingerprint.rb / pr_opener.rb.
-          file = entry["file"] || entry[:file]
-          row = entry["line"] || entry[:line]
-          location = [ file, row ].compact.join(":")
-          snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
+          location = [ entry["file"], entry["line"] ].compact.join(":")
+          snippet = entry["snippet"].to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"
           snippet.empty? ? line : "#{line}: #{snippet}"
         end.join("\n")

@@ -5,6 +5,32 @@ require "hive/commands/migrate"
 class MigrateTest < Minitest::Test
   include HiveTestHelper
 
+  NoopDisplayNameGenerator = Class.new do
+    def initialize(_task, cfg: nil, commit: true); end
+
+    def call
+      nil
+    end
+  end
+
+  RecordingDisplayNameGenerator = Class.new do
+    class << self
+      attr_accessor :calls
+    end
+    self.calls = []
+
+    def initialize(task, cfg: nil, commit: true)
+      @task = task
+      self.class.calls << { slug: task.slug, commit: commit, project: cfg["project_name"] }
+    end
+
+    def call
+      name = @task.slug.split("-").first(3).map(&:capitalize).join(" ")
+      Hive::TaskMeta.update_display_name(@task.folder, name)
+      name
+    end
+  end
+
   def test_migrates_legacy_stage_directories
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -20,7 +46,7 @@ class MigrateTest < Minitest::Test
           File.write(File.join(folder, "task.md"), "x\n")
         end
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         assert File.directory?(File.join(stages, "6-review", "old-review-260513-abcd"))
         assert File.directory?(File.join(stages, "8-finalize", "old-pr-260513-abcd"))
@@ -43,7 +69,7 @@ class MigrateTest < Minitest::Test
           File.write(File.join(folder, "task.md"), "x\n")
         end
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         assert File.directory?(File.join(stages, "8-finalize", "old-finalize-260522-abcd"))
         assert File.directory?(File.join(stages, "9-done", "old-done-260522-abcd"))
@@ -62,7 +88,7 @@ class MigrateTest < Minitest::Test
         FileUtils.mkdir_p(current)
 
         assert_raises(Hive::DestinationCollision) do
-          capture_io { Hive::Commands::Migrate.new(dir).call }
+          capture_io { migrate_command(dir).call }
         end
         assert File.directory?(old)
         assert File.directory?(current)
@@ -80,7 +106,7 @@ class MigrateTest < Minitest::Test
         FileUtils.mkdir_p(File.join(stages, "7-finalize", slug))
 
         err = assert_raises(Hive::DestinationCollision) do
-          capture_io { Hive::Commands::Migrate.new(dir).call }
+          capture_io { migrate_command(dir).call }
         end
 
         assert_match(/multiple legacy stages target the same destination/, err.message)
@@ -111,7 +137,7 @@ class MigrateTest < Minitest::Test
         FileUtils.mkdir_p(File.join(stages, "8-finalize", pr_slug))
 
         assert_raises(Hive::DestinationCollision) do
-          capture_io { Hive::Commands::Migrate.new(dir).call }
+          capture_io { migrate_command(dir).call }
         end
 
         # CRITICAL: the first-iteration rename must NOT have run.
@@ -134,7 +160,7 @@ class MigrateTest < Minitest::Test
         FileUtils.mkdir_p(File.join(stages, "5-review", ".DS_Store"))
         FileUtils.mkdir_p(File.join(stages, "5-review", "real-260513-aaaa"))
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         assert File.directory?(File.join(stages, "5-review", ".DS_Store")),
                "non-slug `.DS_Store` directory must stay in the legacy stage dir"
@@ -149,7 +175,7 @@ class MigrateTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
 
-        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+        out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "target stage directories look already-migrated"
       end
@@ -164,7 +190,7 @@ class MigrateTest < Minitest::Test
         ignored = File.join(stages, "5-review", ".DS_Store")
         FileUtils.mkdir_p(ignored)
 
-        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+        out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "hive: migrate found nothing to move"
         refute_includes out, "already-migrated"
@@ -184,7 +210,7 @@ class MigrateTest < Minitest::Test
         FileUtils.mkdir_p(File.join(stages, "5-review", "demo-260513-aaaa"))
         File.write(File.join(stages, "5-review", "demo-260513-aaaa", "task.md"), "x\n")
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         log = `git -C #{hive_state.shellescape} log --oneline -5`
         assert $CHILD_STATUS.success?, "git log must succeed"
@@ -215,7 +241,7 @@ class MigrateTest < Minitest::Test
         cfg["timeout_sec"]["pr"] = 1234
         File.write(cfg_path, cfg.to_yaml)
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         cfg_after = YAML.safe_load(File.read(cfg_path))
         refute cfg_after["budget_usd"].key?("pr"),
@@ -241,7 +267,7 @@ class MigrateTest < Minitest::Test
         cfg["budget_usd"]["pr"] = 77
         File.write(cfg_path, cfg.to_yaml)
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         cfg_after = YAML.safe_load(File.read(cfg_path))
         assert_equal 99, cfg_after.dig("budget_usd", "finalize"),
@@ -267,7 +293,7 @@ class MigrateTest < Minitest::Test
         stages = File.join(dir, ".hive-state", "stages")
         write_task_folder(stages, "2-brainstorm", "needs-id-260603-aaaa")
 
-        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+        out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "rewrote legacy config keys and backfilled 1 task id",
                          "combined config-rewrite + backfill no-move message must report both"
@@ -284,7 +310,7 @@ class MigrateTest < Minitest::Test
         earlier = write_task_folder(stages, "2-brainstorm", "early-task-260603-aaaa", created_at: "2026-06-03T11:00:00Z")
         no_idea = write_task_folder(stages, "2-brainstorm", "no-idea-260603-cccc", idea: false)
 
-        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+        out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "backfilled 3 task ids"
         assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil }, Hive::TaskMeta.read(earlier))
@@ -302,10 +328,10 @@ class MigrateTest < Minitest::Test
         stages = File.join(dir, ".hive-state", "stages")
         folder = write_task_folder(stages, "3-plan", "existing-task-260603-aaaa")
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
         first = Hive::TaskMeta.read(folder)
         first_counter = Hive::TaskCounter.peek
-        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+        out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "target stage directories look already-migrated"
         assert_equal first, Hive::TaskMeta.read(folder)
@@ -322,9 +348,37 @@ class MigrateTest < Minitest::Test
         folder = write_task_folder(stages, "4-execute", "named-task-260603-aaaa")
         Hive::TaskMeta.write(folder, id: nil, slug: "named-task-260603-aaaa", display_name: "Named Task")
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         assert_equal({ id: 1, slug: "named-task-260603-aaaa", display_name: "Named Task" }, Hive::TaskMeta.read(folder))
+      end
+    end
+  end
+
+  def test_migrate_backfills_missing_display_names_without_renaming_existing_names
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        hive_state = File.dirname(stages)
+        missing_name = write_task_folder(stages, "4-execute", "missing-readable-name-260603-aaaa")
+        existing_name = write_task_folder(stages, "4-execute", "already-named-task-260603-bbbb")
+        Hive::TaskMeta.write(existing_name, id: 7, slug: "already-named-task-260603-bbbb", display_name: "Already Named")
+        RecordingDisplayNameGenerator.calls = []
+
+        out, _err = capture_io do
+          migrate_command(dir, display_name_generator: RecordingDisplayNameGenerator).call
+        end
+
+        assert_includes out, "backfilled 1 display name"
+        assert_equal "Missing Readable Name", Hive::TaskMeta.read(missing_name)[:display_name]
+        assert_equal "Already Named", Hive::TaskMeta.read(existing_name)[:display_name]
+        assert_equal [ { slug: "missing-readable-name-260603-aaaa", commit: false, project: File.basename(dir) } ],
+                     RecordingDisplayNameGenerator.calls
+
+        log = `git -C #{hive_state.shellescape} log --oneline -5`
+        assert $CHILD_STATUS.success?, "git log must succeed"
+        assert_match(/hive: migrate display names \(1 task\)/, log)
       end
     end
   end
@@ -338,7 +392,7 @@ class MigrateTest < Minitest::Test
         new_task = write_task_folder(stages, "3-plan", "new-id-260603-bbbb")
         Hive::TaskMeta.write(existing, id: 41, slug: "existing-id-260603-aaaa", display_name: nil)
 
-        capture_io { Hive::Commands::Migrate.new(dir).call }
+        capture_io { migrate_command(dir).call }
 
         assert_equal 41, Hive::TaskMeta.read(existing)[:id]
         assert_equal 42, Hive::TaskMeta.read(new_task)[:id]
@@ -352,7 +406,7 @@ class MigrateTest < Minitest::Test
     fake_ops.define_singleton_method(:run_git!) do |*_args|
       raise Hive::GitError, "permission denied"
     end
-    migrate = Hive::Commands::Migrate.new("/tmp/project")
+    migrate = migrate_command("/tmp/project")
 
     with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
       _out, err = capture_io do
@@ -365,8 +419,43 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_warns_with_recovery_command_when_display_name_commit_fails
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git!) do |*_args|
+      raise Hive::GitError, "permission denied"
+    end
+    migrate = migrate_command("/tmp/project")
+
+    with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
+      _out, err = capture_io do
+        migrate.send(:commit_display_name_backfill, "/tmp/project/.hive-state", 2)
+      end
+
+      assert_includes err, "could not commit them to the hive-state git history"
+      assert_includes err, "git -C /tmp/project/.hive-state add -A"
+      assert_includes err, "hive: migrate display names (2 tasks)"
+    end
+  end
+
+  def test_migrate_warns_with_singular_display_name_recovery_command
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git!) do |*_args|
+      raise Hive::GitError, "permission denied"
+    end
+    migrate = migrate_command("/tmp/project")
+
+    with_replaced_singleton_method(Hive::GitOps, :new, lambda { |_project_path| fake_ops }) do
+      _out, err = capture_io do
+        migrate.send(:commit_display_name_backfill, "/tmp/project/.hive-state", 1)
+      end
+
+      assert_includes err, "hive: migrate display names (1 task)'"
+      refute_includes err, "1 tasks"
+    end
+  end
+
   def test_restart_daemon_uses_systemctl_when_available
-    migrate = Hive::Commands::Migrate.new("/tmp/project")
+    migrate = migrate_command("/tmp/project")
     calls = []
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
@@ -384,7 +473,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_restart_daemon_warns_when_systemctl_restart_fails
-    migrate = Hive::Commands::Migrate.new("/tmp/project")
+    migrate = migrate_command("/tmp/project")
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
     migrate.define_singleton_method(:systemctl_available?) { true }
@@ -396,7 +485,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_restart_daemon_warns_when_systemctl_is_unavailable
-    migrate = Hive::Commands::Migrate.new("/tmp/project")
+    migrate = migrate_command("/tmp/project")
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
     migrate.define_singleton_method(:systemctl_available?) { false }
@@ -410,7 +499,7 @@ class MigrateTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, ".daemon.pid"), { "pid" => 4321 }.to_yaml)
       with_env("HIVE_HOME" => dir) do
-        assert_equal 4321, Hive::Commands::Migrate.new("/tmp/project").send(:read_daemon_pid)
+        assert_equal 4321, migrate_command("/tmp/project").send(:read_daemon_pid)
       end
     end
   end
@@ -426,7 +515,7 @@ class MigrateTest < Minitest::Test
 
           original.call(path, *args, **kwargs)
         }) do
-          assert_nil Hive::Commands::Migrate.new("/tmp/project").send(:read_daemon_pid)
+          assert_nil migrate_command("/tmp/project").send(:read_daemon_pid)
         end
       end
     end
@@ -443,14 +532,14 @@ class MigrateTest < Minitest::Test
 
           original.call(path)
         }) do
-          assert_nil Hive::Commands::Migrate.new("/tmp/project").send(:read_daemon_pid)
+          assert_nil migrate_command("/tmp/project").send(:read_daemon_pid)
         end
       end
     end
   end
 
   def test_daemon_alive_classifies_signal_results
-    migrate = Hive::Commands::Migrate.new("/tmp/project")
+    migrate = migrate_command("/tmp/project")
 
     with_replaced_singleton_method(Process, :kill, lambda { |_signal, _pid| 1 }) do
       assert migrate.send(:daemon_alive?, 1234)
@@ -464,10 +553,14 @@ class MigrateTest < Minitest::Test
   end
 
   def test_systemctl_available_returns_false_when_system_call_cannot_spawn
-    migrate = Hive::Commands::Migrate.new("/tmp/project")
+    migrate = migrate_command("/tmp/project")
     migrate.define_singleton_method(:system) { |*_args, **_kwargs| raise Errno::ENOENT }
 
     refute migrate.send(:systemctl_available?)
+  end
+
+  def migrate_command(project_path, display_name_generator: NoopDisplayNameGenerator)
+    Hive::Commands::Migrate.new(project_path, display_name_generator: display_name_generator)
   end
 
   def write_task_folder(stages, stage, slug, created_at: "2026-06-03T10:00:00Z", idea: true)

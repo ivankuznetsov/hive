@@ -7,7 +7,7 @@ description: >
 tags: [update, tui]
 steps:
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 10
   - kind: tui_refute
     anchor: "update 999"

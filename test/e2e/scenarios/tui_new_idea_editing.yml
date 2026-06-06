@@ -4,7 +4,7 @@ description: |
 tags: [tui, v2, paste]
 steps:
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 5
   - kind: tui_expect
     anchor: "sandbox"
@@ -46,7 +46,7 @@ steps:
     timeout: 15
 
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 5
 
   - kind: tui_keys

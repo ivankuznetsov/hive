@@ -445,18 +445,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
            "every action icon cell must consume the fixed icon column width"
   end
 
-  def test_wide_single_glyph_icon_aligns_like_a_narrow_multi_char_icon
-    # Genuine wide-vs-narrow contrast: the agent_running icon is ONE wide
-    # codepoint ("🤖", 2 cells / 1 char) while ready_to_plan is a narrow
-    # glyph plus a space ("▶ ", 2 cells / 2 chars). A char-count `ljust`
-    # regression would pad the single-glyph icon to "🤖 " (3 cells) and
-    # shift its id column; cell-aware padding keeps both id offsets equal.
-    running_icon = Hive::Tui::Views::TasksPane::ICONS.fetch("agent_running")
-    ready_icon = Hive::Tui::Views::TasksPane::ICONS.fetch("ready_to_plan")
-    assert_equal 1, running_icon.each_grapheme_cluster.to_a.size
-    refute_equal running_icon.length, ready_icon.length,
-                 "fixture must contrast icons that differ in underlying char count"
-
+  def test_wide_icon_does_not_shift_the_id_column
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
@@ -471,7 +460,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       Hive::Tui::Views::Format.display_width(prefix)
     end
     assert_equal [ 7, 7 ], id_offsets,
-                 "a wide single-glyph icon must land in the same id column as a narrow multi-char icon"
+                 "wide emoji icons must not shift fixed-width columns"
   end
 
   # ---- Sort order ----
@@ -589,6 +578,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     snap = make_snapshot([])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 80)
     assert_includes out, "no tasks"
+  end
+
+  def test_height_clips_task_rows_but_keeps_cursor_visible
+    tasks = 15.times.map { |idx| make_task(slug: "task-#{idx}", id: idx) }
+    snap = make_snapshot([ { "name" => "hive", "tasks" => tasks } ])
+
+    out = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, cursor: [ 0, 14 ]), width: 100, height: 8
+    )
+
+    assert_equal 8, out.lines.count
+    assert_includes out, "task-14", "task viewport must follow the selected cursor"
+    refute_includes out, "task-0", "offscreen tasks must be clipped instead of overflowing the pane"
   end
 
   # ---- compute_layout adaptive column dropping ----

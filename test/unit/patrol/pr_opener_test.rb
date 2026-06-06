@@ -51,6 +51,23 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def before_setup
+    super
+    original = Hive::TaskCounter.method(:next!)
+    counter = 40
+    @restore_task_counter = lambda do
+      Hive::TaskCounter.define_singleton_method(:next!, original)
+    end
+    Hive::TaskCounter.define_singleton_method(:next!) do
+      counter += 1
+    end
+  end
+
+  def after_teardown
+    @restore_task_counter&.call
+    super
+  end
+
   def cfg(draft: true)
     Hive::Config.deep_merge(
       Hive::Config.deep_dup(Hive::Config::DEFAULTS),
@@ -103,6 +120,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       task = Hive::Task.new(result.review_task_path)
       assert_equal "review", task.stage_name
       assert_equal "patrol-feature-fp1", task.slug
+      assert task.id, "patrol-created review tasks must get normal task ids"
       assert_equal "Patrol: Fix bug", task.display_name
       assert_equal :none, Hive::Markers.current(task.state_file).name
       assert File.directory?(task.reviews_dir)

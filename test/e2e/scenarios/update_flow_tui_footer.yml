@@ -25,7 +25,7 @@ steps:
 
   # TUI boots, then its footer renders the nudge.
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 10
   - kind: tui_expect
     anchor: "update 999.0.0"

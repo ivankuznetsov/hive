@@ -212,7 +212,7 @@ module Hive
             "or any installed plugin's skills/<name>/SKILL.md. Codex has no user-level " \
             "slash-command directory; either install a skill named #{inv.name.inspect}, " \
             "install a plugin that ships it, or override the stage's skill in config.yml " \
-            "(e.g. `plan.skill: /compound-engineering:ce-plan`)."
+            "(e.g. `plan.skill: /ce-plan`)."
         end
       end
     end

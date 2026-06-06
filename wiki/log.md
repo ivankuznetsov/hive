@@ -2,6 +2,20 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
+
+**Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.
+## [2026-06-06T12:12:34Z] agents - normalize legacy Compound Engineering invocations
+
+**Action:** Double-checked the installed Compound Engineering plugin metadata (`compound-engineering` v3.11.1): the CE workflows are still exposed as bare `/ce-*` skills such as `/ce-code-review`; the official `/code-review` command is a separate PR-comment workflow and does not satisfy Hive's reviewer-file contract. Updated Hive defaults, templates, and docs to emit `/ce-brainstorm`, `/ce-code-review`, `/ce-commit-push-pr`, and `/ce-test-browser` forms. Added `AgentProfile#format_skill_invocation` compatibility normalization so existing `compound-engineering:ce-*` config values still render to current CE syntax for Claude/Codex and `/skill:ce-*` for Pi.
+
+**Refreshed pages:**
+- [[modules/agent_profile]]
+- [[stages/brainstorm]]
+- [[stages/open-pr]]
+- [[stages/review]]
+- [[commands/doctor]]
+
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
 **Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.
@@ -86,6 +100,44 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:**
 - [[commands/tui]]
+
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear without a
+multi-second loading grid (a generous 5s regression bound, not a benchmark).
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T22:12:41Z] wiki — audit TUI startup seed coverage
+
+**Action:** Audited commit `570beeba` after it added synchronous
+`StateSource#refresh_now` startup seeding for `hive tui`. Read `AGENTS.md`,
+`.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]]
+entries first; `qmd search "StateSource refresh_now TUI startup seed first
+useful paint"` returned no indexed hits, and the configured master wiki path had
+no matching TUI startup note. Inspected the committed diff and current
+`lib/hive/tui/app.rb`, `lib/hive/tui/state_source.rb`, TUI PTY smoke tests, and
+the existing Charm API solution note. Confirmed [[commands/tui]] already covered
+the boot-time synchronous refresh and updated the test-coverage documentation so
+the new state-source startup seed and first-useful-paint PTY assertion are not
+missing from the wiki. No page count or catalog coverage changed, so [[index]]
+did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[commands/tui]]
+- [[log]]
 
 ## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
 
@@ -3204,43 +3256,69 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
-## [2026-06-05T19:32:10Z] eval — document basename-only hive-eval scenario selection
+## [2026-06-05T17:42:09Z] migrate — backfill legacy display names for all task sources
 
-**Action:** Refreshed command/API wiki coverage after commit `762bd7f8` changed `bin/hive-eval --scenario` from accepting `.rb` paths to accepting only safe basenames under `test/eval/scenarios/`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hive-eval eval reporter arbitrary Ruby scenario paths"` found the prior eval-harness log entry. Verified the committed diff plus current `bin/hive-eval`, `Rakefile`, `test/eval/support/reporter.rb`, `test/eval/eval_helper.rb`, and reporter tests. Documented the basename-only selector, exit-64 path rejection, scenario-only runner boundary, and remaining uncertainty that no full judge-backed eval sweep was found after this clamp. Ran `bundle exec ruby -Itest -Ilib test/eval/support/reporter_test.rb` (3 runs, 14 assertions, 0 failures). Did not run `qmd update` or `qmd embed`.
+**Action:** Extended `hive migrate` beyond task-id repair so it also scans every canonical task folder with a missing/null `display_name` and runs `Hive::DisplayName::Generator` with commits disabled, then records successful name writes in a separate `.hive-state` commit. This uses the same agent-backed naming pipeline as `hive generate-name`, preserves existing names (including patrol handoff names), and leaves failed generations retryable. Added focused migration and generator tests and updated command/state docs.
 
 **Refreshed pages:**
+- [[commands/migrate]]
+- [[state-model]]
+- [[stages/inbox]]
+
+## [2026-06-05T18:02:00Z] patrol — allocate task ids for review handoff tasks
+
+**Action:** Changed `Hive::Patrol::ReviewHandoff` so synthetic `6-review/patrol-.../` tasks allocate a normal `Hive::TaskCounter` id instead of writing `id: nil` unconditionally. The fail-soft behavior now matches `hive new`: counter lock contention leaves the id null, but the task is still enqueued and `hive migrate` can repair it later. Added patrol handoff/opener coverage and corrected the task sidecar docs.
+
+**Refreshed pages:**
+- [[state-model]]
+
+## [2026-06-05T20:05:00Z] tui — vertical resize viewport and reduced dashboard chrome
+
+**Action:** Made the grid composer height-aware: it subtracts footer/stalled-banner rows from `model.rows`, passes the remaining budget into `ProjectsPane` and `TasksPane`, and each pane clips/pads with a cursor-following viewport. Removed the persistent grid metadata strip and hidden-archive footer prefix so the first frame prioritizes panes and the footer stays visible under vertical terminal resize. Added focused pane viewport tests plus a PTY Charm smoke that performs a real vertical `winsize` + `SIGWINCH` resize and verifies the footer remains visible.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
+
+**Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[modules/daemon]]
+- [[state-model]]
 - [[testing]]
-- [[gaps]]
 
-## [2026-06-05T20:52:51Z] wiki/testing — refresh default-suite coverage after eval docs commit
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
 
-**Action:** Post-commit wiki refresh after `dd295c03` touched [[testing]], [[gaps]], and [[log]] to document the `bin/hive-eval --scenario` basename clamp from `762bd7f8`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "eval basename-only hive-eval scenario selection"` returned no indexed results, so this refresh used the committed diffs and direct source reads. Verified current `bin/hive-eval`, `test/eval/support/reporter_test.rb`, and `Rakefile`. Confirmed the HEAD documentation matches the scenario-only runner behavior, then corrected stale default-suite coverage wording so [[testing]], [[active-areas]], and [[gaps]] include `test/babysitter/` alongside `test/unit/` and `test/integration/`. Page count did not change, so [[index]] needed no catalog update. Did not run `qmd update` or `qmd embed`.
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
 
 **Refreshed pages:**
-- [[testing]]
-- [[active-areas]]
-- [[gaps]]
+- [[commands/tui]]
+## [2026-06-06T10:14:41Z] patrol — scoped review reviewers for patrol PR handoff
 
-## [2026-06-05T21:01:57Z] patrol — document review handoff evidence rendering
+**Action:** Added a separate `patrol.review.reviewers` config list for synthetic `Patrol: ...` review tasks. Fresh `hive init` now asks for patrol PR reviewers separately from normal `review.reviewers`, defaults patrol PR review to `codex-ce-code-review` only, and lets operators opt into `claude-ce-code-review`; `pr-review-toolkit` is intentionally excluded from the patrol prompt. The 6-review runner selects `patrol.review.reviewers` when `task.md` frontmatter has `source: patrol`, while normal tasks continue using `review.reviewers`. Updated [[commands/init]], [[commands/patrol]], [[modules/config]], and [[stages/review]].
 
-**Action:** Refreshed command/API wiki coverage after commit `789e9148` hardened `Hive::Patrol::ReviewHandoff` evidence rendering and DRY'd synthetic `idea.md` text generation. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured master wiki index first; `qmd search "patrol review handoff evidence idea.md"` returned no indexed results. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/finding.rb`, sibling evidence handling in `fingerprint.rb` / `pr_opener.rb`, and `test/unit/patrol/review_handoff_test.rb`. Documented that patrol-originated synthetic review tasks seed `idea.md` from one computed finding body, tolerate nil/empty evidence, render no-location fallback evidence rows, and preserve symbol-keyed evidence locations. Extended the existing live-smoke gap for patrol-to-review handoff. Did not run `qmd update` or `qmd embed`.
+## [2026-06-06T10:45:00Z] wiki — audit scoped patrol reviewer command/API coverage
+
+**Action:** Audited commit `464b64a9` after it touched CLI help, init prompts, config defaults/validation, the 6-review reviewer selector, the `hive-init.v1` schema, the project config template, and public architecture docs. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review reviewers config init"` found existing config/index/gaps context. Verified the committed diff plus `lib/hive/commands/init.rb`, `lib/hive/commands/init/prompts.rb`, `lib/hive/config.rb`, `lib/hive/stages/review.rb`, `templates/project_config.yml.erb`, `schemas/hive-init.v1.json`, and focused init/config/schema/review tests. Refreshed command/API coverage for the new `patrol_reviewers` init payload field, `patrol.review.reviewers` config surface, and patrol-sourced reviewer selection; recorded that the scoped patrol reviewer path is still not live-smoked through a real patrol PR plus daemon/TUI pickup. Did not run `qmd update` or `qmd embed`.
 
 **Refreshed pages:**
-- [[modules/patrol]]
+- [[index]]
+- [[architecture]]
+- [[commands/init]]
 - [[commands/patrol]]
+- [[modules/config]]
+- [[stages/review]]
 - [[testing]]
 - [[gaps]]
-
-## [2026-06-05T21:18:19Z] wiki/patrol — post-commit validation of evidence-rendering coverage
-
-**Action:** Post-commit wiki refresh after `2c991e3d` touched [[commands/patrol]], [[modules/patrol]], [[testing]], [[gaps]], and [[log]] with documentation for `Hive::Patrol::ReviewHandoff` evidence rendering. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured master wiki index first; `qmd search "residual worktree changes docs plans wiki patrol eval"` returned only prior indexed patrol/wiki log context. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/finding.rb`, and `test/unit/patrol/review_handoff_test.rb`. Confirmed the HEAD wiki pages already match the source behavior for one computed `idea.md` body, nil/empty evidence omission, no-location evidence fallback rows, symbol-keyed evidence entries, and synthetic review-task file coverage. Page coverage did not change, [[index]] needed no catalog update, and no new uncertainty needed recording in [[gaps]]. Did not run `qmd update` or `qmd embed`.
-
-**Refreshed pages:**
-- [[log]]
-
-## [2026-06-05T21:24:12Z] wiki/patrol — validate post-commit patrol log refresh
-
-**Action:** Post-commit wiki refresh after `e1773ad9` touched only [[log]] with a validation entry for patrol review-handoff evidence-rendering coverage. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured master wiki index first; `qmd search "wiki patrol post commit evidence rendering coverage e1773ad9"` returned no indexed results. Verified the committed diff plus current [[commands/patrol]], [[modules/patrol]], [[testing]], [[gaps]], `lib/hive/patrol/review_handoff.rb`, and `test/unit/patrol/review_handoff_test.rb`. Confirmed the prior log entry accurately reflects the documented source behavior for synthetic patrol review tasks and evidence rendering. Page coverage did not change, [[index]] needed no catalog update, and no new uncertainty needed recording in [[gaps]]. Did not run `qmd update` or `qmd embed`.
-
-**Refreshed pages:**
-- [[log]]

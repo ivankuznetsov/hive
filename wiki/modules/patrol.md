@@ -21,7 +21,7 @@ tags: [module, patrol, review, worktree, pr]
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — records fingerprint-to-PR state, invokes `ReviewHandoff` for opened PRs, and records `review_handoff_failed` when a PR opens but the synthetic review task cannot be created. |
-| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. The generated `idea.md` is derived once from the finding and reused for both frontmatter `original_text` and the body; evidence rendering is nil-safe and accepts string- or symbol-keyed `file`/`line`/`snippet` entries. |
+| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 
@@ -40,7 +40,7 @@ Patrol state is deliberately inspectable and removable:
   dismissed.json
 ```
 
-The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. The synthetic task includes `task.md`, `idea.md`, `worktree.yml`, `pr.md`, `reviews/`, and `meta.yml`; `idea.md` carries patrol frontmatter plus the original finding sections so status/TUI idea previews are not blank for patrol-originated review tasks. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
+The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
 
 ## Daemon triggers
 
@@ -50,7 +50,6 @@ The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/w
 
 - Patrol is opt-in: `patrol.enabled` defaults false and the daemon still requires `daemon.enabled`.
 - Findings surface as PRs, and opened PRs enter `6-review` by default; patrol still never writes `1-inbox/` intake tasks.
-- Synthetic review-task evidence is treated as optional data: missing evidence omits the `## Evidence` section, entries without file/line render as `- evidence`, and symbol-keyed entries preserve their real location instead of degrading to the fallback marker.
 - PR creation is gated on validation passing and on the secret scanner.
 - Each finding fingerprint maps to at most one active or merged PR.
 - A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue.

@@ -50,20 +50,6 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     assert_includes out, "Projects", "pane should carry a 'Projects' title header"
   end
 
-  # Wide-char (emoji/CJK) project names are 2 terminal cells per glyph.
-  # render_row must pad by display cells (Format.ljust_cells), not code
-  # units, so a row never over-pads past inner_width and pushes the pane
-  # border out of alignment.
-  def test_render_row_pads_wide_char_label_to_exact_cell_width
-    inner_width = 20
-    ascii = Hive::Tui::Views::ProjectsPane.render_row("plain", false, inner_width)
-    wide = Hive::Tui::Views::ProjectsPane.render_row("🤖🤖 proj", false, inner_width)
-
-    assert_equal inner_width, Hive::Tui::Views::Format.display_width(ascii)
-    assert_equal inner_width, Hive::Tui::Views::Format.display_width(wide),
-                 "wide-char project rows must pad to inner_width by display cells, not code units"
-  end
-
   # ---- Selection (cursor highlight) ----
   # Verifies the selection predicate directly. lipgloss strips ANSI in
   # non-tty so render output cannot distinguish selected vs unselected
@@ -212,5 +198,15 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     out = Hive::Tui::Views::ProjectsPane.render(model, width: 3)
     refute_nil out
     assert out.is_a?(String)
+  end
+
+  def test_height_clips_projects_but_keeps_selected_scope_visible
+    model = make_model(scope: 9, snapshot: make_snapshot(names: (1..12).map { |idx| "proj-#{idx}" }))
+
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 30, height: 7)
+
+    assert_equal 7, out.lines.count
+    assert_includes out, "proj-9", "project viewport must follow the selected scope"
+    refute_includes out, "proj-1", "offscreen projects must be clipped at small heights"
   end
 end

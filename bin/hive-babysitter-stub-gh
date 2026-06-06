@@ -32,6 +32,7 @@ def api_read_only?(rest)
 
   method = nil
   payload = false
+  unsafe_payload = false
   index = 1
   while index < rest.length
     arg = rest[index]
@@ -45,18 +46,38 @@ def api_read_only?(rest)
     when /\A-X=?(.+)\z/
       method = Regexp.last_match(1)
       index += 1
-    when "-f", "-F", "--raw-field", "--field", "--input"
+    when "-f", "--raw-field"
       payload = true
       index += 2
-    when /\A-f.+\z/, /\A-F.+\z/, /\A--raw-field=.+\z/, /\A--field=.+\z/, /\A--input=.+\z/
+    when "-F", "--field"
       payload = true
+      unsafe_payload ||= rest[index + 1].to_s.split("=", 2).last.start_with?("@")
+      index += 2
+    when "--input"
+      payload = true
+      unsafe_payload = true
+      index += 2
+    when /\A-f.+\z/, /\A--raw-field=.+\z/
+      payload = true
+      index += 1
+    when /\A-F(.+)\z/
+      payload = true
+      unsafe_payload ||= Regexp.last_match(1).split("=", 2).last.start_with?("@")
+      index += 1
+    when /\A--field=(.+)\z/
+      payload = true
+      unsafe_payload ||= Regexp.last_match(1).split("=", 2).last.start_with?("@")
+      index += 1
+    when /\A--input=.+\z/
+      payload = true
+      unsafe_payload = true
       index += 1
     else
       index += 1
     end
   end
 
-  return method.casecmp("GET").zero? if method
+  return method.casecmp("GET").zero? && !unsafe_payload if method
 
   !payload
 end

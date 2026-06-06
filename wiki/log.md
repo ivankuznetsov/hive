@@ -9,6 +9,13 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[modules/bot]]
 
+## [2026-06-06T06:45:00Z] bot - hard-fail missing voice E2E secret
+
+**Action:** Resolved the pass-2 voice E2E review escalation by making explicit `TG_IDEA_MODE=voice` fail when `HIVE_WHISPER_API_KEY` is unset instead of reporting a green skip. Updated the shell wrapper message, the voice fixture README, and [[testing]] so the documented contract matches the driver.
+
+**Refreshed pages:**
+- [[testing]]
+
 ## [2026-06-06T06:31:00Z] bot - voice fixture and draft-preservation review fix
 
 **Action:** Addressed 6-review pass-2 voice findings on the Telegram voice-note idea branch. Added the checked-in `test/fixtures/voice/voice-idea.oga` Ogg/Opus speech sample used by the secret-gated voice E2E, and documented it in [[testing]]. Guarded `Router`/`Supervisor` so a bare voice note sent while a non-voice idea draft is open replies with an explicit finish/discard prompt and preserves the existing draft instead of clearing it through `IdeaDraftStore#start`. Refreshed [[modules/bot]] and narrowed [[gaps]] to the remaining live Telegram/OpenAI smoke evidence.

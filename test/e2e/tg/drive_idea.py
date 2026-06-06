@@ -36,12 +36,12 @@ def main():
     try:
         if MODE == "voice":
             if not os.environ.get("HIVE_WHISPER_API_KEY"):
-                # Skip ONLY when the Whisper secret is absent — same convention
-                # as the other secret-gated E2Es (HIVE_TEST_BOT_TOKEN). A
-                # secret-less CI run legitimately cannot exercise the real
-                # transcription path.
-                print("SKIP voice mode requires HIVE_WHISPER_API_KEY")
-                return 0
+                # Voice mode is requested explicitly, so this is a hard
+                # configuration failure. The shell wrapper already hard-requires
+                # HIVE_TEST_BOT_TOKEN; keep the Whisper-backed path equally
+                # honest instead of reporting a green skip.
+                print("FAIL voice mode requires HIVE_WHISPER_API_KEY")
+                return 1
             if not VOICE_FIXTURE or not os.path.exists(VOICE_FIXTURE):
                 # The secret IS set, so the voice path MUST run. A missing
                 # fixture is a hard FAILURE, not a skip: U8 requires a

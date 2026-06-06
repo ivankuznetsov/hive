@@ -21,7 +21,7 @@ export TG_VOICE_EXPECT="${TG_VOICE_EXPECT:-voice idea}"
 if [ "$TG_IDEA_MODE" = "voice" ]; then
   export TG_VOICE_FIXTURE="${TG_VOICE_FIXTURE:-$REPO/test/fixtures/voice/voice-idea.oga}"
   if [ -z "${HIVE_WHISPER_API_KEY:-}" ]; then
-    echo "voice E2E requested but HIVE_WHISPER_API_KEY is unset; driver will skip voice mode"
+    echo "voice E2E requested but HIVE_WHISPER_API_KEY is unset; driver will fail voice mode"
   fi
 fi
 

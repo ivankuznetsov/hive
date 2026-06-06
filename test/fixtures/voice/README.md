@@ -19,11 +19,11 @@ asserts the transcript contains `TG_VOICE_EXPECT` (default `voice idea`).
 
 ## Why it isn't auto-generated
 
-The E2E gate is intentional: when `HIVE_WHISPER_API_KEY` is **unset** the
-voice mode skips (matching the `HIVE_TEST_BOT_TOKEN` convention); when the
-key **is** set, a missing fixture is a hard FAIL rather than a silent skip
-(`drive_idea.py`). Generate the clip once with any TTS that produces
-Ogg/Opus, e.g.:
+The E2E gate is intentional: when `TG_IDEA_MODE=voice` is requested,
+`HIVE_WHISPER_API_KEY` must be set and a missing secret is a hard FAIL,
+matching the wrapper's `HIVE_TEST_BOT_TOKEN` behavior. A missing fixture is
+also a hard FAIL rather than a silent skip (`drive_idea.py`). Generate the
+clip once with any TTS that produces Ogg/Opus, e.g.:
 
 ```sh
 # espeak-ng + ffmpeg (Linux); or `say` on macOS, then convert.

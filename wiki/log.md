@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T14:19:59Z] wiki - audit log-only babysitter dry-run refresh commit
+
+**Action:** Audited commit `e00bcf49` after it auto-committed a log-only wiki refresh entry for the babysitter dry-run stub coverage audit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output ext-diff external-diff"` returned no indexed results, so verification used the committed diff plus direct source reads. Checked the new [[log]] entry against commit `6ef4c3d8`, commit `9d1e0fce`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]]. Confirmed the log-only commit records the already-current dry-run stub documentation: git read allowlist entries still reject `--output`, `--output=<path>`, `--ext-diff`, and `--external-diff`; gh API payload writes remain skipped unless GET is explicit; and the existing live-agent `hive babysit --once PROJECT --dry-run` smoke gap remains the only recorded uncertainty. No index or gaps changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-05T22:23:55Z] wiki - audit babysitter dry-run residue commit
 
 **Action:** Audited commit `6ef4c3d8` after it auto-committed residual wiki edits for the babysitter dry-run git unsafe-option refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output ext-diff external-diff"` returned no indexed results, so verification used the committed diff plus direct source reads. Checked the commit's changes to [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]], and [[log]] against `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, and commit `9d1e0fce`. Confirmed the pages now match the stub allowlist and the remaining uncertainty is still the live-agent `hive babysit --once PROJECT --dry-run` smoke gap in [[gaps]]. No index coverage changes were needed. Did not run `qmd update` or `qmd embed`.

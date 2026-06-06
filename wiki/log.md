@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T15:49:29Z] babysitter/wiki - audit dry-run git executable-config coverage
+
+**Action:** Refreshed command/API surface coverage after commit `9fb8e782` touched the executable `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and babysitter wiki pages. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first, then checked `.llm-wiki/config.json` and [[architecture]] during the refresh; `qmd search "babysitter dry-run git stub executable config"` found existing babysitter command/module/testing/gaps context. Verified the committed diff plus current `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, and the focused dry-run test. The existing [[commands/babysit]] and [[modules/babysitter]] updates correctly document the new executable-affecting Git skip list; this refresh added the missing test-matrix coverage and carried the live-agent dry-run smoke uncertainty forward in [[gaps]]. No page count or catalog coverage changed, so [[index]] did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-06T15:39:48Z] babysitter - block executable-affecting dry-run git pass-through
 
 **Action:** Tightened `bin/hive-babysitter-stub-git` so dry-run read-only pass-through rejects executable-affecting Git globals and options before `exec`ing the real binary. The stub now skips unsafe `-c` / `--config-env` keys such as `diff.external`, `core.fsmonitor`, `core.pager`, `core.hooksPath`, `alias.*`, `pager.*`, `protocol.ext.*`, and hook-related prefixes, plus global pager/exec-path controls and `git grep --open-files-in-pager`. Added regression coverage in `test/unit/babysitter/dry_run_env_test.rb`; `ruby -Itest test/unit/babysitter/dry_run_env_test.rb` and `bundle exec rake test` passed.

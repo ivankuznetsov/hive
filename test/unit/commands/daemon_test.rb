@@ -57,6 +57,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       "max_concurrent_runs" => 2,
       "max_concurrent_per_project" => 1,
       "max_runs_per_day_per_project" => 3,
+      "max_concurrent_patrol_scans" => 1,
       "log_file" => File.join(@home, "logs", "daemon.log"),
       "log_max_bytes" => 1024,
       "log_max_files" => 2,

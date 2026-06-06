@@ -950,11 +950,10 @@ module Hive
           return
         end
 
-        gate = @controller.can_dispatch?(
-          project: project, slug: slug, now: now,
-          external_global_count: @external_active_agent_total,
-          external_project_count: external_active_agent_count_for(project)
-        )
+        # Patrol scans use their OWN concurrency budget (not the task
+        # max_concurrent_runs) so a long codex-backed scan never starves
+        # task dispatch — a running scan no longer eats a task slot.
+        gate = @controller.can_dispatch_patrol_scan?(project: project, now: now)
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: slug,
                                   stage: patrol_dispatch[:stage],
@@ -971,7 +970,8 @@ module Hive
           state_file_path: patrol_dispatch[:state_file_path],
           hive_state_path: patrol_dispatch[:hive_state_path],
           now: now,
-          trigger: "patrol"
+          trigger: "patrol",
+          kind: :patrol_scan
         )
       rescue StandardError => e
         # A spawn error is a genuine failure: route it through `complete`
@@ -1343,7 +1343,7 @@ module Hive
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, hive_state_path:, now:, trigger: "advance",
-                           request_id: nil)
+                           request_id: nil, kind: :task)
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
@@ -1358,7 +1358,8 @@ module Hive
         )
         @controller.record_dispatch(
           pid: pid, project: project, slug: slug, stage: stage,
-          command: command, started_at: now, state_file_mtime: state_file_mtime
+          command: command, started_at: now, state_file_mtime: state_file_mtime,
+          kind: kind
         )
         @logger.event(:dispatched, pid: pid, project: project, slug: slug,
                                    stage: stage, command: command, trigger: trigger,

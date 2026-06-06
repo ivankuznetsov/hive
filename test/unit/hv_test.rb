@@ -55,6 +55,7 @@ class HvTest < Minitest::Test
 
       out, err, status = Open3.capture3(
         {
+          "HIVE_BIN_OVERRIDE" => "",
           "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
           "HOMEBREW_PREFIX" => homebrew_prefix
         },

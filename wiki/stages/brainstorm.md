@@ -32,7 +32,7 @@ tags: [stage, brainstorm, qa, tmux]
    ```
    End with `<!-- WAITING -->`.
 2. If `brainstorm.md` already has rounds, parse the most recent `## Round N`. If all answers are filled in, append `## Requirements` (actor / flow / acceptance examples) and end with `<!-- COMPLETE -->`. Otherwise append `## Round N+1` with follow-ups and end with `<!-- WAITING -->`.
-3. Use `/compound-engineering:ce-brainstorm` skill where available.
+3. Use `/ce-brainstorm` skill where available. Legacy `compound-engineering:ce-*` config values are normalized before rendering.
 
 Agent must not modify any file other than `brainstorm.md` and must not run shell or network tools.
 

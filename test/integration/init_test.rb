@@ -77,7 +77,7 @@ class InitTest < Minitest::Test
         refute_includes out, "hive: using defaults"
         refute_includes out, "hive: initialized"
         assert_equal "hive-init", payload.fetch("schema")
-        assert_equal 2, payload.fetch("schema_version")
+        assert_equal 1, payload.fetch("schema_version")
         assert_equal true, payload.fetch("ok")
         assert_equal File.basename(dir), payload.fetch("project")
         assert_equal File.expand_path(dir), payload.fetch("path")

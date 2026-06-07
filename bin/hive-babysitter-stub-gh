@@ -92,8 +92,13 @@ def api_read_only?(rest)
 end
 
 def browser_launch_option?(arg)
-  arg == "--web" || arg.start_with?("--web=") ||
-    arg == "-w" || arg.start_with?("-w=")
+  return true if arg == "--web" || arg.start_with?("--web=")
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  # Short-flag cluster such as "-w", "-cw", or "-w=value". The bundled cluster
+  # (before any "=" value) launches the browser whenever it contains "w".
+  cluster = arg[1..].to_s.split("=", 2).first
+  cluster.to_s.include?("w")
 end
 
 def read_only?(rest)

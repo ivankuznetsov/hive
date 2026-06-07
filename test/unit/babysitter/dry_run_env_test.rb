@@ -270,12 +270,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
       assert_stubbed env, "gh", "repo", "view", "--web"
       assert_stubbed env, "gh", "run", "view", "123", "-w"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cw"
       assert_passes env, "gh", "pr", "view", "42"
 
       skipped = File.read(log_path)
       assert_includes skipped, "gh pr view 42 --web skipped"
       assert_includes skipped, "gh repo view --web skipped"
       assert_includes skipped, "gh run view 123 -w skipped"
+      assert_includes skipped, "gh pr view 42 -cw skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh pr view 42"

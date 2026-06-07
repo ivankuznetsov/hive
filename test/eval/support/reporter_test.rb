@@ -229,4 +229,57 @@ class HiveEvalReporterTest < Minitest::Test
       refute File.exist?(report)
     end
   end
+
+  def test_cli_rejects_unknown_options_with_usage
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "unknown-option.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--bogus", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/invalid option: --bogus/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_missing_option_values_with_usage
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "missing-scenario.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--report", report, "--scenario"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/missing argument: --scenario/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_stray_positional_scenario_names
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "positional.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "definitely-not-a-scenario", "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/unexpected argument\(s\): definitely-not-a-scenario/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute File.exist?(report)
+    end
+  end
 end

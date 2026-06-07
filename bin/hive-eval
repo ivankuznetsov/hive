@@ -11,27 +11,30 @@ options = {
   no_judge: false
 }
 
-parser = OptionParser.new do |parser|
-  parser.banner = "Usage: bin/hive-eval [--scenario NAME] [--report PATH] [--no-judge]"
-  parser.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/hive-eval [--scenario NAME] [--report PATH] [--no-judge]"
+  opts.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
     options[:scenario] = value
   end
-  parser.on("--report PATH", "Write JSON report to PATH") do |value|
+  opts.on("--report PATH", "Write JSON report to PATH") do |value|
     options[:report] = value
   end
-  parser.on("--no-judge", "Skip Codex judge assertions") do
+  opts.on("--no-judge", "Skip Codex judge assertions") do
     options[:no_judge] = true
   end
 end
 
 begin
-  parser.parse!
-  if ARGV.any?
-    warn "hive-eval: unexpected argument: #{ARGV.first}"
-    exit 64
-  end
+  remaining = parser.parse!
 rescue OptionParser::ParseError => e
   warn "hive-eval: #{e.message}"
+  warn parser
+  exit 64
+end
+
+unless remaining.empty?
+  warn "hive-eval: unexpected argument(s): #{remaining.join(" ")}"
+  warn parser
   exit 64
 end
 

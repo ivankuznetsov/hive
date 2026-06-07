@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-07
 tags: [test, minitest, fixtures]
 ---
 
@@ -64,7 +64,7 @@ task default: :test
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
 | `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers, signal cleanup, and wrapper argv policy. |
-| `hv_test.rb` | `bin/hv` — refuses unsafe Apache Hive fallback paths (`/usr/bin/hive`, `/opt/hive/bin/hive`) and verifies `HIVE_BIN_OVERRIDE` can point at a custom Hive CLI install path. |
+| `hv_test.rb` | `bin/hv` — refuses unsafe Apache Hive fallback paths (`/usr/bin/hive`, `/opt/hive/bin/hive`), skips implicit candidates with Apache-style `Hive X.Y.Z` version output, and verifies `HIVE_BIN_OVERRIDE` can point at a custom Hive CLI install path. |
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, and `gh api` implicit-POST payload flag blocking. |
 
 ## Integration suite (`test/integration/`)

@@ -35,4 +35,44 @@ class HvTest < Minitest::Test
       assert_equal "override:probe\n", out
     end
   end
+
+  def test_implicit_candidate_with_apache_version_is_skipped
+    with_tmp_dir do |dir|
+      xdg_hive = File.join(dir, "xdg", "hive")
+      brew_hive = File.join(dir, "brew", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(xdg_hive))
+      FileUtils.mkdir_p(File.dirname(brew_hive))
+      File.write(xdg_hive, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo "Hive 3.1.3"
+          exit 0
+        fi
+        echo apache:$1
+      SH
+      File.write(brew_hive, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo "0.2.0"
+          exit 0
+        fi
+        echo brew:$1
+      SH
+      FileUtils.chmod(0o755, xdg_hive)
+      FileUtils.chmod(0o755, brew_hive)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_BIN_OVERRIDE" => nil,
+          "XDG_BIN_HOME" => File.dirname(xdg_hive),
+          "HOMEBREW_PREFIX" => File.dirname(File.dirname(brew_hive))
+        },
+        HV_BIN,
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "brew:probe\n", out
+    end
+  end
 end

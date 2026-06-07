@@ -9,8 +9,21 @@ set -euo pipefail
 
 self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
+is_hive_cli() {
+  local version
+
+  version="$("$1" --version 2>/dev/null)" || return 1
+  [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z][0-9A-Za-z._-]*)?$ ]]
+}
+
+override="${HIVE_BIN_OVERRIDE:-}"
+if [[ -n "$override" && -x "$override" ]]; then
+  resolved="$(readlink -f "$override" 2>/dev/null || echo "$override")"
+  # Guard against `hv -> hv` chains: never exec into our own script.
+  [[ "$resolved" == "$self" ]] || exec "$override" "$@"
+fi
+
 candidates=(
-  "${HIVE_BIN_OVERRIDE:-}"
   "${XDG_BIN_HOME:-${HOME}/.local/bin}/hive"
   "${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive"
   "/usr/local/bin/hive"
@@ -23,6 +36,8 @@ for candidate in "${candidates[@]}"; do
   resolved="$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")"
   # Guard against `hv -> hv` chains: never exec into our own script.
   [[ "$resolved" != "$self" ]] || continue
+
+  is_hive_cli "$candidate" || continue
 
   exec "$candidate" "$@"
 done

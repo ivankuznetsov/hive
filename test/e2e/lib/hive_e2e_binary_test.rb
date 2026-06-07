@@ -23,6 +23,14 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_leading_json_list_dispatches_to_list
+    out, err, status = Open3.capture3(hive_e2e, "--json", "list")
+    assert status.success?, "bin/hive-e2e --json list should exit 0, stderr was: #{err}"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-scenarios", payload["schema"]
+  end
+
   def test_clean_json_emits_deleted_and_kept_counts
     # Redirect the runs dir to a temp location so the contract test cannot
     # delete real forensic artifacts under test/e2e/runs/. Without this the
@@ -40,6 +48,19 @@ class E2EBinaryTest < Minitest::Test
       assert_equal 1, payload["schema_version"]
       assert_kind_of Integer, payload["deleted"]
       assert_kind_of Integer, payload["kept"]
+    end
+  end
+
+  def test_leading_json_clean_dispatches_to_clean
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+        hive_e2e, "--json", "clean"
+      )
+      assert status.success?, "bin/hive-e2e --json clean should exit 0, stderr was: #{err}"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-clean", payload["schema"]
     end
   end
 
@@ -64,7 +85,7 @@ class E2EBinaryTest < Minitest::Test
   # rather than Thor's "ERROR: ... was called with no arguments" prose.
   def test_missing_required_args_with_json_emits_envelope_on_stdout
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json")
-    refute_equal 0, status.exitstatus
+    assert_equal 64, status.exitstatus
     assert_empty err
 
     payload = JSON.parse(out)
@@ -80,21 +101,31 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
-  # Thor usage failures must route through bin/hive-e2e's documented usage
-  # exit code even when --json is absent.
-  def test_unknown_command_exits_usage
-    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
+  # Thor's default for unknown commands is to print a deprecation warning
+  # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
+  # see a non-zero status instead. Pin the contract here.
+  def test_unknown_command_exits_usage_code
+    _out, err, status = Open3.capture3(hive_e2e, "no-such-command")
     assert_equal 64, status.exitstatus
+    assert_match(/hive-e2e:/, err, "human mode should print a prose error to stderr")
   end
 
-  def test_missing_required_args_exits_usage
-    _out, _err, status = Open3.capture3(hive_e2e, "replay")
+  def test_missing_required_args_exits_usage_code
+    _out, err, status = Open3.capture3(hive_e2e, "replay")
     assert_equal 64, status.exitstatus
+    assert_match(/hive-e2e:/, err, "human mode should print a prose error to stderr")
   end
 
   def test_run_help_after_subcommand_shows_usage
     out, err, status = Open3.capture3(hive_e2e, "run", "--help")
     assert status.success?, "bin/hive-e2e run --help should exit 0, stderr was: #{err}"
+    assert_includes out, "Run e2e scenarios"
+    refute_includes err, "no scenarios match"
+  end
+
+  def test_run_help_after_option_value_shows_usage
+    out, err, status = Open3.capture3(hive_e2e, "run", "--filter", "tui", "--help")
+    assert status.success?, "bin/hive-e2e run --filter tui --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
   end
@@ -109,6 +140,26 @@ class E2EBinaryTest < Minitest::Test
     assert_equal false, payload["ok"]
     assert_equal "missing_repro", payload["error_kind"]
     assert_equal 78, payload["exit_code"]
+  end
+
+  def test_leading_json_replay_dispatches_to_replay
+    out, err, status = Open3.capture3(hive_e2e, "--json", "replay", "missing-run", "missing-scenario")
+    assert_equal 78, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal "missing_repro", payload["error_kind"]
+  end
+
+  def test_leading_json_unknown_token_still_uses_default_run_pattern
+    out, err, status = Open3.capture3(hive_e2e, "--json", "definitely-no-scenario")
+    assert_equal 64, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "no_scenarios", payload["error_kind"]
+    assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
   end
 
   def test_run_no_match_emits_json_error_when_requested
@@ -161,5 +212,92 @@ class E2EBinaryTest < Minitest::Test
       assert_kind_of Array, payload["deleted_runs"]
       assert_kind_of Array, payload["kept_runs"]
     end
+  end
+
+  def test_unknown_command_with_json_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "no-such", "--json=true")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json=true is set"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no-such/, payload["message"])
+  end
+
+  def test_unknown_command_with_json_uppercase_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "no-such", "--json=TRUE")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json=TRUE is set"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no-such/, payload["message"])
+  end
+
+  def test_truthy_json_spellings_agree_with_inner_command_on_success_path
+    %w[--json --json=true --json=TRUE --json=t --json=T].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "list", flag)
+      assert status.success?, "bin/hive-e2e list #{flag} should exit 0, stderr was: #{err}"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-scenarios", payload["schema"],
+                   "#{flag}: inner command must emit the JSON envelope the wrapper assumes truthy"
+    end
+  end
+
+  def test_unknown_command_with_short_truthy_json_emits_envelope_on_stdout
+    %w[--json=t --json=T].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "no-such", flag)
+      assert_equal 64, status.exitstatus, "#{flag}: usage error must exit 64"
+      assert_empty err, "#{flag}: human prose must not leak to stderr"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-error", payload["schema"]
+      assert_equal "usage", payload["error_kind"]
+      assert_match(/no-such/, payload["message"])
+    end
+  end
+
+  def test_negative_json_spellings_fall_through_to_prose
+    %w[--json=false --json=0 --no-json --json=True].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "no-such", flag)
+      refute_equal 0, status.exitstatus, "#{flag}: unknown command must still exit non-zero"
+      refute_includes out, "hive-e2e-error",
+                       "#{flag}: must not emit a JSON envelope on stdout when JSON is not requested"
+      refute_empty err, "#{flag}: human prose must go to stderr when JSON is not requested"
+    end
+  end
+
+  def test_missing_required_args_with_json_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--json=true")
+    refute_equal 0, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  def test_unknown_command_exits_non_zero
+    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
+    refute_equal 0, status.exitstatus,
+                 "bin/hive-e2e should exit non-zero on unknown commands (got #{status.exitstatus.inspect})"
+  end
+
+  def test_unknown_command_exits_usage
+    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
+    assert_equal 64, status.exitstatus
+  end
+
+  def test_missing_required_args_exits_usage
+    _out, _err, status = Open3.capture3(hive_e2e, "replay")
+    assert_equal 64, status.exitstatus
   end
 end

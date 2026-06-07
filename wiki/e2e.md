@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-06-07
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -20,6 +20,12 @@ bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+`bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
+`hive-cli` executable. It handles top-level `--version` / `-v` before Thor
+dispatch and rewrites command-local `--help` / `-h` before scenario selection.
+That keeps help requests non-mutating and preflight-free even when command
+options precede the help flag, e.g. `bin/hive-e2e run --filter tui --help`.
 
 ## Layout
 

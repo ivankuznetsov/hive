@@ -31,6 +31,10 @@ not add a second runtime and does not publish one ClawHub listing per Hive verb.
 `archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
 findings, metrics, update/uninstall, registry maintenance, and `--json`
 envelopes where the command page says they exist.
+The wrapper also normalizes command-local help before Thor dispatch:
+`hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
+`hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
+instead of being treated as partially-valid command invocations.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
@@ -69,7 +73,10 @@ CLI.
 
 `bin/hive-e2e` is the opt-in outer test harness for scenario-driven,
 subprocess-level verification. It is documented in [[e2e]] rather than treated
-as an end-user workflow command.
+as an end-user workflow command. It mirrors the main wrapper's entrypoint
+conventions for top-level `--version` and command-local help, so
+`bin/hive-e2e run --filter tui --help` prints the `run` usage instead of
+selecting scenarios or running preflight checks.
 
 ## Backlinks
 

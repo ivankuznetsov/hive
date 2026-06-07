@@ -3,12 +3,67 @@
 Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-06-07T17:00:00Z] review fix-pass 03 — finalize healer doc/observability polish
+
+**Action:** Applied 6-review pass-03 findings to `Hive::Daemon::StaleAgentHealer`, its logger, tests, and [[modules/daemon]]. Dropped the unreferenced `MARKER_ERROR_REASONS`/`HEAL_LOG_LABELS` constants; unified the heal event attempt-count key to plural `attempts:` across `marker_healed` and `marker_heal_exhausted`; derived the review-path `marker_heal_failed` reason label from the row (so a `review_agent_died` failure is no longer mislabeled as the tmux-death channel); and made `observe_pre_clear_mtime` emit a new `marker_heal_observer_missing` debug event instead of silently no-op'ing when a controller lacks the method. Tightened the class doc: removed the inaccurate "auth" cause of the unpushed-commits marker (auth raises before the push gate), reordered the finalize re-run checks to "auth, clean-exit, push" to match `finalize.rb#run!`, softened the limit wording to "configured limit (default 3)", and noted the intentional asymmetry with `review_error_signature`. Extended the exhausted-event comment to call out the SIGHUP-reload reset of the `seen` dedup maps. Reverted the manual `wiki/log.md` edits (fragments already exist in `wiki/log.d/`). Added focused tests: status-JSON error-row marker_id contract, observer-missing logging, and exhausted-event one-shot suppression across 3+ heal passes; the redispatch integration test now derives its `action` from the real status pipeline.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-06-07T16:13:56Z] wiki — audit entrypoint help rewrite coverage fragment
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after this branch changed `bin/hive` and `bin/hive-e2e` help rewriting. Read `AGENTS.md`, `.llm-wiki/config.json`, [[cli]], [[commands]], [[e2e]], [[testing]], and [[gaps]] first; `qmd search "bin hive-e2e --version command-local help wrapper"` returned no local hits, while the configured master wiki search surfaced the existing Hive CLI/e2e/testing pages. Inspected the rebased diff and current `bin/hive`, `bin/hive-e2e`, `test/integration/cli_version_test.rb`, and `test/e2e/lib/hive_e2e_binary_test.rb`. Confirmed existing [[cli]], [[commands]], [[e2e]], [[testing]], and [[gaps]] coverage matches the code: command-local help now preserves any leading wrapper options before the subcommand, rewrites to `help <cmd>`, and drops command arguments after the subcommand so option-bearing requests such as `hive approve --from 2-brainstorm --help` and `bin/hive-e2e run --filter tui --help` print usage instead of running partial command validation. [[gaps]] records the remaining uncertainty that the packaged `hive` executable has not been release-install-smoked for this path; `bin/hive-e2e` remains checkout-only. Page coverage did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands]]
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T16:00:00Z] review fix-pass — finalize unpushed healer hardening
+
+**Action:** Applied 6-review findings to `Hive::Daemon::StaleAgentHealer` and its tests. Collapsed duplicated marker reason helpers into one `marker_reason(row)`, extracted the review-path heal-label ternary into `review_heal_label`, and documented the intentional silent no-op when `clear_current` returns false (no event, no retry budget consumed). Added a dispatcher-level integration test proving finalize re-dispatches (not `:record_baseline`) after the unpushed-commits clear via the seeded pre-clear mtime, plus unit tests for clear-false-no-budget, duplicate rows in one heal pass, and per-process budget reset on a fresh healer instance. Strengthened existing assertions with explicit non-default mtime, `Markers.current.none?`, and `refute marker_heal_failed` on negative skips. Noted in [[modules/daemon]] that the recovery budget is in-memory and resets on restart/SIGHUP reload.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-06-07T15:52:00Z] daemon — expose exhausted marker-heal budgets
+
+**Action:** Added `marker_heal_exhausted` as a one-shot daemon log event when bounded marker auto-recovery gives up. The event now carries `budget_scope=per_process`, `suggested_next_action=manual_fix`, and a remediation hint so operators know the budget refills after daemon restart/SIGHUP and can recover manually. Strengthened finalize unpushed recovery tests for fresh marker-id retries, per-task budget isolation, race-shaped no-id marker guards, duplicate rows in one heal pass, and pre-clear baseline redispatch.
+
+**Tests:** Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/unit/daemon/logger_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T15:05:00Z] daemon — auto-heal interrupted finalize push leftovers
+
+**Action:** Extended `Hive::Daemon::StaleAgentHealer` so `8-finalize` rows with `ERROR reason=unpushed_commits` and no live task lock are automatically cleared with a bounded per-process retry budget. The clear uses the observed `marker_id` when present, falling back to legacy no-id markers only, so a stale status row cannot erase a newer same-reason error marker. After a successful clear, the healer seeds the controller's edit-resume baseline with the pre-clear state-file mtime; the next status read sees the marker-clear rewrite as newer than that baseline and dispatches finalize after the normal debounce instead of first-sight `record_baseline` stranding the row. The retry does not push directly inside the healer; it lets the normal daemon dispatch rerun finalize, preserving the existing clean-exit scope check, residue auto-commit path, GitHub auth check, and push validation. Manual-only finalize errors such as `ensure_clean_on_exit_failed` remain red for operator inspection, and repeated push failures stay red after the budget is exhausted.
+
+**Tests:** Added focused unit coverage for unpushed finalize auto-recovery, live-lock skip, non-finalize skip, manual clean-exit skip, retry-budget exhaustion, and marker-clear failure logging. Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/unit/task_action_test.rb`, and `test/integration/run_finalize_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
 ## [2026-06-07T14:41:00Z] docs - add public Discord link to README
 
 **Action:** Added the public Hive Discord invite from Ivan's Hive announcement post to the top of the GitHub README, verified the invite redirects through `discord.com/invite/Qg5E7rMt` with HTTP 200, and recorded the canonical community URL in [[operating]]. No command/API behavior changed.
 
 **Refreshed pages:**
 - [[operating]]
+
+## [2026-06-07T14:17:52Z] wiki — audit finalize unpushed auto-retry coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the finalize unpushed auto-retry change updated `Hive::Daemon::StaleAgentHealer`, focused unit tests, and the daemon/finalize/testing wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "finalize unpushed commits stale healer auto retry"` found only existing CLI/log context, and the configured master wiki path had no relevant Hive context. Inspected the committed diff and current `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/stages/finalize.rb`, `lib/hive/gh.rb`, `lib/hive/task_action.rb`, `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/integration/run_finalize_test.rb`. The existing [[modules/daemon]] and [[stages/finalize]] updates were source-synced; refreshed [[testing]] to include the existing status-to-healer integration test, and recorded missing live-daemon retry evidence in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[gaps]]
 
 ## [2026-06-07T12:50:58Z] wiki — refresh OpenClaw wiki-command coverage
 

@@ -53,6 +53,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal "headless", config_binding.claude_mode
     assert_equal "codex", config_binding.development_agent
     assert_equal Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES, config_binding.enabled_reviewers
+    assert_equal Hive::Commands::Init::Prompts::DEFAULT_PATROL_REVIEWER_NAMES, config_binding.patrol_reviewers
     assert_equal "safetyist", config_binding.triage_bias
     assert_equal default_init_limits("budget_usd"), config_binding.budgets
     assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
@@ -382,6 +383,7 @@ def test_emit_json_summary_swallows_epipe
     "claude_mode" => "tmux",
     "development_agent" => "codex",
     "enabled_reviewers" => [],
+    "patrol_reviewers" => [ "codex-ce-code-review" ],
     "triage_bias" => "courageous",
     "budgets" => {},
     "timeouts" => {},

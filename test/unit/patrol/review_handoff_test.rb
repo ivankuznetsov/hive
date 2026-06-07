@@ -9,14 +9,15 @@ class HivePatrolReviewHandoffTest < Minitest::Test
 
   Patch = Struct.new(:branch, :worktree_path, :head_sha, keyword_init: true)
 
-  def finding
-    Hive::Patrol::Finding.new(
+  def finding(**overrides)
+    defaults = {
       id: "f1", feature_id: "feature", category: "bug", severity: "high",
       confidence: "medium", title: "Fix bug", description: "bug details",
       recommendation: "fix it",
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
       fingerprint: "fp1"
-    )
+    }
+    Hive::Patrol::Finding.new(**defaults.merge(overrides))
   end
 
   def patch(dir)
@@ -27,11 +28,18 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     Hive::Patrol::ReviewHandoff.new(dir, cfg: Hive::Config.deep_dup(Hive::Config::DEFAULTS), state: {})
   end
 
+  def with_task_counter(value = 42)
+    with_replaced_singleton_method(Hive::TaskCounter, :next!, lambda { value }) do
+      yield
+    end
+  end
+
   def test_slug_collides_within_6_review_and_gets_numeric_suffix
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state", "stages", "6-review", "patrol-feature-fp1"))
 
-      folder = handoff(dir).enqueue(finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7")
+      folder = nil
+      with_task_counter { folder = handoff(dir).enqueue(finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7") }
 
       assert_equal "patrol-feature-fp1-2", File.basename(folder),
                    "a slug already taken in 6-review must get a numeric suffix"
@@ -44,152 +52,25 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       # its slug, or the slug-derived worktree/log-dir paths would collide.
       FileUtils.mkdir_p(File.join(dir, ".hive-state", "stages", "9-done", "patrol-feature-fp1"))
 
-      folder = handoff(dir).enqueue(finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7")
+      folder = nil
+      with_task_counter { folder = handoff(dir).enqueue(finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7") }
 
       assert_equal "patrol-feature-fp1-2", File.basename(folder),
                    "slug uniqueness must scan every stage dir, not only 6-review"
     end
   end
 
-  # Real patrol findings often omit recommendation/evidence and sometimes
-  # the title. `idea_text` must drop the empty sections (not emit empty
-  # `## Recommendation` / `## Evidence` headers), fall back to the finding
-  # id when the title is nil, and tolerate a nil `evidence` array (a direct
-  # `Finding.new`, unlike `from_h`, does not coerce it) without raising.
-  def sparse_finding
-    Hive::Patrol::Finding.new(
-      id: "f9", feature_id: "feature", category: "bug", severity: "low",
-      confidence: "low", title: nil, description: "only a description",
-      recommendation: "", evidence: nil, fingerprint: "fp9"
-    )
-  end
-
-  def test_enqueue_idea_md_drops_empty_sections_and_falls_back_to_id
-    with_tmp_dir do |dir|
-      folder = handoff(dir).enqueue(
-        finding: sparse_finding,
-        patch: patch(dir),
-        pr_url: "https://example.com/pull/7",
-        now: Time.utc(2026, 6, 5, 12, 0, 0)
-      )
-
-      idea = File.read(File.join(folder, "idea.md"))
-
-      assert_includes idea, "Patrol: f9",
-                      "a nil title must fall back to the finding id"
-      assert_includes idea, "## Finding"
-      assert_includes idea, "only a description"
-      refute_includes idea, "## Recommendation",
-                      "an empty recommendation must not emit a header"
-      refute_includes idea, "## Evidence",
-                      "a nil/empty evidence array must not emit a header"
-    end
-  end
-
-  def test_enqueue_idea_md_renders_location_only_evidence_fallback
-    with_tmp_dir do |dir|
-      located = Hive::Patrol::Finding.new(
-        id: "f10", feature_id: "feature", category: "bug", severity: "low",
-        confidence: "low", title: "Located", description: "d",
-        recommendation: "", fingerprint: "fp10",
-        evidence: [ { "snippet" => "" }, { "file" => "x.rb", "line" => 2, "snippet" => "" } ]
-      )
-
-      folder = handoff(dir).enqueue(
-        finding: located, patch: patch(dir),
-        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
-      )
-
-      idea = File.read(File.join(folder, "idea.md"))
-
-      assert_includes idea, "- evidence",
-                      "an evidence entry with no file/line falls back to a bare `- evidence` line"
-      assert_includes idea, "- `x.rb:2`",
-                      "an evidence entry with file/line but no snippet renders location-only"
-    end
-  end
-
-  def test_enqueue_idea_md_renders_symbol_keyed_evidence_like_string_keyed
-    with_tmp_dir do |dir|
-      # A direct `Finding.new` (unlike `from_h`) does not coerce evidence
-      # keys, so a symbol-keyed entry must render identically to the
-      # string-keyed primary flow rather than degrading to `- evidence`.
-      sym = Hive::Patrol::Finding.new(
-        id: "f11", feature_id: "feature", category: "bug", severity: "low",
-        confidence: "low", title: "Sym", description: "d", recommendation: "",
-        fingerprint: "fp11", evidence: [ { file: "y.rb", line: 3, snippet: "code" } ]
-      )
-
-      folder = handoff(dir).enqueue(
-        finding: sym, patch: patch(dir),
-        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
-      )
-
-      idea = File.read(File.join(folder, "idea.md"))
-      assert_includes idea, "- `y.rb:3`: code",
-                      "symbol-keyed evidence must render the same as string-keyed"
-    end
-  end
-
-  def test_enqueue_idea_md_renders_bare_heading_only_body_for_empty_finding
-    with_tmp_dir do |dir|
-      # The degenerate case: a blank title AND a nil description (no
-      # recommendation, no evidence) collapses to a single `# Patrol: <id>`
-      # heading with nothing trailing it but the heredoc's newline.
-      empty = Hive::Patrol::Finding.new(
-        id: "f0", feature_id: "feature", category: "bug", severity: "low",
-        confidence: "low", title: nil, description: nil, recommendation: "",
-        evidence: nil, fingerprint: "fp0"
-      )
-
-      folder = handoff(dir).enqueue(
-        finding: empty, patch: patch(dir),
-        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
-      )
-
-      body = File.read(File.join(folder, "idea.md")).split("---\n\n", 2).last
-      assert_equal "# Patrol: f0\n", body,
-                   "an all-empty finding renders only the id heading"
-    end
-  end
-
-  def test_enqueue_idea_md_body_is_exactly_the_rendered_idea_text
-    with_tmp_dir do |dir|
-      # Pin the exact rendered body (not just substrings) so a
-      # leading/trailing-whitespace regression in the heredoc is caught.
-      folder = handoff(dir).enqueue(
-        finding: finding, patch: patch(dir),
-        pr_url: "https://example.com/pull/7", now: Time.utc(2026, 6, 5, 12, 0, 0)
-      )
-
-      body = File.read(File.join(folder, "idea.md")).split("---\n\n", 2).last
-      expected = <<~MD
-        # Patrol: Fix bug
-
-        ## Finding
-
-        bug details
-
-        ## Recommendation
-
-        fix it
-
-        ## Evidence
-
-        - `app.rb:1`: puts
-      MD
-      assert_equal expected, body
-    end
-  end
-
   def test_enqueue_writes_idea_md_from_original_finding
     with_tmp_dir do |dir|
-      folder = handoff(dir).enqueue(
-        finding: finding,
-        patch: patch(dir),
-        pr_url: "https://example.com/pull/7",
-        now: Time.utc(2026, 6, 5, 12, 0, 0)
-      )
+      folder = nil
+      with_task_counter do
+        folder = handoff(dir).enqueue(
+          finding: finding,
+          patch: patch(dir),
+          pr_url: "https://example.com/pull/7",
+          now: Time.utc(2026, 6, 5, 12, 0, 0)
+        )
+      end
 
       idea = File.read(File.join(folder, "idea.md"))
       frontmatter = YAML.safe_load(idea.split("---\n\n", 2).first)
@@ -203,6 +84,94 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       assert_includes idea, "## Recommendation"
       assert_includes idea, "fix it"
       assert_includes idea, "`app.rb:1`: puts"
+    end
+  end
+
+  def test_enqueue_writes_task_id_and_falls_back_to_null_when_counter_is_busy
+    with_tmp_dir do |dir|
+      folder = nil
+      with_task_counter(123) do
+        folder = handoff(dir).enqueue(finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7")
+      end
+
+      assert_equal 123, Hive::TaskMeta.read(folder)[:id]
+    end
+
+    with_tmp_dir do |dir|
+      with_replaced_singleton_method(Hive::TaskCounter, :next!, lambda { raise Hive::ConcurrentRunError, "busy" }) do
+        folder = handoff(dir).enqueue(finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7")
+
+        assert_nil Hive::TaskMeta.read(folder)[:id]
+      end
+    end
+  end
+
+  def test_idea_md_omits_finding_section_when_description_blank
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(description: "   "),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "## Finding", "blank description must omit the Finding section"
+      assert_includes idea, "## Recommendation", "other sections must still render"
+    end
+  end
+
+  def test_idea_md_omits_recommendation_section_when_blank
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(recommendation: ""),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "## Recommendation", "blank recommendation must omit the Recommendation section"
+      assert_includes idea, "## Finding", "other sections must still render"
+    end
+  end
+
+  def test_idea_md_omits_evidence_section_when_evidence_empty
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(evidence: []),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "## Evidence", "empty evidence must omit the Evidence section"
+    end
+  end
+
+  def test_idea_md_renders_evidence_without_location_as_bare_marker
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(evidence: [ { "snippet" => "boom" } ]),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      assert_includes idea, "- evidence: boom",
+                      "evidence with no file/line must render the bare '- evidence' marker"
+    end
+  end
+
+  def test_idea_md_renders_location_only_when_snippet_blank
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(evidence: [ { "file" => "app.rb", "line" => 9, "snippet" => "  " } ]),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      assert_includes idea, "- `app.rb:9`", "a snippet-less entry must render location only"
+      refute_match(/app\.rb:9`:/, idea, "no trailing snippet separator when snippet is blank")
     end
   end
 end

@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/task_counter"
 require "hive/task_meta"
 
 module Hive
@@ -20,24 +21,12 @@ module Hive
 
         slug = unique_slug(finding)
         task_folder = File.join(@project_root, ".hive-state", "stages", "6-review", slug)
-        # These six writes are not individually atomic: a mid-write failure
-        # (e.g. worktree.yml present, pr.md/task.md missing) would orphan a
-        # partial folder that marks the slug taken, renders as a broken
-        # status/TUI row, and could be picked up by the review stage as a
-        # malformed task — the caller only removes the git worktree, not this
-        # folder. Remove the half-written folder before re-raising so enqueue
-        # is all-or-nothing.
-        begin
-          FileUtils.mkdir_p(File.join(task_folder, "reviews"))
-          write_meta(task_folder, slug, finding)
-          write_idea_md(task_folder, slug, finding, now)
-          write_task_md(task_folder, slug, finding, patch, pr_url, now)
-          write_worktree_pointer(task_folder, patch, now)
-          write_pr_md(task_folder, finding, pr_url)
-        rescue StandardError
-          FileUtils.rm_rf(task_folder)
-          raise
-        end
+        FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        write_meta(task_folder, slug, finding)
+        write_idea_md(task_folder, slug, finding, now)
+        write_task_md(task_folder, slug, finding, patch, pr_url, now)
+        write_worktree_pointer(task_folder, patch, now)
+        write_pr_md(task_folder, finding, pr_url)
         task_folder
       end
 
@@ -46,10 +35,16 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: nil,
+          id: allocate_task_id,
           slug: slug,
           display_name: display_name(finding)
         )
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)
@@ -85,10 +80,10 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
-        # Render once: the frontmatter `original_text` and the markdown
-        # body are the same rendered idea, so deriving both from a single
-        # `idea_text` call keeps them from drifting.
-        body = idea_text(finding)
+        # The TUI reads `original_text` from frontmatter; the body is the
+        # human-facing copy. They are deliberately identical, so compute
+        # the text once and interpolate into both positions.
+        text = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
           {
@@ -97,10 +92,10 @@ module Hive
             "source" => "patrol",
             "patrol_finding_id" => finding.id,
             "patrol_fingerprint" => finding.fingerprint,
-            "original_text" => body
+            "original_text" => text
           },
           <<~MD
-          #{body}
+          #{text}
         MD
         )
       end
@@ -111,7 +106,7 @@ module Hive
           "branch" => patch.branch,
           "created_at" => now.utc.iso8601
         }
-        data["execute_base_head"] = patch.head_sha if patch.head_sha
+        data["execute_base_head"] = patch.head_sha if patch.respond_to?(:head_sha) && patch.head_sha
         File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
       end
 
@@ -191,19 +186,10 @@ module Hive
       end
 
       def evidence_text(evidence)
-        evidence.map do |entry|
-          # Defend both key types like the sibling consumers of
-          # `finding.evidence` (`pr_opener.rb`, `fingerprint.rb`): the
-          # primary flow is JSON-parsed (string keys), but a direct
-          # symbol-keyed entry must not silently degrade to `- evidence`.
-          # A non-Hash entry (should never reach here — items are schema
-          # `type: object`) would otherwise raise a TypeError on the
-          # string-index below and abort the whole enqueue; degrade it
-          # instead of crashing.
-          next "- evidence" unless entry.is_a?(Hash)
-
-          location = [ entry["file"] || entry[:file], entry["line"] || entry[:line] ].compact.join(":")
-          snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
+        Array(evidence).map do |entry|
+          entry = {} unless entry.is_a?(Hash)
+          location = [ entry["file"], entry["line"] ].compact.join(":")
+          snippet = entry["snippet"].to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"
           snippet.empty? ? line : "#{line}: #{snippet}"
         end.join("\n")

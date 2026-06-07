@@ -4,6 +4,7 @@ require "open3"
 require "time"
 
 require "hive/agent_profiles"
+require "hive/agent_limit"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
@@ -55,6 +56,7 @@ module Hive
     ].freeze
     CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
     CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
+    CLAUDE_READY_FOOTER_MARKER = "for agents".freeze
     # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
     # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
     # context). A caret embedded mid-line is Claude's own output, not the
@@ -520,6 +522,11 @@ module Hive
 
         return true if claude_ready_prompt?(last_tail)
 
+        if Hive::AgentLimit.limit_reached?(last_tail)
+          raise Hive::AgentError,
+                Hive::AgentLimit.error_message(last_tail, agent: "claude")
+        end
+
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         break if remaining <= 0
 
@@ -527,6 +534,11 @@ module Hive
       end
 
       reason = caller_deadline && deadline == caller_deadline ? "before caller deadline" : "in tmux session #{runner.name}"
+      if Hive::AgentLimit.limit_reached?(last_tail)
+        raise Hive::AgentError,
+              Hive::AgentLimit.error_message(last_tail, agent: "claude")
+      end
+
       raise Hive::AgentError,
             "claude interactive prompt did not become ready #{reason}; " \
             "last pane tail: #{last_tail.byteslice(-500, 500).to_s.scrub.inspect}"
@@ -546,7 +558,8 @@ module Hive
 
       return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
       return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
-      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
+      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER) ||
+                          current_text.include?(CLAUDE_READY_FOOTER_MARKER)
 
       # The idle caret sits at the bottom of the input box: it is the last
       # non-blank line, or the line above it when a one-line hint footer
@@ -585,6 +598,9 @@ module Hive
           last_sentinel_check = Time.now
           gone = tmux_session_gone_marker(task, runner)
           return gone if gone
+
+          limit = limits_reached_marker(task, runner)
+          return limit if limit
 
           marker = marker_from_sentinel_tail(task, runner)
           return marker if marker
@@ -630,6 +646,16 @@ module Hive
       Hive::Markers.current(task.state_file)
     end
 
+    def limits_reached_marker(task, runner)
+      pane = capture_limit_tail(runner)
+      return nil unless Hive::AgentLimit.limit_reached?(pane)
+
+      Hive::Markers.set(task.state_file, :error,
+                        reason: "limits_reached",
+                        message: Hive::AgentLimit.error_message(pane, agent: "claude"))
+      Hive::Markers.current(task.state_file)
+    end
+
     def marker_from_sentinel_tail(task, runner)
       marker = Hive::Markers.current(task.state_file)
       return nil unless terminal_marker?(marker)
@@ -654,7 +680,25 @@ module Hive
       tmux_error_streak = 0
       last_tmux_error_msg = nil
       loop do
-        if File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
+        output_available = expected_output_available?(expected_output)
+        pane_tail = capture_limit_tail(runner)
+        if Hive::AgentLimit.limit_reached?(pane_tail)
+          return {
+            status: :error,
+            error_message: Hive::AgentLimit.error_message(pane_tail, agent: "claude")
+          }
+        end
+
+        unless expected_output_session_alive?(runner)
+          return { status: :ok, log_label: log_label } if output_available && File.exist?(done_path(task))
+
+          return {
+            status: :error,
+            error_message: "tmux_session_terminated before writing expected output file: #{expected_output}"
+          }
+        end
+
+        if output_available
           return { status: :ok, log_label: log_label } if File.exist?(done_path(task))
 
           begin
@@ -686,6 +730,26 @@ module Hive
 
         sleep [ poll_interval, deadline - Time.now ].min
       end
+    end
+
+    def expected_output_available?(expected_output)
+      File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
+    end
+
+    def expected_output_session_alive?(runner)
+      return true unless runner.respond_to?(:session_exists?)
+
+      runner.session_exists?
+    rescue Hive::TmuxError
+      false
+    end
+
+    def capture_limit_tail(runner)
+      return "" unless runner.respond_to?(:capture_pane_tail)
+
+      runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
+    rescue Hive::TmuxError
+      ""
     end
 
     def wait_for_done_signal(task, _runner, timeout, log_label)

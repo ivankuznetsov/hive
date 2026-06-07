@@ -199,4 +199,14 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     refute_nil out
     assert out.is_a?(String)
   end
+
+  def test_height_clips_projects_but_keeps_selected_scope_visible
+    model = make_model(scope: 9, snapshot: make_snapshot(names: (1..12).map { |idx| "proj-#{idx}" }))
+
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 30, height: 7)
+
+    assert_equal 7, out.lines.count
+    assert_includes out, "proj-9", "project viewport must follow the selected scope"
+    refute_includes out, "proj-1", "offscreen projects must be clipped at small heights"
+  end
 end

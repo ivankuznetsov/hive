@@ -242,6 +242,58 @@ class HiveBotTelegramTest < Minitest::Test
     assert_nil update.caption
   end
 
+  def test_poll_updates_parses_voice_note_metadata
+    api = FakeApi.new(updates: [
+      {
+        "update_id" => 3004,
+        "message" => {
+          "message_id" => 45,
+          "chat" => { "id" => 12345 },
+          "voice" => {
+            "file_id" => "voice-file",
+            "file_unique_id" => "voice-unique",
+            "duration" => 7,
+            "mime_type" => "audio/ogg",
+            "file_size" => 4321
+          }
+        }
+      }
+    ])
+
+    update = telegram(api).poll_updates(timeout: 25, since_update_id: nil).first
+
+    assert update.voice?
+    refute update.media?
+    assert_equal "voice-file", update.voice.fetch(:file_id)
+    assert_equal "voice-unique", update.voice.fetch(:file_unique_id)
+    assert_equal 7, update.voice.fetch(:duration)
+    assert_equal "audio/ogg", update.voice.fetch(:mime_type)
+    assert_equal 4321, update.voice.fetch(:file_size)
+  end
+
+  def test_poll_updates_ignores_audio_messages
+    api = FakeApi.new(updates: [
+      {
+        "update_id" => 3005,
+        "message" => {
+          "message_id" => 46,
+          "chat" => { "id" => 12345 },
+          "audio" => {
+            "file_id" => "song-file",
+            "mime_type" => "audio/mpeg",
+            "file_size" => 123_456
+          }
+        }
+      }
+    ])
+
+    update = telegram(api).poll_updates(timeout: 25, since_update_id: nil).first
+
+    refute update.voice?
+    refute update.media?
+    assert_nil update.voice
+  end
+
   def test_callback_updates_do_not_inherit_media_from_source_message
     api = FakeApi.new(updates: [
       {
@@ -265,6 +317,7 @@ class HiveBotTelegramTest < Minitest::Test
     refute update.media?
     assert_nil update.caption
     assert_nil update.effective_text
+    assert_nil update.voice
   end
 
   def test_get_file_returns_path_and_size

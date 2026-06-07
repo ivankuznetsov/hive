@@ -59,6 +59,42 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_problematic_merge_states_are_selected_before_older_neutral_prs
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: {
+          "enabled" => true,
+          "labels_ignore" => [],
+          "max_concurrent_prs" => 2
+        }
+      )
+      prs = [
+        { "number" => 10, "labels" => [], "mergeStateStatus" => "CLEAN", "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 11, "labels" => [], "mergeStateStatus" => "UNKNOWN", "updatedAt" => "2026-05-26T10:00:00Z" },
+        { "number" => 341, "labels" => [], "mergeStateStatus" => "DIRTY", "updatedAt" => "2026-05-27T12:00:00Z" },
+        { "number" => 12, "labels" => [], "mergeStateStatus" => "CLEAN", "updatedAt" => "2026-05-26T08:00:00Z" }
+      ]
+      called = []
+      logger = make_logger(dir)
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **_kwargs|
+          called << pr["number"]
+          :success
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
+          assert_equal({ total: 2, fixed: 2, untouched: 0, needs_human: 0 }, summary)
+        end
+      end
+
+      assert_equal [ 341, 11 ], called
+    ensure
+      logger&.close
+    end
+  end
+
   def test_skips_draft_prs_before_spawning_agent
     with_tmp_dir do |dir|
       project = project_entry(dir)

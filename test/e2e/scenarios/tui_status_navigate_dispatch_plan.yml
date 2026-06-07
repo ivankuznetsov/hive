@@ -13,9 +13,9 @@ steps:
     state_file: brainstorm.md
     content: "# Brainstorm\n\n<!-- COMPLETE -->\n"
   # TUI is started lazily by the first tui_* step. Wait for the dashboard
-  # chrome and the seeded row.
+  # task pane and the seeded row.
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 5
   - kind: tui_expect
     anchor: "tui-plan-task"
@@ -30,7 +30,7 @@ steps:
     timeout: 30
   # TUI re-renders after dispatch — the dashboard chrome is back.
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 5
   # Proves the dispatched `bin/hive plan` actually ran end-to-end:
   # plan.md exists with COMPLETE marker.

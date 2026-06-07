@@ -9,6 +9,14 @@ module Hive
       # duplicating it. Keeps the two surfaces from disagreeing on what
       # "5m" means — every view that displays a row's mtime/age routes
       # through this module.
+      # Naming note: the `_cells` suffix (`ljust_cells`/`rjust_cells`)
+      # distinguishes the cell-aware padders from String's column-naive
+      # `ljust`/`rjust`. `truncate`/`display_width` keep their bare names
+      # for their many external callers but are equally cell-aware.
+      #
+      # Nil-tolerance contract: every public helper coerces its label
+      # through `.to_s`, so a nil label is treated as the empty string
+      # rather than raising.
       module Format
         module_function
 
@@ -24,13 +32,9 @@ module Hive
         end
 
         # Truncate `label` to `max_width` terminal cells, appending an
-        # ellipsis (U+2026) when truncation occurs. Widths are measured
-        # in terminal cells via unicode-display_width, so a double-width
-        # grapheme (CJK/emoji) counts as 2. `max_width < 2` falls back to
-        # a hard cut without ellipsis (no room for the suffix); note that
-        # a `max_width` of 1 against a leading double-width grapheme then
-        # yields `""`, since the cluster's width of 2 exceeds the single
-        # remaining cell. Used by pane/table renderers for column fitting.
+        # ellipsis (U+2026) when truncation occurs. `max_width < 2`
+        # falls back to a hard cut without ellipsis (no room for the
+        # suffix). Used by pane/table renderers for column fitting.
         def truncate(label, max_width)
           return "" if max_width <= 0
 
@@ -55,6 +59,8 @@ module Hive
           Unicode::DisplayWidth.of(label.to_s)
         end
 
+        # Internal primitive: a raw cell-bounded cut with no ellipsis.
+        # Private so callers can't bypass `truncate`'s ellipsis contract.
         def take_cells(label, max_width)
           remaining = max_width
           label.to_s.each_grapheme_cluster.with_object(+"") do |cluster, result|
@@ -65,6 +71,7 @@ module Hive
             remaining -= width
           end
         end
+        private_class_method :take_cells
       end
     end
   end

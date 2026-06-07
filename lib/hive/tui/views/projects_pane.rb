@@ -31,9 +31,10 @@ module Hive
 
         module_function
 
-        def render(model, width:)
+        def render(model, width:, height: nil)
           inner_width = [ width - 2, 1 ].max
           rows = build_rows(model, inner_width)
+          rows = fit_rows(rows, height: height, selected_index: model.scope.to_i) if height
           body = rows.join("\n")
           # Lipgloss chain methods return new Style instances; the frozen
           # base constants stay shared while each render gets its own
@@ -120,6 +121,32 @@ module Hive
         # 1..projects.size for each registered project.
         def selected?(model, scope_index)
           model.scope == scope_index
+        end
+
+        def fit_rows(rows, height:, selected_index:)
+          inner_height = [ height.to_i - 2, 1 ].max
+          header = rows.first(2)
+          return pad_rows(header.first(inner_height), inner_height) if inner_height <= header.size
+
+          list_capacity = inner_height - header.size
+          list_rows = rows.drop(2)
+          start = viewport_start(
+            total: list_rows.size,
+            capacity: list_capacity,
+            selected_index: selected_index
+          )
+          pad_rows(header + list_rows.slice(start, list_capacity).to_a, inner_height)
+        end
+
+        def viewport_start(total:, capacity:, selected_index:)
+          return 0 if total <= capacity
+
+          selected = selected_index.clamp(0, total - 1)
+          selected < capacity ? 0 : [ selected - capacity + 1, total - capacity ].min
+        end
+
+        def pad_rows(rows, height)
+          rows + Array.new([ height - rows.size, 0 ].max, "")
         end
 
         # Local alias so call sites in this module keep their concise

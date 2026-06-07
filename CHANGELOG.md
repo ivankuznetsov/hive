@@ -4,7 +4,7 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.2.0
 
-- Added Telegram bot idea capture with photo and document attachments, draft state, project-pick continuation, and configurable attachment limits.
+- Added Telegram bot idea capture with photo/document attachments and voice-note transcription, including transcript confirm/discard/edit, fallback audio retention on transcription failure, and configurable attachment/transcription limits.
 - Fixed bot `needs_input` notifications so proactive "questions waiting" pushes are suppressed while an operator is actively answering the same task.
 - Fixed brainstorm tmux runs so vanished sessions and unreadable panes fail fast with explicit markers instead of hanging.
 - Fixed patrol and babysitter dry-run guardrails: draft PRs are skipped, mutating `git` / `gh` calls are default-denied, implicit `gh api` POST payloads are blocked, and destructive PR commands are covered by regression tests.

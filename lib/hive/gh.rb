@@ -113,6 +113,7 @@ module Hive
         headRepository
         url
         updatedAt
+        mergeStateStatus
       ].join(",")
       out, err, status = capture3("gh", "pr", "list",
                                   "--state", "open",

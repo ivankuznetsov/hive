@@ -65,7 +65,7 @@ module Hive
       # CLI's installed skill names.
       "brainstorm" => {
         "agent" => "claude",
-        "skill" => "/compound-engineering:ce-brainstorm",
+        "skill" => "/ce-brainstorm",
         "runtime" => "headless"
       },
       "plan" => {
@@ -268,6 +268,9 @@ module Hive
         "max_concurrent_runs" => 3,
         "max_concurrent_per_project" => 3,
         "max_runs_per_day_per_project" => 50,
+        # Patrol scans (`hive patrol PROJECT`) run on their own budget so a
+        # long codex-backed scan never consumes a task-dispatch slot.
+        "max_concurrent_patrol_scans" => 1,
         "transient_retry_backoff_sec" => 60,
         "shutdown_grace_sec" => 600,
         # R-02: per-child wall-clock timeout for daemon-spawned `hive`
@@ -336,7 +339,19 @@ module Hive
         },
         "review" => {
           "max_context_files" => 24,
-          "max_owned_files" => 12
+          "max_owned_files" => 12,
+          "reviewers" => [
+            {
+              "name" => "codex-ce-code-review",
+              "kind" => "agent",
+              "agent" => "codex",
+              "skill" => "ce-code-review",
+              "output_basename" => "codex-ce-code-review",
+              "prompt_template" => "reviewer_codex_ce_code_review.md.erb",
+              "budget_usd" => 50,
+              "timeout_sec" => 5400
+            }
+          ]
         }
       },
       # Global Telegram bot settings. The bot is an operator surface
@@ -359,6 +374,21 @@ module Hive
         "idea_attachment_max_bytes" => 20 * 1024 * 1024,
         "idea_attachment_max_count" => 10,
         "idea_draft_ttl_sec" => 900,
+        "transcription" => {
+          "enabled" => true,
+          "endpoint" => "https://api.openai.com/v1/audio/transcriptions",
+          "model" => "whisper-1",
+          "api_key_env" => "HIVE_WHISPER_API_KEY",
+          "max_retries" => 3,
+          "retry_backoff_sec" => 2,
+          "timeout_sec" => 120,
+          # Bound the TCP connect separately from the overall request. Without
+          # it a hung connect is unbounded and stalls the serial poll thread
+          # well past timeout_sec.
+          "open_timeout_sec" => 10,
+          "no_speech_threshold" => 0.6,
+          "supported_languages" => %w[en ru]
+        },
         "codex_budget_usd" => 1,
         "codex_timeout_sec" => 120,
         "shutdown_grace_sec" => 60,
@@ -1212,12 +1242,16 @@ module Hive
               "review.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries; got #{reviewers.class}"
       end
 
+      validate_reviewer_entries!(reviewers, "review.reviewers", source_path)
+    end
+
+    def validate_reviewer_entries!(reviewers, label, source_path)
       seen_names = {}
       seen_basenames = {}
       reviewers.each_with_index do |entry, idx|
         unless entry.is_a?(Hash)
           raise ConfigError,
-                "review.reviewers[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
+                "#{label}[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
         end
 
         # Required fields: presence + non-empty. Missing or blank values
@@ -1230,13 +1264,13 @@ module Hive
           next unless missing
 
           raise ConfigError,
-                "review.reviewers[#{idx}].#{field} in #{describe_source(source_path)} is missing"
+                "#{label}[#{idx}].#{field} in #{describe_source(source_path)} is missing"
         end
 
         name = entry["name"]
         if name && (prev = seen_names[name])
           raise ConfigError,
-                "review.reviewers in #{describe_source(source_path)} has duplicate name #{name.inspect} " \
+                "#{label} in #{describe_source(source_path)} has duplicate name #{name.inspect} " \
                 "at indices [#{prev}, #{idx}]"
         end
         seen_names[name] = idx if name
@@ -1249,7 +1283,7 @@ module Hive
         normalized_basename = basename.is_a?(String) ? basename.strip : basename
         if basename.is_a?(String) && normalized_basename.empty?
           raise ConfigError,
-                "review.reviewers[#{idx}].output_basename in #{describe_source(source_path)} must not be empty " \
+                "#{label}[#{idx}].output_basename in #{describe_source(source_path)} must not be empty " \
                 "(would produce reviews/-NN.md filenames)"
         end
 
@@ -1268,7 +1302,7 @@ module Hive
              normalized_basename == "." ||
              normalized_basename == ".."
             raise ConfigError,
-                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "#{label}[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
                   "must be a single filename component without path separators (/, \\, null) " \
                   "and may not be '.' or '..'"
           end
@@ -1276,7 +1310,7 @@ module Hive
 
         if normalized_basename && (prev = seen_basenames[normalized_basename])
           raise ConfigError,
-                "review.reviewers in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \
+                "#{label} in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \
                 "at indices [#{prev}, #{idx}] (would cause concurrent file-write collisions)"
         end
         seen_basenames[normalized_basename] = idx if normalized_basename
@@ -1298,7 +1332,7 @@ module Hive
                        .map { |p| p.chomp("-") }
                        .join(", ")
             raise ConfigError,
-                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "#{label}[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
                   "starts with a reserved orchestrator-owned prefix; choose a different name " \
                   "(reserved prefixes: #{reserved})"
           end
@@ -1312,14 +1346,14 @@ module Hive
           max = entry["max_attempts"]
           unless max.is_a?(Integer) && max.positive?
             raise ConfigError,
-                  "review.reviewers[#{idx}].max_attempts in #{describe_source(source_path)} " \
+                  "#{label}[#{idx}].max_attempts in #{describe_source(source_path)} " \
                   "must be a positive Integer; got #{max.inspect}"
           end
         end
 
         validate_agent_name!(
           entry["agent"],
-          "review.reviewers[#{idx}].agent",
+          "#{label}[#{idx}].agent",
           source_path
         )
       end
@@ -1446,6 +1480,7 @@ module Hive
       [ "pr_merge_poll_interval_sec", 60 ],
       [ "max_concurrent_runs", 1 ],
       [ "max_concurrent_per_project", 1 ],
+      [ "max_concurrent_patrol_scans", 1 ],
       [ "max_runs_per_day_per_project", 1 ],
       [ "transient_retry_backoff_sec", 1 ],
       [ "shutdown_grace_sec", 0 ],
@@ -1646,7 +1681,6 @@ module Hive
 
     def validate_patrol_review!(patrol, source_path)
       review = patrol["review"]
-      return if review.nil?
 
       unless review.is_a?(Hash)
         raise ConfigError,
@@ -1664,6 +1698,20 @@ module Hive
                 ">= #{min}; got #{value.inspect} (#{value.class})"
         end
       end
+
+      reviewers = review["reviewers"]
+      if reviewers.nil?
+        raise ConfigError,
+              "patrol.review.reviewers in #{describe_source(source_path)} is nil; " \
+              "either remove the key (defaults provide patrol reviewers) or supply an Array of reviewer entries"
+      end
+
+      unless reviewers.is_a?(Array)
+        raise ConfigError,
+              "patrol.review.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries; got #{reviewers.class}"
+      end
+
+      validate_reviewer_entries!(reviewers, "patrol.review.reviewers", source_path)
     end
 
     BOT_NUMERIC_BOUNDS = [
@@ -1704,6 +1752,7 @@ module Hive
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
+      validate_bot_transcription!(bot, source_path)
     end
 
     def validate_bot_runtime!(bot, source_path)
@@ -1798,6 +1847,81 @@ module Hive
                 "got #{value.inspect}"
         end
         bot[key] = File.expand_path(value)
+      end
+    end
+
+    TRANSCRIPTION_NUMERIC_BOUNDS = [
+      [ "max_retries", 0, nil, true ],
+      [ "retry_backoff_sec", 0, nil, true ],
+      [ "timeout_sec", 0, nil, true ],
+      [ "open_timeout_sec", 0, nil, true ],
+      [ "no_speech_threshold", 0, 1, false ]
+    ].freeze
+
+    def validate_bot_transcription!(bot, source_path)
+      transcription = bot["transcription"]
+      return if transcription.nil?
+
+      unless transcription.is_a?(Hash)
+        raise ConfigError,
+              "bot.transcription in #{describe_source(source_path)} must be a Hash; " \
+              "got #{transcription.inspect} (#{transcription.class})"
+      end
+
+      enabled = transcription["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "bot.transcription.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      %w[endpoint model api_key_env].each do |key|
+        value = transcription[key]
+        next if value.nil?
+
+        unless value.is_a?(String) && !value.strip.empty?
+          raise ConfigError,
+                "bot.transcription.#{key} in #{describe_source(source_path)} must be a non-empty String; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+
+      validate_bot_transcription_numbers!(transcription, source_path)
+      validate_bot_transcription_languages!(transcription, source_path)
+    end
+
+    def validate_bot_transcription_numbers!(transcription, source_path)
+      TRANSCRIPTION_NUMERIC_BOUNDS.each do |key, min, max, integer_only|
+        value = transcription[key]
+        next if value.nil?
+
+        valid_type = integer_only ? value.is_a?(Integer) : value.is_a?(Numeric)
+        unless valid_type && value >= min && (max.nil? || value <= max)
+          bound = max ? "between #{min} and #{max}" : ">= #{min}"
+          type = integer_only ? "integer" : "number"
+          raise ConfigError,
+                "bot.transcription.#{key} in #{describe_source(source_path)} must be a #{type} #{bound}; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+    end
+
+    def validate_bot_transcription_languages!(transcription, source_path)
+      languages = transcription["supported_languages"]
+      return if languages.nil?
+
+      unless languages.is_a?(Array)
+        raise ConfigError,
+              "bot.transcription.supported_languages in #{describe_source(source_path)} " \
+              "must be an Array of Strings; got #{languages.inspect} (#{languages.class})"
+      end
+
+      languages.each_with_index do |entry, idx|
+        next if entry.is_a?(String) && !entry.strip.empty?
+
+        raise ConfigError,
+              "bot.transcription.supported_languages[#{idx}] in #{describe_source(source_path)} " \
+              "must be a non-empty String; got #{entry.inspect} (#{entry.class})"
       end
     end
 

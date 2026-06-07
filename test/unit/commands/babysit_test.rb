@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/babysit"
+require "hive/invoked_binary"
 
 class HiveCommandsBabysitTest < Minitest::Test
   include HiveTestHelper
@@ -93,6 +94,18 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_match(/running \(pid 1234, uptime \d+s\)/, out)
   end
 
+  def test_status_recommends_restart_when_runtime_predates_source
+    command = babysit("status")
+    write_pid_payload(pid: 1234)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    command.define_singleton_method(:current_source_mtime) { Time.now + 60 }
+
+    out, _err = capture_io { command.call }
+    assert_includes out, "restart recommended"
+    assert_includes out, "hive babysit restart --detach"
+  end
+
   def test_once_unknown_project_is_usage_error
     with_tmp_global_config do
       err = assert_raises(Hive::InvalidTaskPath) do
@@ -139,5 +152,413 @@ class HiveCommandsBabysitTest < Minitest::Test
     out, _err = capture_io { command.call }
     assert_equal [ [ 1234, :HUP ] ], signals
     assert_includes out, "reload requested"
+  end
+
+  def test_reload_warns_when_runtime_predates_source
+    command = babysit("reload")
+    write_pid_payload(pid: 1234)
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) { |_pid, _signal| nil }
+    command.define_singleton_method(:current_source_mtime) { Time.now + 60 }
+
+    _out, err = capture_io { command.call }
+    assert_includes err, "reload will not update Ruby code"
+    assert_includes err, "hive babysit restart --detach"
+  end
+
+  def test_restart_stops_existing_process_then_starts
+    command = babysit("restart")
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+    command.define_singleton_method(:start_daemon) { calls << :start }
+
+    command.call
+    assert_equal %i[stop start], calls
+  end
+
+  def test_detached_restart_reexecs_canonical_start_command
+    command = babysit("restart", detach: true, dry_run: true)
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+    command.define_singleton_method(:start_daemon) { calls << :start }
+
+    exec_args = nil
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/tmp/hive-wrapper/bin/hive" }) do
+      with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
+        assert_raises(UncaughtThrowError) { command.call }
+      end
+    end
+
+    assert_equal [ :stop ], calls
+    assert_equal [ "/tmp/hive-wrapper/bin/hive", "babysit", "start", "--detach", "--dry-run" ], exec_args
+  end
+
+  def test_detached_restart_without_dry_run_omits_dry_run_flag
+    command = babysit("restart", detach: true)
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { true }
+
+    exec_args = nil
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/tmp/hive-wrapper/bin/hv" }) do
+      with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
+        assert_raises(UncaughtThrowError) { command.call }
+      end
+    end
+
+    assert_equal [ "/tmp/hive-wrapper/bin/hv", "babysit", "start", "--detach" ], exec_args
+  end
+
+  def test_detached_restart_surfaces_reexec_failure
+    command = babysit("restart", detach: true)
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/tmp/hive-wrapper/bin/hive" }) do
+      with_replaced_singleton_method(Kernel, :exec, ->(*_args) { raise Errno::ENOENT, "missing hive" }) do
+        error = assert_raises(Hive::Error) { command.call }
+        assert_includes error.message, "failed to re-exec detached start"
+      end
+    end
+    assert_equal [ :stop ], calls
+  end
+
+  def test_detached_restart_errors_when_invoked_binary_cannot_be_resolved
+    command = babysit("restart", detach: true)
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { nil }) do
+      error = assert_raises(Hive::Error) { command.call }
+      assert_includes error.message, "failed to resolve invoked hive binary"
+    end
+    assert_equal [ :stop ], calls
+  end
+
+  def test_restart_aborts_when_stop_leaves_existing_process_alive
+    command = babysit("restart")
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop; false }
+    command.define_singleton_method(:start_daemon) { calls << :start }
+
+    error = assert_raises(Hive::Error) { command.call }
+
+    assert_equal [ :stop ], calls
+    assert_includes error.message, "stop failed"
+  end
+
+  def test_stop_leaves_pid_file_when_kill_ownership_becomes_unverified
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      signals.empty? ? :verified : :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    _out, err = capture_io do
+      assert_raises(Hive::Error) do
+        with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    assert File.exist?(command.pid_file)
+    assert_includes err, "refusing KILL"
+  end
+
+  def test_stop_does_not_remove_replacement_pid_file_after_process_exits
+    command = babysit("stop")
+    write_pid_payload(pid: 1234, process_start_time: "old-start")
+    replacement_payload = {
+      "pid" => 9999,
+      "process_start_time" => "new-start",
+      "started_at" => Time.now.utc.iso8601
+    }
+    alive = true
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :owned }
+    command.define_singleton_method(:send_signal_safely) do |_pid, signal|
+      signals << signal
+      alive = false
+      File.write(command.pid_file, replacement_payload.to_yaml)
+    end
+
+    out, _err = capture_io { command.call }
+
+    assert_equal [ :TERM ], signals
+    assert_includes out, "stopped"
+    assert_equal replacement_payload, YAML.safe_load(File.read(command.pid_file))
+  end
+
+  def test_stop_succeeds_when_process_exits_during_post_grace_ownership_check
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive_checks = 0
+    signals = []
+    command.define_singleton_method(:pid_alive?) do |_pid|
+      alive_checks += 1
+      alive_checks < 4
+    end
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      signals.empty? ? :verified : :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_succeeds_when_process_exits_during_ownership_probe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive = true
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      alive = false if signals.any?
+      alive ? :verified : :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_refuses_kill_when_ownership_changes_before_kill
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    signals = []
+    ownership_checks = 0
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      ownership_checks += 1
+      ownership_checks < 3 ? :verified : :reused
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    _out, err = capture_io do
+      assert_raises(Hive::Error) do
+        with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    assert File.exist?(command.pid_file)
+    assert_includes err, "before KILL"
+  end
+
+  def test_stop_succeeds_when_process_exits_before_kill_reprobe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive_checks = 0
+    signals = []
+    command.define_singleton_method(:pid_alive?) do |_pid|
+      alive_checks += 1
+      alive_checks < 5
+    end
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_succeeds_when_process_exits_during_pre_kill_ownership_probe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive = true
+    ownership_checks = 0
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      ownership_checks += 1
+      if ownership_checks >= 3
+        alive = false
+        :unverified
+      else
+        :verified
+      end
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_kill_grace_loop_sleeps_before_process_exits
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    kill_sent = false
+    kill_loop_checks = 0
+    slept = false
+    signals = []
+    command.define_singleton_method(:pid_alive?) do |_pid|
+      if kill_sent
+        kill_loop_checks += 1
+        kill_loop_checks < 2
+      else
+        true
+      end
+    end
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) do |_pid, signal|
+      signals << signal
+      kill_sent = true if signal == :KILL
+    end
+    command.define_singleton_method(:sleep) { |_sec| slept = true }
+    after_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 1
+    times = [ Time.at(0), Time.at(after_grace), Time.at(after_grace), Time.at(after_grace) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(after_grace) }) do
+        command.call
+      end
+    end
+
+    assert_equal %i[TERM KILL], signals
+    assert slept
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_succeeds_when_process_exits_during_initial_ownership_probe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive = true
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      alive = false
+      :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+
+    _out, err = capture_io { command.call }
+
+    assert_empty signals
+    refute File.exist?(command.pid_file)
+    assert_includes err, "exited before signaling"
+  end
+
+  def test_stop_succeeds_when_process_exits_during_initial_reuse_probe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive = true
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      alive = false
+      :reused
+    end
+
+    _out, err = capture_io { command.call }
+
+    refute File.exist?(command.pid_file)
+    assert_includes err, "exited before signaling"
+  end
+
+  def test_guarded_pid_cleanup_returns_false_when_current_payload_is_unreadable
+    command = babysit("stop")
+    command.define_singleton_method(:read_pid_file_payload) { raise "unreadable" }
+
+    refute command.send(:remove_pid_file_if_current, { "pid" => 1234 })
+  end
+
+  def test_pid_file_mutex_times_out_when_lock_cannot_be_acquired
+    command = babysit("stop")
+    fake_lock = Object.new
+    fake_lock.define_singleton_method(:flock) do |mode|
+      mode == File::LOCK_UN ? true : false
+    end
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(0), Time.at(Hive::Commands::Babysit::PID_LOCK_WAIT_SEC + 1) ]
+
+    error = assert_raises(Hive::Error) do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::PID_LOCK_WAIT_SEC + 1) }) do
+        command.send(:acquire_pid_file_mutex, fake_lock)
+      end
+    end
+
+    assert_includes error.message, "timed out waiting"
+  end
+
+  def test_stale_runtime_ignores_malformed_started_at
+    command = babysit("status")
+    command.define_singleton_method(:current_source_mtime) { Time.now + 60 }
+
+    refute command.send(:stale_runtime?, { "started_at" => "not-a-time" })
+  end
+
+  def test_current_source_mtime_returns_nil_when_source_scan_fails
+    command = babysit("status")
+    original_glob = Dir.method(:glob)
+    Dir.define_singleton_method(:glob) { |_pattern| raise Errno::EACCES, "blocked" }
+
+    assert_nil command.send(:current_source_mtime)
+  ensure
+    Dir.define_singleton_method(:glob, original_glob) if original_glob
   end
 end

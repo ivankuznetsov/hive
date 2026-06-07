@@ -9,18 +9,27 @@ Expects a bot already polling the test token (run_idea_e2e.sh owns that).
 The shared send -> tap -> assert sequence lives in _drive.py.
 
 Env: TG_API_ID, TG_API_HASH, TG_BOT_USERNAME, TG_CAPTURE_PROJECT (default shipped).
+Set TG_IDEA_MODE=voice with TG_VOICE_FIXTURE and HIVE_WHISPER_API_KEY for the
+real voice-note transcription path. When TG_VOICE_ANSWER_SLUG is present,
+voice mode also answers that seeded brainstorm task by voice.
 """
 import os
 import sys
 
 from telethon.sync import TelegramClient
 
-from _drive import drive
+from _drive import drive, drive_voice, drive_voice_answer
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 BOT = os.environ["TG_BOT_USERNAME"]
 PROJECT = os.environ.get("TG_CAPTURE_PROJECT", "shipped")
+MODE = os.environ.get("TG_IDEA_MODE", "text")
+VOICE_FIXTURE = os.environ.get("TG_VOICE_FIXTURE")
+VOICE_EXPECT = os.environ.get("TG_VOICE_EXPECT", "voice idea")
+VOICE_ANSWER_SLUG = os.environ.get("TG_VOICE_ANSWER_SLUG")
+VOICE_ANSWER_PATH = os.environ.get("TG_VOICE_ANSWER_PATH")
+VOICE_ANSWER_EXPECT = os.environ.get("TG_VOICE_ANSWER_EXPECT", VOICE_EXPECT)
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION = os.path.join(HERE, "hive_e2e")
 
@@ -29,6 +38,28 @@ def main():
     client = TelegramClient(SESSION, API_ID, API_HASH)
     client.connect()
     try:
+        if MODE == "voice":
+            if not os.environ.get("HIVE_WHISPER_API_KEY"):
+                # Voice mode is requested explicitly, so this is a hard
+                # configuration failure. The shell wrapper already hard-requires
+                # HIVE_TEST_BOT_TOKEN; keep the Whisper-backed path equally
+                # honest instead of reporting a green skip.
+                print("FAIL voice mode requires HIVE_WHISPER_API_KEY")
+                return 1
+            if not VOICE_FIXTURE or not os.path.exists(VOICE_FIXTURE):
+                # The secret IS set, so the voice path MUST run. A missing
+                # fixture is a hard FAILURE, not a skip: U8 requires a
+                # checked-in speech sample, and silently returning 0 here would
+                # let the unimplemented path masquerade as passing.
+                print(f"FAIL voice fixture not found at {VOICE_FIXTURE!r}; "
+                      "U8 requires a checked-in speech sample saying "
+                      f"{VOICE_EXPECT!r} (default test/fixtures/voice/voice-idea.oga)")
+                return 1
+            result = drive_voice(client, BOT, PROJECT, VOICE_FIXTURE, VOICE_EXPECT)
+            if result != 0 or not VOICE_ANSWER_SLUG:
+                return result
+            return drive_voice_answer(client, BOT, VOICE_ANSWER_SLUG, VOICE_FIXTURE,
+                                      VOICE_ANSWER_EXPECT, answer_path=VOICE_ANSWER_PATH)
         return drive(client, BOT, PROJECT)
     finally:
         client.disconnect()

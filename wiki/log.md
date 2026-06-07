@@ -2,27 +2,21 @@
 
 Append-only log of all wiki operations.
 
-## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage
-
-**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `a8774462` changed `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and existing babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub env var config injection"` found the current babysitter docs and prior refresh history, while the configured master collection had no relevant hit. Inspected the committed diff plus `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/cli.rb`, and focused dry-run tests. Updated [[commands/babysit]] to describe option screening as scoped to each CLI's honored option regions, refreshed [[testing]] metadata, and tied the remaining live-agent dry-run smoke gap to `a8774462`. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
-
-**Refreshed pages:**
-- [[commands/babysit]]
-- [[testing]]
-- [[gaps]]
-- [[log]]
-
-## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
-
-**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
-
-**Refreshed pages:**
-- [[commands/babysit]]
-- [[modules/babysitter]]
-- [[testing]]
-- [[gaps]]
-- [[log]]
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-06-07T18:55:00Z] daemon — retry late-stage terminal agent-loss errors
+
+**Action:** Extended `Hive::Daemon::StaleAgentHealer` so late-stage terminal agent-loss errors are recovered by the normal daemon flow instead of staying red after ordinary interruptions. `7-artifacts` and `8-finalize` rows with `ERROR reason=tmux_session_terminated` or `ERROR reason=agent_orphaned` now clear when no live task lock exists, using the same marker-id guard, pre-clear dispatch-baseline seeding, bounded per-process retry budget, and one-shot `marker_heal_exhausted` logging used by finalize `ERROR reason=unpushed_commits`. The healer logs these retries as `reason=terminal_agent_loss`, keeps the original marker reason in `marker_reason`, and leaves repository-state/manual failures such as `ERROR reason=git_status_failed` red for operator inspection. Added focused tests for artifacts tmux-session loss, finalize orphaned-agent loss, marker-id races, live-lock skips, git-status manual skips, and retry-budget exhaustion, then refreshed daemon, artifacts, finalize, testing, and gaps docs.
+
+**Tests:**
+- `bundle exec ruby -Itest test/unit/daemon/stale_agent_healer_test.rb`
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/artifacts]]
+- [[stages/finalize]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-07T17:00:00Z] review fix-pass 03 — finalize healer doc/observability polish
 
 **Action:** Applied 6-review pass-03 findings to `Hive::Daemon::StaleAgentHealer`, its logger, tests, and [[modules/daemon]]. Dropped the unreferenced `MARKER_ERROR_REASONS`/`HEAL_LOG_LABELS` constants; unified the heal event attempt-count key to plural `attempts:` across `marker_healed` and `marker_heal_exhausted`; derived the review-path `marker_heal_failed` reason label from the row (so a `review_agent_died` failure is no longer mislabeled as the tmux-death channel); and made `observe_pre_clear_mtime` emit a new `marker_heal_observer_missing` debug event instead of silently no-op'ing when a controller lacks the method. Tightened the class doc: removed the inaccurate "auth" cause of the unpushed-commits marker (auth raises before the push gate), reordered the finalize re-run checks to "auth, clean-exit, push" to match `finalize.rb#run!`, softened the limit wording to "configured limit (default 3)", and noted the intentional asymmetry with `review_error_signature`. Extended the exhausted-event comment to call out the SIGHUP-reload reset of the `seen` dedup maps. Reverted the manual `wiki/log.md` edits (fragments already exist in `wiki/log.d/`). Added focused tests: status-JSON error-row marker_id contract, observer-missing logging, and exhausted-event one-shot suppression across 3+ heal passes; the redispatch integration test now derives its `action` from the real status pipeline.
@@ -38,6 +32,21 @@ Append-only log of all wiki operations.
 - [[cli]]
 - [[commands]]
 - [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T16:08:13Z] babysitter — fix detached restart process identity
+
+**Action:** Live-smoked a stale babysitter after the current checkout and reproduced that `hive babysit restart --detach` could leave the long-lived process running under the `restart --detach` argv. Later restarts then waited on that process instead of quickly replacing it. Updated `Hive::Commands::Babysit#restart_daemon` so detached restart stops the old process and re-execs the canonical `hive babysit start --detach` command before daemonizing, preserving the PID-file/startup invariant. Kept the long 600-second stop drain because an active babysitter tick can be inside a synchronous PR repair agent; review pass 1 caught that shortening the drain would orphan child agents and temporary worktrees. The same review found that stop could suppress KILL after ownership became unverified yet still delete the PID file and print success, so stop now leaves the PID file and warns when the process may still be alive; KILL escalation is also explicit in stderr. Review pass 2 found that restart could still continue after such a refused stop and that detached re-exec should use the installed stable wrapper rather than raw process argv. Restart now aborts when stop leaves a live PID, direct `stop` exits non-zero in the same refused-stop paths, and detached re-exec resolves the command through `Hive::InvokedBinary.path`. Later review passes found narrow races where a process could exit during initial or post-grace ownership probes; stop now re-checks liveness around those probes and treats a now-dead PID as a clean stale cleanup instead of requiring manual intervention. The final cleanup review found that successful stop cleanup could remove a replacement PID file created by a concurrent `start`; reservation and cleanup now share a bounded sidecar lock and cleanup removes only when the file still matches the payload being stopped, while the detached re-exec call is direct/auditable. Added unit regressions for detached restart re-exec, no-dry-run argv, re-exec failure reporting, unresolved wrapper errors, restart abort after refused stop, direct stop failure on refused stop, ownership-probe clean exits including the pre-KILL recheck, replacement PID-file preservation, lock-acquire timeout, KILL-success cleanup, and skip-KILL PID-file preservation, then refreshed babysitter command/module/testing docs plus the stale-runtime gap.
+
+**Tests:**
+- `bundle exec ruby -Itest test/unit/commands/babysit_test.rb`
+- `bundle exec ruby -Itest test/unit/babysitter/coverage_gaps_test.rb`
+- `bundle exec rubocop lib/hive/commands/babysit.rb test/unit/commands/babysit_test.rb test/unit/babysitter/coverage_gaps_test.rb`
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
 - [[testing]]
 - [[gaps]]
 
@@ -106,6 +115,26 @@ Append-only log of all wiki operations.
 - [[testing]]
 <!-- END GENERATED WIKI LOG FRAGMENTS -->
 
+## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `a8774462` changed `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and existing babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub env var config injection"` found the current babysitter docs and prior refresh history, while the configured master collection had no relevant hit. Inspected the committed diff plus `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/cli.rb`, and focused dry-run tests. Updated [[commands/babysit]] to describe option screening as scoped to each CLI's honored option regions, refreshed [[testing]] metadata, and tied the remaining live-agent dry-run smoke gap to `a8774462`. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
+
+**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
 ## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
 
 **Action:** Refreshed command/API surface coverage after commit `dc0f540f` (`fix(babysitter): detect stale runtime`) changed `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, and existing babysitter wiki notes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "command API surface routes handlers README entrypoint"` surfaced prior command/API refresh context, and the configured master wiki path had only generic route/command guidance. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[cli]], and [[operating]]. Documented the new `hive babysit restart` lifecycle subcommand, the boundary that `reload` refreshes config/log settings but not loaded Ruby source, the source-mtime stale-process recommendation printed by `status`, and the remaining lack of a live detached-process stale-runtime smoke artifact. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

@@ -25,7 +25,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
-| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` are cleared with a bounded per-process retry budget so interrupted sessions can be pushed by the normal daemon flow. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus late-stage `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun through the normal daemon flow. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by external callers (today: the Telegram bot via `Hive::Bot::DispatchRequestWriter`) and consumed by the dispatcher's tick loop. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: the bot writes, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
@@ -112,18 +112,22 @@ stage does not move and no workflow verb fires from either path.
    pass-specific `reviews/errors-NN.md` contains only
    `tmux_session_terminated before writing expected output file` reviewer
    failures. It also auto-clears `8-finalize` `ERROR reason=unpushed_commits`
-   with no live task lock. The clear matches the observed marker's
+   with no live task lock, and treats `7-artifacts` / `8-finalize`
+   `ERROR reason=tmux_session_terminated` or `reason=agent_orphaned` as
+   retryable terminal agent-loss markers. The clear matches the observed marker's
    `marker_id` when present, falling back to the legacy `reason` guard only for
    old markers without ids. Retry accounting is keyed by project, slug, stage,
-   and marker reason, not by marker id, because finalize mints a fresh
-   `marker_id` on each push failure for the same task. After a successful clear,
+   and marker reason, not by marker id, because retryable terminal failures can
+   mint a fresh `marker_id` for the same task. After a successful clear,
    it records the pre-clear state-file mtime in the dispatch baseline map so the
    marker-clear rewrite looks like a settled edit-resume change on the next
    status read rather than a first-sight row to strand via `record_baseline`.
-   Clearing the marker lets the daemon rerun finalize, which performs the
-   existing auth check, clean-exit scope check, optional residue commit, and
-   push (in that order). Manual-only errors such as `reason=ensure_clean_on_exit_failed` are
-   left red because they need operator inspection. Auto-clears are bounded per
+   Clearing the marker lets the daemon rerun the owning stage; finalize still
+   performs its existing auth check, clean-exit scope check, optional residue
+   commit, and push (in that order). Manual-only errors such as
+   `reason=ensure_clean_on_exit_failed` and repository-state failures such as
+   `reason=git_status_failed` are left red because they need operator
+   inspection. Auto-clears are bounded per
    daemon process by failure signature (default 3 clears); repeated identical
    failures stay red after the budget is exhausted so a persistent
    infrastructure break cannot churn forever. The budget is in-memory only: a

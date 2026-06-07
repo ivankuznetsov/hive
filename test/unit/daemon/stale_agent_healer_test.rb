@@ -661,6 +661,169 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_auto_recovers_artifacts_tmux_session_terminated_error
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=tmux-a -->\n")
+      pre_clear_mtime = NOW - 5151
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: pre_clear_mtime,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "tmux-a" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected artifacts terminal-agent-loss auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "terminal_agent_loss", heal_event[1][:reason]
+      assert_equal "tmux_session_terminated", heal_event[1][:marker_reason]
+      assert_equal "7-artifacts", heal_event[1][:stage]
+      assert_equal 1, heal_event[1][:attempts]
+      assert_equal [ { project: "p", slug: "s", mtime: pre_clear_mtime } ], @controller.observed_mtimes
+      assert Hive::Markers.current(state_file).none?,
+             "tmux-session terminal ERROR should clear so the daemon can rerun artifacts"
+    end
+  end
+
+  def test_auto_recovers_finalize_agent_orphaned_error
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=agent_orphaned marker_id=agent-a -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "agent_orphaned", "marker_id" => "agent-a" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected finalize terminal-agent-loss auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "terminal_agent_loss", heal_event[1][:reason]
+      assert_equal "agent_orphaned", heal_event[1][:marker_reason]
+      assert Hive::Markers.current(state_file).none?,
+             "orphaned-agent terminal ERROR should clear so the daemon can rerun finalize"
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_uses_marker_id_guard_when_present
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=newer -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "older" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/ERROR reason=tmux_session_terminated marker_id=newer/, File.read(state_file),
+                   "a stale status row must not clear a newer same-reason ERROR marker")
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_skips_live_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=agent_orphaned -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "agent_orphaned" },
+        action: "error",
+        live_task_lock: true
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a live-lock skip must be a clean no-op, not a logged failure"
+      assert_match(/ERROR reason=agent_orphaned/, File.read(state_file))
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_does_not_clear_git_status_failed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=git_status_failed -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "git_status_failed" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a repository-state failure must stay manual, not enter agent-loss retry"
+      assert_match(/ERROR reason=git_status_failed/, File.read(state_file))
+    end
+  end
+
+  def test_terminal_agent_loss_stays_red_after_retry_budget_is_exhausted
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated -->\n")
+      heal([ row ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated -->\n")
+      heal([ row ])
+
+      assert_match(/ERROR reason=tmux_session_terminated/, File.read(state_file),
+                   "same terminal agent loss must stay red after budget exhaustion")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal "terminal_agent_loss", heals.first[1][:reason]
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "terminal_agent_loss", exhausted.first[1][:reason]
+      assert_equal "tmux_session_terminated", exhausted.first[1][:marker_reason]
+      assert_equal 1, exhausted.first[1][:attempts]
+      assert_equal 1, exhausted.first[1][:max_attempts]
+      assert_equal "per_process", exhausted.first[1][:budget_scope]
+      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
+      assert_match(/rerun 7-artifacts/, exhausted.first[1][:remediation])
+      assert_match(/no live agent/, exhausted.first[1][:remediation])
+    end
+  end
+
   def test_finalize_unpushed_recovery_uses_marker_id_guard_when_present
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=newer -->\n")

@@ -252,7 +252,6 @@ module Hive
       def old_archived_row?(row, now:)
         Hive::ArchiveFilter.hide?(
           stage: row.stage,
-          marker_name: row.marker,
           mtime: parse_time(row.mtime),
           folder_mtime: parse_folder_mtime(row.folder_mtime),
           now: now

@@ -9,14 +9,15 @@ class HivePatrolReviewHandoffTest < Minitest::Test
 
   Patch = Struct.new(:branch, :worktree_path, :head_sha, keyword_init: true)
 
-  def finding
-    Hive::Patrol::Finding.new(
+  def finding(**overrides)
+    defaults = {
       id: "f1", feature_id: "feature", category: "bug", severity: "high",
       confidence: "medium", title: "Fix bug", description: "bug details",
       recommendation: "fix it",
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
       fingerprint: "fp1"
-    )
+    }
+    Hive::Patrol::Finding.new(**defaults.merge(overrides))
   end
 
   def patch(dir)
@@ -102,6 +103,75 @@ class HivePatrolReviewHandoffTest < Minitest::Test
 
         assert_nil Hive::TaskMeta.read(folder)[:id]
       end
+    end
+  end
+
+  def test_idea_md_omits_finding_section_when_description_blank
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(description: "   "),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "## Finding", "blank description must omit the Finding section"
+      assert_includes idea, "## Recommendation", "other sections must still render"
+    end
+  end
+
+  def test_idea_md_omits_recommendation_section_when_blank
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(recommendation: ""),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "## Recommendation", "blank recommendation must omit the Recommendation section"
+      assert_includes idea, "## Finding", "other sections must still render"
+    end
+  end
+
+  def test_idea_md_omits_evidence_section_when_evidence_empty
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(evidence: []),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "## Evidence", "empty evidence must omit the Evidence section"
+    end
+  end
+
+  def test_idea_md_renders_evidence_without_location_as_bare_marker
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(evidence: [ { "snippet" => "boom" } ]),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      assert_includes idea, "- evidence: boom",
+                      "evidence with no file/line must render the bare '- evidence' marker"
+    end
+  end
+
+  def test_idea_md_renders_location_only_when_snippet_blank
+    with_tmp_dir do |dir|
+      folder = handoff(dir).enqueue(
+        finding: finding(evidence: [ { "file" => "app.rb", "line" => 9, "snippet" => "  " } ]),
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      )
+
+      idea = File.read(File.join(folder, "idea.md"))
+      assert_includes idea, "- `app.rb:9`", "a snippet-less entry must render location only"
+      refute_match(/app\.rb:9`:/, idea, "no trailing snippet separator when snippet is blank")
     end
   end
 end

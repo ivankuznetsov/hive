@@ -63,7 +63,7 @@ end
 
 LOCAL_SIDE_EFFECT_OPTIONS = %w[--cache --web].freeze
 WEB_SHORT_OPTION_COMMANDS = {
-  "pr" => %w[checks view],
+  "pr" => %w[checks diff list view],
   "repo" => %w[view],
   "run" => %w[view],
   "workflow" => %w[view]

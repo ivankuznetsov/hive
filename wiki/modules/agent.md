@@ -101,12 +101,13 @@ validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
-Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review.
+Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
 
 ## `handle_exit`
 
 | Condition | Marker set |
 |-----------|------------|
+| provider-limit text in a failed/timeout result's `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
 | `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code marker_id=<hex16> -->` (corrupted state, not silent OK) |

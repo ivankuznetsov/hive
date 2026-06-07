@@ -4,6 +4,7 @@ require "open3"
 require "tempfile"
 require "time"
 require "hive/agent_profiles"
+require "hive/agent_limit"
 require "hive/agent/message_extractor"
 require "hive/events"
 require "hive/lock"
@@ -307,6 +308,17 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      if (limit_message = limit_error_message(result))
+        if effective_status_mode == :state_file_marker
+          Hive::Markers.set(@task.state_file, :error,
+                            reason: "limits_reached",
+                            message: limit_message)
+        end
+        result[:status] = :error
+        result[:error_message] = limit_message
+        return
+      end
+
       if result[:timed_out]
         # Only the :state_file_marker mode writes :error to task.state_file
         # on timeout. The other modes leave the orchestrator-owned marker
@@ -333,6 +345,15 @@ module Hive
     end
 
     private
+
+    def limit_error_message(result)
+      return nil if result[:exit_code] == 0 && !result[:timed_out]
+
+      text = result[:final_message].to_s
+      return nil unless Hive::AgentLimit.limit_reached?(text)
+
+      Hive::AgentLimit.error_message(text, agent: @profile.name)
+    end
 
     def handle_exit_state_file_marker(result)
       if result[:exit_code].nil? || result[:exit_code].zero?

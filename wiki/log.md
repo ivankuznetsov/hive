@@ -228,13 +228,6 @@ Append-only log of all wiki operations.
 - [[operating]]
 - [[gaps]]
 
-## [2026-06-07T04:53:37Z] eval — ignore ambient TEST in hive-eval
-
-**Action:** Fixed `bin/hive-eval` so inherited `TEST` values cannot override the scenario-only Rake FileList when `--scenario` is omitted. The wrapper now deletes `TEST` in the subprocess environment and only sets it to a validated scenario path for explicit single-scenario runs. Added reporter coverage that launches the CLI with `TEST=test/unit/config_test.rb` and verifies the generated report only contains `test/eval/scenarios/` files.
-
-**Refreshed pages:**
-- [[testing]]
-
 ## [2026-06-06T20:24:46Z] openclaw — publish as one ClawHub skill
 
 **Action:** Corrected the OpenClaw publishing model after live ClawHub preflight showed that installing one skill folder is the right user surface. Hive now documents and tests a single ClawHub listing, `hive-cli`, whose installed `SKILL.md` still exposes `/hive`; all workflows are invoked as `/hive ...` arguments rather than separate shortcut listings. Deleted the accidental `ivankuznetsov` ClawHub shortcut listings `hive-accept-finding`, `hive-archive`, `hive-artifacts`, and `hive-babysit`; `hive-bot` never published because ClawHub rejected it at the new-skill rate limit. Refreshed the README, OpenClaw README, [[index]], [[operating]], and [[gaps]] so future publication uses only `clawhub skill publish openclaw/skills/hive --slug hive-cli`.

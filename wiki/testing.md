@@ -148,8 +148,6 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 
 `bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
 
-The wrapper clears any ambient `TEST` before invoking Rake so shell-level Minitest selection cannot bypass the scenario-only FileList. When `--scenario` is provided, the wrapper sets `TEST` only after resolving the validated basename under `test/eval/scenarios/`.
-
 ## Lint
 
 `bundle exec rubocop` is the lint command. Config in `.rubocop.yml`:

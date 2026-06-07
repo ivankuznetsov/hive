@@ -90,6 +90,16 @@ Append-only log of all wiki operations.
 - [[operating]]
 - [[gaps]]
 
+## [2026-06-07T06:14:13Z] babysitter - screen bundled gh short flags in dry-run passthrough
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `d4939d64` changed `bin/hive-babysitter-stub-gh` and `test/unit/babysitter/dry_run_env_test.rb`. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run gh short flags"` found the existing babysit/gaps/log coverage. Verified the committed diff plus `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/commands/babysit.rb`, and `test/unit/babysitter/dry_run_env_test.rb`. Documented that allowed `gh` reads still skip unsafe passthrough flags: `--web` / short bundles containing `w`, and `--show-token` / `gh auth status` bundles containing `t`, so bundled forms like `gh pr view 42 -cw` and `gh auth status -at` do not reach real `gh`. Recorded that the full live-agent `hive babysit --once PROJECT --dry-run` smoke evidence is still absent. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-06T20:24:46Z] openclaw — publish as one ClawHub skill
 
 **Action:** Corrected the OpenClaw publishing model after live ClawHub preflight showed that installing one skill folder is the right user surface. Hive now documents and tests a single ClawHub listing, `hive-cli`, whose installed `SKILL.md` still exposes `/hive`; all workflows are invoked as `/hive ...` arguments rather than separate shortcut listings. Deleted the accidental `ivankuznetsov` ClawHub shortcut listings `hive-accept-finding`, `hive-archive`, `hive-artifacts`, and `hive-babysit`; `hive-bot` never published because ClawHub rejected it at the new-skill rate limit. Refreshed the README, OpenClaw README, [[index]], [[operating]], and [[gaps]] so future publication uses only `clawhub skill publish openclaw/skills/hive --slug hive-cli`.

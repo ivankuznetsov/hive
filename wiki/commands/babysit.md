@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -69,6 +69,8 @@ On success, the babysitter is silent on the PR. On failure, timeout, or budget e
 
 The current `git` stub read-only allowlist is `branch` (bare, `--show-current`, or `--contains`), `cat-file`, `describe`, `diff`, `grep`, `log`, `ls-files`, `ls-tree`, `merge-base`, `remote` only for listing, `show [-n]`, and `get-url` forms, `rev-list`, `rev-parse`, `show`, `status`, and `config` when paired with `--get`, `--get-all`, or `--list`. On top of the subcommand allowlist, the stub screens the invocation for options that make real git execute a command or write a file, but scopes each screen to where git honors that spelling: global `-c <key>=<cmd>` / `--config-env[=...]` config injection (which can wire up `diff.external`, `*.textconv`, or `core.pager` to spawn a command), global `--exec-path[=...]`, any exact `--output` / `--output=...`, and `git grep` pager execution through `-O`, bundled short flags such as `-nO...`, or `--open-files-in-pager[=...]`. So `git diff --name-only`, `git diff -Oorderfile --name-only`, `git diff --output-indicator-new=> --name-only`, and `git grep -c needle` pass through, but `git diff --output=patch.diff`, `git -c diff.external='<cmd>' diff`, `git --exec-path=/tmp/evil diff`, and `git grep -nO'<cmd>' <pat>` are skipped. Before execing real git, the stub also deletes exec-influencing environment variables (`GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and `GIT_CONFIG*`), because argv screening cannot see them. The current `gh` stub read-only allowlist is `api` with no mutating method and no payload flags, `api --method GET ...` / `api -XGET ...`, `auth status`, `pr checks/diff/list/status/view`, `run list/view/watch`, `repo view`, and `workflow list/view`.
 
+Allowed `gh` reads still pass through an unsafe-option screen before the stub execs real `gh`. `--web`, `--web=...`, and any short-flag cluster containing `w` are skipped. `--show-token`, `--show-token=...`, and, specifically for `gh auth status`, any short-flag cluster containing `t` are also skipped. So `gh pr view 42 -cw` and `gh auth status -at` are skipped just like their unbundled `--web` and `-t` forms.
+
 For `gh api`, payload-bearing forms are treated as writes unless the command explicitly sets GET. Dry-run skips implicit-POST calls such as `gh api repos/owner/repo/issues/123/comments -f body=hi`, `-F body=@comment.md`, `--raw-field body=hi`, `--field body=hi`, and `--input payload.json`, while still passing explicit GET reads such as `gh api --method GET repos/owner/repo/issues -f state=open`.
 
 The dry-run guard is best-effort: an agent that invokes absolute binary paths can bypass the PATH overlay. Use throwaway repos for destructive validation until a stronger sandbox exists. If `HIVE_BABYSITTER_REAL_GIT` is unset or points at an invalid binary, the stub exits 127 with a one-line diagnostic instead of guessing a system path.
@@ -76,7 +78,7 @@ The dry-run guard is best-effort: an agent that invokes absolute binary paths ca
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation and lifecycle helpers.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard, `git --output` write skips, and git exec/write guard regressions for scoped config injection, `--exec-path`, grep pager execution including bundled `-nO`, and pass-through cases for `git diff -O`, `--output-indicator-*`, and `git grep -c`.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard, unsafe `gh` passthrough flags including bundled `-at` / `-cw`, `git --output` write skips, and git exec/write guard regressions for scoped config injection, `--exec-path`, grep pager execution including bundled `-nO`, and pass-through cases for `git diff -O`, `--output-indicator-*`, and `git grep -c`.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

@@ -61,6 +61,19 @@ def api_read_only?(rest)
   !payload
 end
 
+def unsafe_passthrough_flag?(arg, rest)
+  arg == "--show-token" ||
+    arg.start_with?("--show-token=") ||
+    arg == "--web" ||
+    arg.start_with?("--web=") ||
+    arg.start_with?("-w") ||
+    (rest[0] == "auth" && rest[1] == "status" && arg.start_with?("-t"))
+end
+
+def safe_passthrough_options?(argv, rest)
+  argv.none? { |arg| unsafe_passthrough_flag?(arg, rest) }
+end
+
 def read_only?(rest)
   case rest[0]
   when "api"
@@ -82,7 +95,7 @@ end
 
 rest = stripped_global_options(argv)
 
-unless read_only?(rest)
+unless read_only?(rest) && safe_passthrough_options?(argv, rest)
   log_skip(argv)
   warn "[dry-run] gh #{argv.join(' ')} skipped"
   exit 0

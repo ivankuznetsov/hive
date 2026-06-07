@@ -146,6 +146,24 @@ def read_only_remote?(rest)
   end
 end
 
+def read_only_config?(rest)
+  args = rest[1..] || []
+  # Skip leading type/format modifiers that precede a read verb, e.g.
+  # `git config --bool --get commit.gpgsign` (auto_commit.rb runs exactly
+  # this). These never assign a value, so they keep the command read-only.
+  args = args.dup
+  args.shift while args.first =~ /\A(--bool|--int|--path|--null|-z|--type=.*)\z/
+
+  case args.first
+  when "--get", "--get-all"
+    args.length == 2 && !args.last.start_with?("-")
+  when "--list"
+    args.length == 1
+  else
+    false
+  end
+end
+
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
@@ -156,7 +174,7 @@ def read_only?(rest)
   when "remote"
     read_only_remote?(rest)
   when "config"
-    rest.include?("--get") || rest.include?("--get-all") || rest.include?("--list")
+    read_only_config?(rest)
   else
     false
   end

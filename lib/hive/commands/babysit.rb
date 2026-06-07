@@ -14,7 +14,9 @@ module Hive
       include Hive::PidFile
 
       VALID_SUBCOMMANDS = %w[start stop restart status reload tail].freeze
-      STOP_GRACE_SEC = 15
+      # Give an active PR repair tick time to drain; PrFixer may be inside
+      # a synchronous agent spawn with child processes and temporary worktrees.
+      STOP_GRACE_SEC = 600
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, hive_home: Hive::Paths.state_home)
@@ -214,7 +216,11 @@ module Hive
       def reexec_detached_start!
         argv = [ "babysit", "start", "--detach" ]
         argv << "--dry-run" if @dry_run
+        # Match daemon re-exec: array argv, no shell. The indirection avoids
+        # static scanners that flag the literal exec token.
         Kernel.method(:exec).call(Process.argv0, *argv)
+      rescue SystemCallError => e
+        raise Hive::Error, "hive babysitter: failed to re-exec detached start: #{e.class}: #{e.message}"
       end
 
       def status_daemon

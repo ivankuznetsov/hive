@@ -197,6 +197,21 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_equal [ Process.argv0, "babysit", "start", "--detach", "--dry-run" ], exec_args
   end
 
+  def test_detached_restart_surfaces_reexec_failure
+    command = babysit("restart", detach: true)
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+
+    with_replaced_singleton_method(Kernel, :exec, ->(*_args) { raise Errno::ENOENT, "missing hive" }) do
+      error = assert_raises(Hive::Error) { command.call }
+      assert_includes error.message, "failed to re-exec detached start"
+    end
+    assert_equal [ :stop ], calls
+  end
+
   def test_stale_runtime_ignores_malformed_started_at
     command = babysit("status")
     command.define_singleton_method(:current_source_mtime) { Time.now + 60 }

@@ -146,22 +146,87 @@ def read_only_remote?(rest)
   end
 end
 
-def read_only_config?(rest)
-  args = rest[1..] || []
-  # Skip leading type/format modifiers that precede a read verb, e.g.
-  # `git config --bool --get commit.gpgsign` (auto_commit.rb runs exactly
-  # this). These never assign a value, so they keep the command read-only.
-  args = args.dup
-  args.shift while args.first =~ /\A(--bool|--int|--path|--null|-z|--type=.*)\z/
-
-  case args.first
-  when "--get", "--get-all"
-    args.length == 2 && !args.last.start_with?("-")
-  when "--list"
-    args.length == 1
+# Options that make real git execute an arbitrary command or write a file even
+# when the subcommand itself is read-only. argv screening cannot see the value
+# tokens, so each option is matched structurally and screened only in the region
+# where git actually honours it — over-blocking a read-only option that merely
+# reuses the spelling would turn a legitimate read into a silent no-op.
+#
+#   -c <key>=<cmd> / --config-env[=]   inject diff.external, *.textconv,
+#                                      core.pager, etc. — all of which spawn
+#                                      <cmd>. git honours these only as *global*
+#                                      options (before the subcommand), so they
+#                                      are screened in the global region alone;
+#                                      that lets read-only subcommand flags that
+#                                      reuse the spelling through (notably `git
+#                                      grep -c` = --count). Only the exact `-c`
+#                                      token is dangerous — git rejects a bundled
+#                                      `-cKEY=VAL` — so no prefix match is needed.
+#   --exec-path[=<dir>]                redirects git's helper-binary lookup; a
+#                                      global, exec-influencing option.
+#   --paginate / -p                    force output through a pager. Screened
+#                                      only as global options so `git log -p`
+#                                      remains a read-only pass-through.
+#   --output[=<file>]                  writes the command's output to a file;
+#                                      dangerous on any subcommand. Anchored to
+#                                      the exact option so read-only diff
+#                                      formatting flags (--output-indicator-*)
+#                                      pass through.
+#   -O / --open-files-in-pager         run the named pager as a command. Only
+#                                      `git grep` honours these, so they are
+#                                      screened in the grep subcommand region
+#                                      alone (`git diff -O<orderfile>` names a
+#                                      read-only orderfile and must pass). The
+#                                      `-O` match deliberately covers bundled
+#                                      short flags (`-nO`, `-inO`, …) which all
+#                                      still reach the pager.
+def dangerous_global_option?(arg)
+  case arg
+  when "-c", "--config-env", "--paginate", "-p"
+    true
   else
     false
   end
+end
+
+def writes_output_file?(arg)
+  arg == "--output" || arg.start_with?("--output=")
+end
+
+def grep_pager_option?(arg)
+  arg == "--open-files-in-pager" ||
+    arg.start_with?("--open-files-in-pager=") ||
+    arg.match?(/\A-[^-]*O/)
+end
+
+def diff_rendering_command?(command)
+  %w[diff log show].include?(command)
+end
+
+def enables_external_diff_or_textconv?(arg)
+  arg == "--ext-diff" || arg == "--textconv"
+end
+
+def exec_or_write_screened?(argv, rest)
+  global_options = argv[0, argv.length - rest.length]
+  return true if global_options.any? { |arg| dangerous_global_option?(arg) }
+  return true if argv.any? { |arg| writes_output_file?(arg) || arg == "--paginate" }
+  return true if diff_rendering_command?(rest.first.to_s) &&
+    rest.drop(1).any? { |arg| enables_external_diff_or_textconv?(arg) }
+  return true if rest.first == "grep" && rest.drop(1).any? { |arg| grep_pager_option?(arg) }
+
+  false
+end
+
+def safe_read_argv(argv, rest)
+  safe_argv = [ "--no-pager", *argv ]
+
+  if diff_rendering_command?(rest.first.to_s)
+    subcommand_index = argv.length - rest.length
+    safe_argv.insert(subcommand_index + 2, "--no-ext-diff", "--no-textconv")
+  end
+
+  safe_argv
 end
 
 def read_only?(rest)
@@ -193,9 +258,16 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
   exit 127
 end
+
+# Even an allowlisted read-only subcommand executes arbitrary commands if these
+# env vars reach real git, and argv screening structurally cannot see them.
+# Scrub the whole exec-influencing family before handing off.
+%w[GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER].each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
+safe_argv = safe_read_argv(argv, rest)
+
 begin
-  # Array-form exec (no shell) hands argv straight to the real git binary.
-  exec real, *argv
+  exec(real, *safe_argv)
 rescue SystemCallError => e
   # A set-but-invalid path (missing, not executable, …) would otherwise leak a raw Ruby
   # backtrace and exit 1; mirror the unset-case friendly exit-127 handling above.

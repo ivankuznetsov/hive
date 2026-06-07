@@ -102,6 +102,28 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_ignores_inherited_test_when_running_all_scenarios
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      root = File.expand_path("../../..", __dir__)
+      scenario_dir = File.join(root, "test", "eval", "scenarios") + File::SEPARATOR
+      report = File.join(dir, "all.json")
+
+      _out, err, _status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1", "TEST" => "test/eval/support/scaffold_test.rb" },
+        "bin/hive-eval", "--no-judge", "--report", report
+      )
+
+      assert File.exist?(report), err
+      files = JSON.parse(File.read(report))
+        .fetch("scenarios")
+        .map { |entry| File.expand_path(entry.fetch("file"), root) }
+
+      refute_empty files
+      assert files.all? { |file| file.start_with?(scenario_dir) },
+             "expected only scenario files, got #{files.inspect}"
+    end
+  end
+
   def test_cli_rejects_scenario_paths_outside_scenario_dir
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "outside.json")

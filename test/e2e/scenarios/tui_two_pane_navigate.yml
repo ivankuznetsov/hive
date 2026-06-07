@@ -19,7 +19,7 @@ steps:
   # TUI lazy-boots on the first tui_* step. Anchor against the v2
   # header banner so we know the dashboard chrome rendered.
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 5
   # The seeded task slug lands in the right pane (TasksPane).
   - kind: tui_expect
@@ -95,9 +95,9 @@ steps:
     glob: true
     timeout: 15
   # The TUI is back in :grid mode after submission; the dashboard
-  # chrome is visible.
+  # task pane is visible.
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
     timeout: 5
 
   # Clean exit.

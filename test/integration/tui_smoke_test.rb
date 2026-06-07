@@ -76,12 +76,23 @@ class TuiSmokeTest < Minitest::Test
           # projects pane renders and the project name surface is alive.
           reader.winsize = [ 30, 120 ]
 
+          started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
             buf.include?(project_prefix)
           end
+          first_useful_paint = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
           assert_includes buffer, project_prefix,
                           "a stable prefix of the seeded project name must appear in " \
                           "the first frame within 10s, got buffer:\n#{buffer.inspect[0, 500]}"
+          # Regression guard, not a benchmark: the seeded first frame paints
+          # in ~0.3s locally. A revert to waiting on the starved background
+          # poll reintroduces the multi-second loading grid this fixes. The
+          # bound is generous (5s, well above the synchronous prime + PTY
+          # spawn cost on a loaded CI host) so it catches that regression
+          # without flaking; the 10s read_until above is the hard gate.
+          assert_operator first_useful_paint, :<, 5.0,
+                          "seeded project should appear without a multi-second loading grid " \
+                          "on TUI startup; took #{format('%.3f', first_useful_paint)}s"
 
           writer.write("q")
           writer.flush

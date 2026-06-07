@@ -75,8 +75,10 @@ module Hive
 
     def ensure_project_wiki(project_root)
       FileUtils.mkdir_p(File.join(project_root, "wiki"))
+      FileUtils.mkdir_p(File.join(project_root, "wiki", "log.d"))
       FileUtils.mkdir_p(File.join(project_root, "raw", "notes"))
       write_once(File.join(project_root, "raw", "notes", ".gitkeep"), "")
+      write_once(File.join(project_root, "wiki", "log.d", ".gitkeep"), "")
       write_once(File.join(project_root, "wiki", "index.md"), Pages.index)
       write_once(File.join(project_root, "wiki", "log.md"), Pages.log)
       write_once(File.join(project_root, "wiki", "gaps.md"), Pages.gaps)

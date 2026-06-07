@@ -256,8 +256,10 @@ module Hive
           dispatch_patrol_with_gates(patrol_dispatch, now: now)
         end
 
-        # 4. Per-row dispatch
-        result.rows.each { |row| handle_row(row, now: now) }
+        # 4. Per-row dispatch, later pipeline stages first (see
+        # dispatch_priority_order) so work nearest completion drains
+        # ahead of newer earlier-stage work when slots are scarce.
+        dispatch_priority_order(result.rows).each { |row| handle_row(row, now: now) }
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -819,6 +821,25 @@ module Hive
         )
       end
 
+      # Order rows so tasks closer to the end of the pipeline dispatch
+      # first: a 7-artifacts row before a 6-review row, an 8-finalize
+      # before both. When concurrency slots are scarce this drains work
+      # nearest completion ahead of newer earlier-stage work (a WIP-limit
+      # — don't start a fresh review while finalizes wait on a slot).
+      # Stable within a stage (original status order preserved), and
+      # unranked/unknown stages sort last.
+      def dispatch_priority_order(rows)
+        rows.each_with_index
+            .sort_by { |row, idx| [ -stage_rank(row.stage), idx ] }
+            .map(&:first)
+      end
+
+      # Pipeline position of a stage dir (higher = closer to done); -1 for
+      # an unrecognized stage so it deprioritizes behind every known stage.
+      def stage_rank(stage)
+        Hive::Stages::DIRS.index(stage.to_s) || -1
+      end
+
       def observe_external_running_rows(rows)
         per_project = Hash.new(0)
         rows.each do |row|
@@ -929,11 +950,10 @@ module Hive
           return
         end
 
-        gate = @controller.can_dispatch?(
-          project: project, slug: slug, now: now,
-          external_global_count: @external_active_agent_total,
-          external_project_count: external_active_agent_count_for(project)
-        )
+        # Patrol scans use their OWN concurrency budget (not the task
+        # max_concurrent_runs) so a long codex-backed scan never starves
+        # task dispatch — a running scan no longer eats a task slot.
+        gate = @controller.can_dispatch_patrol_scan?(project: project, now: now)
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: slug,
                                   stage: patrol_dispatch[:stage],
@@ -950,7 +970,8 @@ module Hive
           state_file_path: patrol_dispatch[:state_file_path],
           hive_state_path: patrol_dispatch[:hive_state_path],
           now: now,
-          trigger: "patrol"
+          trigger: "patrol",
+          kind: :patrol_scan
         )
       rescue StandardError => e
         # A spawn error is a genuine failure: route it through `complete`
@@ -1322,7 +1343,7 @@ module Hive
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, hive_state_path:, now:, trigger: "advance",
-                           request_id: nil)
+                           request_id: nil, kind: :task)
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
@@ -1337,7 +1358,8 @@ module Hive
         )
         @controller.record_dispatch(
           pid: pid, project: project, slug: slug, stage: stage,
-          command: command, started_at: now, state_file_mtime: state_file_mtime
+          command: command, started_at: now, state_file_mtime: state_file_mtime,
+          kind: kind
         )
         @logger.event(:dispatched, pid: pid, project: project, slug: slug,
                                    stage: stage, command: command, trigger: trigger,

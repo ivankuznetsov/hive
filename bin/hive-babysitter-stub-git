@@ -4,32 +4,132 @@
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
   File.open(path, "a") { |file| file.puts("[dry-run] git #{argv.join(' ')} skipped") }
-rescue SystemCallError
-  nil
+rescue SystemCallError, IOError => e
+  # The command is still skipped (stderr below preserves the human-visible signal), but the
+  # persistent audit log just developed an invisible gap; surface the cause instead of
+  # silently dropping the record. Catch IOError too (e.g. a closed stream on flush) so a
+  # write/flush failure cannot escape, crash the stub, and drop the audit record. Name the
+  # target path so the operator knows which log location (the override or the default) failed.
+  warn "[dry-run] failed to write skip log #{path}: #{e.message}"
 end
 
 argv = ARGV.dup
 
-def stripped_global_options(argv)
+# Walk only the leading global-option region (everything before the subcommand) and
+# report whether any unsafe global option appears there. Scoping to the leading region
+# matters: a read-only subcommand flag like `-p` (`git log -p`) must not be misread as the
+# global `--paginate`. Returns [unsafe?, rest] where rest is the subcommand and its args.
+def split_global_options(argv)
   rest = argv.dup
+  unsafe = false
   loop do
     case rest.first
-    when "-C", "-c", "--git-dir", "--work-tree"
+    # Any global config override (`-c`/`--config-env`, glued or separate) can wire up
+    # executable-affecting keys — diff.<driver>.textconv/command, filter.<driver>.*,
+    # gpg.<format>.program, pagers, hooks, aliases, and whatever git adds next. The
+    # babysitter never needs to inject config into read-only git, so reject the whole
+    # config-override category instead of enumerating dangerous keys.
+    when "-c", "--config-env"
+      unsafe = true
+      rest.shift(2)
+    when /\A-c./, /\A--config-env=/
+      unsafe = true
+      rest.shift
+    # `-p`/`--paginate` can launch an attacker-influenced pager, and `--exec-path[=<dir>]`
+    # redirects git to an arbitrary directory of git-* helper binaries — both are exec seams
+    # that a read-only babysitter never needs.
+    when "-p", "--paginate", "--exec-path", /\A--exec-path=/
+      unsafe = true
+      rest.shift
+    when "-C", "--git-dir", "--work-tree"
       rest.shift(2)
     when /\A--git-dir=/, /\A--work-tree=/
       rest.shift
     when /\A-/
+      # Unrecognized leading global option. Today's git routes all other globals through the
+      # branches above, but a future one taking a separate-word value would leave that value
+      # as the apparent subcommand and could fail open. Treat any unknown global as unsafe:
+      # over-blocking a read is the safe failure for a default-deny gate.
+      unsafe = true
       rest.shift
     else
       break
     end
   end
-  rest
+  [ unsafe, rest ]
+end
+
+def unsafe_command_options?(rest)
+  subcommand = rest.first
+  # Only tokens before the `--` pathspec separator are options; everything after it is a
+  # literal pathspec, so `git log -- -o` targets a file named `-o`, not the output flag.
+  options = (rest[1..] || []).take_while { |arg| arg != "--" }
+  options.any? { |arg| unsafe_read_option?(subcommand, arg) }
+end
+
+def unsafe_read_option?(subcommand, arg)
+  # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
+  return true if arg == "--ext-diff"
+
+  # `--open-files-in-pager` / `-O` (its short form, including glued `-O<cmd>`) runs an
+  # arbitrary pager command, but only on `git grep` — that is the precise RCE seam this guard
+  # exists to close. On `diff` / `log` / `show`, `-O<orderfile>` is `--output-ordering`, which
+  # only reads an orderfile, so the pager block must be scoped to grep or it over-skips reads.
+  # `git grep -o` / `--only-matching` is a read-only match filter (grep has no `--output`).
+  if subcommand == "grep"
+    return arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=", "-O")
+  end
+
+  # `git ls-files -o` / `--others` lists untracked files — a read, not a write. ls-files has
+  # no file-writing `--output`, so only the genuine write forms below should ever fire here.
+  return false if subcommand == "ls-files" && (arg == "-o" || arg == "--others")
+
+  # The file-writing `--output` / `-o` (separate or glued `-o<path>`) defeats the no-mutation
+  # boundary on an allowed read (`diff` / `log` / `show` write the requested file).
+  arg == "--output" || arg.start_with?("--output=", "-o")
+end
+
+def unsafe_env?
+  # The argv guards above are fully bypassable through git's environment-variable config
+  # path, so the env path mirrors the same fail-closed posture. Each guarded var is a known
+  # exec-capable seam (this is a denylist of the known offenders, not an exhaustive bar):
+  #   * GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND / GIT_SSH / GIT_PROXY_COMMAND each name a command
+  #     git execs directly (the older GIT_SSH / GIT_PROXY_COMMAND siblings are as dangerous as
+  #     the newer GIT_SSH_COMMAND).
+  #   * GIT_CONFIG_PARAMETERS is git's one-shot config channel — it carries the same
+  #     exec-capable keys (diff.external, core.fsmonitor, aliases, …) as a leading `-c`.
+  #   * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject those keys as well.
+  #   * GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM repoint config at an attacker-written file that
+  #     can carry the same keys.
+  # GIT_PAGER / core.pager is intentionally left alone — non-TTY dry-run stdout does not
+  # auto-spawn a pager, so guarding it would only over-block legitimate reads.
+  return true if env_set?("GIT_EXTERNAL_DIFF")
+  return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
+  return true if env_set?("GIT_PROXY_COMMAND")
+  return true if env_set?("GIT_CONFIG_PARAMETERS")
+  return true if env_set?("GIT_CONFIG_GLOBAL") || env_set?("GIT_CONFIG_SYSTEM")
+  return true if unsafe_config_count?
+
+  false
+end
+
+def unsafe_config_count?
+  raw = ENV.fetch("GIT_CONFIG_COUNT", "")
+  return false if raw.empty?
+
+  # Default-deny: a set GIT_CONFIG_COUNT is unsafe unless it cleanly parses to 0. A positive
+  # count carries attacker-controlled GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n; a non-numeric value
+  # (which `.to_i` would silently read as 0/allowed) is rejected rather than trusted to git.
+  Integer(raw, exception: false) != 0
+end
+
+def env_set?(name)
+  !ENV.fetch(name, "").empty?
 end
 
 def read_only_remote?(rest)
   args = rest[1..] || []
-  args.shift while ["-v", "--verbose"].include?(args.first)
+  args.shift while [ "-v", "--verbose" ].include?(args.first)
   return true if args.empty?
 
   case args.first
@@ -39,7 +139,7 @@ def read_only_remote?(rest)
     args.all? { |arg| !arg.start_with?("-") }
   when "get-url"
     args.shift
-    args.shift while ["--push", "--all"].include?(args.first)
+    args.shift while [ "--push", "--all" ].include?(args.first)
     args.length == 1 && !args.first.start_with?("-")
   else
     false
@@ -70,9 +170,9 @@ def read_only?(rest)
   end
 end
 
-rest = stripped_global_options(argv)
+unsafe_global, rest = split_global_options(argv)
 
-unless read_only?(rest)
+if unsafe_global || unsafe_command_options?(rest) || unsafe_env? || !read_only?(rest)
   log_skip(argv)
   warn "[dry-run] git #{argv.join(' ')} skipped"
   exit 0
@@ -83,4 +183,12 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
   exit 127
 end
-exec(real, *argv)
+begin
+  # Array-form exec (no shell) hands argv straight to the real git binary.
+  exec real, *argv
+rescue SystemCallError => e
+  # A set-but-invalid path (missing, not executable, …) would otherwise leak a raw Ruby
+  # backtrace and exit 1; mirror the unset-case friendly exit-127 handling above.
+  warn "hive-babysitter dry-run: cannot exec real git at #{real.inspect}: #{e.message}"
+  exit 127
+end

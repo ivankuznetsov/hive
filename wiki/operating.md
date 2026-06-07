@@ -1,16 +1,16 @@
 ---
 title: Operating Hive
 type: operating
-source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
+source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-06-03
+updated: 2026-06-07
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
 Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
-log inspection, and how to disable automation mid-flight.
+log inspection, community support, and how to disable automation mid-flight.
 
 ## Worktree-first workflow
 
@@ -96,16 +96,21 @@ Fresh installs use XDG locations:
 `<project>/.hive-state/`; install and uninstall do not move completed pipeline
 work.
 
-Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
-bash installer creates `hv` when another `hive` is already earlier on PATH. The
-in-tree `bin/hv` fallback probes only `HIVE_BIN_OVERRIDE`,
+Apache Hive collision: the Homebrew formula installs an `hv` symlink. The bash
+installer always writes a working `${data_home}/gems/bin/hv` wrapper that
+delegates to its GEM_HOME-aware `hive` wrapper, and exposes it under the user
+bin directory when another `hive` is already earlier on PATH or when it is
+refreshing an existing owned symlink. The in-tree `bin/hv` fallback probes only
+`HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
 and `/usr/local/bin/hive`; it intentionally does not fall through to
 `/usr/bin/hive` or `/opt/hive/bin/hive`, because those are common Apache Hive
-locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. The AUR
-package does not ship the gem's `bin/hv` wrapper; its `conflicts=('hive'
-'apache-hive')` metadata blocks the parallel install before fallback aliasing is
-possible.
+locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. RubyGems
+does not advertise `hv` as a gem executable, because RubyGems would wrap the
+bash launcher in a Ruby binstub; install channels create the working `hv`
+wrapper/symlink themselves. The AUR package also uses an `hv -> hive` symlink;
+its `conflicts=('hive' 'apache-hive')` metadata blocks the parallel install
+before fallback aliasing is possible.
 
 Daemon autostart is part of install, not project enrollment. The bash installer
 runs `hive daemon install --json` after installing the gem. Agent-assisted
@@ -142,12 +147,28 @@ core install still succeeds without it:
 | Codex | `codex plugin install ivankuznetsov/hive-skills` |
 | Pi | `pi install ivankuznetsov/hive-skills` |
 
-OpenClaw support now lives in-tree under `openclaw/skills/`. It is a skill
-bundle, not a TypeScript plugin: `/hive` is the umbrella command, while
-shortcuts such as `/plan`, `/work`, and `/ce-review` map to the existing
-`hive plan`, `hive develop`, and `hive review` CLI verbs. ClawHub publishing is
-still an external maintainer step; until it is live, use local checkout installs
-from `openclaw/README.md`.
+OpenClaw support now lives in-tree under `openclaw/skills/hive/`. It is one
+skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug
+is `hive-cli`, the public listing is
+`https://clawhub.ai/ivankuznetsov/hive-cli`, and the installed slash command is
+`/hive`. The checked-in skill is version `0.1.1`. ClawHub uses the skill
+frontmatter `description` as the public page summary and search text, so listing
+copy belongs in that field and in the opening `SKILL.md` body for the single
+umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
+version verification, `hive daemon install`, and optional non-interactive
+`hive init`; after setup, users pass normal CLI verbs as
+`/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+The skill also documents `/hive wiki compile-log --check` as the read-only
+aggregate-changelog verification path and tells agents to reserve mutating
+`hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
+The naked `hive` ClawHub slug is already owned by another publisher, so it is
+intentionally not used.
+
+## Community
+
+The public Hive Discord group is `https://discord.gg/Qg5E7rMt`. Keep the
+GitHub README link pointed at that invite unless a newer canonical community
+URL is announced.
 
 ## Release verification
 
@@ -270,9 +291,13 @@ Inspect `<project>/.hive-state/babysitter/events.jsonl`,
 results look right, stop the dry-run process and start live mode:
 
 ```bash
-hive babysit stop
-hive babysit start --detach
+hive babysit restart --detach
 ```
+
+`hive babysit reload` refreshes config/log settings only; the detached
+Ruby process keeps the source code it loaded at start. After pulling a
+new checkout or upgrading Hive, run `hive babysit status` and restart if
+it reports that the process predates the current source checkout.
 
 Kill switch: set `babysitter.enabled: false`; the dispatcher reloads
 project config each tick. v1 has no launchd/systemd install command for

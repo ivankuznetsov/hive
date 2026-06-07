@@ -20,7 +20,12 @@ tags: [dependencies, gems, runtime]
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
-`telegram-bot-ruby` pulls Faraday for HTTP transport. `Gemfile.lock` keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
+`telegram-bot-ruby` pulls Faraday and `faraday-multipart` for HTTP
+transport. Hive also uses those transitive gems directly in
+`Hive::Bot::Transcriber` to POST Telegram voice-note bytes to the
+configured OpenAI-compatible audio transcription endpoint. `Gemfile.lock`
+keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags
+`2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

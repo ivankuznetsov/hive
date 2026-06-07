@@ -10,12 +10,58 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
   end
 
   def test_start_and_get_round_trip
-    draft = @store.start(chat_id: 1, phase: :awaiting_text, text: nil, token: "tok")
+    draft = @store.start(chat_id: 1, phase: :awaiting_text, text: nil, token: "tok", origin: :voice)
 
     assert_equal draft, @store.get(chat_id: 1)
     assert_equal :awaiting_text, draft.phase
     assert_equal "tok", draft.token
+    assert_equal :voice, draft.origin
     assert_equal [], draft.attachments
+  end
+
+  def test_start_rejects_unknown_phase
+    assert_raises(ArgumentError, "an unknown phase must be rejected at start") do
+      @store.start(chat_id: 1, phase: :bogus_phase)
+    end
+  end
+
+  def test_start_rejects_unknown_origin
+    assert_raises(ArgumentError, "an unknown origin must be rejected at start") do
+      @store.start(chat_id: 1, phase: :awaiting_text, origin: :sms)
+    end
+  end
+
+  def test_start_rejects_transcript_confirm_phase_with_non_voice_origin
+    assert_raises(ArgumentError,
+                  ":awaiting_transcript_confirm must require origin :voice") do
+      @store.start(chat_id: 1, phase: :awaiting_transcript_confirm, origin: nil)
+    end
+  end
+
+  def test_set_transcript_and_confirm_transcript
+    @store.start(chat_id: 1, phase: :awaiting_text, token: "tok", origin: :voice)
+
+    @store.set_transcript(chat_id: 1, text: "capture this")
+    draft = @store.get(chat_id: 1)
+
+    assert_equal "capture this", draft.text
+    assert_equal :awaiting_transcript_confirm, draft.phase
+
+    @store.confirm_transcript(chat_id: 1)
+    assert_equal :awaiting_project, @store.get(chat_id: 1).phase
+    assert_equal :voice, @store.get(chat_id: 1).origin
+  end
+
+  def test_await_text_clears_text_and_moves_phase
+    @store.start(chat_id: 1, phase: :awaiting_transcript_confirm,
+                 text: "transcript", token: "tok", origin: :voice)
+
+    @store.await_text(chat_id: 1)
+    draft = @store.get(chat_id: 1)
+
+    assert_nil draft.text
+    assert_equal :awaiting_text, draft.phase
+    assert_equal :voice, draft.origin
   end
 
   def test_set_text_and_project_advance_phase
@@ -46,7 +92,7 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
   end
 
   def test_ttl_prune_removes_stale_draft
-    @store.start(chat_id: 1, phase: :awaiting_project, text: "fix", token: "tok")
+    @store.start(chat_id: 1, phase: :awaiting_transcript_confirm, text: "fix", token: "tok", origin: :voice)
 
     @now += 901
     @store.prune!

@@ -49,6 +49,14 @@ module Hive
         @current
       end
 
+      # Synchronous refresh used during TUI boot to seed the first frame
+      # before Bubbletea's input loop starts. The normal background
+      # poller still owns subsequent refreshes.
+      def refresh_now
+        refresh_once
+        current
+      end
+
       # Boots the polling thread. Idempotent: a second call while the
       # thread is alive is a no-op so accidental double-starts in test
       # setup don't leak threads.

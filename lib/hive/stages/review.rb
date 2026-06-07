@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "open3"
 require "time"
+require "yaml"
 require "hive/events"
 require "hive/config"
 require "hive/protected_files"
@@ -940,7 +941,7 @@ module Hive
       # gone — the partial results stay on disk for the next run to
       # consume.
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
-        specs = Array(cfg.dig("review", "reviewers"))
+        specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
         # promise "errors-NN.md reflects
@@ -950,7 +951,19 @@ module Hive
         # reviewers between runs.
         clear_reviewer_infra_errors(ctx)
 
-        return :ok if specs.empty?
+        if specs.empty?
+          # An empty NORMAL review.reviewers is an intentional opt-out, but a
+          # patrol task reaching here means patrol.review.reviewers resolved
+          # to [] — the patrol PR would clear 6-review with no reviewer run.
+          # That is operator-surprising, so make it observable rather than
+          # letting the review gate pass silently.
+          if patrol_task?(task)
+            warn "[hive.review] patrol task resolved to zero patrol.review.reviewers; " \
+                 "6-review will pass with no reviewers run — set patrol.review.reviewers " \
+                 "in .hive-state/config.yml to review patrol PRs"
+          end
+          return :ok
+        end
         if started_at && max_wall_clock_sec &&
            wall_clock_exceeded?(started_at, max_wall_clock_sec)
           return :wall_clock_exceeded
@@ -1031,6 +1044,47 @@ module Hive
                                        wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def reviewer_specs_for(cfg, task)
+        return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
+
+        Array(cfg.dig("review", "reviewers"))
+      end
+
+      def patrol_task?(task)
+        frontmatter = task_frontmatter(task.state_file)
+        # Normalize before comparing: the producer (Hive::Patrol::ReviewHandoff)
+        # writes a bare lowercase `source: patrol` via to_yaml, but matching
+        # exact-case-sensitively means any future producer drift (quoting,
+        # casing, trailing whitespace) would silently misroute a patrol PR
+        # to the broader normal reviewer set. strip + casecmp? tolerates that.
+        frontmatter["source"].to_s.strip.casecmp?("patrol") || false
+      rescue SystemCallError => e
+        # I/O failures reading task.state_file fall back to the normal
+        # reviewer set (the broader, safer direction), but must not be
+        # silent — a misrouted patrol PR is otherwise invisible. Psych
+        # parse errors are already absorbed by task_frontmatter; narrowing
+        # to SystemCallError lets genuine programmer errors (nil task,
+        # unknown stage) propagate instead of being swallowed.
+        warn "[hive.review] patrol_task? could not read #{task.state_file.inspect}: " \
+             "#{e.class}: #{e.message} — routing as a normal (non-patrol) task"
+        false
+      end
+
+      def task_frontmatter(path)
+        return {} unless File.exist?(path)
+
+        content = File.read(path)
+        return {} unless content.start_with?("---\n")
+
+        yaml = content.split(/^---\s*$/, 3)[1]
+        return {} if yaml.to_s.strip.empty?
+
+        data = YAML.safe_load(yaml, permitted_classes: [ Time ], aliases: false) || {}
+        data.is_a?(Hash) ? data : {}
+      rescue Psych::Exception
+        {}
       end
 
       def reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining:)

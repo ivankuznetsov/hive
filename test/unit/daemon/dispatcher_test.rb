@@ -234,6 +234,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :dispatched)
   end
 
+  def test_dispatches_later_pipeline_stages_first
+    # Rows supplied in pipeline order; the dispatcher must flip them so the
+    # task closest to done (8-finalize) claims a slot before earlier-stage
+    # work (6-review), draining the pipeline rather than starving it.
+    rows = [
+      row(slug: "rev", stage: "6-review", action: "ready_to_plan", command: "hive run rev"),
+      row(slug: "art", stage: "7-artifacts", action: "ready_to_plan", command: "hive run art"),
+      row(slug: "fin", stage: "8-finalize", action: "ready_to_plan", command: "hive run fin")
+    ]
+    dispatcher, sup, = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %w[8-finalize 7-artifacts 6-review], sup.spawned.map { |s| s[:stage] },
+                 "tasks closer to the end of the pipeline must dispatch first"
+  end
+
+  def test_dispatch_priority_order_is_later_stage_first_and_stable
+    rows = [
+      row(slug: "a", stage: "2-brainstorm"),
+      row(slug: "b", stage: "7-artifacts"),
+      row(slug: "c", stage: "6-review"),
+      row(slug: "d", stage: "7-artifacts"),
+      row(slug: "e", stage: "9-done")
+    ]
+    dispatcher, = make_dispatcher
+
+    ordered = dispatcher.send(:dispatch_priority_order, rows)
+
+    assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
+                 ordered.map(&:stage), "later stages first"
+    assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
+                 "stable within a stage — original status order preserved"
+  end
+
   def test_advance_action_skips_when_task_folder_vanished_after_snapshot
     missing = File.join(Dir.tmpdir, "hive-dispatcher-missing-#{Process.pid}-#{rand(1_000_000)}")
     FileUtils.rm_rf(missing)
@@ -475,13 +510,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
                     "a gated patrol must release the scheduler's pending marker or the project wedges forever"
   end
 
-  def test_patrol_dispatch_respects_capacity
-    dispatcher, sup, ctrl, logger, _mw, patrol = make_dispatcher(
+  def test_patrol_scan_not_blocked_by_full_task_cap
+    dispatcher, sup, ctrl, _logger, _mw, patrol = make_dispatcher(
       rows: [], with_patrol_scheduler: true
     )
+    # Fill the TASK cap with a task-kind run.
     ctrl.instance_variable_set(:@max_concurrent_runs, 1)
     ctrl.record_dispatch(pid: 999, project: "p1", slug: "running", stage: "6-review",
-                         command: "hive review running", started_at: T0, state_file_mtime: T0 - 60)
+                         command: "hive review running", started_at: T0,
+                         state_file_mtime: T0 - 60, kind: :task)
     patrol.next_dispatches = [ {
       project: "p1", slug: "patrol", stage: "patrol",
       command: "hive patrol p1 --json", state_file_mtime: nil,
@@ -490,12 +527,33 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
+    assert_equal 1, sup.spawned.size,
+                 "a patrol scan runs on its own budget and is not blocked by a full task cap"
+    assert_equal "hive patrol p1 --json", sup.spawned.first[:command]
+  end
+
+  def test_patrol_scan_blocked_when_its_own_budget_is_full
+    dispatcher, sup, ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    # Fill the patrol-scan budget (default 1) with a running scan.
+    ctrl.record_dispatch(pid: 999, project: "p1", slug: "patrol-running", stage: "patrol",
+                         command: "hive patrol p1 --json", started_at: T0,
+                         state_file_mtime: nil, kind: :patrol_scan)
+    patrol.next_dispatches = [ {
+      project: "p2", slug: "patrol", stage: "patrol",
+      command: "hive patrol p2 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
     assert_equal 0, sup.spawned.size
     blocked = logger.events.find { |(name, attrs)| name == :blocked && attrs[:action] == "patrol" }
     refute_nil blocked
-    assert_equal "global_cap", blocked[1][:reason]
-    assert_includes patrol.cancelled, "p1",
-                    "a capacity-gated patrol must release its pending marker so it retries when capacity frees"
+    assert_equal "patrol_scan_cap", blocked[1][:reason]
+    assert_includes patrol.cancelled, "p2",
+                    "a budget-gated patrol must release its pending marker so it retries when the scan budget frees"
   end
 
   def test_patrol_dispatch_skips_legacy_layout_project

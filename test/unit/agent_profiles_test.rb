@@ -73,8 +73,26 @@ class AgentProfilesTest < Minitest::Test
   def test_format_skill_invocation_preserves_claude_slash_invocations
     profile = Hive::AgentProfiles.lookup(:claude)
     assert_equal "/plan", profile.format_skill_invocation("/plan")
-    assert_equal "/compound-engineering:ce-plan", profile.format_skill_invocation("/compound-engineering:ce-plan")
     assert_equal "/plan", profile.format_skill_invocation("plan")
+  end
+
+  def test_format_skill_invocation_normalizes_legacy_compound_engineering_namespace
+    claude = Hive::AgentProfiles.lookup(:claude)
+    codex = Hive::AgentProfiles.lookup(:codex)
+    pi = Hive::AgentProfiles.lookup(:pi)
+
+    assert_equal "/ce-code-review",
+                 claude.format_skill_invocation("/compound-engineering:ce-code-review")
+    assert_equal "/ce-code-review",
+                 claude.format_skill_invocation("compound-engineering:ce-code-review")
+    assert_equal "/ce-code-review",
+                 codex.format_skill_invocation("/compound-engineering:ce-code-review")
+    assert_equal "/ce-code-review",
+                 codex.format_skill_invocation("compound-engineering:ce-code-review")
+    assert_equal "/skill:ce-code-review",
+                 pi.format_skill_invocation("/compound-engineering:ce-code-review")
+    assert_equal "/skill:ce-code-review",
+                 pi.format_skill_invocation("compound-engineering:ce-code-review")
   end
 
   def test_format_skill_invocation_normalizes_pi_skill_form

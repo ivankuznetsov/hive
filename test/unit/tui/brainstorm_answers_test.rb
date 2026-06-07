@@ -47,7 +47,7 @@ class HiveTuiBrainstormAnswersTest < Minitest::Test
   # ---- Heading-form tolerance: `### Q{n} answer.` ----
 
   def test_q_n_answer_heading_recognized_as_answer
-    # The /compound-engineering:ce-brainstorm skill emits
+    # The /ce-brainstorm skill emits
     # `### Q{n} answer.` instead of `### A{n}.` for Round 2+. The
     # parser must accept both forms or it would refuse on legitimate
     # agent output.

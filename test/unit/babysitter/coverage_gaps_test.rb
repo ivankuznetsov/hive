@@ -205,7 +205,7 @@ class BabysitterCoverageGapsTest < Minitest::Test
 
       File.write(cmd.pid_file, { "pid" => 123 }.to_yaml)
       cmd.define_singleton_method(:pid_ownership) { |_payload, _pid| :unverified }
-      _out, err = capture_io { cmd.call }
+      _out, err = capture_io { assert_raises(Hive::Error) { cmd.call } }
       assert_includes err, "cannot verify"
 
       File.write(cmd.pid_file, { "pid" => 123 }.to_yaml)
@@ -229,11 +229,41 @@ class BabysitterCoverageGapsTest < Minitest::Test
       cmd.define_singleton_method(:pid_ownership) { |_payload, _pid| :owned }
       cmd.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
       cmd.define_singleton_method(:sleep) { |_sec| nil }
-      times = [ Time.at(0), Time.at(601), Time.at(601) ]
-      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(601) }) do
-        cmd.call
+      after_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 1
+      after_kill_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 6
+      times = [ Time.at(0), Time.at(after_grace), Time.at(after_grace), Time.at(after_kill_grace) ]
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(after_kill_grace) }) do
+        assert_raises(Hive::Error) { cmd.call }
       end
       assert_includes signals, :KILL
+    end
+  end
+
+  def test_stop_daemon_removes_pid_when_process_exits_after_kill
+    with_tmp_global_config do |home|
+      cmd = Hive::Commands::Babysit.new("stop", hive_home: home)
+      File.write(cmd.pid_file, { "pid" => 123 }.to_yaml)
+      alive = true
+      signals = []
+      cmd.define_singleton_method(:pid_alive?) { |_pid| alive }
+      cmd.define_singleton_method(:pid_ownership) { |_payload, _pid| :owned }
+      cmd.define_singleton_method(:send_signal_safely) do |_pid, signal|
+        signals << signal
+        alive = false if signal == :KILL
+      end
+      cmd.define_singleton_method(:sleep) { |_sec| nil }
+      after_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 1
+      times = [ Time.at(0), Time.at(after_grace), Time.at(after_grace) ]
+
+      out, _err = capture_io do
+        with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(after_grace) }) do
+          cmd.call
+        end
+      end
+
+      assert_equal %i[TERM KILL], signals
+      refute File.exist?(cmd.pid_file)
+      assert_includes out, "stopped"
     end
   end
 

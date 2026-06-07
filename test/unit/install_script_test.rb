@@ -12,4 +12,10 @@ class InstallScriptTest < Minitest::Test
     assert_includes wrapper[:body], 'exec "${gem_home}/bin/hive" "\$@"'
     refute_includes wrapper[:body], 'exec "${gem_home}/shims/hv" "\$@"'
   end
+
+  def test_installer_does_not_expect_a_gem_installed_hv_binstub
+    script = File.read(INSTALL_SCRIPT)
+
+    refute_includes script, 'mv "${gem_home}/bin/hv" "${gem_home}/shims/hv"'
+  end
 end

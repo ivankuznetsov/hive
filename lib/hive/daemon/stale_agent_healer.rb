@@ -55,7 +55,9 @@ module Hive
     # recoverable by rerunning finalize. Clearing that specific marker
     # lets finalize rerun its existing clean-exit, auth, and push checks
     # up to ERROR_AUTO_RECOVERY_LIMIT times before leaving the marker red
-    # for manual recovery.
+    # for manual recovery. There is no healer-side backoff between those
+    # retries — the only thing spacing them is finalize's own re-dispatch
+    # runtime (a full finalize agent run), not any delay enforced here.
     #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
@@ -170,7 +172,9 @@ module Hive
             reason: "finalize_unpushed_commits",
             marker_reason: reason,
             attempts: attempts,
-            max_attempts: @error_auto_recovery_limit
+            max_attempts: @error_auto_recovery_limit,
+            remediation: "rerun finalize (`hive run #{row.project} #{row.slug}`) " \
+                         "or push the branch manually"
           )
           return
         end
@@ -268,7 +272,9 @@ module Hive
             max_attempts: @review_error_auto_recovery_limit,
             phase: marker_attrs["phase"],
             pass: marker_attrs["pass"],
-            errors_path: reviewer_errors_path(row)
+            errors_path: reviewer_errors_path(row),
+            remediation: "rerun review for this task " \
+                         "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
           )
           return
         end
@@ -302,6 +308,13 @@ module Hive
                       error: "#{e.class}: #{e.message}")
       end
 
+      # Emit `marker_heal_exhausted` at most once per (process, recovery_key).
+      # The event name reads terminal, but the budget it reports is
+      # in-memory and per-process: a daemon restart (or the SIGHUP healer
+      # rebuild) drops the counts and re-arms `max_attempts` more clears.
+      # `budget_scope: "per_process"` flags that on the event; each call
+      # site also passes a `remediation:` hint so an operator reading the
+      # log knows how to recover now instead of over-reading "red forever".
       def log_recovery_exhausted_once(seen, recovery_key, row, **attrs)
         return if seen[recovery_key]
 

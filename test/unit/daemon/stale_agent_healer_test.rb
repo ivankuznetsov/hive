@@ -901,6 +901,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal 1, exhausted.first[1][:max_attempts]
       assert_equal "per_process", exhausted.first[1][:budget_scope]
       assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
+      assert_match(/rerun finalize/, exhausted.first[1][:remediation],
+                   "exhausted event must carry an actionable remediation hint")
+      assert_match(/push the branch manually/, exhausted.first[1][:remediation])
     end
   end
 
@@ -1214,6 +1217,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal "1", exhausted.first[1][:pass]
       assert_equal "per_process", exhausted.first[1][:budget_scope]
       assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
+      assert_match(/rerun review/, exhausted.first[1][:remediation],
+                   "exhausted event must carry an actionable remediation hint")
     end
   end
 

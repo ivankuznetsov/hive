@@ -61,12 +61,34 @@ def api_read_only?(rest)
   !payload
 end
 
+def auth_status_read_only?(rest)
+  return false unless rest[0] == "auth" && rest[1] == "status"
+
+  index = 2
+  while index < rest.length
+    case rest[index]
+    when "-a", "--active"
+      index += 1
+    when "-h", "--hostname", "--jq", "--json", "--template"
+      return false if rest[index + 1].nil?
+
+      index += 2
+    when /\A--hostname=.+\z/, /\A--jq=.+\z/, /\A--json=.+\z/, /\A--template=.+\z/
+      index += 1
+    else
+      return false
+    end
+  end
+
+  true
+end
+
 def read_only?(rest)
   case rest[0]
   when "api"
     api_read_only?(rest)
   when "auth"
-    rest[1] == "status"
+    auth_status_read_only?(rest)
   when "pr"
     %w[checks diff list status view].include?(rest[1])
   when "run"

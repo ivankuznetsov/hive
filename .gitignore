@@ -45,6 +45,9 @@
 /.daemon.pid
 /daemon.pid
 /logs/
+# Babysitter dry-run skip log — local artifact written when gh commands are
+# skipped under HIVE_BABYSITTER_DRY_RUN; never source.
+/.babysitter-dry-run-skipped.log
 .qmd/
 /.llm-wiki/qmd-cache/
 /.llm-wiki/post-commit-refresh.log

@@ -180,6 +180,14 @@ end
 #                                      `-O` match deliberately covers bundled
 #                                      short flags (`-nO`, `-inO`, …) which all
 #                                      still reach the pager.
+#   --textconv (grep)                  `git grep --textconv` runs configured
+#                                      *.textconv helpers over blob contents, so
+#                                      it spawns arbitrary commands just like the
+#                                      diff/log/show family. grep does not honour
+#                                      textconv by default, so the explicit
+#                                      option is screened in the grep region
+#                                      alone (no --no-textconv neutralization is
+#                                      needed the way it is for diff/show).
 def dangerous_global_option?(arg)
   case arg
   when "-c", "--config-env", "--paginate", "-p"
@@ -213,7 +221,8 @@ def exec_or_write_screened?(argv, rest)
   return true if argv.any? { |arg| writes_output_file?(arg) }
   return true if diff_rendering_command?(rest.first.to_s) &&
     rest.drop(1).any? { |arg| enables_external_diff_or_textconv?(arg) }
-  return true if rest.first == "grep" && rest.drop(1).any? { |arg| grep_pager_option?(arg) }
+  return true if rest.first == "grep" &&
+    rest.drop(1).any? { |arg| grep_pager_option?(arg) || arg == "--textconv" }
 
   false
 end

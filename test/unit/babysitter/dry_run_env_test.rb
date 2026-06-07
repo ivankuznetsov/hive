@@ -77,6 +77,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "grep", "--open-files-in-pager=touch pwned", "needle"
       # Bare `--open-files-in-pager` (no glued value) is equally a pager exec.
       assert_stubbed env, "git", "grep", "--open-files-in-pager", "needle"
+      # `git grep --textconv` runs configured *.textconv helpers — same exec
+      # class as diff/log/show, screened in the grep region.
+      assert_stubbed env, "git", "grep", "--textconv", "needle"
       # Trailing bare two-token global option must not underflow / crash.
       assert_stubbed env, "git", "-c"
       assert_stubbed env, "git", "-C"
@@ -131,6 +134,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=diff.external=PWN diff skipped"
       assert_includes skipped, "git grep -Otouch pwned needle skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch pwned needle skipped"
+      assert_includes skipped, "git grep --textconv needle skipped"
       assert_includes skipped, "git --output=patch.diff diff skipped"
       assert_includes skipped, "git log --output=log.txt skipped"
       assert_includes skipped, "git show --output=show.txt skipped"

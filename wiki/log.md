@@ -3649,3 +3649,10 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 **Refreshed pages:**
 - [[testing]]
 - [[gaps]]
+
+## [2026-06-07T00:00:00Z] review fix-pass — finalize unpushed healer hardening
+
+**Action:** Applied 6-review fix-pass findings to `Hive::Daemon::StaleAgentHealer` and its tests. Collapsed the duplicated `auto_recoverable_error_reason`/`auto_recoverable_review_error_reason` helpers into one `marker_reason(row)`, extracted the review-path heal-label ternary into `review_heal_label`, and documented the intentional silent no-op when `clear_current` returns false (no event, no retry budget consumed). Added a dispatcher-level integration test proving finalize re-dispatches (not `:record_baseline`) after the unpushed-commits clear via the seeded pre-clear mtime, plus unit tests for the clear-false-no-budget path and the per-process budget reset on a fresh healer instance. Strengthened existing assertions (explicit non-default mtime, `Markers.current.none?`, `refute marker_heal_failed` on negative skips). Noted in [[modules/daemon]] that the recovery budget is in-memory and resets on restart/SIGHUP reload.
+
+**Refreshed pages:**
+- [[modules/daemon]]

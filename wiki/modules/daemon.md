@@ -126,7 +126,11 @@ stage does not move and no workflow verb fires from either path.
    left red because they need operator inspection. Auto-clears are bounded per
    daemon process by failure signature (default 3 clears); repeated identical
    failures stay red after the budget is exhausted so a persistent
-   infrastructure break cannot churn forever. The healer logs `marker_healed`,
+   infrastructure break cannot churn forever. The budget is in-memory only: a
+   daemon restart or SIGHUP config reload rebuilds the healer (`dispatcher.rb`
+   reconstructs `StaleAgentHealer` on reload without a persisted limit),
+   dropping the accumulated counts so an exhausted row becomes eligible again.
+   The healer logs `marker_healed`,
    `marker_heal_failed`, and a one-shot `marker_heal_exhausted` event when a
    bounded recovery path gives up.
 

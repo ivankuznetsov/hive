@@ -49,10 +49,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "repos/owner/repo", "--cache", "1h"
+      assert_stubbed env, "gh", "api", "repos/owner/repo", "--cache=1h"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
       assert_stubbed env, "gh", "pr", "diff", "42", "--web"
       assert_stubbed env, "gh", "pr", "diff", "42", "-w"
       assert_stubbed env, "gh", "pr", "list", "-w"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cw"
+      assert_stubbed env, "gh", "pr", "list", "-dw"
       assert_stubbed env, "gh", "repo", "view", "--web"
       assert_stubbed env, "gh", "run", "view", "123", "-w"
       assert_stubbed env, "gh", "workflow", "run", "release.yml"
@@ -125,10 +128,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
       assert_includes skipped, "gh api repos/owner/repo --cache 1h skipped"
+      assert_includes skipped, "gh api repos/owner/repo --cache=1h skipped"
       assert_includes skipped, "gh pr view 42 --web skipped"
       assert_includes skipped, "gh pr diff 42 --web skipped"
       assert_includes skipped, "gh pr diff 42 -w skipped"
       assert_includes skipped, "gh pr list -w skipped"
+      assert_includes skipped, "gh pr view 42 -cw skipped"
+      assert_includes skipped, "gh pr list -dw skipped"
       assert_includes skipped, "gh repo view --web skipped"
       assert_includes skipped, "gh run view 123 -w skipped"
       assert_includes skipped, "gh workflow run release.yml skipped"
@@ -170,6 +176,21 @@ class BabysitterDryRunEnvTest < Minitest::Test
     _out, err, status = Open3.capture3(env, stub_path(binary), *args)
     assert status.success?, err
     assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+
+    # A skipped invocation must not also exec the real binary (a "warn then
+    # passthrough" regression would otherwise still satisfy the skip assertion).
+    real_log = real_log_path(env, binary)
+    return unless real_log && File.exist?(real_log)
+
+    refute_includes File.read(real_log), "real-#{binary} #{args.join(' ')}",
+                    "skipped #{binary} invocation must not reach the real binary"
+  end
+
+  def real_log_path(env, binary)
+    real_binary = env["HIVE_BABYSITTER_REAL_#{binary.upcase}"]
+    return nil unless real_binary
+
+    File.join(File.dirname(real_binary), "real.log")
   end
 
   def assert_passes(env, binary, *args)

@@ -78,7 +78,9 @@ end
 def web_short_option?(rest)
   return false unless WEB_SHORT_OPTION_COMMANDS.fetch(rest[0], []).include?(rest[1])
 
-  rest.any? { |arg| arg.start_with?("-w") }
+  # Match `-w` whether standalone or bundled in a single-dash short cluster
+  # (e.g. `-cw`, `-dw`); `--web` is handled by LOCAL_SIDE_EFFECT_OPTIONS.
+  rest.any? { |arg| arg.match?(/\A-[^-]*w/) }
 end
 
 def read_only?(rest)

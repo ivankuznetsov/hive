@@ -68,7 +68,7 @@ end
 def browser_launch_command?(rest)
   case rest[0]
   when "pr"
-    %w[checks view].include?(rest[1])
+    %w[checks diff list view].include?(rest[1])
   when "repo", "run", "workflow"
     rest[1] == "view"
   else

@@ -150,6 +150,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_passthrough_scrubs_exec_influencing_environment
+    with_tmp_dir do |dir|
+      scrubbed_keys = %w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY]
+      real_gh = env_recording_binary(dir, "real-gh", scrubbed_keys)
+      env = { "HIVE_BABYSITTER_REAL_GH" => real_gh }
+      scrubbed_keys.each { |key| env[key] = "touch pwned" }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "view", "42")
+
+      assert status.success?, err
+      recorded_env = File.read(File.join(dir, "real-gh-env.log"))
+      scrubbed_keys.each do |key|
+        assert_includes recorded_env, "#{key}=nil"
+      end
+    end
+  end
+
   private
 
   def assert_stubbed(env, binary, *args)
@@ -169,6 +186,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
       #!/usr/bin/env ruby
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
+      end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def env_recording_binary(dir, name, keys)
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      keys = #{keys.inspect}
+      File.open(#{File.join(dir, "#{name}-env.log").dump}, "a") do |file|
+        keys.each { |key| file.puts("\#{key}=\#{ENV[key].inspect}") }
       end
     RUBY
     FileUtils.chmod("+x", path)

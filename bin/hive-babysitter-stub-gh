@@ -61,7 +61,28 @@ def api_read_only?(rest)
   !payload
 end
 
+def browser_launch_flag?(arg)
+  arg == "--web" || arg.start_with?("--web=") || arg == "-w" || arg.start_with?("-w=")
+end
+
+def browser_launch_command?(rest)
+  case rest[0]
+  when "pr"
+    %w[checks view].include?(rest[1])
+  when "repo", "run", "workflow"
+    rest[1] == "view"
+  else
+    false
+  end
+end
+
+def browser_launch?(rest)
+  browser_launch_command?(rest) && rest.drop(2).any? { |arg| browser_launch_flag?(arg) }
+end
+
 def read_only?(rest)
+  return false if browser_launch?(rest)
+
   case rest[0]
   when "api"
     api_read_only?(rest)

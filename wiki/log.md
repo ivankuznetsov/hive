@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T04:36:18Z] babysitter - block gh browser launches in dry-run stub
+
+**Action:** Fixed the babysitter dry-run `gh` stub so allowlisted read commands that can open a browser (`pr view`, `pr checks`, `repo view`, `run view`, and `workflow view`) skip when passed `--web` or `-w`, while read-only `gh run list -w <workflow>` still passes through. Added focused regression coverage in `test/unit/babysitter/dry_run_env_test.rb`; verified with `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`, `ruby -c bin/hive-babysitter-stub-gh`, and `git diff --check`. Refreshed [[commands/babysit]] dry-run documentation. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[log]]
+
 ## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
 
 **Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.

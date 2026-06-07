@@ -3583,6 +3583,13 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[stages/review]]
 - [[gaps]]
 
+## [2026-06-07T14:17:10Z] e2e — keep JSON validator fixtures on current schema versions
+
+**Action:** While rebasing PR #336, `bundle exec rake e2e:lib_test` exposed a stale `E2EJsonValidatorTest` fixture that still emitted `hive-status` schema version `1` even though the published command schema is now v3. Updated the fixture to derive the version from `Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")`, matching the rest of the schema tests, and documented the convention in [[testing]].
+
+**Refreshed pages:**
+- [[testing]]
+
 ## [2026-06-07T15:05:00Z] wiki — audit archive filter marker-agnostic coverage
 
 **Action:** Refreshed command/API wiki coverage after the archive-filter cleanup removed the unused `marker_name` parameter from `Hive::ArchiveFilter.hide?` and both Status/TUI callers. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "ArchiveFilter hide archive status TUI folder_mtime"` found the existing status/archive coverage, and the configured master wiki path had no matching context. Inspected the committed diff plus current `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, and relevant status/TUI/testing wiki pages. Corrected stale text that described archive hiding as clean-marker-only, documented the marker-agnostic and no-timestamp fail-open contract, and carried the same uncertainty forward: no in-tree live registered-project artifact proves the full archive workflow after aged done folders exist. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

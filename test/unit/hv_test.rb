@@ -18,7 +18,14 @@ class HvTest < Minitest::Test
     with_tmp_dir do |dir|
       override = File.join(dir, "custom", "hive")
       FileUtils.mkdir_p(File.dirname(override))
-      File.write(override, "#!/bin/sh\necho override:$1\n")
+      File.write(override, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo 1.2.3
+          exit 0
+        fi
+        echo override:$1
+      SH
       FileUtils.chmod(0o755, override)
 
       out, err, status = Open3.capture3(
@@ -33,6 +40,49 @@ class HvTest < Minitest::Test
 
       assert status.success?, err
       assert_equal "override:probe\n", out
+    end
+  end
+
+  def test_apache_style_xdg_candidate_is_skipped_for_next_valid_hive_cli
+    with_tmp_dir do |dir|
+      xdg_home = File.join(dir, "xdg-bin")
+      homebrew_prefix = File.join(dir, "homebrew")
+      apache = File.join(xdg_home, "hive")
+      real_hive = File.join(homebrew_prefix, "bin", "hive")
+
+      FileUtils.mkdir_p(xdg_home)
+      File.write(apache, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo "Hive 4.0.0"
+          exit 0
+        fi
+        echo apache:$1
+      SH
+      FileUtils.chmod(0o755, apache)
+
+      FileUtils.mkdir_p(File.dirname(real_hive))
+      File.write(real_hive, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo 1.2.3
+          exit 0
+        fi
+        echo real:$1
+      SH
+      FileUtils.chmod(0o755, real_hive)
+
+      out, err, status = Open3.capture3(
+        {
+          "XDG_BIN_HOME" => xdg_home,
+          "HOMEBREW_PREFIX" => homebrew_prefix
+        },
+        HV_BIN,
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "real:probe\n", out
     end
   end
 end

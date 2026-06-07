@@ -24,6 +24,10 @@ for candidate in "${candidates[@]}"; do
   # Guard against `hv -> hv` chains: never exec into our own script.
   [[ "$resolved" != "$self" ]] || continue
 
+  version_output="$("$candidate" --version 2>/dev/null)" || continue
+  version_line="${version_output%%$'\n'*}"
+  [[ "$version_line" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+
   exec "$candidate" "$@"
 done
 

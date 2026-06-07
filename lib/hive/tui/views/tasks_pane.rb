@@ -9,7 +9,7 @@ module Hive
     module Views
       # Pure view function: `Views::TasksPane.render(model, width:) →
       # String`. Right pane of the v2 two-pane layout — renders the
-      # scoped task list as a 6-column compact table inside a bordered
+      # scoped task list as a 5-column compact table inside a bordered
       # box. Replaces v1's project-grouped section format; project
       # context now lives in the left pane (Views::ProjectsPane).
       #

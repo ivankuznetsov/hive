@@ -1,13 +1,13 @@
 ---
 title: Hive::Agent
 type: module
-source: lib/hive/agent.rb
+source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb
 created: 2026-04-25
-updated: 2026-05-26
+updated: 2026-06-07
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces budget + timeout, kills on signal or timeout, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces budget + timeout, kills on signal or timeout, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
 ## Class shape
 
@@ -30,6 +30,12 @@ Hive::Agent.new(
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
+
+## Provider-limit classification
+
+`Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`.
+
+Headless `Hive::Agent#handle_exit` only runs this classifier when the child failed or timed out; a clean `exit_code == 0` result is not reclassified. For `:state_file_marker` spawns it stamps `ERROR reason=limits_reached`; for `:exit_code_only` and `:output_file_exists` spawns it returns the limit message without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
 
 ## `run!` (the main entry)
 
@@ -101,12 +107,13 @@ validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
-Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review.
+Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
 
 ## `handle_exit`
 
 | Condition | Marker set |
 |-----------|------------|
+| provider-limit text in a failed/timeout result's `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
 | `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code marker_id=<hex16> -->` (corrupted state, not silent OK) |

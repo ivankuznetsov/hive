@@ -572,6 +572,55 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_state_file_marker_classifies_provider_limits_before_exit_code
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 1,
+        final_message: "Error: RESOURCE_EXHAUSTED: quota exceeded"
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_match(/\Alimits reached for claude:/, result[:error_message])
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      assert_match(/quota exceeded/, marker.attrs["message"])
+    end
+  end
+
+  def test_output_file_mode_classifies_limits_before_missing_expected_output
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      profile = Hive::AgentProfiles.lookup(:codex)
+      agent = Hive::Agent.new(
+        task: task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :output_file_exists,
+        expected_output: File.join(task.folder, "missing.md")
+      )
+      result = {
+        timed_out: false,
+        exit_code: 1,
+        final_message: "429 Too Many Requests: rate limit reached"
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result[:status]
+      assert_match(/\Alimits reached for codex:/, result[:error_message])
+      refute_match(/expected output file missing/, result[:error_message])
+    end
+  end
+
   def test_extract_final_message_handles_agent_and_assistant_shapes
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)

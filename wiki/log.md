@@ -3501,6 +3501,16 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 
 **Refreshed pages:**
 - [[commands/tui]]
+## [2026-06-07T10:45:00Z] agent — classify provider limits before generic agent failures
+
+**Action:** Added `Hive::AgentLimit` and wired it into headless `Hive::Agent#handle_exit` plus Claude tmux readiness, terminal-marker, and expected-output waits. Provider quota/rate-limit text and Claude's usage-credit menu now surface as `limits reached for <agent>:` / `ERROR reason=limits_reached` before generic `exit_code`, `timeout`, `tmux_session_terminated`, or "interactive prompt did not become ready" failures. Checked the current red Hive rows: `patrol-command-bin-hive-e2e-effc81e9` and `patrol-command-bin-hive-e2e-bb21a633` had the exact Claude "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu behind `triage_failed` / `timeout`; other apparent matches were historical `[stream]` log lines containing source line numbers or review text, not provider-limit evidence. Added focused regressions in `agent_limit_test.rb`, `agent_test.rb`, and `claude_launcher_test.rb`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[stages/index]]
+- [[state-model]]
+- [[testing]]
+
 ## [2026-06-06T10:14:41Z] patrol — scoped review reviewers for patrol PR handoff
 
 **Action:** Added a separate `patrol.review.reviewers` config list for synthetic `Patrol: ...` review tasks. Fresh `hive init` now asks for patrol PR reviewers separately from normal `review.reviewers`, defaults patrol PR review to `codex-ce-code-review` only, and lets operators opt into `claude-ce-code-review`; `pr-review-toolkit` is intentionally excluded from the patrol prompt. The 6-review runner selects `patrol.review.reviewers` when `task.md` frontmatter has `source: patrol`, while normal tasks continue using `review.reviewers`. Updated [[commands/init]], [[commands/patrol]], [[modules/config]], and [[stages/review]].
@@ -3528,3 +3538,13 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 **Refreshed pages:**
 - [[operating]]
 - [[gaps]]
+
+## [2026-06-07T10:42:24Z] wiki — post-commit agent-limit coverage audit
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `d22caf37` added `Hive::AgentLimit` and already touched [[modules/agent]], [[stages/index]], [[state-model]], [[testing]], and [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "agent limit provider quota rate limit claude usage credits"` returned no indexed hits, so verification used direct source/wiki search plus the configured master wiki path (no relevant hit). Inspected the committed diff and current `lib/hive/agent_limit.rb`, `lib/hive/agent.rb`, `lib/hive/claude_launcher.rb`, focused unit tests, and the touched wiki pages. Updated [[modules/agent]] to map the new classifier source file, refreshed [[architecture]] to remove stale inode-based concurrent-edit wording and document limit precedence in headless/tmux paths, updated [[gaps]] with the new source-coverage row and missing post-fix live-smoke evidence, and bumped [[index]] because page coverage metadata changed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[architecture]]
+- [[gaps]]
+- [[index]]

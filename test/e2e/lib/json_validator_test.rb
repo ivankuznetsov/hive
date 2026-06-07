@@ -5,7 +5,7 @@ class E2EJsonValidatorTest < Minitest::Test
   def test_validates_status_payload
     payload = {
       "schema" => "hive-status",
-      "schema_version" => 1,
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => Time.now.utc.iso8601,
       "projects" => []

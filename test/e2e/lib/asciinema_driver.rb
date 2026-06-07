@@ -40,6 +40,7 @@ module Hive
         @cast_path = cast_path
         @rows = rows
         @cols = cols
+        @version = nil
         @pid = nil
         preflight!
       end
@@ -51,7 +52,7 @@ module Hive
         command = "tmux -L #{@socket_name.shellescape} attach -t #{@session_name.shellescape}"
         @pid = Process.spawn(
           self.class.binary, "rec", "--overwrite",
-          "--rows", @rows.to_s, "--cols", @cols.to_s,
+          *recorder_size_args,
           "--output-format=asciicast-v2",
           "--command", command,
           @cast_path,
@@ -124,6 +125,14 @@ module Hive
       def preflight!
         found = self.class.version
         raise Unavailable, "asciinema >= 2.4 is required for TUI e2e casts" unless found && found >= MIN_VERSION
+
+        @version = found
+      end
+
+      def recorder_size_args
+        return [ "--window-size", "#{@cols}x#{@rows}" ] if @version.segments.first >= 3
+
+        [ "--rows", @rows.to_s, "--cols", @cols.to_s ]
       end
     end
   end

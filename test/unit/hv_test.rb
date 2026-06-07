@@ -18,7 +18,11 @@ class HvTest < Minitest::Test
     with_tmp_dir do |dir|
       override = File.join(dir, "custom", "hive")
       FileUtils.mkdir_p(File.dirname(override))
-      File.write(override, "#!/bin/sh\necho override:$1\n")
+      File.write(override, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "1.2.3"; exit 0; fi
+        echo override:$1
+      SH
       FileUtils.chmod(0o755, override)
 
       out, err, status = Open3.capture3(
@@ -33,6 +37,35 @@ class HvTest < Minitest::Test
 
       assert status.success?, err
       assert_equal "override:probe\n", out
+    end
+  end
+
+  def test_skips_executable_hive_candidate_without_bare_semver_version
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin)
+      File.write(File.join(bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "Hive 4.0.0"; exit 0; fi
+        echo wrong:$1
+      SH
+      FileUtils.chmod(0o755, File.join(bin, "hive"))
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_BIN_OVERRIDE" => "",
+          "XDG_BIN_HOME" => bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "HOME" => dir
+        },
+        HV_BIN,
+        "probe"
+      )
+
+      assert_equal "", out
+      refute status.success?
+      assert_includes err, "HIVE_BIN_OVERRIDE"
+      refute_includes out, "wrong:probe"
     end
   end
 end

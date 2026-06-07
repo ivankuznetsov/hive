@@ -196,6 +196,27 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_prepare_claude_session_reports_limits_after_trust_prompt_deadline
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-limited-after-trust" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) do |bytes:|
+      "Do you trust the files in this folder?\n" \
+        "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+    end
+    runner.define_singleton_method(:send_keys) { |_keys| nil }
+
+    monotonic_now = 1_000.0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      err = assert_raises(Hive::AgentError) do
+        Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
+      end
+
+      assert_match(/\Alimits reached for claude:/, err.message)
+      refute_match(/interactive prompt did not become ready/, err.message)
+    end
+  end
+
   def test_send_prompt_and_wait_clamps_wait_timeout_to_remaining_deadline
     with_tmp_task do |task|
       runner = Object.new

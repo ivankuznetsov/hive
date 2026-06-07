@@ -11,6 +11,16 @@ Append-only log of all wiki operations.
 - [[gaps]]
 - [[log]]
 
+## [2026-06-07T10:11:26+01:00] wiki — refresh babysitter gh web-short dry-run coverage
+
+**Action:** Refreshed babysitter dry-run command/module/test coverage after commit `88c17f5` fixed `bin/hive-babysitter-stub-gh` so `gh pr diff --web` and `gh pr list -w` are skipped instead of passing through to real `gh` and opening a browser. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter gh pr diff list web dry-run stub"` surfaced prior babysitter dry-run history. Verified the committed diff plus current `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Updated the dry-run `gh` local-side-effect descriptions and carried forward that the default-deny stubs are still unit-pinned but not live-smoked through a full `hive babysit --once PROJECT --dry-run` agent run. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+
 ## [2026-06-07T08:46:17Z] babysitter - block gh web/cache dry-run side effects
 
 **Action:** Tightened `bin/hive-babysitter-stub-gh` so allowlisted read commands skip before passthrough when the invocation includes local side-effect options: `--web`, the `-w` web shorthand on web-capable read commands, and `gh api --cache`. Added focused `test/unit/babysitter/dry_run_env_test.rb` coverage for `gh pr view --web`, `gh repo view --web`, `gh run view -w`, and `gh api --cache`, while keeping plain read-only `gh pr view` / `gh api --method GET ... -f` passthrough coverage. Refreshed [[commands/babysit]], [[testing]], and [[gaps]].

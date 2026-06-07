@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-06-06
+updated: 2026-06-07
 tags: [gap, todo]
 ---
 
@@ -60,7 +60,7 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 1. **Release tag trust remains the main release-channel hardening gap.** Homebrew and AUR publishing are implemented and public install docs now route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The remaining trust gap is that release automation signs and publishes whatever a `vX.Y.Z` tag points at; a GitHub `v*` tag-protection ruleset and/or signed git-tag verification remains the compensating control to record before considering the release chain fully hardened.
 2. **macOS x86_64 install.sh support remains unsupported.** Current `install.sh` still accepts only `darwin-arm64` on macOS and glibc Linux `x86_64`/`aarch64`; a future follow-up can add best-effort Rosetta behavior once the release smoke matrix covers it.
 3. **Claude/Codex/Pi marketplace publishing is still a companion-package follow-up.** Claude/Codex/Pi marketplace install commands are documented in `install.md` and [[operating]], but agents must not run those commands until `ivankuznetsov/hive-skills` is actually published. This is a separate external publish step from the in-tree OpenClaw bundle in entry 4 below.
-4. **OpenClaw publishes as one ClawHub skill.** `openclaw/skills/hive/` is the only public OpenClaw skill source. It publishes to ClawHub as `hive-cli`, installs a slash command named `/hive`, and handles all workflows as `/hive ...` arguments. `/hive setup` guides first-use Hive CLI install/verification, daemon install, and optional project init. The public `hive` slug is owned by another publisher, so Hive intentionally uses `hive-cli`; shortcut listings such as `hive-plan`, `hive-work`, or `hive-babysit` are not part of the public surface.
+4. **OpenClaw ClawHub listing is published; scan completion evidence is partial.** `openclaw/skills/hive/` is the only public OpenClaw skill source. It publishes to ClawHub as `hive-cli` at `https://clawhub.ai/ivankuznetsov/hive-cli`, installs a slash command named `/hive`, and handles all workflows as `/hive ...` arguments. `/hive setup` guides first-use Hive CLI install/verification, daemon install, and optional project init. The public `hive` slug is owned by another publisher, so Hive intentionally uses `hive-cli`; shortcut listings such as `hive-plan`, `hive-work`, or `hive-babysit` are not part of the public surface. The 2026-06-07 wiki log records `clawhub inspect hive-cli --json` reporting `latest: 0.1.1` and clean moderation fields, but also records `clawhub scan --slug hive-cli --version 0.1.1 --json` hanging without returning; no checked-in artifact independently proves a completed scan command.
 
 ## Patterns detected in code but not yet documented
 

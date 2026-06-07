@@ -1,15 +1,77 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hive-e2e
+source: bin/hive, bin/hv, bin/hive-e2e, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-05-14
+updated: 2026-06-07
 tags: [commands, api]
 ---
 
-**TLDR**: External interaction surface is derived from routes, controllers, commands, and plugin surfaces.
+**TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
+`hv` fallback launcher), the opt-in e2e harness, and the single ClawHub
+`hive-cli` OpenClaw skill whose installed slash command is `/hive`. The Ruby
+command/API contract lives in [[cli]] and the per-command pages. OpenClaw does
+not add a second runtime and does not publish one ClawHub listing per Hive verb.
 
 ## Source Files
 
 - `bin/hive`
+- `bin/hv`
 - `bin/hive-e2e`
+- `openclaw/skills/hive/SKILL.md`
+- `openclaw/README.md`
+
+## Surfaces
+
+### Thor CLI
+
+`bin/hive` loads `Hive::CLI` and exposes the public command set documented in
+[[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
+`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
+`archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
+findings, metrics, update/uninstall, registry maintenance, and `--json`
+envelopes where the command page says they exist.
+
+`bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
+owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
+fall through to common Apache Hive paths. See [[operating]] for install-channel
+behavior.
+
+### OpenClaw / ClawHub
+
+`openclaw/skills/hive/SKILL.md` is the only checked-in OpenClaw skill source
+published through ClawHub. The ClawHub slug is `hive-cli`, the public listing is
+`https://clawhub.ai/ivankuznetsov/hive-cli`, and the installed slash command is
+still `/hive` because OpenClaw reads `name: hive` from the skill frontmatter.
+
+The checked-in skill version is `0.1.1`. Its frontmatter `description` is the
+public listing/search summary, while the opening markdown body documents the
+install and common workflow paths. `/hive setup`, `/hive install`, and
+`/hive bootstrap` enter the guided setup flow: verify or install the Hive CLI,
+run strict `hive`/`hv` version detection, install/enable the per-user daemon,
+and optionally run non-interactive `hive init` for the current repository.
+
+For normal use, the slash-command text after `/hive` is treated as arguments
+for the detected Hive CLI binary. Examples in the skill include
+`/hive status --json`, `/hive new . "build this feature"`, `/hive plan
+<task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>`.
+The skill tells agents to pass arguments safely rather than interpolate raw user
+text into a shell string, to prefer `--json` when structured output is useful,
+and to confirm before destructive or foreground/blocking admin commands.
+
+OpenClaw does not introduce Ruby routes, HTTP handlers, controllers, resolvers,
+or new executable entrypoints. It is an agent-facing wrapper over the existing
+CLI.
+
+### E2E Harness
+
+`bin/hive-e2e` is the opt-in outer test harness for scenario-driven,
+subprocess-level verification. It is documented in [[e2e]] rather than treated
+as an end-user workflow command.
+
+## Backlinks
+
+- [[index]]
+- [[cli]]
+- [[operating]]
+- [[e2e]]

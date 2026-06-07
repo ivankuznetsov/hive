@@ -6,6 +6,10 @@ class OpenClawSkillsTest < Minitest::Test
   ROOT = Pathname.new(__dir__).join("../../openclaw/skills").expand_path
   HOMEPAGE = "https://github.com/ivankuznetsov/hive"
   CLAWHUB_SLUG = "hive-cli"
+  CLAWHUB_DESCRIPTION = "Run Hive's folder-based coding-agent pipeline from OpenClaw: " \
+                        "guided CLI setup, project init, task creation, " \
+                        "plan/develop/review workflows, status, daemon, " \
+                        "and guarded admin commands."
 
   def test_only_umbrella_skill_is_published_through_clawhub
     actual = ROOT.glob("*/SKILL.md").map { |path| path.dirname.basename.to_s }.sort
@@ -18,8 +22,8 @@ class OpenClawSkillsTest < Minitest::Test
     openclaw_metadata = metadata.fetch("metadata").fetch("openclaw")
 
     assert_equal "hive", metadata.fetch("name")
-    assert_equal "Install, set up, or drive any Hive CLI workflow from OpenClaw.", metadata.fetch("description")
-    assert_equal "0.1.0", metadata.fetch("version")
+    assert_equal CLAWHUB_DESCRIPTION, metadata.fetch("description")
+    assert_equal "0.1.1", metadata.fetch("version")
     assert_equal true, metadata.fetch("user-invocable")
     assert_equal HOMEPAGE, openclaw_metadata.fetch("homepage")
     assert_equal true, openclaw_metadata.fetch("always"), "umbrella skill must remain visible for setup"
@@ -38,6 +42,11 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "/hive setup"
     assert_includes body, "/hive install"
     assert_includes body, "/hive bootstrap"
+    assert_includes body, "openclaw skills install #{CLAWHUB_SLUG}"
+    assert_includes body, "/hive new ."
+    assert_includes body, "/hive plan <task-slug>"
+    assert_includes body, "/hive develop <task-slug>"
+    assert_includes body, "/hive review <task-slug>"
     assert_includes body, "hive --version"
     assert_includes body, "hv --version"
     assert_includes body, "brew install ivankuznetsov/hive/hive"

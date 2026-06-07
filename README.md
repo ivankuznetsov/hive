@@ -68,6 +68,8 @@ Hive publishes one OpenClaw skill through ClawHub:
 openclaw skills install hive-cli
 ```
 
+Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
+
 That listing installs the `/hive` slash command. Ask OpenClaw to run the guided
 setup:
 

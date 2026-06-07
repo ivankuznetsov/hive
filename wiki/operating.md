@@ -1,9 +1,9 @@
 ---
 title: Operating Hive
 type: operating
-source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
+source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -149,12 +149,17 @@ core install still succeeds without it:
 
 OpenClaw support now lives in-tree under `openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug
-is `hive-cli`, and the installed slash command is `/hive`. `/hive setup` guides
-confirmed Hive install, strict `hive`/`hv` version verification,
-`hive daemon install`, and optional non-interactive `hive init`; after setup,
-users pass normal CLI verbs as `/hive status --json`, `/hive plan <slug>`,
-`/hive develop <slug>`, and so on. The naked `hive` ClawHub slug is already
-owned by another publisher, so it is intentionally not used.
+is `hive-cli`, the public listing is
+`https://clawhub.ai/ivankuznetsov/hive-cli`, and the installed slash command is
+`/hive`. The checked-in skill is version `0.1.1`. ClawHub uses the skill
+frontmatter `description` as the public page summary and search text, so listing
+copy belongs in that field and in the opening `SKILL.md` body for the single
+umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
+version verification, `hive daemon install`, and optional non-interactive
+`hive init`; after setup, users pass normal CLI verbs as
+`/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+The naked `hive` ClawHub slug is already owned by another publisher, so it is
+intentionally not used.
 
 ## Release verification
 

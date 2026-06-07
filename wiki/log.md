@@ -2,6 +2,29 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T10:45:00Z] wiki - refresh OpenClaw command/API coverage after ClawHub listing copy commit
+
+**Action:** Refreshed command/API surface coverage after commit `704b9705` (`docs(openclaw): improve ClawHub skill listing`) changed README/OpenClaw documentation, `openclaw/skills/hive/SKILL.md`, `test/unit/openclaw_skills_test.rb`, and existing wiki pages. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; also read `.llm-wiki/config.json`. `qmd search "command API surface routes handlers entrypoints README"` returned existing OpenClaw and release-context hits. Verified the committed diff plus `README.md`, `openclaw/README.md`, `openclaw/skills/hive/SKILL.md`, `test/unit/openclaw_skills_test.rb`, [[operating]], [[cli]], and [[commands]]. The commit does not add Ruby routes, HTTP handlers, Thor command handlers, or executable entrypoints; the changed public surface is the OpenClaw/ClawHub wrapper over the existing CLI.
+
+**Coverage:** Expanded [[commands]] so it covers `bin/hv`, the single ClawHub `hive-cli` listing, `/hive` slash-command dispatch, guided setup aliases, safe argument passing, JSON preference, and destructive/foreground confirmation rules. Updated [[operating]] source metadata and OpenClaw operating text for the public listing URL and checked-in skill version `0.1.1`. Recorded in [[gaps]] that `clawhub inspect` evidence is logged but the explicit `clawhub scan --slug hive-cli --version 0.1.1 --json` command did not return a durable checked-in artifact. No page count change, so [[index]] did not need a catalog edit. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands]]
+- [[operating]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T10:37:00Z] openclaw - improve ClawHub listing copy
+
+**Action:** Checked live ClawHub examples and confirmed the public detail page uses `SKILL.md` frontmatter `description` as the hero/search/OpenGraph summary, then renders the opening markdown body under the `SKILL.md` tab. Updated Hive's single `hive-cli` ClawHub skill to version `0.1.1` with a more specific summary for the folder-based coding-agent pipeline, added a visible install/common-path section before the agent runtime rules, kept the single `/hive` umbrella model, and refreshed README/OpenClaw docs plus [[index]] and [[operating]]. Published `hive-cli@0.1.1` under `ivankuznetsov`; `clawhub inspect hive-cli --json` now reports `latest: 0.1.1` and the new summary. The explicit `clawhub scan --slug hive-cli --version 0.1.1 --json` command submitted but hung without returning; the registry inspect moderation fields still report `verdict: clean`, `isSuspicious: false`, and `isMalwareBlocked: false`.
+
+**Tests:** `bundle exec ruby -Itest test/unit/openclaw_skills_test.rb`; `bundle exec rubocop --format simple test/unit/openclaw_skills_test.rb`; YAML frontmatter parse check; `git diff --check`.
+
+**Refreshed pages:**
+- [[index]]
+- [[operating]]
+- [[log]]
+
 ## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
 
 **Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.

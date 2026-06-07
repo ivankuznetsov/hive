@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-05-22
+updated: 2026-06-07
 tags: [stage, artifacts, release]
 ---
 
@@ -27,6 +27,7 @@ tags: [stage, artifacts, release]
 
 - Markerless or non-complete `7-artifacts` rows surface as `ready_to_artifacts` with `hive artifacts <slug> --from 7-artifacts`.
 - `:complete` rows surface as `ready_to_finalize` with `hive finalize <slug> --from 7-artifacts`.
+- `ERROR reason=tmux_session_terminated` and `ERROR reason=agent_orphaned` are daemon-retryable when no live task lock exists. `Hive::Daemon::StaleAgentHealer` clears them with the shared terminal-error marker-id guard and bounded per-process budget, then the normal daemon dispatch reruns artifacts.
 
 ## Backlinks
 

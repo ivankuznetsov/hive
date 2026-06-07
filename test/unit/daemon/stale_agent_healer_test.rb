@@ -15,12 +15,19 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   Row = Hive::Daemon::StatusConsumer::Row
 
   class FakeController
+    attr_reader :observed_mtimes
+
     def initialize(running_pairs: [])
       @running = running_pairs
+      @observed_mtimes = []
     end
 
     def running_task?(project:, slug:)
       @running.include?([ project, slug ])
+    end
+
+    def observe_state_file_mtime(project:, slug:, mtime:)
+      @observed_mtimes << { project: project, slug: slug, mtime: mtime }
     end
   end
 
@@ -618,6 +625,742 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_auto_recovers_finalize_unpushed_commits_error
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits detail=\"push failed\" marker_id=err-a -->\n")
+      # Explicit non-default mtime so the observed_mtimes assertion below
+      # actually pins that observe_pre_clear_mtime forwards the row's own
+      # state_file_mtime — not the make_row default, which would pass even
+      # if the pass-through were hard-coded.
+      pre_clear_mtime = NOW - 4242
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: pre_clear_mtime,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: {
+          "reason" => "unpushed_commits",
+          "detail" => "push failed",
+          "marker_id" => "err-a"
+        },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected finalize unpushed auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "finalize_unpushed_commits", heal_event[1][:reason]
+      assert_equal "unpushed_commits", heal_event[1][:marker_reason]
+      assert_equal 1, heal_event[1][:attempts]
+      assert_equal [ { project: "p", slug: "s", mtime: pre_clear_mtime } ], @controller.observed_mtimes
+      assert Hive::Markers.current(state_file).none?,
+             "auto-recoverable unpushed finalize marker should clear to :none so daemon can rerun finalize"
+    end
+  end
+
+  def test_auto_recovers_terminal_agent_loss_error_matrix
+    %w[7-artifacts 8-finalize].product(%w[tmux_session_terminated agent_orphaned]).each_with_index do |(stage, reason), index|
+      with_marker_file do |state_file|
+        marker_id = "terminal-#{index}"
+        File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} marker_id=#{marker_id} -->\n")
+        pre_clear_mtime = NOW - 5151 - index
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          mtime: pre_clear_mtime,
+          stage: stage,
+          marker: "error",
+          marker_attrs: { "reason" => reason, "marker_id" => marker_id },
+          action: "error",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        heal_event = @logger.events.last
+        assert_equal :marker_healed, heal_event[0]
+        assert_equal "terminal_agent_loss", heal_event[1][:reason]
+        assert_equal reason, heal_event[1][:marker_reason]
+        assert_equal stage, heal_event[1][:stage]
+        assert_equal 1, heal_event[1][:attempts]
+        assert_equal({ project: "p", slug: "s", mtime: pre_clear_mtime }, @controller.observed_mtimes.last)
+        assert Hive::Markers.current(state_file).none?,
+               "#{stage}/#{reason} terminal ERROR should clear so the daemon can rerun the stage"
+      end
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_does_not_clear_same_reasons_outside_late_stages
+    %w[tmux_session_terminated agent_orphaned].each do |reason|
+      with_marker_file do |state_file|
+        File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} -->\n")
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          stage: "6-review",
+          marker: "error",
+          marker_attrs: { "reason" => reason },
+          action: "error",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        refute @logger.events.any? { |name, _| name == :marker_healed },
+               "6-review/#{reason} should stay outside terminal agent-loss auto-retry"
+        refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+        assert_match(/ERROR reason=#{reason}/, File.read(state_file))
+      end
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_uses_marker_id_guard_when_present
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=newer -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "older" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/ERROR reason=tmux_session_terminated marker_id=newer/, File.read(state_file),
+                   "a stale status row must not clear a newer same-reason ERROR marker")
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_skips_live_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=agent_orphaned -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "agent_orphaned" },
+        action: "error",
+        live_task_lock: true
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a live-lock skip must be a clean no-op, not a logged failure"
+      assert_match(/ERROR reason=agent_orphaned/, File.read(state_file))
+    end
+  end
+
+  def test_terminal_agent_loss_recovery_does_not_clear_git_status_failed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=git_status_failed -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "git_status_failed" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a repository-state failure must stay manual, not enter agent-loss retry"
+      assert_match(/ERROR reason=git_status_failed/, File.read(state_file))
+    end
+  end
+
+  def test_terminal_agent_loss_stays_red_after_retry_budget_is_exhausted
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated -->\n")
+      heal([ row ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated -->\n")
+      heal([ row ])
+
+      assert_match(/ERROR reason=tmux_session_terminated/, File.read(state_file),
+                   "same terminal agent loss must stay red after budget exhaustion")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal "terminal_agent_loss", heals.first[1][:reason]
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "terminal_agent_loss", exhausted.first[1][:reason]
+      assert_equal "tmux_session_terminated", exhausted.first[1][:marker_reason]
+      assert_equal 1, exhausted.first[1][:attempts]
+      assert_equal 1, exhausted.first[1][:max_attempts]
+      assert_equal "per_process", exhausted.first[1][:budget_scope]
+      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
+      assert_match(/rerun 7-artifacts/, exhausted.first[1][:remediation])
+      assert_match(/hive run s --project p --stage 7-artifacts/, exhausted.first[1][:remediation])
+      refute_match(/--from/, exhausted.first[1][:remediation])
+      assert_match(/no live agent/, exhausted.first[1][:remediation])
+    end
+  end
+
+  def test_terminal_agent_loss_budget_accumulates_across_fresh_marker_ids
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      first = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "err-a" },
+        action: "error",
+        live_task_lock: false
+      )
+      second = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "err-b" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-a -->\n")
+      heal([ first ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-b -->\n")
+      heal([ second ])
+
+      assert_match(/ERROR reason=tmux_session_terminated marker_id=err-b/, File.read(state_file),
+                   "retry budget should key on task/stage/reason, not marker_id")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, heals.size
+      assert_equal 1, exhausted.size
+      assert_equal "terminal_agent_loss", exhausted.first[1][:reason]
+      assert_equal "tmux_session_terminated", exhausted.first[1][:marker_reason]
+    end
+  end
+
+  def test_finalize_unpushed_recovery_uses_marker_id_guard_when_present
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=newer -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: {
+          "reason" => "unpushed_commits",
+          "marker_id" => "older"
+        },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/ERROR reason=unpushed_commits marker_id=newer/, File.read(state_file),
+                   "a stale status row must not clear a newer same-reason ERROR marker")
+    end
+  end
+
+  def test_finalize_unpushed_recovery_clears_legacy_marker_without_marker_id
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected legacy finalize marker to clear, got: #{@logger.events.inspect}"
+      assert Hive::Markers.current(state_file).none?,
+             "legacy no-marker_id finalize marker should clear to :none"
+    end
+  end
+
+  def test_finalize_unpushed_recovery_does_not_clear_modern_marker_when_row_lacks_marker_id
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=modern -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/ERROR reason=unpushed_commits marker_id=modern/, File.read(state_file),
+                   "a row without marker_id must not clear a current marker that has one")
+    end
+  end
+
+  def test_finalize_unpushed_recovery_does_not_clear_marker_that_gains_id_after_snapshot
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=fresh -->\n")
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/ERROR reason=unpushed_commits marker_id=fresh/, File.read(state_file),
+                   "a legacy row snapshot must not clear a modern marker written before heal")
+    end
+  end
+
+  def test_finalize_unpushed_recovery_ignores_missing_or_malformed_marker_attrs
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: nil,
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      assert_match(/ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_finalize_unpushed_recovery_skips_when_state_file_mtime_is_missing
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file),
+                   "without a pre-clear mtime the healer cannot seed redispatch safely")
+    end
+  end
+
+  def test_does_not_auto_recover_finalize_unpushed_commits_with_live_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: true
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a live-lock skip must be a clean no-op, not a logged failure"
+      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_unpushed_commits_outside_finalize
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a wrong-stage skip must be a clean no-op, not a logged failure"
+      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_manual_clean_exit_failure
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=ensure_clean_on_exit_failed -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "ensure_clean_on_exit_failed" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a wrong-reason (non-recoverable) skip must be a clean no-op, not a logged failure"
+      assert_match(/ERROR reason=ensure_clean_on_exit_failed/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recoverable_finalize_unpushed_commits_stays_red_after_retry_budget_is_exhausted
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      heal([ row ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      heal([ row ])
+
+      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file),
+                   "same finalize push failure must stay red after budget exhaustion")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal 1, heals.first[1][:attempts]
+      assert_equal 1, heals.first[1][:max_attempts]
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "finalize_unpushed_commits", exhausted.first[1][:reason]
+      assert_equal "unpushed_commits", exhausted.first[1][:marker_reason]
+      assert_equal 1, exhausted.first[1][:attempts]
+      assert_equal 1, exhausted.first[1][:max_attempts]
+      assert_equal "per_process", exhausted.first[1][:budget_scope]
+      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
+      assert_match(/rerun finalize/, exhausted.first[1][:remediation],
+                   "exhausted event must carry an actionable remediation hint")
+      assert_match(/push the branch manually/, exhausted.first[1][:remediation])
+    end
+  end
+
+  def test_finalize_unpushed_budget_accumulates_across_fresh_marker_ids
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
+      first = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-a" },
+        action: "error",
+        live_task_lock: false
+      )
+      heal([ first ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-b -->\n")
+      second = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-b" },
+        action: "error",
+        live_task_lock: false
+      )
+      heal([ second ])
+
+      assert_match(/ERROR reason=unpushed_commits marker_id=err-b/, File.read(state_file),
+                   "fresh marker ids from repeated finalize failures must share one recovery budget")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+    end
+  end
+
+  def test_finalize_unpushed_recovery_budget_is_isolated_per_task
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    Dir.mktmpdir do |dir|
+      first_file = File.join(dir, "first.md")
+      second_file = File.join(dir, "second.md")
+      File.write(first_file, "# first\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      File.write(second_file, "# second\n\n<!-- ERROR reason=unpushed_commits -->\n")
+
+      first = make_row(
+        first_file,
+        pid_alive: nil,
+        project: "p",
+        slug: "first",
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+      second = make_row(
+        second_file,
+        pid_alive: nil,
+        project: "p",
+        slug: "second",
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ first, second ])
+
+      refute_match(/ERROR/, File.read(first_file))
+      refute_match(/ERROR/, File.read(second_file))
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 2, heals.size
+      assert_equal %w[first second], heals.map { |_, attrs| attrs[:slug] }.sort
+    end
+  end
+
+  def test_finalize_unpushed_clear_false_consumes_no_budget_and_emits_no_event
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      # On-disk marker is NEWER than the stale status row's marker_id, so
+      # the reason matches but the marker_id guard makes clear_current
+      # return false. That branch must be a pure no-op: no event of any
+      # kind, and crucially no retry budget consumed.
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=newer -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "older" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_empty @logger.events,
+                   "a clear_current=false skip must emit no event at all, got: #{@logger.events.inspect}"
+      assert_empty @controller.observed_mtimes,
+                   "no mtime baseline should be seeded when nothing was cleared"
+
+      # The single retry budget must be intact: once the on-disk marker
+      # matches the row again, the same task still heals on the first try.
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=older -->\n")
+      matching = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "older" },
+        action: "error",
+        live_task_lock: false
+      )
+      heal([ matching ])
+
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size,
+                   "the earlier clear_current=false must not have consumed the single retry budget"
+      assert Hive::Markers.current(state_file).none?
+    end
+  end
+
+  def test_finalize_unpushed_duplicate_rows_in_same_heal_pass_consume_one_budget_slot
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-a" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row, row ])
+
+      assert Hive::Markers.current(state_file).none?
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal 1, heals.first[1][:attempts]
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_exhausted }
+    end
+  end
+
+  def test_finalize_unpushed_budget_resets_on_fresh_healer_instance
+    # The recovery budget is in-memory and per-process. A daemon restart
+    # — or the SIGHUP rebuild of the healer in Dispatcher — drops the
+    # accumulated counts, so a row that exhausted its budget on the old
+    # instance is eligible again on a fresh one. This pins that reset as
+    # INTENDED: a future "persist the budget" change must consciously
+    # break this test.
+    row_attrs = {
+      pid_alive: nil,
+      stage: "8-finalize",
+      marker: "error",
+      marker_attrs: { "reason" => "unpushed_commits" },
+      action: "error",
+      live_task_lock: false
+    }
+
+    with_marker_file do |state_file|
+      first = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        error_auto_recovery_limit: 1
+      )
+      row = make_row(state_file, **row_attrs)
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      first.heal([ row ], now: NOW)
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      first.heal([ row ], now: NOW)
+      assert_match(/ERROR/, File.read(state_file),
+                   "budget must be exhausted on the first instance after the second pass")
+
+      fresh = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        error_auto_recovery_limit: 1
+      )
+      fresh.heal([ row ], now: NOW)
+
+      assert Hive::Markers.current(state_file).none?,
+             "a fresh healer instance must heal the same row again (per-process budget reset)"
+    end
+  end
+
+  def test_finalize_unpushed_auto_recovery_logs_failure_when_marker_clear_raises
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      original = Hive::Markers.method(:clear_current)
+      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+        raise Errno::ENOSPC, "no space left" if path == state_file
+
+        original.call(path, *args)
+      end
+
+      begin
+        heal([ row ])
+      ensure
+        Hive::Markers.define_singleton_method(:clear_current, &original)
+      end
+
+      failure = @logger.events.find { |name, _| name == :marker_heal_failed }
+      assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
+      assert_equal "finalize_unpushed_commits", failure[1][:reason]
+      assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
   def test_does_not_auto_recover_review_error_review_agent_died_with_live_lock
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 -->\n")
@@ -638,6 +1381,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a review live-lock skip must be a clean no-op, not a logged failure"
       assert_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end
@@ -676,8 +1421,18 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                    "same auto-recoverable review error must stay red after budget exhaustion")
       heals = @logger.events.select { |name, _| name == :marker_healed }
       assert_equal 1, heals.size
-      assert_equal 1, heals.first[1][:attempt]
+      assert_equal 1, heals.first[1][:attempts]
       assert_equal 1, heals.first[1][:max_attempts]
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "review_agent_died", exhausted.first[1][:marker_reason]
+      assert_equal "reviewers", exhausted.first[1][:phase]
+      assert_equal "1", exhausted.first[1][:pass]
+      assert_equal "per_process", exhausted.first[1][:budget_scope]
+      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
+      assert_match(/rerun review/, exhausted.first[1][:remediation],
+                   "exhausted event must carry an actionable remediation hint")
     end
   end
 
@@ -713,8 +1468,75 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       failure = @logger.events.find { |name, _| name == :marker_heal_failed }
       assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
-      assert_equal "reviewer_tmux_session_terminated", failure[1][:reason]
+      assert_equal "review_agent_died", failure[1][:reason],
+                   "a heal failure on a review_agent_died marker must keep its own " \
+                   "label, not be mislabeled as the tmux-death channel"
       assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_finalize_unpushed_logs_when_controller_cannot_seed_pre_clear_mtime
+    controller = Object.new
+    def controller.running_task?(project:, slug:) = false
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: controller,
+      logger: @logger,
+      grace_sec: 300
+    )
+
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      missing = @logger.events.find { |name, _| name == :marker_heal_observer_missing }
+      assert missing, "expected observer-missing event, got: #{@logger.events.inspect}"
+      assert_equal "p", missing[1][:project]
+      assert_equal "s", missing[1][:slug]
+      assert_equal state_file, missing[1][:state_file]
+      assert Hive::Markers.current(state_file).none?,
+             "missing observer logging must not roll back a successful clear"
+    end
+  end
+
+  def test_finalize_unpushed_exhausted_event_is_logged_once_per_process_key
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      heal([ row ])
+      3.times do
+        File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+        heal([ row ])
+      end
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size,
+                   "exhausted seen-map must suppress repeated log spam for the same process key"
     end
   end
 

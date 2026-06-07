@@ -2,6 +2,7 @@ require "fileutils"
 require "time"
 require "yaml"
 require "hive/config"
+require "hive/invoked_binary"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
@@ -14,6 +15,12 @@ module Hive
       include Hive::PidFile
 
       VALID_SUBCOMMANDS = %w[start stop restart status reload tail].freeze
+      # Give an active PR repair tick time to drain; PrFixer may be inside
+      # a synchronous agent spawn with child processes and temporary worktrees.
+      STOP_GRACE_SEC = 600
+      KILL_GRACE_SEC = 5
+      PID_LOCK_WAIT_SEC = 10
+      POLL_INTERVAL_SEC = 0.5
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, hive_home: Hive::Paths.state_home)
@@ -37,7 +44,7 @@ module Hive
 
         case @subcommand
         when "start"  then start_daemon
-        when "stop"    then stop_daemon
+        when "stop"    then stop_daemon_or_raise
         when "restart" then restart_daemon
         when "status"  then status_daemon
         when "reload"  then reload_daemon
@@ -59,54 +66,59 @@ module Hive
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
 
-        if (existing = read_live_pid)
-          raise Hive::ConcurrentRunError.new(
-            "hive babysitter already running (pid #{existing})",
-            holder: { pid: existing },
-            lock_path: pid_file
-          )
-        end
-        # No live daemon owns the PID file, so clear any stale/dead remnant
-        # and reserve the slot with an exclusive create. Two simultaneous
-        # `start` invocations can both pass the read_live_pid check above;
-        # the EXCL create lets only one win, and the loser is rejected as a
-        # conflict instead of silently launching a second dispatcher.
-        FileUtils.rm_f(pid_file)
-        begin
-          handle = File.open(pid_file, File::WRONLY | File::CREAT | File::EXCL)
-        rescue Errno::EEXIST
-          raise Hive::ConcurrentRunError.new(
-            "hive babysitter already starting (PID file #{pid_file} created concurrently)",
-            holder: { pid: (read_pid_file_payload || {})["pid"] },
-            lock_path: pid_file
-          )
-        end
-
-        Process.daemon(true, true) if @detach
-
-        own_start_time = Hive::Lock.send(:process_start_time, Process.pid)
-        if own_start_time.nil?
-          handle.close
+        handle = nil
+        with_pid_file_mutex do
+          if (existing = read_live_pid)
+            raise Hive::ConcurrentRunError.new(
+              "hive babysitter already running (pid #{existing})",
+              holder: { pid: existing },
+              lock_path: pid_file
+            )
+          end
+          # No live daemon owns the PID file, so clear any stale/dead remnant
+          # and reserve the slot with an exclusive create. The sidecar mutex
+          # keeps stop cleanup from deleting a replacement PID file between
+          # payload comparison and unlink.
           FileUtils.rm_f(pid_file)
-          raise Hive::Error,
-                "hive babysitter: cannot read process start time " \
-                "(neither /proc/#{Process.pid}/stat nor `ps -o lstart=` worked); " \
-                "PID-reuse defense would be disabled. Refusing to start."
+          begin
+            handle = File.open(pid_file, File::WRONLY | File::CREAT | File::EXCL)
+          rescue Errno::EEXIST
+            raise Hive::ConcurrentRunError.new(
+              "hive babysitter already starting (PID file #{pid_file} created concurrently)",
+              holder: { pid: (read_pid_file_payload || {})["pid"] },
+              lock_path: pid_file
+            )
+          end
+
+          Process.daemon(true, true) if @detach
+
+          own_start_time = Hive::Lock.send(:process_start_time, Process.pid)
+          if own_start_time.nil?
+            FileUtils.rm_f(pid_file)
+            raise Hive::Error,
+                  "hive babysitter: cannot read process start time " \
+                  "(neither /proc/#{Process.pid}/stat nor `ps -o lstart=` worked); " \
+                  "PID-reuse defense would be disabled. Refusing to start."
+          end
+
+          handle.write(pid_file_payload(Process.pid, own_start_time).to_yaml)
+          handle.flush
+        ensure
+          handle&.close unless handle&.closed?
         end
 
-        handle.write(pid_file_payload(Process.pid, own_start_time).to_yaml)
-        handle.flush
-        handle.close
         dispatcher = build_dispatcher
         begin
           dispatcher.run_forever
         ensure
-          payload = begin
-            read_pid_file_payload
-          rescue StandardError
-            nil
+          with_pid_file_mutex do
+            payload = begin
+              read_pid_file_payload
+            rescue StandardError
+              nil
+            end
+            File.delete(pid_file) if payload && payload["pid"] == Process.pid && File.exist?(pid_file)
           end
-          File.delete(pid_file) if payload && payload["pid"] == Process.pid && File.exist?(pid_file)
         end
       end
 
@@ -163,49 +175,166 @@ module Hive
       def stop_daemon
         unless File.exist?(pid_file)
           warn "hive: babysitter not running (no PID file at #{pid_file})"
-          return
+          return true
         end
 
         payload = read_pid_file_payload
         pid = payload && payload["pid"]
         if pid.nil? || pid <= 0
-          FileUtils.rm_f(pid_file)
-          warn "hive: babysitter PID file at #{pid_file} is malformed; removing"
-          return
+          removed = remove_pid_file_if_current(payload)
+          action = removed ? "removing" : "not removing because it changed"
+          warn "hive: babysitter PID file at #{pid_file} is malformed; #{action}"
+          return true
         end
 
         unless pid_alive?(pid)
-          FileUtils.rm_f(pid_file)
-          warn "hive: babysitter PID #{pid} is not alive; removed stale #{pid_file}"
-          return
+          removed = remove_pid_file_if_current(payload)
+          action = removed ? "removed stale" : "left changed"
+          warn "hive: babysitter PID #{pid} is not alive; #{action} #{pid_file}"
+          return true
         end
 
         case pid_ownership(payload, pid)
         when :reused
-          FileUtils.rm_f(pid_file)
-          warn "hive: PID #{pid} appears reused (start_time mismatch); refusing to signal. Removed stale #{pid_file}."
-          return
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            warn "hive: babysitter PID #{pid} exited before signaling; removed stale #{pid_file}"
+            return true
+          end
+          removed = remove_pid_file_if_current(payload)
+          action = removed ? "Removed stale" : "Left changed"
+          warn "hive: PID #{pid} appears reused (start_time mismatch); refusing to signal. #{action} #{pid_file}."
+          return true
         when :unverified
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            warn "hive: babysitter PID #{pid} exited before signaling; removed stale #{pid_file}"
+            return true
+          end
           warn "hive: cannot verify PID #{pid} is the hive babysitter; refusing to signal. Manually confirm and clean #{pid_file}."
-          return
+          return false
         end
 
         send_signal_safely(pid, :TERM)
-        deadline = Time.now + 600
+        deadline = Time.now + STOP_GRACE_SEC
         while pid_alive?(pid) && Time.now < deadline
-          sleep 0.5
+          sleep POLL_INTERVAL_SEC
         end
         if pid_alive?(pid)
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            puts "hive babysitter: stopped (pid #{pid})"
+            return true
+          end
           ownership_now = pid_ownership(payload, pid)
-          send_signal_safely(pid, :KILL) unless %i[reused unverified].include?(ownership_now)
-          FileUtils.rm_f(pid_file)
+          if %i[reused unverified].include?(ownership_now)
+            unless pid_alive?(pid)
+              remove_pid_file_if_current(payload)
+              puts "hive babysitter: stopped (pid #{pid})"
+              return true
+            end
+            warn "hive: babysitter PID #{pid} still alive after TERM but ownership is #{ownership_now}; " \
+                 "refusing KILL and leaving #{pid_file} for manual inspection"
+            return false
+          end
+          warn "hive: babysitter PID #{pid} did not stop within #{STOP_GRACE_SEC}s; sending KILL"
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            puts "hive babysitter: stopped (pid #{pid})"
+            return true
+          end
+          ownership_before_kill = pid_ownership(payload, pid)
+          if %i[reused unverified].include?(ownership_before_kill)
+            unless pid_alive?(pid)
+              remove_pid_file_if_current(payload)
+              puts "hive babysitter: stopped (pid #{pid})"
+              return true
+            end
+            warn "hive: babysitter PID #{pid} ownership is #{ownership_before_kill} before KILL; " \
+                 "leaving #{pid_file} for manual inspection"
+            return false
+          end
+          send_signal_safely(pid, :KILL)
+          kill_deadline = Time.now + KILL_GRACE_SEC
+          while pid_alive?(pid) && Time.now < kill_deadline
+            sleep POLL_INTERVAL_SEC
+          end
+          if pid_alive?(pid)
+            warn "hive: babysitter PID #{pid} is still alive after KILL; leaving #{pid_file}"
+            return false
+          end
         end
+        remove_pid_file_if_current(payload)
         puts "hive babysitter: stopped (pid #{pid})"
+        true
+      end
+
+      def remove_pid_file_if_current(expected_payload)
+        with_pid_file_mutex do
+          current_payload = begin
+            read_pid_file_payload
+          rescue StandardError
+            nil
+          end
+          return false unless current_payload == expected_payload
+
+          FileUtils.rm_f(pid_file)
+          true
+        end
+      end
+
+      def with_pid_file_mutex
+        lock_path = "#{pid_file}.lock"
+        FileUtils.mkdir_p(File.dirname(lock_path))
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          acquire_pid_file_mutex(lock)
+          yield
+        ensure
+          lock.flock(File::LOCK_UN) unless lock.closed?
+        end
+      end
+
+      def acquire_pid_file_mutex(lock)
+        deadline = Time.now + PID_LOCK_WAIT_SEC
+        loop do
+          return true if lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+          break if Time.now >= deadline
+
+          sleep POLL_INTERVAL_SEC
+        end
+        raise Hive::Error, "timed out waiting for babysitter PID-file lock #{pid_file}.lock"
+      end
+
+      def stop_daemon_or_raise
+        return true if stop_daemon
+
+        raise Hive::Error, "hive babysitter: stop failed; inspect #{pid_file}"
       end
 
       def restart_daemon
-        stop_daemon if File.exist?(pid_file)
+        stop_daemon_or_raise if File.exist?(pid_file)
+        reexec_detached_start! if @detach
+
         start_daemon
+      end
+
+      def reexec_detached_start!
+        argv = [ "babysit", "start", "--detach" ]
+        argv << "--dry-run" if @dry_run
+        binary = Hive::InvokedBinary.path
+        unless binary
+          raise Hive::Error,
+                "hive babysitter: failed to resolve invoked hive binary for detached restart"
+        end
+
+        # Match daemon re-exec: stable wrapper path, array argv, no shell. The
+        # wrapper path comes from the process that launched this Hive command.
+        Kernel.exec(binary, *argv)
+      rescue SystemCallError => error
+        raise Hive::Error,
+              "hive babysitter: failed to re-exec detached start: " \
+              "#{error.class}: #{error.message}"
       end
 
       def status_daemon

@@ -3,11 +3,11 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-06-07
 tags: [test, e2e, tui, artifacts]
 ---
 
-**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging.
+**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
 
 ## Commands
 
@@ -20,6 +20,24 @@ bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+## Binary contract
+
+`bin/hive-e2e` mirrors the main Hive CLI's sysexits-shaped contract for the e2e harness:
+
+| Code | Meaning |
+|------|---------|
+| `0` | all selected scenarios passed |
+| `1` | one or more scenarios failed, or an unclassified harness error occurred |
+| `64` | usage error: unknown command, missing required Thor arguments, unsafe replay path, invalid retention window, or no matching scenarios |
+| `78` | preflight/config failure: missing `tmux`, missing `asciinema` when required, or missing replay repro artifact |
+
+Thor is started with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
+`bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
+`hive-cli` executable. It handles top-level `--version` / `-v` before Thor
+dispatch and rewrites command-local `--help` / `-h` before scenario selection.
+That keeps help requests non-mutating and preflight-free even when command
+options precede the help flag, e.g. `bin/hive-e2e run --filter tui --help`.
 
 ## Layout
 
@@ -90,7 +108,12 @@ On failure, the harness writes a scenario bundle containing:
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `tui_new_idea_editing` | TUI new-idea prompt paste delivery plus cursor navigation/insertion before submit. |
+| `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement. |
 | `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |
+| `update_flow_pipeline` | Daemon update-check pipeline against a releases stub. |
+| `update_flow_tui_footer` | TUI update footer rendering after the update check records a newer release. |
+| `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
+| `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 
 ## Operational Notes
 

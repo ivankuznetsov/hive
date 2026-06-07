@@ -63,8 +63,9 @@ Also search default main cross-project wiki paths when they exist:
 ~/wikis/master/wiki/, ~/wikis/main/wiki/, ../wikis/master/wiki/, and
 ../wikis/main/wiki/.
 Inspect recent git history and changed source files.
-Update stale wiki pages, update wiki/index.md when page coverage changes, append
-wiki/log.md, and record uncertainty in wiki/gaps.md.
+Update stale wiki pages, update wiki/index.md when page coverage changes, add a
+new wiki/log.d/<timestamp>-<slug>.md fragment without editing compiled wiki/log.md, and
+record uncertainty in wiki/gaps.md.
 Do not run qmd update or qmd embed yourself; the wrapper script runs bounded qmd
 maintenance after this Codex refresh finishes.
 Do not invent facts.

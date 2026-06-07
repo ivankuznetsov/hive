@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [command, daemon, automation, json]
 ---
 
@@ -13,10 +13,11 @@ every 1s for cheap child-exit/state-mtime probes, runs a full
 `hive status --json` scan on change or every 30s as a backstop, dispatches
 workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
 `artifacts` / `finalize`) on tasks ready to advance, and
-auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED`. Stops
-only at human-input gates: `_WAITING` markers (Q&A / triage), recovery
-markers (`_STALE` / `_ERROR`), and 8-finalize while the PR is still open on
-GitHub.
+auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED`. It
+stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
+recovery markers, and 8-finalize while the PR is still open on GitHub; selected
+retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
+normal policy dispatch.
 
 ## Subcommands
 
@@ -48,7 +49,11 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 
 Per `Hive::Daemon::Policy.decide`, the daemon classifies each `hive
 status --json` task row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
-value) and routes:
+value) and routes. `Hive::Daemon::StaleAgentHealer` runs before this policy
+step, so selected no-live-lock `error` rows may be cleared into markerless
+edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
+`7-artifacts` / `8-finalize` `reason=tmux_session_terminated` or
+`reason=agent_orphaned`.
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|
@@ -65,7 +70,7 @@ value) and routes:
 | `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
 | `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
 | `archived`            | Skip — terminal. |
-| `error`               | Skip. |
+| `error`               | Skip ordinary/manual error rows. Retryable terminal-error rows listed above are healer-cleared before policy sees the post-clear row. |
 
 `agent_running` rows also feed daemon capacity accounting when status
 has positive liveness evidence. The dispatcher counts both rows with a

@@ -67,6 +67,12 @@ class E2ESandboxTest < Minitest::Test
     end
   end
 
+  def test_cleanup_runs_refuses_tmp_root
+    assert_raises(ArgumentError) do
+      Hive::E2E::Sandbox.cleanup_runs(runs_dir: Dir.tmpdir, dry_run: true)
+    end
+  end
+
   def test_cleanup_runs_only_deletes_generated_run_directories
     Dir.mktmpdir("e2e-runs") do |runs_dir|
       old_generated = File.join(runs_dir, "2026-04-30T12-00-00Z-1234-abcd")

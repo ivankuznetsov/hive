@@ -133,7 +133,7 @@ module Hive
         sources.each do |source|
           dest = File.join(dest_root, File.basename(source))
           copy_tui_diagnostic(source, dest)
-          File.write("#{dest}.tail", tail_lines(source, LOG_TAIL_LINES))
+          File.write("#{dest}.tail", tail_lines(dest, LOG_TAIL_LINES))
         end
       end
 
@@ -212,7 +212,10 @@ module Hive
       end
 
       def write_manifest
-        files = Dir[File.join(@scenario_dir, "**", "*")].select { |path| File.file?(path) }.sort
+        files = Dir[File.join(@scenario_dir, "**", "*")]
+          .select { |path| File.file?(path) }
+          .reject { |path| live_tui_log_file?(path) }
+          .sort
         manifest = {
           "schema" => "hive-e2e-manifest",
           "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-manifest"),
@@ -230,6 +233,12 @@ module Hive
         tmp = "#{path}.tmp.#{Process.pid}"
         File.write(tmp, JSON.pretty_generate(manifest))
         File.rename(tmp, path)
+      end
+
+      def live_tui_log_file?(path)
+        return false unless @tui_log_dir
+
+        path.start_with?("#{@tui_log_dir}/")
       end
     end
   end

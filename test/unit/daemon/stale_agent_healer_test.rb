@@ -1046,6 +1046,30 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_finalize_unpushed_duplicate_rows_in_same_heal_pass_consume_one_budget_slot
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-a" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row, row ])
+
+      assert Hive::Markers.current(state_file).none?
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal 1, heals.first[1][:attempt]
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_exhausted }
+    end
+  end
+
   def test_finalize_unpushed_budget_resets_on_fresh_healer_instance
     # The recovery budget is in-memory and per-process. A daemon restart
     # — or the SIGHUP rebuild of the healer in Dispatcher — drops the

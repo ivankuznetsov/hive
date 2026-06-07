@@ -207,7 +207,9 @@ class DaemonStaleAgentHealingTest < Minitest::Test
                       "the seeded baseline must be the PRE-clear mtime"
 
       # The clear rewrote the file, bumping its mtime past the seeded
-      # baseline — a genuine edit from Policy's point of view.
+      # baseline — a genuine edit from Policy's point of view. The
+      # pre-clear mtime is offset by 1000s above so this assertion does
+      # not depend on sub-second filesystem mtime resolution.
       post_clear_mtime = File.mtime(state_file)
       assert post_clear_mtime > baseline,
              "post-clear mtime must exceed the seeded pre-clear baseline"

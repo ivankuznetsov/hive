@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-08
 tags: [dependencies, gems, runtime]
 ---
 
@@ -69,7 +69,7 @@ These are not gems but the CLI tools the runtime invokes:
 | Tool | Min version | Used by |
 |------|-------------|---------|
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
-| `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for secret-scan / dedupe), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
+| `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
@@ -85,6 +85,7 @@ These are not gems but the CLI tools the runtime invokes:
 ## Backlinks
 
 - [[architecture]]
+- [[modules/gh]]
 - [[modules/agent]]
 - [[commands/bot]]
 - [[e2e]]

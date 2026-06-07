@@ -1,0 +1,5 @@
+## [2026-06-07T19:26:14Z] daemon — archive merged finalize error rows
+
+**Action:** Updated finalize merge recovery so already-merged PRs no longer stay red solely because their stale local worktree cannot pass finalize's pre-push Git checks. `Hive::Daemon::Dispatcher` now hands whitelisted `8-finalize` `ERROR` rows (`git_status_failed`, `claude_launch_failed`) to `PrMergeWatcher`; after `gh pr view` reports `MERGED`, the watcher dispatches `hive archive` with an internal `--recover-merged-error-reason` flag. `Hive::Commands::StageAction` accepts that archive only when the current marker is `ERROR`, its `reason=` exactly matches the flag, and the `pr.md` URL still reports `MERGED`, preserving the normal manual path for open PRs and mismatched errors.
+
+**Coverage:** Added focused tests for merge-watcher command generation, unknown-reason filtering, dispatcher routing of `git_status_failed` finalize rows, and archive-stage acceptance/rejection of matching, mismatched, and still-open merged-error recovery reasons. Refreshed [[modules/daemon]] and [[testing]]. Did not run `qmd update` or `qmd embed`.

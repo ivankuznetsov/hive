@@ -148,24 +148,42 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_codex_profile_passes_prompt_via_stdin_file
+    with_tmp_dir do |root|
+      prompt_capture = File.join(root, "prompt.txt")
+      script = <<~SH
+        #!/bin/sh
+        cat > #{prompt_capture}
+        printf 'Codex stdin name\\n'
+      SH
+
+      with_generator(agent: "codex", script: script, commit: false) do |gen, task|
+        File.write(task.state_file, "raw idea for codex prompt")
+
+        assert_equal "Codex stdin name", gen.send(:generate_name)
+        assert_includes File.read(prompt_capture), "raw idea for codex prompt"
+      end
+    end
+  end
+
   private
 
   # Builds a real task folder (valid PATH_RE) plus a config that points the
   # execute-stage agent's bin at a throwaway script, yields a Generator and
   # its Task. `.hive-state` is intentionally NOT a git repo here.
-  def with_generator(commit: true, **config_overrides)
+  def with_generator(commit: true, agent: "claude", script: nil, **config_overrides)
     with_tmp_dir do |root|
       slug = "sample-task-260603-aaaa"
       folder = File.join(root, ".hive-state", "stages", "1-inbox", slug)
       FileUtils.mkdir_p(folder)
 
       bin = File.join(root, "fake-display-agent")
-      File.write(bin, "#!/bin/sh\nprintf 'noop\\n'\nexit 0\n")
+      File.write(bin, script || "#!/bin/sh\nprintf 'noop\\n'\nexit 0\n")
       FileUtils.chmod(0o755, bin)
 
       cfg = {
-        "execute" => { "agent" => "claude" },
-        "agents" => { "claude" => { "bin" => bin } }
+        "execute" => { "agent" => agent },
+        "agents" => { agent => { "bin" => bin } }
       }.merge(config_overrides.transform_keys(&:to_s))
 
       task = Hive::Task.new(folder)

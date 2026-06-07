@@ -3,7 +3,7 @@ title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [stage, finalize, pr, github, clean-exit]
 ---
 
@@ -15,7 +15,7 @@ tags: [stage, finalize, pr, github, clean-exit]
 2. `pr.md` must already exist with `pr_url` frontmatter from 5-open-pr; missing PR metadata records `ERROR reason=missing_pr_md` or `ERROR reason=missing_pr_url`.
 3. `gh auth status` must succeed.
 4. The feature worktree must be clean on exit. The new clean-exit invariant (`Hive::Stages::CleanExit`, gated on `stages.ensure_clean_on_exit`) runs as both an entry backstop (Finalize self-heals dirty residue when 6-review left untracked changes behind) and a `with_stage_events` exit hook on every WORKTREE_OWNING stage. In-scope residue (review.fix.auto_commit.scope_check allowlist) is auto-committed; out-of-scope residue or git failure overwrites the marker to `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=... -->`. Legacy `<!-- ERROR reason=dirty_worktree -->` markers continue to write when entry preflight fails before CleanExit runs.
-5. The branch must be pushed to its upstream. The runner attempts one push before writing `<!-- ERROR reason=unpushed_commits -->`. The daemon healer treats that specific finalize marker as retryable when no task lock is live: it clears the marker with a bounded retry budget, matches the observed `marker_id` when present, and seeds the pre-clear mtime as the dispatch baseline, so finalize can rerun the clean-exit backstop and push path after the normal debounce instead of waiting for a human edit. The same bounded retry path handles finalize `ERROR reason=tmux_session_terminated` and `ERROR reason=agent_orphaned` because those indicate a lost agent session rather than a repository-state failure. Persistent non-ff/auth/remote failures and `ERROR reason=git_status_failed` remain red after the budget is exhausted or because they need operator inspection, with a one-shot `marker_heal_exhausted` daemon log event on budget exhaustion.
+5. The branch must be pushed to its upstream. The runner attempts one push before writing `<!-- ERROR reason=unpushed_commits -->`. The daemon healer treats that specific finalize marker as retryable when no task lock is live: it clears the marker with a bounded retry budget, matches the observed `marker_id` when present, and seeds the pre-clear mtime as the dispatch baseline, so finalize can rerun the clean-exit backstop and push path after the normal debounce instead of waiting for a human edit. The same bounded retry path handles finalize `ERROR reason=tmux_session_terminated` and `ERROR reason=agent_orphaned` because those indicate a lost agent session rather than a repository-state failure. Persistent non-ff/auth/remote failures and `ERROR reason=git_status_failed` remain red after the budget is exhausted or while they need operator inspection, with a one-shot `marker_heal_exhausted` daemon log event on budget exhaustion. Once GitHub reports the PR as `MERGED`, however, the daemon may archive stale `git_status_failed` or `claude_launch_failed` finalize errors through the internal `hive archive --recover-merged-error-reason` path; that path re-checks the current marker reason and PR state before moving the task to `9-done`.
 
 ## Steps performed (`Stages::Finalize.run!`)
 

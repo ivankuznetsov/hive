@@ -13,7 +13,8 @@ every 1s for cheap child-exit/state-mtime probes, runs a full
 `hive status --json` scan on change or every 30s as a backstop, dispatches
 workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
 `artifacts` / `finalize`) on tasks ready to advance, and
-auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED`. It
+auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED` for
+complete finalize rows or for two whitelisted stale finalize errors. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
 recovery markers, and 8-finalize while the PR is still open on GitHub; selected
 retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
@@ -72,12 +73,13 @@ stage.
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
 | `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 8-finalize` (8→9) |
+| `error` at `8-finalize` with `reason=git_status_failed` or `reason=claude_launch_failed` | **Hand off to PrMergeWatcher before normal policy.** If the PR later reports `MERGED`, dispatch `hive archive <slug> --from 8-finalize --recover-merged-error-reason <reason>`; the archive command re-checks marker reason and PR state before moving the task. |
 | `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered, whether they arrive one-at-a-time via the bot or in one editor save. See [[modules/daemon]] "Brainstorm answers-pending gate". |
 | `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
 | `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
 | `archived`            | Skip — terminal. |
-| `error`               | Skip ordinary/manual error rows. Retryable terminal-error rows listed above are healer-cleared before policy sees the post-clear row. |
+| `error`               | Skip ordinary/manual error rows. Retryable terminal-error rows listed above are healer-cleared before policy sees the post-clear row; the merged-finalize-error exception is handled by `PrMergeWatcher` before this policy table. |
 
 `agent_running` rows also feed daemon capacity accounting when status
 has positive liveness evidence. The dispatcher counts both rows with a

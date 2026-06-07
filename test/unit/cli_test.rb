@@ -8,6 +8,7 @@ require "hive/commands/update"
 require "hive/commands/uninstall"
 require "hive/commands/migrate"
 require "hive/commands/new"
+require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
@@ -115,6 +116,16 @@ class HiveCliTest < Minitest::Test
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
     assert_equal Hive::ExitCodes::GENERIC, status
     assert_match(/missing task text/, err)
+  end
+
+  def test_generate_name_passes_lookup_options
+    with_command_new_stub(Hive::Commands::GenerateName) do |calls|
+      Hive::CLI.start([ "generate-name", "slug", "--project", "proj", "--stage", "inbox" ])
+
+      assert_equal [ "slug" ], calls.first.fetch(:args)
+      assert_equal({ project: "proj", stage: "inbox" }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
   end
 
   def test_run_and_rebase_status_pass_lookup_options

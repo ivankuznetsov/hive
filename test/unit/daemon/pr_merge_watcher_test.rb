@@ -104,6 +104,36 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_tick_with_merged_state_carries_recoverable_error_reason
+    with_pr_md(url: "x") do |folder|
+      watcher = make(poll_interval_sec: 0)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder,
+                      error_reason: "git_status_failed")
+
+      with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+        result = watcher.tick(now: Time.now)
+        assert_equal 1, result.size
+        archive = result.first
+        assert_equal "git_status_failed", archive[:error_reason]
+        assert_match(/--recover-merged-error-reason git_status_failed\z/, archive[:command])
+      end
+    end
+  end
+
+  def test_enqueue_ignores_unknown_error_reason
+    with_pr_md(url: "x") do |folder|
+      watcher = make(poll_interval_sec: 0)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder,
+                      error_reason: "ensure_clean_on_exit_failed")
+
+      with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+        archive = watcher.tick(now: Time.now).first
+        refute_match(/recover-merged-error-reason/, archive[:command])
+        assert_nil archive[:error_reason]
+      end
+    end
+  end
+
   def test_tick_with_closed_state_drops_entry
     with_pr_md(url: "x") do |folder|
       watcher = make(poll_interval_sec: 0)

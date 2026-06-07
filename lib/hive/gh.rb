@@ -101,6 +101,20 @@ module Hive
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
     end
 
+    def pr_state(pr_url, cfg: nil)
+      out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", "state", cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{pr_url}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      doc["state"].to_s
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned unparseable JSON: #{e.message}"
+    end
+
     def list_open_prs(worktree_path, cfg: nil)
       fields = %w[
         number

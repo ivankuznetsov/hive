@@ -140,6 +140,44 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_scenario_with_backslash_path_separator
+    # The backslash branch of scenario_path raises the same
+    # "must be a basename" error as the slash branch (Windows-style
+    # separators are rejected too), distinct from the safe-basename raise.
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "backslash.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", 'evil\\scenario', "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario must be a basename/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_unsafe_scenario_basename
+    # A separator-free name that still contains characters outside
+    # [\w-] (here a dot) trips the distinct "safe basename" raise, not
+    # the basename/separator one.
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "unsafe.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "s1.status", "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario must be a safe basename/, err)
+      refute File.exist?(report)
+    end
+  end
+
   def test_cli_rejects_invalid_option_as_usage_error
     _out, err, status = Open3.capture3(
       { "HIVE_EVAL_NO_JUDGE" => "1" },
@@ -188,44 +226,6 @@ class HiveEvalReporterTest < Minitest::Test
       refute status.success?
       assert_equal 64, status.exitstatus
       assert_match(/hive-eval: unexpected argument: extra/, err)
-      refute File.exist?(report)
-    end
-  end
-
-  def test_cli_rejects_scenario_with_backslash_path_separator
-    # The backslash branch of scenario_path raises the same
-    # "must be a basename" error as the slash branch (Windows-style
-    # separators are rejected too), distinct from the safe-basename raise.
-    Dir.mktmpdir("hive-eval-report") do |dir|
-      report = File.join(dir, "backslash.json")
-
-      _out, err, status = Open3.capture3(
-        { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", 'evil\\scenario', "--no-judge", "--report", report
-      )
-
-      refute status.success?
-      assert_equal 64, status.exitstatus
-      assert_match(/scenario must be a basename/, err)
-      refute File.exist?(report)
-    end
-  end
-
-  def test_cli_rejects_unsafe_scenario_basename
-    # A separator-free name that still contains characters outside
-    # [\w-] (here a dot) trips the distinct "safe basename" raise, not
-    # the basename/separator one.
-    Dir.mktmpdir("hive-eval-report") do |dir|
-      report = File.join(dir, "unsafe.json")
-
-      _out, err, status = Open3.capture3(
-        { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", "s1.status", "--no-judge", "--report", report
-      )
-
-      refute status.success?
-      assert_equal 64, status.exitstatus
-      assert_match(/scenario must be a safe basename/, err)
       refute File.exist?(report)
     end
   end

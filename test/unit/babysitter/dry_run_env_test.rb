@@ -254,6 +254,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+
   def test_gh_stub_scrubs_exec_influencing_environment_before_passthrough
     with_tmp_dir do |dir|
       env_keys = %w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY]
@@ -297,7 +298,6 @@ class BabysitterDryRunEnvTest < Minitest::Test
       refute File.exist?(File.join(dir, "real.log"))
     end
   end
-
   private
 
   def assert_stubbed(env, binary, *args)
@@ -335,6 +335,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path
   end
 
+  def stub_path(binary)
+    File.expand_path("../../../bin/hive-babysitter-stub-#{binary}", __dir__)
+  end
+
   def recording_env_binary(dir, name, keys)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
@@ -349,9 +353,5 @@ class BabysitterDryRunEnvTest < Minitest::Test
     RUBY
     FileUtils.chmod("+x", path)
     path
-  end
-
-  def stub_path(binary)
-    File.expand_path("../../../bin/hive-babysitter-stub-#{binary}", __dir__)
   end
 end

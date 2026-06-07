@@ -85,6 +85,7 @@ task default: :test
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit. |
+| `cli_usage_error_json_test.rb` | `bin/hive` subprocess coverage for Thor usage errors before command dispatch: missing-argument `run --json`, `approve --json`, and `markers clear --json` emit parseable error envelopes and EX_USAGE. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |

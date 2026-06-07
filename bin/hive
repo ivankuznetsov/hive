@@ -4,6 +4,7 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
 require "hive/cli"
+require "json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
@@ -43,8 +44,45 @@ end
 normalize_leading_json_options!(ARGV)
 rewrite_help_flag!(ARGV)
 
+def json_requested?(argv)
+  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(true|1|yes)\z/i) }
+end
+
+def json_usage_error_contract(argv)
+  command = argv.find { |arg| !arg.start_with?("-") }
+  case command
+  when "run"
+    [ "hive-run", "invalid_task_path" ]
+  when "approve"
+    [ "hive-approve", "invalid_task_path" ]
+  when "markers"
+    [ "hive-markers-clear", "invalid_task_path" ]
+  end
+end
+
+def emit_json_usage_error(argv, error)
+  contract = json_usage_error_contract(argv)
+  return false unless contract && json_requested?(argv)
+
+  schema, error_kind = contract
+  payload = Hive::Schemas::ErrorEnvelope.build(
+    schema: schema,
+    error: error,
+    error_kind: error_kind
+  )
+  puts JSON.generate(payload)
+  true
+rescue Errno::EPIPE, JSON::GeneratorError
+  true
+end
+
 begin
-  Hive::CLI.start(ARGV)
+  Hive::CLI.start(ARGV, debug: true)
+rescue Thor::Error => e
+  error = Hive::InvalidTaskPath.new(e.message)
+  emitted_json = emit_json_usage_error(ARGV, error)
+  warn(emitted_json ? "hive: #{error.message}" : error.message)
+  exit(error.exit_code)
 rescue Hive::Error => e
   warn "hive: #{e.message}"
   exit(e.respond_to?(:exit_code) ? e.exit_code : 1)

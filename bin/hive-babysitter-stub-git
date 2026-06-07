@@ -164,6 +164,41 @@ def read_only_config?(rest)
   end
 end
 
+def writes_output_file?(arg)
+  arg == "--output" || arg.start_with?("--output=")
+end
+
+def grep_pager_option?(arg)
+  arg == "--open-files-in-pager" ||
+    arg.start_with?("--open-files-in-pager=") ||
+    arg.match?(/\A-[^-]*O/)
+end
+
+def diff_output_command?(command)
+  %w[diff log show].include?(command)
+end
+
+def diff_exec_override_option?(arg)
+  %w[--ext-diff --textconv].include?(arg)
+end
+
+def exec_or_write_screened?(argv, rest)
+  global_options = argv[0, argv.length - rest.length]
+  return true if global_options.any? { |arg| dangerous_global_option?(arg) }
+  return true if argv.any? { |arg| writes_output_file?(arg) }
+  return true if rest.first == "grep" && rest.drop(1).any? { |arg| grep_pager_option?(arg) }
+  return true if diff_output_command?(rest.first) && rest.drop(1).any? { |arg| diff_exec_override_option?(arg) }
+
+  false
+end
+
+def safe_exec_argv(argv, rest)
+  command_index = argv.length - rest.length
+  safe_argv = argv[0...command_index] + [ "--no-pager", rest.first ]
+  safe_argv.concat(%w[--no-ext-diff --no-textconv]) if diff_output_command?(rest.first)
+  safe_argv.concat(rest.drop(1))
+end
+
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
@@ -196,6 +231,7 @@ end
 begin
   # Array-form exec (no shell) hands argv straight to the real git binary.
   exec real, *argv
+  exec(real, *safe_exec_argv(argv, rest))
 rescue SystemCallError => e
   # A set-but-invalid path (missing, not executable, …) would otherwise leak a raw Ruby
   # backtrace and exit 1; mirror the unset-case friendly exit-127 handling above.

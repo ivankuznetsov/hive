@@ -210,7 +210,7 @@ end
 def exec_or_write_screened?(argv, rest)
   global_options = argv[0, argv.length - rest.length]
   return true if global_options.any? { |arg| dangerous_global_option?(arg) }
-  return true if argv.any? { |arg| writes_output_file?(arg) || arg == "--paginate" }
+  return true if argv.any? { |arg| writes_output_file?(arg) }
   return true if diff_rendering_command?(rest.first.to_s) &&
     rest.drop(1).any? { |arg| enables_external_diff_or_textconv?(arg) }
   return true if rest.first == "grep" && rest.drop(1).any? { |arg| grep_pager_option?(arg) }

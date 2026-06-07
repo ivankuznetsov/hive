@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T08:46:17Z] babysitter - block gh web/cache dry-run side effects
+
+**Action:** Tightened `bin/hive-babysitter-stub-gh` so allowlisted read commands skip before passthrough when the invocation includes local side-effect options: `--web`, the `-w` web shorthand on web-capable read commands, and `gh api --cache`. Added focused `test/unit/babysitter/dry_run_env_test.rb` coverage for `gh pr view --web`, `gh repo view --web`, `gh run view -w`, and `gh api --cache`, while keeping plain read-only `gh pr view` / `gh api --method GET ... -f` passthrough coverage. Refreshed [[commands/babysit]], [[testing]], and [[gaps]].
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
 
 **Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.

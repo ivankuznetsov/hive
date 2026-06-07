@@ -61,6 +61,26 @@ def api_read_only?(rest)
   !payload
 end
 
+LOCAL_SIDE_EFFECT_OPTIONS = %w[--cache --web].freeze
+WEB_SHORT_OPTION_COMMANDS = {
+  "pr" => %w[checks view],
+  "repo" => %w[view],
+  "run" => %w[view],
+  "workflow" => %w[view]
+}.freeze
+
+def local_side_effect_option?(argv, rest)
+  argv.any? do |arg|
+    LOCAL_SIDE_EFFECT_OPTIONS.any? { |option| arg == option || arg.start_with?("#{option}=") }
+  end || web_short_option?(rest)
+end
+
+def web_short_option?(rest)
+  return false unless WEB_SHORT_OPTION_COMMANDS.fetch(rest[0], []).include?(rest[1])
+
+  rest.any? { |arg| arg.start_with?("-w") }
+end
+
 def read_only?(rest)
   case rest[0]
   when "api"
@@ -81,6 +101,12 @@ def read_only?(rest)
 end
 
 rest = stripped_global_options(argv)
+
+if local_side_effect_option?(argv, rest)
+  log_skip(argv)
+  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  exit 0
+end
 
 unless read_only?(rest)
   log_skip(argv)

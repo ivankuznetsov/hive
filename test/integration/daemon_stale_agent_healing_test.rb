@@ -166,6 +166,44 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_heal_failed
   end
 
+  def test_status_json_finalize_error_row_attrs_carry_marker_id
+    # The healer's TOCTOU guard (auto_recoverable_error_match_attrs) keys
+    # off the marker_id carried in the status `attrs`. If `hive status
+    # --json` ever stopped surfacing marker_id in attrs, every production
+    # heal would silently fall onto the legacy no-id path and the guard
+    # would be defeated — with no failing test. Pin the contract end to
+    # end: a real status run over a finalize ERROR marker (marker_id
+    # auto-stamped by Markers.set, exactly as finalize writes it) carries
+    # that id through the JSON envelope into the StatusConsumer Row.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "finalize-260607-bbbb"
+        folder = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "pr.md")
+        File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n")
+        # Markers.set auto-stamps a random marker_id on ERROR markers —
+        # the same path finalize uses when it writes reason=unpushed_commits.
+        Hive::Markers.set(state_file, :error, reason: "unpushed_commits")
+        stamped_id = Hive::Markers.current(state_file).attrs["marker_id"].to_s
+        refute stamped_id.empty?, "precondition: Markers.set must stamp a marker_id"
+
+        rows = status_rows_via_consumer(dir)
+        target = rows.find { |r| r.slug == slug }
+        assert target, "status pipeline must include the finalize task: rows=#{rows.inspect}"
+        assert_equal "error", target.marker
+        assert target.marker_attrs.is_a?(Hash),
+               "status attrs must be a hash, got: #{target.marker_attrs.inspect}"
+        assert_equal "unpushed_commits", target.marker_attrs["reason"]
+        assert_equal stamped_id, target.marker_attrs["marker_id"].to_s,
+                     "status --json error-row attrs must carry the on-disk marker_id so the " \
+                     "healer's TOCTOU guard keys off the real id, not the legacy no-id path; " \
+                     "attrs=#{target.marker_attrs.inspect}"
+      end
+    end
+  end
+
   def test_finalize_unpushed_clear_redispatches_instead_of_recording_baseline
     # The load-bearing claim behind observe_pre_clear_mtime: clearing a
     # finalize `ERROR reason=unpushed_commits` marker leaves a markerless
@@ -180,53 +218,64 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     # the real StaleAgentHealer → ConcurrencyController → Policy chain to
     # prove finalize actually re-fires (it is NOT enough to assert the
     # marker was removed — the unit tests already do that).
-    Dir.mktmpdir do |dir|
-      state_file = File.join(dir, "task.md")
-      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
-      pre_clear_mtime = Time.now - 1000
-      File.utime(pre_clear_mtime, pre_clear_mtime, state_file)
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "finalize-260607-abcd"
+        folder = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "pr.md")
+        File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n\n" \
+                               "<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
+        pre_clear_mtime = Time.now - 1000
+        File.utime(pre_clear_mtime, pre_clear_mtime, state_file)
 
-      row = Hive::Daemon::StatusConsumer::Row.new(
-        project: "p", slug: "s", stage: "8-finalize",
-        marker: "error",
-        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-a" },
-        folder: dir, state_file: state_file,
-        state_file_mtime: File.mtime(state_file),
-        action: "error", suggested_command: nil,
-        claude_pid_alive: nil, live_task_lock: false, diagnostic: nil
-      )
+        rows = status_rows_via_consumer(dir)
+        row = rows.find { |candidate| candidate.slug == slug }
+        assert row, "status pipeline must include the finalize task: rows=#{rows.inspect}"
+        assert_equal "error", row.marker
+        assert_equal "error", row.action
+        assert_equal({ "reason" => "unpushed_commits", "marker_id" => "err-a" }, row.marker_attrs)
+        assert_in_delta pre_clear_mtime.to_f, row.state_file_mtime.to_f, 1.0,
+                        "status pipeline must carry the state-file mtime into healer rows"
 
-      @healer.heal([ row ], now: Time.now)
+        @healer.heal([ row ], now: Time.now)
 
-      assert Hive::Markers.current(state_file).none?,
-             "healer must clear the finalize unpushed marker"
-      baseline = @controller.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
-      assert baseline,
-             "heal must seed a dispatch baseline so the post-clear row is not treated as first-sight"
-      assert_in_delta pre_clear_mtime.to_f, baseline.to_f, 1.0,
-                      "the seeded baseline must be the PRE-clear mtime"
+        assert Hive::Markers.current(state_file).none?,
+               "healer must clear the finalize unpushed marker"
+        baseline = @controller.last_dispatched_state_file_mtime_for(project: File.basename(dir), slug: slug)
+        assert baseline,
+               "heal must seed a dispatch baseline so the post-clear row is not treated as first-sight"
+        assert_in_delta pre_clear_mtime.to_f, baseline.to_f, 1.0,
+                        "the seeded baseline must be the PRE-clear mtime"
 
-      # The clear rewrote the file, bumping its mtime past the seeded
-      # baseline — a genuine edit from Policy's point of view. The
-      # pre-clear mtime is offset by 1000s above so this assertion does
-      # not depend on sub-second filesystem mtime resolution.
-      post_clear_mtime = File.mtime(state_file)
-      assert post_clear_mtime > baseline,
-             "post-clear mtime must exceed the seeded pre-clear baseline"
+        # The clear rewrote the file, bumping its mtime past the seeded
+        # baseline — a genuine edit from Policy's point of view. The
+        # pre-clear mtime is offset by 1000s above so this assertion does
+        # not depend on sub-second filesystem mtime resolution.
+        post_clear_mtime = File.mtime(state_file)
+        assert post_clear_mtime > baseline,
+               "post-clear mtime must exceed the seeded pre-clear baseline"
+        post_clear_row = status_rows_via_consumer(dir).find { |candidate| candidate.slug == slug }
+        assert post_clear_row, "status pipeline must include the cleared finalize task"
+        assert_equal "none", post_clear_row.marker
+        assert_equal "needs_input", post_clear_row.action,
+                     "policy input must come from the real post-clear status row"
 
-      decision = Hive::Daemon::Policy.decide(
-        action: "needs_input",
-        stage: "8-finalize",
-        command: "hive run p s",
-        state_file_mtime: post_clear_mtime,
-        last_dispatched_state_file_mtime: baseline,
-        now: post_clear_mtime + 3600,
-        edit_debounce_sec: 30
-      )
+        decision = Hive::Daemon::Policy.decide(
+          action: post_clear_row.action,
+          stage: post_clear_row.stage,
+          command: post_clear_row.suggested_command,
+          state_file_mtime: post_clear_row.state_file_mtime,
+          last_dispatched_state_file_mtime: baseline,
+          now: post_clear_row.state_file_mtime + 3600,
+          edit_debounce_sec: 30
+        )
 
-      assert_equal :dispatch, decision,
-                   "finalize must re-dispatch after the unpushed_commits heal, " \
-                   "not strand on :record_baseline"
+        assert_equal :dispatch, decision,
+                     "finalize must re-dispatch after the unpushed_commits heal, " \
+                     "not strand on :record_baseline"
+      end
     end
   end
 

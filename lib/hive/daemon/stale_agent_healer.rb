@@ -51,13 +51,19 @@ module Hive
     #
     # ERROR reason=unpushed_commits at 8-finalize is also auto-retryable:
     # the finalize push gate can fail during ordinary interruptions
-    # (sleep/network/auth agent loss) even though the task state remains
+    # (sleep/network) even though the task state remains
     # recoverable by rerunning finalize. Clearing that specific marker
-    # lets finalize rerun its existing clean-exit, auth, and push checks
-    # up to ERROR_AUTO_RECOVERY_LIMIT times before leaving the marker red
+    # lets finalize rerun its existing auth, clean-exit, and push checks
+    # up to the configured limit (default 3) before leaving the marker red
     # for manual recovery. There is no healer-side backoff between those
     # retries — the only thing spacing them is finalize's own re-dispatch
     # runtime (a full finalize agent run), not any delay enforced here.
+    #
+    # Unlike the review path (`review_error_signature`), the finalize
+    # recovery key (`error_auto_recovery_key`) deliberately omits a failure
+    # signature: every push failure on a task shares one retry budget by
+    # design, so a genuinely different push error does not silently earn a
+    # fresh budget. This asymmetry is intentional, not an oversight.
     #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
@@ -71,21 +77,6 @@ module Hive
     #     advance these)
     #   - placeholder marker still within grace (slow but normal dispatch)
     class StaleAgentHealer
-      # Reason attrs the healer writes onto ERROR markers.
-      MARKER_ERROR_REASONS = %i[
-        agent_died
-        agent_orphaned
-      ].freeze
-
-      # Structured labels emitted as marker_healed / marker_heal_* reasons.
-      HEAL_LOG_LABELS = %i[
-        agent_died
-        agent_orphaned
-        review_agent_died
-        review_orphaned
-        reviewer_tmux_session_terminated
-        finalize_unpushed_commits
-      ].freeze
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
       ERROR_AUTO_RECOVERY_LIMIT = 3
 
@@ -203,7 +194,7 @@ module Hive
                       reason: "finalize_unpushed_commits",
                       marker_reason: reason,
                       state_file: row.state_file,
-                      attempt: attempts,
+                      attempts: attempts,
                       max_attempts: @error_auto_recovery_limit)
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
@@ -234,7 +225,19 @@ module Hive
       end
 
       def observe_pre_clear_mtime(row)
-        return unless @controller.respond_to?(:observe_state_file_mtime)
+        # Production always satisfies this (ConcurrencyController defines
+        # the method). A future controller swap that dropped it would
+        # silently reintroduce the first-sight `record_baseline` stranding
+        # the seeded baseline exists to prevent — so emit a debug event
+        # instead of a silent no-op, giving the gap a log signal.
+        unless @controller.respond_to?(:observe_state_file_mtime)
+          @logger.event(:marker_heal_observer_missing,
+                        project: row.project,
+                        slug: row.slug,
+                        stage: row.stage,
+                        state_file: row.state_file)
+          return
+        end
 
         @controller.observe_state_file_mtime(
           project: row.project,
@@ -297,24 +300,29 @@ module Hive
                       phase: marker_attrs["phase"],
                       pass: marker_attrs["pass"],
                       errors_path: reviewer_errors_path(row),
-                      attempt: attempts,
+                      attempts: attempts,
                       max_attempts: @review_error_auto_recovery_limit)
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
                       slug: row.slug,
                       stage: row.stage,
-                      reason: "reviewer_tmux_session_terminated",
+                      reason: review_heal_label(marker_reason(row)),
                       error: "#{e.class}: #{e.message}")
       end
 
       # Emit `marker_heal_exhausted` at most once per (process, recovery_key).
       # The event name reads terminal, but the budget it reports is
-      # in-memory and per-process: a daemon restart (or the SIGHUP healer
-      # rebuild) drops the counts and re-arms `max_attempts` more clears.
-      # `budget_scope: "per_process"` flags that on the event; each call
-      # site also passes a `remediation:` hint so an operator reading the
-      # log knows how to recover now instead of over-reading "red forever".
+      # in-memory and per-process: a daemon restart — or a routine SIGHUP
+      # config reload, which rebuilds the healer in Dispatcher (see the
+      # `@stale_agent_healer = StaleAgentHealer.new` rebuild in
+      # dispatcher.rb) — drops both the retry counts AND these `seen` dedup
+      # maps. So a reload re-arms `max_attempts` fresh clears and re-arms
+      # this one-shot guard, which means the exhausted event can fire again
+      # afterwards for the same key. `budget_scope: "per_process"` flags that
+      # on the event; each call site also passes a `remediation:` hint so an
+      # operator reading the log knows how to recover now instead of
+      # over-reading "red forever".
       def log_recovery_exhausted_once(seen, recovery_key, row, **attrs)
         return if seen[recovery_key]
 

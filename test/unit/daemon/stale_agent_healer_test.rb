@@ -654,7 +654,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert heal_event, "expected finalize unpushed auto-recovery event, got: #{@logger.events.inspect}"
       assert_equal "finalize_unpushed_commits", heal_event[1][:reason]
       assert_equal "unpushed_commits", heal_event[1][:marker_reason]
-      assert_equal 1, heal_event[1][:attempt]
+      assert_equal 1, heal_event[1][:attempts]
       assert_equal [ { project: "p", slug: "s", mtime: pre_clear_mtime } ], @controller.observed_mtimes
       assert Hive::Markers.current(state_file).none?,
              "auto-recoverable unpushed finalize marker should clear to :none so daemon can rerun finalize"
@@ -890,7 +890,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                    "same finalize push failure must stay red after budget exhaustion")
       heals = @logger.events.select { |name, _| name == :marker_healed }
       assert_equal 1, heals.size
-      assert_equal 1, heals.first[1][:attempt]
+      assert_equal 1, heals.first[1][:attempts]
       assert_equal 1, heals.first[1][:max_attempts]
 
       exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
@@ -1067,7 +1067,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert Hive::Markers.current(state_file).none?
       heals = @logger.events.select { |name, _| name == :marker_healed }
       assert_equal 1, heals.size
-      assert_equal 1, heals.first[1][:attempt]
+      assert_equal 1, heals.first[1][:attempts]
       refute @logger.events.any? { |name, _| name == :marker_heal_failed }
       refute @logger.events.any? { |name, _| name == :marker_heal_exhausted }
     end
@@ -1207,7 +1207,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
                    "same auto-recoverable review error must stay red after budget exhaustion")
       heals = @logger.events.select { |name, _| name == :marker_healed }
       assert_equal 1, heals.size
-      assert_equal 1, heals.first[1][:attempt]
+      assert_equal 1, heals.first[1][:attempts]
       assert_equal 1, heals.first[1][:max_attempts]
 
       exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
@@ -1254,8 +1254,75 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       failure = @logger.events.find { |name, _| name == :marker_heal_failed }
       assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
-      assert_equal "reviewer_tmux_session_terminated", failure[1][:reason]
+      assert_equal "review_agent_died", failure[1][:reason],
+                   "a heal failure on a review_agent_died marker must keep its own " \
+                   "label, not be mislabeled as the tmux-death channel"
       assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_finalize_unpushed_logs_when_controller_cannot_seed_pre_clear_mtime
+    controller = Object.new
+    def controller.running_task?(project:, slug:) = false
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: controller,
+      logger: @logger,
+      grace_sec: 300
+    )
+
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      missing = @logger.events.find { |name, _| name == :marker_heal_observer_missing }
+      assert missing, "expected observer-missing event, got: #{@logger.events.inspect}"
+      assert_equal "p", missing[1][:project]
+      assert_equal "s", missing[1][:slug]
+      assert_equal state_file, missing[1][:state_file]
+      assert Hive::Markers.current(state_file).none?,
+             "missing observer logging must not roll back a successful clear"
+    end
+  end
+
+  def test_finalize_unpushed_exhausted_event_is_logged_once_per_process_key
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      heal([ row ])
+      3.times do
+        File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+        heal([ row ])
+      end
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size,
+                   "exhausted seen-map must suppress repeated log spam for the same process key"
     end
   end
 

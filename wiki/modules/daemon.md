@@ -121,8 +121,8 @@ stage does not move and no workflow verb fires from either path.
    marker-clear rewrite looks like a settled edit-resume change on the next
    status read rather than a first-sight row to strand via `record_baseline`.
    Clearing the marker lets the daemon rerun finalize, which performs the
-   existing clean-exit scope check, optional residue commit, auth check, and
-   push. Manual-only errors such as `reason=ensure_clean_on_exit_failed` are
+   existing auth check, clean-exit scope check, optional residue commit, and
+   push (in that order). Manual-only errors such as `reason=ensure_clean_on_exit_failed` are
    left red because they need operator inspection. Auto-clears are bounded per
    daemon process by failure signature (default 3 clears); repeated identical
    failures stay red after the budget is exhausted so a persistent

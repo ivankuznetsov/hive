@@ -177,6 +177,72 @@ class ClaudeLauncherTest < Minitest::Test
     assert_in_delta 0.5, sleeps.sum, 0.001
   end
 
+  def test_prepare_claude_session_reports_limits_when_caller_deadline_is_already_expired
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-limited-session" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) do |bytes:|
+      "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+    end
+
+    monotonic_now = 1_000.0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      err = assert_raises(Hive::AgentError) do
+        Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
+      end
+
+      assert_match(/\Alimits reached for claude:/, err.message)
+      refute_match(/interactive prompt did not become ready/, err.message)
+    end
+  end
+
+  def test_prepare_claude_session_reports_limits_after_trust_prompt_deadline
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-limited-after-trust" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) do |bytes:|
+      "Quick safety check\n" \
+        "❯ 1. Yes, I trust this folder\n" \
+        "Enter to confirm\n" \
+        "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+    end
+    runner.define_singleton_method(:send_keys) { |_keys| nil }
+
+    monotonic_now = 1_000.0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      err = assert_raises(Hive::AgentError) do
+        Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
+      end
+
+      assert_match(/\Alimits reached for claude:/, err.message)
+      refute_match(/interactive prompt did not become ready/, err.message)
+    end
+  end
+
+  def test_prepare_claude_session_reports_limits_after_ready_wait_exits
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-limited-after-wait" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) { |bytes:| "Claude Code\nstill starting\n" }
+
+    monotonic_now = 1_000.0
+    calls = 0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      with_replaced_singleton_method(Hive::AgentLimit, :limit_reached?, lambda { |_text|
+        calls += 1
+        calls >= 2
+      }) do
+        with_replaced_singleton_method(Hive::AgentLimit, :error_message, ->(_text, agent:) { "limits reached for #{agent}: after wait" }) do
+          err = assert_raises(Hive::AgentError) do
+            Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
+          end
+
+          assert_equal "limits reached for claude: after wait", err.message
+        end
+      end
+    end
+  end
+
   def test_send_prompt_and_wait_clamps_wait_timeout_to_remaining_deadline
     with_tmp_task do |task|
       runner = Object.new
@@ -385,6 +451,15 @@ class ClaudeLauncherTest < Minitest::Test
 
     assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
            "the idle caret at line end (with a hint footer below it) must read as ready"
+  end
+
+  def test_claude_ready_prompt_accepts_current_footer_when_banner_scrolled_out
+    pane = "?────────────────────────────────────────────────────────────────────────\n" \
+           "  hive-patrol-command-bin-hive-babysitter-stub-gh-5031d524 hive-patrol/command-bin-hive-babysitter-stub-gh-5031d524  ❯\n" \
+           "  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #316 · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the live prompt footer can remain visible after the Claude Code banner scrolls out of the captured tail"
   end
 
   # A numbered menu option must stay rejected even when a hint footer now
@@ -687,6 +762,27 @@ class ClaudeLauncherTest < Minitest::Test
     assert_match(/terminated before becoming ready/, err.message)
   end
 
+  def test_prepare_claude_session_reports_limits_instead_of_ready_timeout
+    limit_menu = <<~TEXT
+      Claude Code
+      What do you want to do?
+      ❯ 1. Stop and wait for limit to reset
+        2. Add funds to continue with usage credits
+        3. Switch to Team plan
+    TEXT
+    runner = Struct.new(:name, :tail) do
+      def session_exists? = true
+      def capture_pane_tail(bytes:) = tail
+    end.new("limited-session", limit_menu)
+
+    err = assert_raises(Hive::AgentError) do
+      Hive::ClaudeLauncher.prepare_claude_session!(runner)
+    end
+
+    assert_match(/\Alimits reached for claude:/, err.message)
+    refute_match(/interactive prompt did not become ready/, err.message)
+  end
+
   def test_wait_for_status_dispatches_exit_output_and_unknown_modes
     with_tmp_task do |task|
       runner = Struct.new(:tail) do
@@ -750,6 +846,88 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal :error, result.fetch(:status)
         assert_match(/tmux_pane_unreadable: pane unreadable/, result.fetch(:error_message))
       end
+    end
+  end
+
+  def test_wait_for_expected_output_fails_fast_when_session_dies_before_output
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { flunk "must not wait to timeout" }) do
+        result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+        assert_equal :error, result.fetch(:status)
+        assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+        assert_match(/missing\.md/, result.fetch(:error_message))
+      end
+    end
+  end
+
+  def test_wait_for_expected_output_reports_limits_before_tmux_session_death
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      runner = Struct.new(:name, :tail) do
+        def session_exists? = false
+        def capture_pane_tail(bytes:) = tail
+      end.new("limited-reviewer", limit_menu)
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      refute_match(/tmux_session_terminated/, result.fetch(:error_message))
+    end
+  end
+
+  def test_wait_for_expected_output_treats_tmux_liveness_error_as_dead_session
+    with_tmp_task do |task|
+      output = File.join(task.folder, "missing.md")
+      runner = Struct.new(:name) do
+        def session_exists?
+          raise Hive::TmuxError, "server unavailable"
+        end
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+    end
+  end
+
+  def test_wait_for_expected_output_rejects_nonempty_output_when_session_dies_without_done_signal
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/tmux_session_terminated/, result.fetch(:error_message))
+      assert_equal "review findings", File.read(output)
+    end
+  end
+
+  def test_wait_for_expected_output_accepts_nonempty_output_and_done_when_session_dies_after_write
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:name) do
+        def session_exists? = false
+      end.new("gone-reviewer")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal({ status: :ok, log_label: "review" }, result)
+      assert_equal "review findings", File.read(output)
     end
   end
 
@@ -837,6 +1015,27 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "tmux_session_terminated", marker.attrs.fetch("reason")
         assert_match(/gone-session/, marker.attrs.fetch("message"))
+      end
+    end
+  end
+
+  def test_wait_for_terminal_marker_reports_limits_instead_of_timeout
+    with_tmp_task do |task|
+      Hive::Markers.set(task.state_file, :agent_working,
+                        pid: Process.pid,
+                        started: Time.now.utc.iso8601)
+      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      runner = Struct.new(:name, :tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new("limited-stage", limit_menu)
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+        marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
+
+        assert_equal :error, marker.name
+        assert_equal "limits_reached", marker.attrs.fetch("reason")
+        assert_match(/\Alimits reached for claude:/, marker.attrs.fetch("message"))
       end
     end
   end

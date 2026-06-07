@@ -69,9 +69,9 @@ module Hive
 
         module_function
 
-        def render(model, width:)
+        def render(model, width:, height: nil)
           inner_width = [ width - 2, 1 ].max
-          body = build_body(model, inner_width)
+          body = build_body(model, inner_width, height: height)
           border_for(model).width(inner_width).render(body)
         end
 
@@ -82,20 +82,21 @@ module Hive
 
         # ---- Body sections ----
 
-        def build_body(model, inner_width)
+        def build_body(model, inner_width, height: nil)
           lines = []
           lines << Styles::HEADER.render(truncate(title_for(model), inner_width))
           lines << ""
+          inner_height = height ? [ height.to_i - 2, 1 ].max : nil
 
           if model.snapshot.nil?
             lines << Styles::HINT.render(NO_SNAPSHOT_PLACEHOLDER)
-            return lines.join("\n")
+            return fit_lines(lines, inner_height).join("\n")
           end
 
           visible = visible_snapshot(model)
           if visible.nil? || visible.projects.all? { |p| p.rows.empty? }
             lines << Styles::HINT.render(EMPTY_PLACEHOLDER)
-            return lines.join("\n")
+            return fit_lines(lines, inner_height).join("\n")
           end
 
           layout = compute_layout(inner_width)
@@ -105,11 +106,17 @@ module Hive
           # mis-highlighted rows at scope=0 when registries had >1
           # project, because cursor[1] resets to 0 on next-project jump
           # while a flat iterator keeps incrementing.
+          row_lines = []
           visible.projects.each_with_index do |project, project_idx|
             project.rows.each_with_index do |row, row_idx|
-              lines << render_row(row, project_idx, row_idx, model, layout)
+              row_lines << {
+                coord: [ project_idx, row_idx ],
+                text: render_row(row, project_idx, row_idx, model, layout)
+              }
             end
           end
+
+          lines = visible_task_lines(lines, row_lines, model.cursor, inner_height)
           lines.join("\n")
         end
 
@@ -159,13 +166,13 @@ module Hive
 
         def render_row(row, project_idx, row_idx, model, layout)
           highlighted = highlight?(model, project_idx, row_idx)
-          icon = ICONS.fetch(row.action_key.to_s, DEFAULT_ICON)
-          id = row.id ? row.id.to_s.rjust(ID_WIDTH) : "—".rjust(ID_WIDTH)
-          name = truncate(display_name(row), layout[:name]).ljust(layout[:name])
-          age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
+          icon = Format.ljust_cells(ICONS.fetch(row.action_key.to_s, DEFAULT_ICON), ICON_WIDTH)
+          id = Format.rjust_cells(row.id ? row.id.to_s : "—", ID_WIDTH)
+          name = Format.ljust_cells(display_name(row), layout[:name])
+          age = Format.rjust_cells(Format.age(row.age_seconds), AGE_WIDTH)
           parts = [ icon, id, name ]
-          parts << truncate(row.stage.to_s, layout[:stage]).ljust(layout[:stage]) if layout[:stage].positive?
-          parts << truncate(status_label(row), layout[:status]).ljust(layout[:status]) if layout[:status].positive?
+          parts << Format.ljust_cells(row.stage.to_s, layout[:stage]) if layout[:stage].positive?
+          parts << Format.ljust_cells(status_label(row), layout[:status]) if layout[:status].positive?
           parts << age
           line = parts.join(" ")
           colored = Styles.for_action_key(row.action_key).render(line)
@@ -251,6 +258,33 @@ module Hive
           !model.cursor.nil? &&
             model.cursor == [ project_idx, row_idx ] &&
             model.pane_focus == :right
+        end
+
+        def visible_task_lines(header, row_lines, cursor, inner_height)
+          return header + row_lines.map { |row| row[:text] } if inner_height.nil?
+          return fit_lines(header, inner_height) if inner_height <= header.size
+
+          capacity = inner_height - header.size
+          selected_index = row_lines.index { |row| row[:coord] == cursor } || 0
+          start = viewport_start(
+            total: row_lines.size,
+            capacity: capacity,
+            selected_index: selected_index
+          )
+          fit_lines(header + row_lines.slice(start, capacity).to_a.map { |row| row[:text] }, inner_height)
+        end
+
+        def fit_lines(lines, height)
+          return lines if height.nil?
+
+          lines.first(height) + Array.new([ height - lines.size, 0 ].max, "")
+        end
+
+        def viewport_start(total:, capacity:, selected_index:)
+          return 0 if total <= capacity
+
+          selected = selected_index.clamp(0, total - 1)
+          selected < capacity ? 0 : [ selected - capacity + 1, total - capacity ].min
         end
       end
     end

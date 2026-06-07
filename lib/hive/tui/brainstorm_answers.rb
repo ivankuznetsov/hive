@@ -10,7 +10,7 @@ module Hive
     # Heading-form tolerance:
     #   The canonical contract in `templates/brainstorm_prompt.md.erb`
     #   uses `### Q{n}.` for questions and `### A{n}.` for answers,
-    #   but the `/compound-engineering:ce-brainstorm` skill (which the
+    #   but the `/ce-brainstorm` skill (which the
     #   prompt invokes for Round 2+) emits `### Q{n} answer.` instead
     #   of `### A{n}.`. Both forms are accepted as answers so the
     #   parser does not refuse on legitimate agent output.

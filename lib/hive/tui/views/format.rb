@@ -1,3 +1,5 @@
+require "unicode/display_width"
+
 module Hive
   module Tui
     module Views
@@ -7,6 +9,14 @@ module Hive
       # duplicating it. Keeps the two surfaces from disagreeing on what
       # "5m" means — every view that displays a row's mtime/age routes
       # through this module.
+      # Naming note: the `_cells` suffix (`ljust_cells`/`rjust_cells`)
+      # distinguishes the cell-aware padders from String's column-naive
+      # `ljust`/`rjust`. `truncate`/`display_width` keep their bare names
+      # for their many external callers but are equally cell-aware.
+      #
+      # Nil-tolerance contract: every public helper coerces its label
+      # through `.to_s`, so a nil label is treated as the empty string
+      # rather than raising.
       module Format
         module_function
 
@@ -21,20 +31,47 @@ module Hive
           "#{seconds / 86_400}d"
         end
 
-        # Truncate `label` to `max_width` cells, appending an ellipsis
-        # (U+2026) when truncation occurs. `max_width < 2` falls back to
-        # a hard cut without ellipsis (no room for the suffix). Used by
-        # both ProjectsPane and TasksPane for column/cell fitting.
-        # Note: counts code units, not display cells — wide-character
-        # cell math is not done here; emoji and CJK can overflow on
-        # terminals that render them double-width. Acknowledged.
+        # Truncate `label` to `max_width` terminal cells, appending an
+        # ellipsis (U+2026) when truncation occurs. `max_width < 2`
+        # falls back to a hard cut without ellipsis (no room for the
+        # suffix). Used by pane/table renderers for column fitting.
         def truncate(label, max_width)
           return "" if max_width <= 0
-          return label if label.length <= max_width
-          return label[0, max_width] if max_width < 2
 
-          "#{label[0, max_width - 1]}…"
+          string = label.to_s
+          return string if display_width(string) <= max_width
+          return take_cells(string, max_width) if max_width < 2
+
+          "#{take_cells(string, max_width - 1)}…"
         end
+
+        def ljust_cells(label, width)
+          string = truncate(label, width)
+          string + (" " * [ width - display_width(string), 0 ].max)
+        end
+
+        def rjust_cells(label, width)
+          string = truncate(label, width)
+          (" " * [ width - display_width(string), 0 ].max) + string
+        end
+
+        def display_width(label)
+          Unicode::DisplayWidth.of(label.to_s)
+        end
+
+        # Internal primitive: a raw cell-bounded cut with no ellipsis.
+        # Private so callers can't bypass `truncate`'s ellipsis contract.
+        def take_cells(label, max_width)
+          remaining = max_width
+          label.to_s.each_grapheme_cluster.with_object(+"") do |cluster, result|
+            width = display_width(cluster)
+            break result if width > remaining
+
+            result << cluster
+            remaining -= width
+          end
+        end
+        private_class_method :take_cells
       end
     end
   end

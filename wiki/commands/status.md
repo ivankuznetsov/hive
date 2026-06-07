@@ -3,11 +3,11 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal text status hides clean `9-done` tasks whose task-folder mtime is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, and prints human task identities grouped by the next useful action. Normal text status hides `9-done` tasks whose row `mtime` is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
 
 ## Output shape
 
@@ -25,7 +25,7 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 
 ## Archived tasks
 
-`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable only when `stage == Hive::Stages::DIRS.last` (`9-done`), the marker is resolved (`:complete` or `:none`), `folder_mtime` is present, and `(now - folder_mtime) > 3 days`. Any unresolved marker on a done task (`ERROR`, `AGENT_WORKING`, `WAITING`, `MANUAL_STEERING`, etc.) remains visible regardless of age.
+`Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), the row timestamp is present, and `(now - mtime) > 3 days`. Marker state is not part of the policy: complete, unresolved, and markerless done rows all use the same age rule. The policy uses the task row's `mtime` (state-file mtime, the same timestamp rendered as row age) rather than `folder_mtime`, because sidecar updates such as `meta.yml` display-name backfills can touch the directory without making the archived task newly relevant. Older consumers that only have `folder_mtime` still get it as a fallback. If neither timestamp is available, the filter fails open and keeps the row visible rather than guessing. `hive archive` remains the full view.
 
 The filter applies only to human daily surfaces: default `hive status` text and the TUI grid. Default `hive status --json` stays unfiltered so bots, daemons, and agents continue to see every task row. Text status prints `… and N archived >3d ago (hive archive to view)` when rows were hidden.
 
@@ -65,7 +65,7 @@ The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hi
 - Project path missing → `"<name>: missing project path <path>"`.
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
-- Old clean `9-done` rows → hidden from text output with the per-project summary line above; unresolved done markers remain visible.
+- Old `9-done` rows → hidden from text output by age alone, regardless of marker state, with the per-project summary line above.
 - Daily task identity is left-padded to 42 chars; state label to 24 chars; then the suggested command and humanised age. Archive-mode rows left-pad the slug to 36 chars. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.

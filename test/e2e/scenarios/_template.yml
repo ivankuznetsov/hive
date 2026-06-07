@@ -93,7 +93,7 @@ steps:
   # Required: anchor
   # Optional: timeout (seconds, default 3.0)
   - kind: tui_expect
-    anchor: "hive tui"
+    anchor: "Tasks ·"
 
   # tui_keys — deliver keystrokes to the live tmux pane. Use `keys` for named
   # tmux keys ("Enter", "Up", "C-c"); use `text` for literal characters.

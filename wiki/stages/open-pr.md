@@ -22,7 +22,7 @@ tags: [stage, pr, github]
 3. If a MERGED PR exists for the current local `HEAD` (`headRefOid` match), write `pr.md` with `merged=true`, secret-scan it, write `summary.md`, and finish without spawning an agent.
 4. Push the branch with `git push -u origin <branch>`.
 5. Render `templates/open_pr_prompt.md.erb` with the plan and execute output wrapped in a per-spawn `<user_supplied>` nonce.
-6. Spawn the open-pr agent in the worktree. The prompt invokes `compound-engineering:ce-commit-push-pr`, requires `gh pr create --draft`, forbids another push, and requires `pr.md` frontmatter with `pr_url` / `pr_number`.
+6. Spawn the open-pr agent in the worktree. The prompt invokes `/ce-commit-push-pr`, requires `gh pr create --draft`, forbids another push, and requires `pr.md` frontmatter with `pr_url` / `pr_number`.
 7. Secret-scan the resulting `pr.md` and PR body before returning success.
 
 ## Marker → commit action

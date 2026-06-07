@@ -85,10 +85,9 @@ module Hive
 
       # Thor 1.3+ default is to print a deprecation warning and exit 0 on
       # unknown commands; opting in to non-zero exit lets CI / wrapper
-      # scripts branch precisely on bad invocations. The `--json` path
-      # passes `debug: true` to Thor::Base.start (see bottom of this file),
-      # which makes Thor re-raise Thor::Error so the outer rescue can emit
-      # a structured envelope.
+      # scripts branch precisely on bad invocations. Thor starts in debug
+      # mode below so Thor::Error re-raises and the outer rescue can map
+      # usage failures to this binary's documented exit code.
       def self.exit_on_failure?
         true
       end
@@ -247,9 +246,8 @@ def rewrite_help_flag!(argv)
   help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
-  cmd = argv.delete_at(cmd_idx)
-  argv.delete_at(cmd_idx + help_idx)
-  argv.unshift("help", cmd)
+  cmd = argv[cmd_idx]
+  argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
 def normalize_leading_class_options!(argv)
@@ -266,14 +264,11 @@ end
 begin
   normalize_leading_class_options!(ARGV)
   rewrite_help_flag!(ARGV)
-  # Thor::Base#start rescues Thor::Error internally and either prints to
-  # stderr + exit 1 (when exit_on_failure? is true) or warns + exit 0
-  # (when false) — neither path lets bin/hive-e2e's outer rescue emit a
-  # JSON error envelope. Passing `debug: true` makes Thor re-raise instead,
-  # so when --json is set the rescue below can format the structured
-  # hive-e2e-error output. Without --json, preserve Thor's existing
-  # human-readable behavior.
-  Hive::E2E::Binary.start(ARGV, debug: ARGV.include?("--json"))
+  # Thor::Base#start rescues Thor::Error internally and exits 1 when
+  # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
+  # instead so the rescue below can preserve human/JSON formatting while
+  # mapping usage failures to BinaryExit::USAGE.
+  Hive::E2E::Binary.start(ARGV, debug: true)
 rescue Hive::E2E::PreflightError => e
   if ARGV.include?("--json")
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
@@ -287,7 +282,7 @@ rescue Thor::Error => e
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
-    warn e.message
+    warn "hive-e2e: #{e.message}"
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e

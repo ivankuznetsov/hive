@@ -3,11 +3,11 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-05
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Five runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`, `sqlite3`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
+**TLDR**: Six runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`, `sqlite3`, `unicode-display_width`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
 
 ## Runtime gems
 
@@ -18,8 +18,14 @@ tags: [dependencies, gems, runtime]
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
+| `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
-`telegram-bot-ruby` pulls Faraday for HTTP transport. `Gemfile.lock` keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
+`telegram-bot-ruby` pulls Faraday and `faraday-multipart` for HTTP
+transport. Hive also uses those transitive gems directly in
+`Hive::Bot::Transcriber` to POST Telegram voice-note bytes to the
+configured OpenAI-compatible audio transcription endpoint. `Gemfile.lock`
+keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags
+`2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

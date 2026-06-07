@@ -31,7 +31,7 @@ class InitDoctorPreflightTest < Minitest::Test
   def install_all_default_skills(home)
     # plan stage default → /plan (user command)
     write_file("#{home}/.claude/commands/plan.md")
-    # brainstorm stage default → /compound-engineering:ce-brainstorm
+    # brainstorm stage default → /ce-brainstorm
     write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
     # review.reviewers default set: claude-ce-code-review +
     # codex-ce-code-review + pr-review-toolkit:review-pr

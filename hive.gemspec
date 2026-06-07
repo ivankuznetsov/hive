@@ -46,13 +46,21 @@ Gem::Specification.new do |spec|
   ]
 
   spec.bindir      = "bin"
-  spec.executables = [ "hive", "hv" ]
+  spec.executables = [ "hive" ]
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
   spec.add_dependency "bubbletea", "= 0.1.4"
+  # faraday + faraday-multipart are required and used directly by the voice
+  # transcriber (Faraday.new, Faraday::Multipart::FilePart). They resolve
+  # transitively through telegram-bot-ruby today, but declaring them directly
+  # keeps transcription from breaking with a LoadError if an upstream bump
+  # drops or re-scopes them.
+  spec.add_dependency "faraday", "~> 2.0"
+  spec.add_dependency "faraday-multipart", "~> 1.0"
   spec.add_dependency "lipgloss", "~> 0.2.2"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"
+  spec.add_dependency "unicode-display_width", "~> 3.2"
 end

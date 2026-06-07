@@ -85,7 +85,7 @@ class E2EBinaryTest < Minitest::Test
   # rather than Thor's "ERROR: ... was called with no arguments" prose.
   def test_missing_required_args_with_json_emits_envelope_on_stdout
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json")
-    refute_equal 0, status.exitstatus
+    assert_equal 64, status.exitstatus
     assert_empty err
 
     payload = JSON.parse(out)
@@ -104,15 +104,28 @@ class E2EBinaryTest < Minitest::Test
   # Thor's default for unknown commands is to print a deprecation warning
   # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
   # see a non-zero status instead. Pin the contract here.
-  def test_unknown_command_exits_non_zero
-    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
-    refute_equal 0, status.exitstatus,
-                 "bin/hive-e2e should exit non-zero on unknown commands (got #{status.exitstatus.inspect})"
+  def test_unknown_command_exits_usage_code
+    _out, err, status = Open3.capture3(hive_e2e, "no-such-command")
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-e2e:/, err, "human mode should print a prose error to stderr")
+  end
+
+  def test_missing_required_args_exits_usage_code
+    _out, err, status = Open3.capture3(hive_e2e, "replay")
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-e2e:/, err, "human mode should print a prose error to stderr")
   end
 
   def test_run_help_after_subcommand_shows_usage
     out, err, status = Open3.capture3(hive_e2e, "run", "--help")
     assert status.success?, "bin/hive-e2e run --help should exit 0, stderr was: #{err}"
+    assert_includes out, "Run e2e scenarios"
+    refute_includes err, "no scenarios match"
+  end
+
+  def test_run_help_after_option_value_shows_usage
+    out, err, status = Open3.capture3(hive_e2e, "run", "--filter", "tui", "--help")
+    assert status.success?, "bin/hive-e2e run --filter tui --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
   end

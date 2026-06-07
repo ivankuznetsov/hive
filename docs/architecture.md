@@ -51,7 +51,7 @@ Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstor
 
 Hive has built-in agent profiles for `claude`, `codex`, and `pi`. A profile defines the binary, version check, prompt flag, add-dir behavior, skill invocation syntax, and status-detection mode. Stage runners look up the configured profile before spawning the subprocess.
 
-Default new-project setup uses `claude` for planning, `codex` for execute, and a reviewer set that can include Claude, Codex, and PR review toolkit agents. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
+Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
 
 ## Required Skills Per Stage
 
@@ -59,12 +59,12 @@ Hive's prompts invoke skills inside the chosen agent. `hive doctor` checks the c
 
 | Stage | Default invocation | Install for claude | Install for codex |
 |---|---|---|---|
-| `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
+| `2-brainstorm` | `/ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
 | `3-plan` | `/plan` | a user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/ivankuznetsov/agent-plugins) or write one inline) | a skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
 
 | Reviewer | Default skill | Agent | Install target |
 |---|---|---|---|
-| `claude-ce-code-review` | `/ce-code-review` | `claude` | `~/.claude/skills/ce-code-review/SKILL.md` (or set `skill: compound-engineering:ce-code-review` in config to use the plugin form explicitly) |
+| `claude-ce-code-review` | `/ce-code-review` | `claude` | `~/.claude/skills/ce-code-review/SKILL.md` or a Claude plugin that ships `ce-code-review`; legacy `skill: compound-engineering:ce-code-review` config is normalized to `/ce-code-review` |
 | `codex-ce-code-review` | `/ce-code-review` | `codex` | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
 | `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude` | `claude plugin install <pr-review-toolkit-marketplace>` |
 
@@ -181,7 +181,7 @@ rebase:
   conflict_resolution_timeout_sec: 2700
 ```
 
-`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
+`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
 
 `HIVE_HOME` changes where Hive reads the global registry. `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, and `HIVE_PI_BIN` override agent binaries for tests or local shims.
 

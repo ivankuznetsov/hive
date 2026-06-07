@@ -50,6 +50,13 @@ module Hive
           codex-ce-code-review
           pr-review-toolkit
         ].freeze
+        PATROL_REVIEWER_NAMES = %w[
+          codex-ce-code-review
+          claude-ce-code-review
+        ].freeze
+        DEFAULT_PATROL_REVIEWER_NAMES = %w[
+          codex-ce-code-review
+        ].freeze
 
         # The effective budget/timeout keys after dropping the deprecated
         # execute_review (review owns reviewer budgets per ADR-014).
@@ -107,6 +114,7 @@ module Hive
         #     "claude_permission_mode" => String,      # Claude Code permission mode
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
+        #     "patrol_reviewers"  => Array<String>,    # subset of PATROL_REVIEWER_NAMES
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
@@ -124,6 +132,7 @@ module Hive
           claude_permission_mode = prompt_claude_permission_mode
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
+          patrol_reviewers = prompt_patrol_reviewers
           triage_bias = prompt_triage_bias
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
@@ -136,6 +145,7 @@ module Hive
             "claude_permission_mode" => claude_permission_mode,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
+            "patrol_reviewers" => patrol_reviewers,
             "triage_bias" => triage_bias,
             "budgets" => budgets,
             "timeouts" => timeouts,
@@ -166,6 +176,7 @@ module Hive
             "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
+            "patrol_reviewers" => DEFAULT_PATROL_REVIEWER_NAMES.dup,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
@@ -181,6 +192,7 @@ module Hive
             "claude_permission_mode=#{DEFAULT_CLAUDE_PERMISSION_MODE}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
+            "patrol_reviewers=codex, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled, " \
             "babysitter=enabled, daemon_autostart=disabled"
           )
@@ -316,6 +328,39 @@ module Hive
         end
 
         def resolve_reviewer_tokens(answer)
+          resolve_reviewer_tokens_from(
+            answer,
+            choices: DEFAULT_REVIEWER_NAMES,
+            empty_message: "input had no reviewer tokens; type a name/index list, or blank for all"
+          )
+        end
+
+        def prompt_patrol_reviewers
+          @output.puts ""
+          @output.puts "Patrol PR review agents — blank = codex only; add Claude for broader patrol PR review:"
+          PATROL_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
+          loop do
+            @output.print "  > "
+            @output.flush
+            answer = read_line
+            return DEFAULT_PATROL_REVIEWER_NAMES.dup if answer.empty?
+
+            resolved = resolve_patrol_reviewer_tokens(answer)
+            return resolved if resolved.is_a?(Array)
+
+            @output.puts "  #{resolved}"
+          end
+        end
+
+        def resolve_patrol_reviewer_tokens(answer)
+          resolve_reviewer_tokens_from(
+            answer,
+            choices: PATROL_REVIEWER_NAMES,
+            empty_message: "input had no patrol reviewer tokens; type a name/index list, or blank for codex only"
+          )
+        end
+
+        def resolve_reviewer_tokens_from(answer, choices:, empty_message:)
           tokens = answer.split(",").map(&:strip).reject(&:empty?)
           # Comma-only input (e.g. ",", ",,", "  ,  ") drops to zero tokens
           # after the reject. Treating that as "user picked zero reviewers"
@@ -326,20 +371,20 @@ module Hive
           # already maps to "all enabled" via the empty?-early-return at
           # prompt_reviewers; non-blank input that resolves to zero tokens
           # is a typo, not a valid selection.
-          return "input had no reviewer tokens; type a name/index list, or blank for all" if tokens.empty?
+          return empty_message if tokens.empty?
 
           out = []
           tokens.each do |token|
             if token =~ /\A\d+\z/
               idx = token.to_i
-              return "invalid index #{token}; pick 1..#{DEFAULT_REVIEWER_NAMES.size}" unless idx.between?(1, DEFAULT_REVIEWER_NAMES.size)
+              return "invalid index #{token}; pick 1..#{choices.size}" unless idx.between?(1, choices.size)
 
-              out << DEFAULT_REVIEWER_NAMES[idx - 1]
+              out << choices[idx - 1]
             else
               # Case-insensitive match for parity with prompt_agent's
               # resolve_agent_choice. Closes ce-code-review F9.
-              match = DEFAULT_REVIEWER_NAMES.find { |r| r.casecmp(token).zero? }
-              return "unknown reviewer #{token.inspect}; valid names: #{DEFAULT_REVIEWER_NAMES.join(', ')}" unless match
+              match = choices.find { |r| r.casecmp(token).zero? }
+              return "unknown reviewer #{token.inspect}; valid names: #{choices.join(', ')}" unless match
 
               out << match
             end
@@ -493,6 +538,7 @@ module Hive
           @output.puts "  claude_permission_mode  = #{answers['claude_permission_mode']}"
           @output.puts "  development_agent       = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
+          @output.puts "  patrol_reviewers  = [#{answers['patrol_reviewers'].join(', ')}]"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"

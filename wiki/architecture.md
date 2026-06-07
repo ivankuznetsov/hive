@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-07
 tags: [architecture, overview]
 ---
 
@@ -36,14 +36,15 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 `hive run` is synchronous, single-process, single-task:
 
 1. Parent acquires per-task lock (`<task>/.lock`, EXCL with stale-PID detection).
-2. Parent spawns `claude -p` via `Process.spawn(..., pgroup: true, out:/err: pipe)` (`lib/hive/agent.rb:51`).
-3. Parent traps SIGINT/SIGTERM to forward `kill -TERM -<pgid>` to the child group.
-4. Parent's reader thread streams stdout/stderr into `<.hive-state>/logs/<slug>/<label>-<ts>.log`.
-5. Parent polls `Process.wait(pid, WNOHANG)` until completion or timeout. On timeout, sends TERM, waits 3s grace, escalates to KILL.
-6. Parent records pre/post inode of the state file; mismatch → `<!-- ERROR concurrent_edit_detected -->` (an editor save with atomic rename happened during the run).
-7. Marker is read again to derive the run's status; runner returns `{commit:, status:}`.
-8. Parent acquires per-project commit lock (`<.hive-state>/.commit-lock` flock) and runs `git add . && git commit` in the hive-state worktree.
-9. Parent prints the marker + a `next:` hint and releases the task lock.
+2. Marker-owned spawns write `AGENT_WORKING`; reviewer-style sub-spawns leave the orchestrator's marker in place.
+3. Parent spawns the resolved `AgentProfile` command via `Process.spawn(..., pgroup: true, out:/err: pipe)`.
+4. Parent traps SIGINT/SIGTERM to forward `kill -TERM -<pgid>` to the child group.
+5. Parent's reader thread streams stdout/stderr into `<.hive-state>/logs/<slug>/<label>-<ts>.log` and keeps a bounded `final_message` tail.
+6. Parent polls `Process.wait(pid, WNOHANG)` until completion or timeout. On timeout, sends TERM, waits 3s grace, escalates to KILL.
+7. Exit handling first checks `Hive::AgentLimit` for provider account/rate/quota exhaustion in failed or timed-out output; marker-owned spawns become `ERROR reason=limits_reached` before generic timeout/exit-code markers.
+8. The selected status-detection mode derives the result from the state-file marker, exit code, or expected-output file; runner returns `{commit:, status:}`.
+9. Parent acquires per-project commit lock (`<.hive-state>/.commit-lock` flock) and runs `git add . && git commit` in the hive-state worktree.
+10. Parent prints the marker + a `next:` hint and releases the task lock.
 
 Concurrency: any number of `hive run` processes on **different** tasks can proceed in parallel; the per-project commit lock serialises only the brief `git commit` window.
 
@@ -74,6 +75,14 @@ Claude, Codex, and Pi therefore share one subprocess wrapper while
 keeping their CLI-specific argv and status-detection contracts in
 `lib/hive/agent_profiles/`.
 
+Fresh project setup separates reviewer policy by source. Normal feature
+PRs use `review.reviewers`, populated by `hive init` from the normal
+reviewer prompt. Synthetic patrol PR tasks whose `task.md` frontmatter
+has `source: patrol` use `patrol.review.reviewers` instead; the fresh
+default is Codex CE code review only, with Claude CE code review as the
+init-time opt-in. The review runner selects between those lists at Phase
+2, before dispatching reviewer adapters.
+
 For the built-in Claude profile, the default headless argv is:
 
 ```
@@ -99,6 +108,13 @@ Claude-backed stages normally route through `Hive::ClaudeLauncher`,
 which honors project config `claude.mode`. `tmux` runs an attachable
 interactive Claude session using the configured
 `claude.permission_mode`; `headless` delegates back to `Hive::Agent`.
+
+Provider-limit handling is shared across headless and tmux paths through
+`Hive::AgentLimit`. Headless failures inspect the captured final message
+before generic timeout/exit-code handling; tmux readiness, terminal-marker,
+and expected-output waits inspect the pane tail so Claude's usage-credit menu
+surfaces as `limits reached for claude:` / `ERROR reason=limits_reached`
+instead of being masked as a timeout or session failure.
 
 The default Claude permission path (`bypassPermissions`, which maps to `--dangerously-skip-permissions`) is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 6-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), (d) the Phase 4 auto-commit scope gate, which checks staged fallback-commit paths against `review.fix.auto_commit.scope_check` before Hive writes trailered fix commits, and (e) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. PR publishing paths (`OpenPr`, `Review::GithubPublisher`, `Finalize`) also secret-scan before sending content to GitHub.
 
@@ -158,6 +174,7 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 - **`Hive::Tui::BubbleModel`** (`lib/hive/tui/bubble_model.rb`) — `Bubbletea::Model` adapter. Translates framework messages (`KeyMessage`, `WindowSizeMessage`, `RawTextInput`) into Hive Messages, then either delegates to `Update.apply` (pure path) or runs them through `#handle_side_effect` (impure path) for messages that need a runner reference (`DispatchCommand`) or perform synchronous I/O (`OpenLogTail`, `OpenInputEditor`, `NewIdeaSubmitted`, …). I/O lives here so Update stays pure.
 - **`Hive::Tui::PasteAwareRunner`** (`lib/hive/tui/paste_aware_runner.rb`) — `Bubbletea::Runner` subclass overriding `run_loop` / `process_input` to drain every raw read through `InputDecoder`. Pinned to bubbletea 0.1.4 (boot-time `VERSION` check) because the override touches private superclass instance variables.
 - **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
+- **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns.
 
 ### Key seams
 
@@ -194,10 +211,13 @@ verbs with `--from <stage> --json`; recovery buttons call
 in-process writes are intentionally scoped: brainstorm answer insertion,
 which is limited to `### A<N>.` blocks under
 `Hive::Lock.with_task_lock`, and Telegram idea-draft submission with
-attachments, which downloads allowed media into a temp staging dir and
-then calls `Hive::Commands::New#call!` with a body override plus
-`attachments:` tuples. Final task files are still written through the
-same `hive new` command path.
+attachments or voice-note transcripts. Attachment capture downloads
+allowed media into a temp staging dir; voice capture downloads the
+Telegram voice file, transcribes it through `Hive::Bot::Transcriber`,
+keeps only the confirmed transcript on the happy path, then calls
+`Hive::Commands::New#call!` with the same body/attachment arguments as
+other idea drafts. Final task files are still written through the same
+`hive new` command path.
 
 Path A brainstorm help uses Codex as a short-lived subprocess per turn
 through `Hive::Bot::CodexConversation`. Telegram-sourced text is wrapped

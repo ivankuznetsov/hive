@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -18,11 +18,12 @@ and subprocess I/O.
 | Module | File | Purpose |
 |--------|------|---------|
 | `Supervisor` | `lib/hive/bot/supervisor.rb` | Long-running loop. Polls Telegram, runs status ticks, reaps child commands, handles TERM/INT/HUP, writes last-seen update IDs. |
-| `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, message splitting, markdown escaping, typed `Update` records, media metadata extraction, `getFile`, and file download. |
-| `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. Idea capture includes media updates, awaiting-text drafts, project-pick callbacks, and Done/Skip callbacks. |
+| `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, message splitting, markdown escaping, typed `Update` records, media/voice metadata extraction, `getFile`, and file download. |
+| `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. Idea capture includes media updates, voice-note transcription/edit intents, awaiting-text drafts, project-pick callbacks, transcript confirm/discard callbacks, and Done/Skip callbacks. Voice notes sent during an active or reattached `/answer` conversation route to the transcription action with answer context instead of being treated as blank free text. |
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. |
-| `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
+| `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, voice-origin and transcript-confirm phases, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
 | `IdeaAttachmentPolicy` | `lib/hive/bot/idea_attachment_policy.rb` | Pure classifier for Telegram photo/document attachments. Allows jpg/jpeg/png/webp/gif/pdf/txt/md/docx, enforces count/byte caps, and normalizes extensions through `Hive::Tui::ComposerStaging`. |
+| `Transcriber` | `lib/hive/bot/transcriber.rb` | OpenAI-compatible audio transcription client for Telegram voice notes used by idea capture and audio answers. Posts `multipart/form-data` to `bot.transcription.endpoint` with `model`, retries transient failures, maps empty/high no-speech-prob results to `:no_speech`, applies `supported_languages`, and logs failures through the bot logger. |
 | `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows carrying slug/id/display_name plus project-level legacy-stage warnings. |
 | `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery rows, daemon-disabled ready approvals, and project-level legacy-stage warnings through a persistent alert lifecycle store. Ready notifications are suppressed when the daemon is enabled for that project; recovery rows get one confirmation when they leave the active set, same-task recovery fingerprint changes are treated as superseded rather than recovered, and unchanged recovery rows get one reminder. **`needs_input` (brainstorm/review "waiting") pushes are suppressed for a project+slug with an active answer conversation** (`ConversationStore#active_for_slug?(slug, project:)`, injected): the operator is already answering, so a row that briefly flaps out of and back into `WAITING` (e.g. a mid-answer daemon resume) won't re-fire the "questions waiting" push. Suppression is lenient when either side lacks a project, but two fully resolved different projects sharing a slug do not cross-suppress. The first alert still fires (no conversation exists until the operator taps **Answer in chat**), error/recovery alerts are never gated this way, and a TTL-expired/abandoned conversation stops suppressing (re-engaging the operator). Suppressed rows are logged as `notification_skipped_active_conversation` and never enter the alert store, so ending the conversation can re-alert if the task is still waiting. |
 | `AlertStore` | `lib/hive/bot/alert_store.rb` | JSON sidecar for alert fingerprints, first-seen timestamps, reminder timestamps, and row snapshots. Corrupt files are renamed aside so the bot keeps running. |
@@ -55,8 +56,11 @@ Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <displa
 effects. The normal command actions remain `reply`,
 `dispatch_then_reply`, `dispatch_commands`, `start_answer`, and
 `write_answer_then_reply`. The idea-attachment flow adds
-`stage_attachment` and `commit_idea`: the first downloads one Telegram
-file into draft staging, and the second calls `Hive::Commands::New`
+`stage_attachment`, `transcribe_voice`, and `commit_idea`: attachments
+download one Telegram file into draft staging; voice transcription
+downloads a Telegram voice file, runs `Hive::Bot::Transcriber`, and
+either stores/edits an idea transcript or writes an audio answer through
+the normal brainstorm answer path; commit calls `Hive::Commands::New`
 in-process to create the inbox task.
 
 Recovery push notifications intentionally hide marker attrs, exception
@@ -88,15 +92,33 @@ inserts the literal confirmed text. Two devices racing the same question
 therefore produce one answer and one "already answered" reply, not a
 merged or overwritten block.
 
-Idea capture with attachments is the second in-process path. The router
-stores draft text/project/phase in `IdeaDraftStore`; `Supervisor` stages
-each accepted Telegram attachment in a process-owned temp directory, then
-`commit_idea` builds a markdown body that embeds images as
-`![](assets/<name>)` and links non-images as `[name](assets/<name>)`.
-The final create operation is `Hive::Commands::New#call!`, so slug
-validation, `assets/` copying, rollback-on-write-failure, and
-`hive/state` commit behavior remain shared with the CLI/TUI capture
-surface. Draft cleanup removes the staging directory.
+Idea capture with attachments and voice notes is the second in-process
+path. The router stores draft text/project/phase in `IdeaDraftStore`;
+`Supervisor` stages each accepted Telegram attachment in a process-owned
+temp directory, then `commit_idea` builds a markdown body that embeds
+images as `![](assets/<name>)` and links non-images as
+`[name](assets/<name>)`. Voice notes are transcribed before project
+selection: successful transcripts enter `:awaiting_transcript_confirm`,
+where the operator can confirm, discard, send corrected text, or send a
+replacement voice note. A confirmed voice draft with no attachments
+commits as plain `idea.md` immediately after project selection. If
+transcription fails after the file is downloaded, the `.oga` is staged as
+`voice-N.oga` and the draft falls back to awaiting idea text. The final
+create operation is `Hive::Commands::New#call!`, so slug validation,
+`assets/` copying, rollback-on-write-failure, and `hive/state` commit
+behavior remain shared with the CLI/TUI capture surface. Draft cleanup
+removes the staging directory. A bare voice note is refused while a
+non-voice idea draft is open, preserving the existing typed/media draft
+instead of clearing it through the voice transcription path.
+
+Audio answers reuse the same download/transcription action with
+`purpose: :answer`. The router attaches the active `ConversationStore`
+state (or a reply-to reattach target) to the result, and the supervisor
+feeds a successful transcript into `execute_answer_write`. That means the
+same task lock, first-write-wins behavior, auto-advance reply, and
+all-answered auto-dispatch semantics apply to spoken answers as to typed
+answers; failed/no-speech/unsupported-language transcripts reply without
+creating or mutating an idea draft.
 
 ## Single-dispatcher invariant (plan 2026-05-28-002)
 
@@ -158,9 +180,20 @@ backstop when no bot is running. To avoid reconnect floods,
 and collapses the overflow into one per-chat summary, removing the
 overflow files only after the summary sends.
 
+## Reload Behavior
+
+`Supervisor#reload_config_if_requested` reloads the global bot config,
+rebuilds the router, notification dispatcher, and voice transcriber, and
+updates the shared conversation TTL. Rebuilding the transcriber is
+required because `Hive::Bot::Transcriber` snapshots
+`bot.transcription.*` settings such as endpoint, model, retry/backoff,
+timeout, no-speech threshold, supported languages, and API-key env name
+at construction time; `hive bot reload` must apply those settings without
+a full bot restart.
+
 ## Eval harness
 
-`test/eval/` exercises this module through the same supervisor entrypoints production uses, with only Telegram and child-process I/O replaced by in-process fakes. The harness classifies outbound messages into the eval contract reasons (`agent_blocked_question`, `status_response`, `task_finished`, `fatal_error`) from observable status rows, handler intents, and child exits. That mapping stays test-only; production bot payloads are unchanged.
+`test/eval/` exercises this module through the same supervisor entrypoints production uses, with only Telegram and child-process I/O replaced by in-process fakes. The harness classifies outbound messages into the eval contract reasons (`agent_blocked_question`, `status_response`, `task_finished`, `fatal_error`) from observable status rows, handler intents, and child exits. That mapping stays test-only; production bot payloads are unchanged. The live Telegram wrapper `test/e2e/tg/run_idea_e2e.sh` remains opt-in; in `TG_IDEA_MODE=voice` it now exercises both a new audio idea and a seeded audio `/answer` path with the checked-in voice fixture when Telegram/OpenAI credentials are present.
 
 ## Backlinks
 

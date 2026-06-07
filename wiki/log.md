@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T19:01:10Z] wiki/e2e — audit residue refresh coverage
+
+**Action:** Audited residue commit `1c18b331` after it touched only wiki refresh files for the `bin/hive-e2e --json` dispatch fix. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e --json subcommand dispatch"` returned no indexed hits, and the configured master wiki path had no matching `hive-e2e` context. Verified the HEAD wiki diff plus commit `c6906632`, current `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], [[testing]], `docs/cli.md`, [[cli]], and [[commands]]. Confirmed no new page coverage was needed: [[e2e]] documents leading class-option normalization, [[testing]] maps the direct-binary contract tests, and [[gaps]] records the missing external replay artifact. Updated page/index metadata and the [[gaps]] audit note. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[index]]
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-05T16:45:00Z] e2e binary — refresh leading JSON dispatch coverage
 
 **Action:** Refreshed command/API wiki coverage after commit `c6906632` fixed `bin/hive-e2e` dispatch when `--json` or `--no-json` appears before a known subcommand. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `.llm-wiki/config.json` points at `/home/asterio/wikis/master/wiki`, and `qmd search "hive-e2e --json subcommand dispatch e2e binary"` returned no indexed hits. Verified the committed diff plus `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], and [[testing]]. Documented the class-option normalization boundary, updated the executable contract test coverage map, and recorded that the original external caller path is not represented by an in-tree artifact. Ran `bundle exec ruby -Itest test/e2e/lib/hive_e2e_binary_test.rb` (16 runs, 85 assertions, 0 failures). Did not run `qmd update` or `qmd embed`.

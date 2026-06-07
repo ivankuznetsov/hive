@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [test, e2e, tui, artifacts]
 ---
 

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-05
+updated: 2026-06-06
 tags: [test, minitest, fixtures]
 ---
 

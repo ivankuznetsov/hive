@@ -3251,7 +3251,34 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[commands/tui]]
 - [[commands/markers]]
 - [[modules/markers]]
+## [2026-06-05T16:04:21Z] e2e — refresh `bin/hive-e2e` usage exit-code coverage
 
+**Action:** Refreshed executable-entrypoint wiki coverage after commit `d51455e6` changed `bin/hive-e2e` so Thor usage failures always re-raise through the outer rescue and exit `64`, including human unknown-command and missing-required-argument paths. Verified the committed diff plus `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], [[testing]], [[cli]], and relevant [[gaps]] entries. Documented the e2e binary's success/failure/usage/config exit-code contract, the `hive-e2e-error` JSON envelope behavior, the focused executable tests, and the remaining lack of installed-binary smoke evidence. Page coverage count did not change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-05T16:25:44Z] wiki/e2e — audit residual e2e wiki refresh commit
+
+**Action:** Audited commit `654e25cd` after it committed residual wiki refresh changes for the `bin/hive-e2e` usage-exit contract. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e usage exit-code e2e testing gaps"` returned no indexed hits, so verification used the committed wiki diff plus direct reads of `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], and [[testing]]. Confirmed page coverage did not change, kept [[index]] unchanged, and added the current human-mode stderr prefix expectation (`hive-e2e:`). Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[log]]
+
+## [2026-06-05T16:38:55Z] wiki/e2e — audit residual e2e wiki commit and scenario coverage
+
+**Action:** Audited commit `02717784` after it committed residual e2e wiki refresh changes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e usage exit-code e2e testing gaps"` returned no indexed hits. Verified the committed wiki diff plus current `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, and the scenario files under `test/e2e/scenarios/`. Kept [[index]] unchanged, preserved both archive-listing and e2e usage-exit gap entries while resolving the wiki merge state, and refreshed [[e2e]] / [[testing]] so scenario coverage no longer refers to the old seven/six-scenario inventory. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+  
 ## [2026-05-26T13:42:13Z] tui — guard ERROR recovery with marker_id
 
 **Action:** Added generated `marker_id` attrs to new `ERROR` markers and changed TUI error recovery / kill-class auto-heal to clear by `--match-attr marker_id=...` when available. This closes the same-exit-code aliasing window where a stale recovery worker could clear a fresh `ERROR reason=exit_code exit_code=1` marker that the operator never reviewed. Legacy rows without `marker_id` fall back to observed `reason` and `exit_code` attrs when present.

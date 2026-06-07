@@ -22,6 +22,89 @@ Append-only log of all wiki operations.
 - [[testing]]
 - [[gaps]]
 - [[log]]
+<!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-06-07T17:00:00Z] review fix-pass 03 — finalize healer doc/observability polish
+
+**Action:** Applied 6-review pass-03 findings to `Hive::Daemon::StaleAgentHealer`, its logger, tests, and [[modules/daemon]]. Dropped the unreferenced `MARKER_ERROR_REASONS`/`HEAL_LOG_LABELS` constants; unified the heal event attempt-count key to plural `attempts:` across `marker_healed` and `marker_heal_exhausted`; derived the review-path `marker_heal_failed` reason label from the row (so a `review_agent_died` failure is no longer mislabeled as the tmux-death channel); and made `observe_pre_clear_mtime` emit a new `marker_heal_observer_missing` debug event instead of silently no-op'ing when a controller lacks the method. Tightened the class doc: removed the inaccurate "auth" cause of the unpushed-commits marker (auth raises before the push gate), reordered the finalize re-run checks to "auth, clean-exit, push" to match `finalize.rb#run!`, softened the limit wording to "configured limit (default 3)", and noted the intentional asymmetry with `review_error_signature`. Extended the exhausted-event comment to call out the SIGHUP-reload reset of the `seen` dedup maps. Reverted the manual `wiki/log.md` edits (fragments already exist in `wiki/log.d/`). Added focused tests: status-JSON error-row marker_id contract, observer-missing logging, and exhausted-event one-shot suppression across 3+ heal passes; the redispatch integration test now derives its `action` from the real status pipeline.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-06-07T16:13:56Z] wiki — audit entrypoint help rewrite coverage fragment
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after this branch changed `bin/hive` and `bin/hive-e2e` help rewriting. Read `AGENTS.md`, `.llm-wiki/config.json`, [[cli]], [[commands]], [[e2e]], [[testing]], and [[gaps]] first; `qmd search "bin hive-e2e --version command-local help wrapper"` returned no local hits, while the configured master wiki search surfaced the existing Hive CLI/e2e/testing pages. Inspected the rebased diff and current `bin/hive`, `bin/hive-e2e`, `test/integration/cli_version_test.rb`, and `test/e2e/lib/hive_e2e_binary_test.rb`. Confirmed existing [[cli]], [[commands]], [[e2e]], [[testing]], and [[gaps]] coverage matches the code: command-local help now preserves any leading wrapper options before the subcommand, rewrites to `help <cmd>`, and drops command arguments after the subcommand so option-bearing requests such as `hive approve --from 2-brainstorm --help` and `bin/hive-e2e run --filter tui --help` print usage instead of running partial command validation. [[gaps]] records the remaining uncertainty that the packaged `hive` executable has not been release-install-smoked for this path; `bin/hive-e2e` remains checkout-only. Page coverage did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands]]
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T16:00:00Z] review fix-pass — finalize unpushed healer hardening
+
+**Action:** Applied 6-review findings to `Hive::Daemon::StaleAgentHealer` and its tests. Collapsed duplicated marker reason helpers into one `marker_reason(row)`, extracted the review-path heal-label ternary into `review_heal_label`, and documented the intentional silent no-op when `clear_current` returns false (no event, no retry budget consumed). Added a dispatcher-level integration test proving finalize re-dispatches (not `:record_baseline`) after the unpushed-commits clear via the seeded pre-clear mtime, plus unit tests for clear-false-no-budget, duplicate rows in one heal pass, and per-process budget reset on a fresh healer instance. Strengthened existing assertions with explicit non-default mtime, `Markers.current.none?`, and `refute marker_heal_failed` on negative skips. Noted in [[modules/daemon]] that the recovery budget is in-memory and resets on restart/SIGHUP reload.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-06-07T15:52:00Z] daemon — expose exhausted marker-heal budgets
+
+**Action:** Added `marker_heal_exhausted` as a one-shot daemon log event when bounded marker auto-recovery gives up. The event now carries `budget_scope=per_process`, `suggested_next_action=manual_fix`, and a remediation hint so operators know the budget refills after daemon restart/SIGHUP and can recover manually. Strengthened finalize unpushed recovery tests for fresh marker-id retries, per-task budget isolation, race-shaped no-id marker guards, duplicate rows in one heal pass, and pre-clear baseline redispatch.
+
+**Tests:** Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/unit/daemon/logger_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T15:05:00Z] daemon — auto-heal interrupted finalize push leftovers
+
+**Action:** Extended `Hive::Daemon::StaleAgentHealer` so `8-finalize` rows with `ERROR reason=unpushed_commits` and no live task lock are automatically cleared with a bounded per-process retry budget. The clear uses the observed `marker_id` when present, falling back to legacy no-id markers only, so a stale status row cannot erase a newer same-reason error marker. After a successful clear, the healer seeds the controller's edit-resume baseline with the pre-clear state-file mtime; the next status read sees the marker-clear rewrite as newer than that baseline and dispatches finalize after the normal debounce instead of first-sight `record_baseline` stranding the row. The retry does not push directly inside the healer; it lets the normal daemon dispatch rerun finalize, preserving the existing clean-exit scope check, residue auto-commit path, GitHub auth check, and push validation. Manual-only finalize errors such as `ensure_clean_on_exit_failed` remain red for operator inspection, and repeated push failures stay red after the budget is exhausted.
+
+**Tests:** Added focused unit coverage for unpushed finalize auto-recovery, live-lock skip, non-finalize skip, manual clean-exit skip, retry-budget exhaustion, and marker-clear failure logging. Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/unit/task_action_test.rb`, and `test/integration/run_finalize_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T14:41:00Z] docs - add public Discord link to README
+
+**Action:** Added the public Hive Discord invite from Ivan's Hive announcement post to the top of the GitHub README, verified the invite redirects through `discord.com/invite/Qg5E7rMt` with HTTP 200, and recorded the canonical community URL in [[operating]]. No command/API behavior changed.
+
+**Refreshed pages:**
+- [[operating]]
+
+## [2026-06-07T14:17:52Z] wiki — audit finalize unpushed auto-retry coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the finalize unpushed auto-retry change updated `Hive::Daemon::StaleAgentHealer`, focused unit tests, and the daemon/finalize/testing wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "finalize unpushed commits stale healer auto retry"` found only existing CLI/log context, and the configured master wiki path had no relevant Hive context. Inspected the committed diff and current `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/stages/finalize.rb`, `lib/hive/gh.rb`, `lib/hive/task_action.rb`, `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/integration/run_finalize_test.rb`. The existing [[modules/daemon]] and [[stages/finalize]] updates were source-synced; refreshed [[testing]] to include the existing status-to-healer integration test, and recorded missing live-daemon retry evidence in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T12:50:58Z] wiki — refresh OpenClaw wiki-command coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `b47231e8` extended the OpenClaw `/hive` skill and focused tests for the `hive wiki compile-log` surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "openclaw hive wiki compile-log fragments slash command"` and the configured master wiki path produced no relevant prior guidance. Verified the committed diff plus current `openclaw/skills/hive/SKILL.md`, `openclaw/README.md`, `lib/hive/commands/wiki.rb`, `lib/hive/wiki_log.rb`, `test/integration/wiki_command_test.rb`, `test/unit/openclaw_skills_test.rb`, [[commands/wiki]], [[commands]], [[operating]], and [[testing]]. Updated wiki command coverage for the OpenClaw `/hive wiki compile-log --check` path, the fragment-first policy, legacy-entry/template-prose behavior, focused command/OpenClaw tests, the representative OpenClaw source map, and the remaining lack of a live OpenClaw invocation artifact. Page count stayed 75, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/wiki]]
+- [[commands]]
+- [[operating]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-05T22:15:00Z] wiki — fragment-based changelog compilation
+
+**Action:** Added `hive wiki compile-log`, `Hive::WikiLog`, and the `wiki/log.d/*.md` fragment flow so concurrent PRs can record wiki updates without all editing the hot `wiki/log.md` tail. Updated managed llm-wiki bootstrap prompts/context, checked-in AGENTS/CLAUDE guidance, and the current generated `.llm-wiki/*.sh` scripts to ask agents for fragments instead of direct compiled-log edits in feature PRs, initialized new projects with `wiki/log.d/.gitkeep`, documented the command, and added compiler/CLI/init coverage. Review follow-ups tightened legacy-body extraction so fresh wiki template prose is not preserved as a bogus changelog entry and added the OpenClaw `/wiki` skill surface for the new Thor command.
+
+**Refreshed pages:**
+- [[commands/wiki]]
+- [[index]]
+- [[testing]]
+<!-- END GENERATED WIKI LOG FRAGMENTS -->
 
 ## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
 
@@ -3584,3 +3667,32 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[architecture]]
 - [[gaps]]
 - [[index]]
+
+## [2026-06-07T14:20:00Z] babysitter — prioritize dirty PRs and snapshot pre-fix residue
+
+**Action:** Investigated why babysitter skipped PR #341 even though it was `DIRTY`. The project had a large open-PR backlog and `ProjectTick` selected only the oldest updated PRs before `PrFixer` could inspect merge state, so newer conflicted PRs could starve behind neutral rows. Updated the selection contract to request `mergeStateStatus` from `gh pr list` and sort actionable states ahead of age before applying `babysitter.max_concurrent_prs`.
+
+**Action:** Changed 6-review pre-fix dirty-worktree cleanup to auto-commit all existing residue with `Hive-Auto-Commit-Reason: pre_fix_dirty_worktree`. Normal clean-exit and finalize backstop scope checks remain strict; the permissive path only snapshots pre-existing residue before the fix agent starts so `fix_dirty_worktree` does not block routine recovery.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[stages/review]]
+
+## [2026-06-07T14:35:00Z] wiki — audit babysitter dirty-priority refresh coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the dirty-priority branch already touched [[modules/babysitter]], [[stages/review]], and [[log]]. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dirty priority pre fix dirty worktree review residue"` returned no indexed hits, and the configured master wiki path had no matching context. Inspected the committed diff and current `lib/hive/babysitter/project_tick.rb`, `lib/hive/gh.rb`, `lib/hive/stages/clean_exit.rb`, `lib/hive/stages/review.rb`, plus focused babysitter/GitHub/review tests. Updated [[decisions]] because ADR-034 still described the old pre-fix dirty guard, corrected the stale Phase 4 text in [[stages/review]], and recorded the missing live-smoke evidence for dirty-priority selection and out-of-scope pre-fix snapshots in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[decisions]]
+- [[stages/review]]
+- [[gaps]]
+
+## [2026-06-07T15:05:00Z] wiki — audit archive filter marker-agnostic coverage
+
+**Action:** Refreshed command/API wiki coverage after the archive-filter cleanup removed the unused `marker_name` parameter from `Hive::ArchiveFilter.hide?` and both Status/TUI callers. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "ArchiveFilter hide archive status TUI folder_mtime"` found the existing status/archive coverage, and the configured master wiki path had no matching context. Inspected the committed diff plus current `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, and relevant status/TUI/testing wiki pages. Corrected stale text that described archive hiding as clean-marker-only, documented the marker-agnostic and no-timestamp fail-open contract, and carried the same uncertainty forward: no in-tree live registered-project artifact proves the full archive workflow after aged done folders exist. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+- [[gaps]]

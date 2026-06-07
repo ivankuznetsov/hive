@@ -96,6 +96,13 @@ class E2EBinaryTest < Minitest::Test
     refute_includes err, "no scenarios match"
   end
 
+  def test_run_help_after_option_value_shows_usage
+    out, err, status = Open3.capture3(hive_e2e, "run", "--filter", "tui", "--help")
+    assert status.success?, "bin/hive-e2e run --filter tui --help should exit 0, stderr was: #{err}"
+    assert_includes out, "Run e2e scenarios"
+    refute_includes err, "no scenarios match"
+  end
+
   def test_replay_missing_repro_emits_json_error_when_requested
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "missing-run", "missing-scenario")
     assert_equal 78, status.exitstatus

@@ -1,7 +1,7 @@
 ---
 title: Operating Hive
 type: operating
-source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
 updated: 2026-06-07
 tags: [operating, daemon, bot, systemd, launchd, install]
@@ -10,7 +10,7 @@ tags: [operating, daemon, bot, systemd, launchd, install]
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
 Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
-log inspection, and how to disable automation mid-flight.
+log inspection, community support, and how to disable automation mid-flight.
 
 ## Worktree-first workflow
 
@@ -158,8 +158,17 @@ umbrella skill. `/hive setup` guides confirmed Hive install, strict `hive`/`hv`
 version verification, `hive daemon install`, and optional non-interactive
 `hive init`; after setup, users pass normal CLI verbs as
 `/hive status --json`, `/hive plan <slug>`, `/hive develop <slug>`, and so on.
+The skill also documents `/hive wiki compile-log --check` as the read-only
+aggregate-changelog verification path and tells agents to reserve mutating
+`hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
+
+## Community
+
+The public Hive Discord group is `https://discord.gg/Qg5E7rMt`. Keep the
+GitHub README link pointed at that invite unless a newer canonical community
+URL is announced.
 
 ## Release verification
 

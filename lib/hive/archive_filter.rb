@@ -13,7 +13,11 @@ module Hive
       stage_dir == ARCHIVE_STAGE_DIR
     end
 
-    def hide?(stage:, marker_name: nil, mtime: nil, folder_mtime: nil, now: Time.now)
+    # Hiding is purely age-based: marker state does not gate it, so the
+    # param was dropped. Fail-open by design — when neither timestamp is
+    # known we can't compute an age, so the row is never hidden rather
+    # than guessed at.
+    def hide?(stage:, mtime: nil, folder_mtime: nil, now: Time.now)
       return false unless archived?(stage)
       archived_at = mtime || folder_mtime
       return false unless archived_at

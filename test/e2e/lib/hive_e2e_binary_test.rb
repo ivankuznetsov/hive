@@ -213,4 +213,81 @@ class E2EBinaryTest < Minitest::Test
       assert_kind_of Array, payload["kept_runs"]
     end
   end
+
+  def test_unknown_command_with_json_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "no-such", "--json=true")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json=true is set"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no-such/, payload["message"])
+  end
+
+  def test_unknown_command_with_json_uppercase_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "no-such", "--json=TRUE")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json=TRUE is set"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no-such/, payload["message"])
+  end
+
+  def test_truthy_json_spellings_agree_with_inner_command_on_success_path
+    %w[--json --json=true --json=TRUE --json=t --json=T].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "list", flag)
+      assert status.success?, "bin/hive-e2e list #{flag} should exit 0, stderr was: #{err}"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-scenarios", payload["schema"],
+                   "#{flag}: inner command must emit the JSON envelope the wrapper assumes truthy"
+    end
+  end
+
+  def test_unknown_command_with_short_truthy_json_emits_envelope_on_stdout
+    %w[--json=t --json=T].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "no-such", flag)
+      assert_equal 64, status.exitstatus, "#{flag}: usage error must exit 64"
+      assert_empty err, "#{flag}: human prose must not leak to stderr"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-error", payload["schema"]
+      assert_equal "usage", payload["error_kind"]
+      assert_match(/no-such/, payload["message"])
+    end
+  end
+
+  def test_negative_json_spellings_fall_through_to_prose
+    %w[--json=false --json=0 --no-json --json=True].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "no-such", flag)
+      refute_equal 0, status.exitstatus, "#{flag}: unknown command must still exit non-zero"
+      refute_includes out, "hive-e2e-error",
+                       "#{flag}: must not emit a JSON envelope on stdout when JSON is not requested"
+      refute_empty err, "#{flag}: human prose must go to stderr when JSON is not requested"
+    end
+  end
+
+  def test_missing_required_args_with_json_true_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--json=true")
+    refute_equal 0, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  def test_unknown_command_exits_non_zero
+    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
+    refute_equal 0, status.exitstatus,
+                 "bin/hive-e2e should exit non-zero on unknown commands (got #{status.exitstatus.inspect})"
+  end
 end

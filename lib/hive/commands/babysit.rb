@@ -1,4 +1,5 @@
 require "fileutils"
+require "rbconfig"
 require "time"
 require "yaml"
 require "hive/config"
@@ -200,9 +201,23 @@ module Hive
         end
         if pid_alive?(pid)
           ownership_now = pid_ownership(payload, pid)
-          send_signal_safely(pid, :KILL) unless %i[reused unverified].include?(ownership_now)
-          FileUtils.rm_f(pid_file)
+          if %i[reused unverified].include?(ownership_now)
+            warn "hive: babysitter PID #{pid} still alive after TERM but ownership is #{ownership_now}; " \
+                 "refusing KILL and leaving #{pid_file} for manual inspection"
+            return
+          end
+          warn "hive: babysitter PID #{pid} did not stop within #{STOP_GRACE_SEC}s; sending KILL"
+          send_signal_safely(pid, :KILL)
+          kill_deadline = Time.now + 5
+          while pid_alive?(pid) && Time.now < kill_deadline
+            sleep 0.5
+          end
+          if pid_alive?(pid)
+            warn "hive: babysitter PID #{pid} is still alive after KILL; leaving #{pid_file}"
+            return
+          end
         end
+        FileUtils.rm_f(pid_file)
         puts "hive babysitter: stopped (pid #{pid})"
       end
 
@@ -219,8 +234,15 @@ module Hive
         # Match daemon re-exec: array argv, no shell. The indirection avoids
         # static scanners that flag the literal exec token.
         Kernel.method(:exec).call(Process.argv0, *argv)
-      rescue SystemCallError => e
-        raise Hive::Error, "hive babysitter: failed to re-exec detached start: #{e.class}: #{e.message}"
+      rescue SystemCallError => first_error
+        begin
+          Kernel.method(:exec).call(RbConfig.ruby, $PROGRAM_NAME, *argv)
+        rescue SystemCallError => second_error
+          raise Hive::Error,
+                "hive babysitter: failed to re-exec detached start: " \
+                "#{first_error.class}: #{first_error.message}; " \
+                "ruby fallback failed: #{second_error.class}: #{second_error.message}"
+        end
       end
 
       def status_daemon

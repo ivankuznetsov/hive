@@ -197,6 +197,21 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_equal [ Process.argv0, "babysit", "start", "--detach", "--dry-run" ], exec_args
   end
 
+  def test_detached_restart_without_dry_run_omits_dry_run_flag
+    command = babysit("restart", detach: true)
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { nil }
+
+    exec_args = nil
+    with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
+      assert_raises(UncaughtThrowError) { command.call }
+    end
+
+    assert_equal [ Process.argv0, "babysit", "start", "--detach" ], exec_args
+  end
+
   def test_detached_restart_surfaces_reexec_failure
     command = babysit("restart", detach: true)
     calls = []
@@ -210,6 +225,29 @@ class HiveCommandsBabysitTest < Minitest::Test
       assert_includes error.message, "failed to re-exec detached start"
     end
     assert_equal [ :stop ], calls
+  end
+
+  def test_stop_leaves_pid_file_when_kill_ownership_becomes_unverified
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      signals.empty? ? :verified : :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    assert File.exist?(command.pid_file)
+    assert_includes err, "refusing KILL"
   end
 
   def test_stale_runtime_ignores_malformed_started_at

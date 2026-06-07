@@ -229,8 +229,10 @@ class BabysitterCoverageGapsTest < Minitest::Test
       cmd.define_singleton_method(:pid_ownership) { |_payload, _pid| :owned }
       cmd.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
       cmd.define_singleton_method(:sleep) { |_sec| nil }
-      times = [ Time.at(0), Time.at(601), Time.at(601) ]
-      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(601) }) do
+      after_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 1
+      after_kill_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 6
+      times = [ Time.at(0), Time.at(after_grace), Time.at(after_grace), Time.at(after_kill_grace) ]
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(after_kill_grace) }) do
         cmd.call
       end
       assert_includes signals, :KILL

@@ -65,54 +65,59 @@ module Hive
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
 
-        if (existing = read_live_pid)
-          raise Hive::ConcurrentRunError.new(
-            "hive babysitter already running (pid #{existing})",
-            holder: { pid: existing },
-            lock_path: pid_file
-          )
-        end
-        # No live daemon owns the PID file, so clear any stale/dead remnant
-        # and reserve the slot with an exclusive create. Two simultaneous
-        # `start` invocations can both pass the read_live_pid check above;
-        # the EXCL create lets only one win, and the loser is rejected as a
-        # conflict instead of silently launching a second dispatcher.
-        FileUtils.rm_f(pid_file)
-        begin
-          handle = File.open(pid_file, File::WRONLY | File::CREAT | File::EXCL)
-        rescue Errno::EEXIST
-          raise Hive::ConcurrentRunError.new(
-            "hive babysitter already starting (PID file #{pid_file} created concurrently)",
-            holder: { pid: (read_pid_file_payload || {})["pid"] },
-            lock_path: pid_file
-          )
-        end
-
-        Process.daemon(true, true) if @detach
-
-        own_start_time = Hive::Lock.send(:process_start_time, Process.pid)
-        if own_start_time.nil?
-          handle.close
+        handle = nil
+        with_pid_file_mutex do
+          if (existing = read_live_pid)
+            raise Hive::ConcurrentRunError.new(
+              "hive babysitter already running (pid #{existing})",
+              holder: { pid: existing },
+              lock_path: pid_file
+            )
+          end
+          # No live daemon owns the PID file, so clear any stale/dead remnant
+          # and reserve the slot with an exclusive create. The sidecar mutex
+          # keeps stop cleanup from deleting a replacement PID file between
+          # payload comparison and unlink.
           FileUtils.rm_f(pid_file)
-          raise Hive::Error,
-                "hive babysitter: cannot read process start time " \
-                "(neither /proc/#{Process.pid}/stat nor `ps -o lstart=` worked); " \
-                "PID-reuse defense would be disabled. Refusing to start."
+          begin
+            handle = File.open(pid_file, File::WRONLY | File::CREAT | File::EXCL)
+          rescue Errno::EEXIST
+            raise Hive::ConcurrentRunError.new(
+              "hive babysitter already starting (PID file #{pid_file} created concurrently)",
+              holder: { pid: (read_pid_file_payload || {})["pid"] },
+              lock_path: pid_file
+            )
+          end
+
+          Process.daemon(true, true) if @detach
+
+          own_start_time = Hive::Lock.send(:process_start_time, Process.pid)
+          if own_start_time.nil?
+            FileUtils.rm_f(pid_file)
+            raise Hive::Error,
+                  "hive babysitter: cannot read process start time " \
+                  "(neither /proc/#{Process.pid}/stat nor `ps -o lstart=` worked); " \
+                  "PID-reuse defense would be disabled. Refusing to start."
+          end
+
+          handle.write(pid_file_payload(Process.pid, own_start_time).to_yaml)
+          handle.flush
+        ensure
+          handle&.close unless handle&.closed?
         end
 
-        handle.write(pid_file_payload(Process.pid, own_start_time).to_yaml)
-        handle.flush
-        handle.close
         dispatcher = build_dispatcher
         begin
           dispatcher.run_forever
         ensure
-          payload = begin
-            read_pid_file_payload
-          rescue StandardError
-            nil
+          with_pid_file_mutex do
+            payload = begin
+              read_pid_file_payload
+            rescue StandardError
+              nil
+            end
+            File.delete(pid_file) if payload && payload["pid"] == Process.pid && File.exist?(pid_file)
           end
-          File.delete(pid_file) if payload && payload["pid"] == Process.pid && File.exist?(pid_file)
         end
       end
 
@@ -248,15 +253,28 @@ module Hive
       end
 
       def remove_pid_file_if_current(expected_payload)
-        current_payload = begin
-          read_pid_file_payload
-        rescue StandardError
-          nil
-        end
-        return false unless current_payload == expected_payload
+        with_pid_file_mutex do
+          current_payload = begin
+            read_pid_file_payload
+          rescue StandardError
+            nil
+          end
+          return false unless current_payload == expected_payload
 
-        FileUtils.rm_f(pid_file)
-        true
+          FileUtils.rm_f(pid_file)
+          true
+        end
+      end
+
+      def with_pid_file_mutex
+        lock_path = "#{pid_file}.lock"
+        FileUtils.mkdir_p(File.dirname(lock_path))
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield
+        ensure
+          lock.flock(File::LOCK_UN) unless lock.closed?
+        end
       end
 
       def stop_daemon_or_raise

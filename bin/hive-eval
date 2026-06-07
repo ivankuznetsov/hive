@@ -58,7 +58,8 @@ end
 
 env = {
   "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
-  "HIVE_EVAL_SCENARIOS_ONLY" => "1"
+  "HIVE_EVAL_SCENARIOS_ONLY" => "1",
+  "TEST" => nil
 }
 env["HIVE_EVAL_NO_JUDGE"] = "1" if options[:no_judge]
 

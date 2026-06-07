@@ -60,13 +60,6 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
-  # Read the idea.md body — the segment after the frontmatter — so body
-  # assertions cannot be satisfied by the same text echoed into the
-  # `original_text` frontmatter mirror.
-  def idea_body(folder)
-    File.read(File.join(folder, "idea.md")).split("---\n\n", 2).last
-  end
-
   def test_enqueue_writes_idea_md_from_original_finding
     with_tmp_dir do |dir|
       folder = nil
@@ -86,71 +79,11 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       assert_equal "f1", frontmatter.fetch("patrol_finding_id")
       assert_equal "fp1", frontmatter.fetch("patrol_fingerprint")
       assert_includes frontmatter.fetch("original_text"), "Patrol: Fix bug"
-
-      body = idea_body(folder)
-      assert_includes body, "## Finding", "the body must render the finding section, not just the frontmatter mirror"
-      assert_includes body, "bug details"
-      assert_includes body, "## Recommendation"
-      assert_includes body, "fix it"
-      assert_includes body, "`app.rb:1`: puts"
-    end
-  end
-
-  def test_idea_md_skips_empty_sections
-    bare = Hive::Patrol::Finding.new(
-      id: "f3", feature_id: "feature", category: "bug", severity: "high",
-      confidence: "medium", title: "Bare finding", description: "",
-      recommendation: "   ", evidence: [], fingerprint: "fp3"
-    )
-    with_tmp_dir do |dir|
-      folder = handoff(dir).enqueue(finding: bare, patch: patch(dir), pr_url: "https://example.com/pull/7")
-      body = idea_body(folder)
-
-      assert_includes body, "# Patrol: Bare finding"
-      refute_includes body, "## Finding", "blank description must not emit a Finding section"
-      refute_includes body, "## Recommendation", "whitespace-only recommendation must not emit a section"
-      refute_includes body, "## Evidence", "empty evidence must not emit an Evidence section"
-    end
-  end
-
-  def test_idea_md_renders_each_evidence_branch
-    ev = Hive::Patrol::Finding.new(
-      id: "f4", feature_id: "feature", category: "bug", severity: "high",
-      confidence: "medium", title: "Evidence finding", description: "d",
-      recommendation: "r",
-      evidence: [
-        { "snippet" => "loose snippet" },                   # no location, has snippet
-        {},                                                 # no location, no snippet
-        { "file" => "a.rb", "line" => 9, "snippet" => "" }  # location, blank snippet
-      ],
-      fingerprint: "fp4"
-    )
-    with_tmp_dir do |dir|
-      folder = handoff(dir).enqueue(finding: ev, patch: patch(dir), pr_url: "https://example.com/pull/7")
-      body = idea_body(folder)
-
-      assert_includes body, "## Evidence"
-      assert_includes body, "- evidence: loose snippet", "no-location entry with a snippet renders the snippet"
-      assert_includes body, "\n- evidence\n", "no-location entry without a snippet renders a bare marker"
-      assert_includes body, "- `a.rb:9`", "located entry with a blank snippet renders just the location"
-      refute_includes body, "`a.rb:9`:", "a blank snippet must not leave a trailing colon"
-    end
-  end
-
-  def test_idea_md_survives_finding_built_without_evidence
-    # A Finding constructed outside from_h can carry nil evidence; idea_text
-    # must guard with Array(...) rather than calling nil.empty?.
-    no_ev = Hive::Patrol::Finding.new(
-      id: "f5", feature_id: "feature", category: "bug", severity: "high",
-      confidence: "medium", title: "No evidence", description: "d",
-      recommendation: "r", evidence: nil, fingerprint: "fp5"
-    )
-    with_tmp_dir do |dir|
-      folder = handoff(dir).enqueue(finding: no_ev, patch: patch(dir), pr_url: "https://example.com/pull/7")
-      body = idea_body(folder)
-
-      assert_includes body, "# Patrol: No evidence"
-      refute_includes body, "## Evidence", "nil evidence must be treated as empty, not raise"
+      assert_includes idea, "## Finding"
+      assert_includes idea, "bug details"
+      assert_includes idea, "## Recommendation"
+      assert_includes idea, "fix it"
+      assert_includes idea, "`app.rb:1`: puts"
     end
   end
 

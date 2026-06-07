@@ -50,7 +50,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
       assert_stubbed env, "gh", "auth", "status", "--show-token"
       assert_stubbed env, "gh", "auth", "status", "-t"
+      # Bundled short flags must be screened char-by-char: `-at` still reaches
+      # `--show-token` and `-cw` still reaches `--web`.
+      assert_stubbed env, "gh", "auth", "status", "-at"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cw"
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "--web"
       assert_stubbed env, "gh", "run", "view", "123", "-w"
       assert_stubbed env, "gh", "workflow", "view", "release.yml", "--web"
@@ -125,7 +129,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
       assert_includes skipped, "gh auth status --show-token skipped"
       assert_includes skipped, "gh auth status -t skipped"
+      assert_includes skipped, "gh auth status -at skipped"
       assert_includes skipped, "gh pr view 42 --web skipped"
+      assert_includes skipped, "gh pr view 42 -cw skipped"
       assert_includes skipped, "gh repo view owner/repo --web skipped"
       assert_includes skipped, "gh run view 123 -w skipped"
       assert_includes skipped, "gh workflow view release.yml --web skipped"

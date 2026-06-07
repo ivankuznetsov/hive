@@ -61,13 +61,22 @@ def api_read_only?(rest)
   !payload
 end
 
+def short_flag_bundle?(arg)
+  arg.length >= 2 && arg.start_with?("-") && !arg.start_with?("--")
+end
+
 def unsafe_passthrough_flag?(arg, rest)
-  arg == "--show-token" ||
-    arg.start_with?("--show-token=") ||
-    arg == "--web" ||
-    arg.start_with?("--web=") ||
-    arg.start_with?("-w") ||
-    (rest[0] == "auth" && rest[1] == "status" && arg.start_with?("-t"))
+  return true if arg == "--show-token" || arg.start_with?("--show-token=")
+  return true if arg == "--web" || arg.start_with?("--web=")
+  return false unless short_flag_bundle?(arg)
+
+  # Short flags can be bundled (e.g. `-cw`, `-at`), so screen each character
+  # rather than only the first: `-w` (--web) and, under `auth status`, `-t`
+  # (--show-token) must be caught no matter where they appear in the cluster.
+  flags = arg[1..]
+  return true if flags.include?("w")
+
+  rest[0] == "auth" && rest[1] == "status" && flags.include?("t")
 end
 
 def safe_passthrough_options?(argv, rest)

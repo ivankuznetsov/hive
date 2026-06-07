@@ -68,4 +68,28 @@ class HvTest < Minitest::Test
       refute_includes out, "wrong:probe"
     end
   end
+
+  def test_executable_directory_candidate_does_not_abort_fallback_search
+    with_tmp_dir do |dir|
+      xdg_hive = File.join(dir, "xdg-bin", "hive")
+      homebrew_hive = File.join(dir, "homebrew", "bin", "hive")
+      FileUtils.mkdir_p(xdg_hive)
+      FileUtils.mkdir_p(File.dirname(homebrew_hive))
+      File.write(homebrew_hive, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.2.3; exit 0; fi\necho homebrew:$1\n")
+      FileUtils.chmod(0o755, homebrew_hive)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_BIN_OVERRIDE" => nil,
+          "XDG_BIN_HOME" => File.dirname(xdg_hive),
+          "HOMEBREW_PREFIX" => File.join(dir, "homebrew")
+        },
+        HV_BIN,
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "homebrew:probe\n", out
+    end
+  end
 end

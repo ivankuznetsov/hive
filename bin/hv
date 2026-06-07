@@ -36,7 +36,7 @@ candidates=(
 
 for candidate in "${candidates[@]}"; do
   [[ -n "$candidate" ]] || continue
-  [[ -x "$candidate" ]] || continue
+  [[ -f "$candidate" && -x "$candidate" ]] || continue
 
   resolved="$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")"
   # Guard against `hv -> hv` chains: never exec into our own script.

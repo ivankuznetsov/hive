@@ -41,6 +41,8 @@ The ClawHub slug is `hive-cli` because the public `hive` slug is already owned
 by another publisher. The installed slash command is still `/hive` because
 OpenClaw reads `name: hive` from `SKILL.md`.
 
+Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
+
 ## Setup Model
 
 `openclaw skills install hive-cli` installs the OpenClaw skill folder. It does
@@ -79,8 +81,8 @@ clawhub skill publish openclaw/skills/hive \
   --slug hive-cli \
   --name "Hive CLI" \
   --owner ivankuznetsov \
-  --version 0.1.0 \
-  --changelog "Initial Hive OpenClaw skill with guided setup"
+  --version 0.1.1 \
+  --changelog "Improve ClawHub listing summary and setup guidance"
 ```
 
 Do not run `clawhub sync` for this repository, and do not publish folders such

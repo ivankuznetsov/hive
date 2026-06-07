@@ -40,6 +40,31 @@ rescue Thor::Error => e
   end
   exit Hive::ExitCodes::USAGE
 rescue Hive::Error => e
-  warn "hive: #{e.message}"
-  exit(e.respond_to?(:exit_code) ? e.exit_code : 1)
+  exit_code = e.respond_to?(:exit_code) ? e.exit_code : Hive::ExitCodes::GENERIC
+  if Hive::ThorUsageJson.json_requested?(ARGV)
+    # `hive bot --json` / `hive daemon --bogus --json` raise a Hive::Error
+    # that bypasses the Thor parse path, so without this an agent that
+    # learned `hive run --json` returns a parseable stdout envelope would
+    # get empty stdout + free-form stderr. Emit the same schema-less generic
+    # envelope shape the unknown-command branch uses, carrying the error's
+    # own exit code.
+    Hive::ThorUsageJson.emit_generic(e, error_kind: "usage", exit_code: exit_code)
+  else
+    warn "hive: #{e.message}"
+  end
+  exit exit_code
+rescue StandardError => e
+  # `Hive::CLI.start(..., debug: true)` makes Thor re-raise the original
+  # exception, so a plain StandardError from a command body escapes both
+  # rescues above. Without this it would dump a multi-line backtrace (exit 1)
+  # where pre-`debug` Thor printed one line. Emit a one-line message (or an
+  # `internal`/SOFTWARE envelope under --json); the full backtrace is gated
+  # behind HIVE_DEBUG for when a developer actually wants it.
+  if Hive::ThorUsageJson.json_requested?(ARGV)
+    Hive::ThorUsageJson.emit_generic(e, error_kind: "internal", exit_code: Hive::ExitCodes::SOFTWARE)
+  else
+    warn "hive: internal error: #{e.class}: #{e.message}"
+    warn e.backtrace.join("\n") if ENV["HIVE_DEBUG"]
+  end
+  exit Hive::ExitCodes::SOFTWARE
 end

@@ -74,7 +74,12 @@ class HiveThorUsageJsonTest < Minitest::Test
                        io: io, warn_io: StringIO.new)
 
     payload = JSON.parse(io.string)
-    refute payload.key?("schema"), "an unknown command has no versioned schema to route under"
+    # An unknown command has no versioned schema to route under, but the
+    # `schema` key is present with an explicit `null` sentinel so an agent
+    # dispatching on `payload.fetch("schema")` gets a clean signal rather
+    # than a missing-key exception.
+    assert payload.key?("schema"), "the schema key must be present as a null sentinel"
+    assert_nil payload.fetch("schema")
     assert_equal "usage", payload.fetch("error_kind")
     assert_equal "UsageError", payload.fetch("error_class")
     assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")

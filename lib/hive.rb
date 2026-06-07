@@ -385,7 +385,10 @@ module Hive
   class UsageError < Error
     attr_reader :error_kind
 
-    def initialize(message, error_kind: nil)
+    # Defaults to "usage" so the safe, contract-valid wire value lives in
+    # the type rather than relying on every caller to paper over a nil
+    # `error_kind` (the only emit site previously did so with `|| "usage"`).
+    def initialize(message, error_kind: "usage")
       super(message)
       @error_kind = error_kind
     end

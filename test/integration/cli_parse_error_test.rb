@@ -11,7 +11,7 @@ class CliParseErrorTest < Minitest::Test
   # its published schema. Each entry is the invoked command paired with the
   # schema name the emitted envelope claims; running `hive <command> --json`
   # with no positional reliably raises a Thor parse error (the positional is
-  # required), routing through `emit_thor_usage_json`. A bare round-trip
+  # required), routing through `Hive::ThorUsageJson.emit`. A bare round-trip
   # ("build envelope -> validate against schemas/<schema>.v*.json") over the
   # whole set is the single highest-value guard: it pins the per-command
   # schema mapping and, critically, the `hive-stage-action` `verb` extra that
@@ -37,7 +37,7 @@ class CliParseErrorTest < Minitest::Test
   # purpose — they accept the bare invocation (optional positional or a
   # subcommand group) and so never raise a Thor *parse* error. `forget`'s
   # missing-NAME case is a Hive::Error raised inside the command, emitted by
-  # its own EnvelopeEmitter, not by `emit_thor_usage_json`.
+  # its own EnvelopeEmitter, not by `Hive::ThorUsageJson.emit`.
 
   def test_parse_error_envelopes_validate_against_their_schemas
     PARSE_ERROR_COMMANDS.each do |command, schema_name|
@@ -109,7 +109,7 @@ class CliParseErrorTest < Minitest::Test
   # `status` and `prune` accept a bare invocation (no required positional),
   # so they are absent from PARSE_ERROR_COMMANDS — but an *unknown flag*
   # still makes Thor raise before the command body runs, routing them
-  # through `emit_thor_usage_json`. These rows were previously untested
+  # through `Hive::ThorUsageJson.emit`. These rows were previously untested
   # (wiki/gaps.md #24); pin that the routed envelope is contract-valid.
   UNKNOWN_FLAG_THOR_ROUTED = {
     "status" => "hive-status",
@@ -135,18 +135,27 @@ class CliParseErrorTest < Minitest::Test
     end
   end
 
-  def test_daemon_unknown_subcommand_is_a_dead_map_entry_emitting_stderr
-    # The `daemon` map row is retained defensively but unreachable: an
-    # unknown daemon subcommand raises a command-local Hive::Error caught
-    # by bin/hive's *lower* `rescue Hive::Error`, so no stdout JSON
-    # envelope is built from the map. Pin that current behavior so a
-    # future refactor that routes it through the Thor path (double-emit)
-    # is caught.
+  def test_daemon_unknown_subcommand_emits_generic_json_envelope
+    # The `daemon` ENVELOPES map row is unreachable (an unknown daemon
+    # subcommand raises a command-local Hive::Error caught by bin/hive's
+    # *lower* `rescue Hive::Error`, not the Thor parse path). But under
+    # `--json` that lower rescue no longer drops to stderr-only: it emits a
+    # schema-less generic envelope so an agent that learned `--json` returns
+    # a parseable stdout document still gets one here. The map row stays
+    # unused, so this remains a single emit — a future refactor that also
+    # routed it through the Thor path (double-emit) would break the JSON
+    # parse below.
     out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", HIVE_BIN, "daemon", "--bogus", "--json")
 
     assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-    assert_empty out.strip, "the dead daemon map row must not emit a stdout JSON envelope"
-    assert_includes err, "unknown subcommand"
+    assert_empty err, "the --json generic envelope path must not also warn to stderr"
+
+    payload = JSON.parse(out)
+    assert_nil payload.fetch("schema"), "no routable schema exists, so the sentinel must be null"
+    assert_equal false, payload.fetch("ok")
+    assert_equal "usage", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
+    assert_includes payload.fetch("message"), "unknown subcommand"
   end
 
   def test_unknown_command_exits_usage

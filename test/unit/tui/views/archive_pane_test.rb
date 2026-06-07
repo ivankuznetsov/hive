@@ -43,6 +43,11 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
                         "tasks" => [
                           task(slug: "old-archived", stage: "9-done", project: "alpha", age: 5 * 86_400),
                           task(slug: "recent-archived", stage: "9-done", project: "alpha", age: 3600),
+                          # Errored, age-hidden archived row: hidden from the
+                          # daily grid by age, but the Archive pane is its
+                          # recovery surface and must list it regardless of
+                          # marker — a marker filter leaking in would orphan it.
+                          task(slug: "errored-archived", stage: "9-done", project: "alpha", marker: "error", age: 5 * 86_400),
                           task(slug: "active-task", stage: "4-execute", project: "alpha")
                         ]
                       },
@@ -61,6 +66,7 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
     assert_includes out, "Archive · all done tasks"
     assert_includes out, "old-archived"
     assert_includes out, "recent-archived"
+    assert_includes out, "errored-archived"
     assert_includes out, "beta-archived"
     assert_includes out, "alpha"
     assert_includes out, "beta"

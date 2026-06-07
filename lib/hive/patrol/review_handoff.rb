@@ -20,12 +20,24 @@ module Hive
 
         slug = unique_slug(finding)
         task_folder = File.join(@project_root, ".hive-state", "stages", "6-review", slug)
-        FileUtils.mkdir_p(File.join(task_folder, "reviews"))
-        write_meta(task_folder, slug, finding)
-        write_idea_md(task_folder, slug, finding, now)
-        write_task_md(task_folder, slug, finding, patch, pr_url, now)
-        write_worktree_pointer(task_folder, patch, now)
-        write_pr_md(task_folder, finding, pr_url)
+        # These six writes are not individually atomic: a mid-write failure
+        # (e.g. worktree.yml present, pr.md/task.md missing) would orphan a
+        # partial folder that marks the slug taken, renders as a broken
+        # status/TUI row, and could be picked up by the review stage as a
+        # malformed task — the caller only removes the git worktree, not this
+        # folder. Remove the half-written folder before re-raising so enqueue
+        # is all-or-nothing.
+        begin
+          FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+          write_meta(task_folder, slug, finding)
+          write_idea_md(task_folder, slug, finding, now)
+          write_task_md(task_folder, slug, finding, patch, pr_url, now)
+          write_worktree_pointer(task_folder, patch, now)
+          write_pr_md(task_folder, finding, pr_url)
+        rescue StandardError
+          FileUtils.rm_rf(task_folder)
+          raise
+        end
         task_folder
       end
 
@@ -184,6 +196,12 @@ module Hive
           # `finding.evidence` (`pr_opener.rb`, `fingerprint.rb`): the
           # primary flow is JSON-parsed (string keys), but a direct
           # symbol-keyed entry must not silently degrade to `- evidence`.
+          # A non-Hash entry (should never reach here — items are schema
+          # `type: object`) would otherwise raise a TypeError on the
+          # string-index below and abort the whole enqueue; degrade it
+          # instead of crashing.
+          next "- evidence" unless entry.is_a?(Hash)
+
           location = [ entry["file"] || entry[:file], entry["line"] || entry[:line] ].compact.join(":")
           snippet = (entry["snippet"] || entry[:snippet]).to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"

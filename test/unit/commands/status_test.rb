@@ -476,6 +476,11 @@ class CommandsStatusTest < Minitest::Test
       hive_state = File.join(project_root, ".hive-state")
       create_status_task(hive_state, "9-done", "old-archived-260604-abcd", marker: "COMPLETE", age_days: 10)
       create_status_task(hive_state, "9-done", "recent-archived-260604-abcd", marker: "COMPLETE", age_days: 0)
+      # An errored, age-hidden archived row: hidden from daily status by age
+      # (see test_render_project_hides_old_archived_rows_with_unresolved_markers),
+      # but the archive surface is the recovery path and must still list it —
+      # a marker filter leaking into archive selection would orphan it.
+      create_status_task(hive_state, "9-done", "errored-archived-260604-abcd", marker: "ERROR", age_days: 10)
       create_status_task(hive_state, "4-execute", "active-task-260604-abcd", marker: "EXECUTE_COMPLETE", age_days: 10)
 
       out, = capture_io do
@@ -485,6 +490,7 @@ class CommandsStatusTest < Minitest::Test
       assert_includes out, "Archived"
       assert_includes out, "old-archived-260604-abcd"
       assert_includes out, "recent-archived-260604-abcd"
+      assert_includes out, "errored-archived-260604-abcd"
       refute_includes out, "active-task-260604-abcd"
       refute_includes out, "archived >3d ago"
     end

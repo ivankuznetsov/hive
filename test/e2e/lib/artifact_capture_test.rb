@@ -164,7 +164,40 @@ class E2EArtifactCaptureTest < Minitest::Test
       copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
       assert File.size(copied_spawn) < File.size(spawn_log),
              "artifact bundle should not copy oversized per-spawn captures wholesale"
+      assert File.size("#{copied_spawn}.tail") <= File.size(copied_spawn),
+             "tail companion should be derived from the truncated bundle copy"
       assert_includes File.read(copied_spawn, 128), "truncated to last"
+    end
+  end
+
+  def test_manifest_excludes_live_tui_subprocess_logs
+    with_dirs do |scenario_dir, sandbox, run_home|
+      log_dir = File.join(scenario_dir, "tui-subprocess-live")
+      FileUtils.mkdir_p(log_dir)
+      File.write(File.join(log_dir, "hive-tui-spawn-LIVE.log"), "LIVE\n")
+
+      collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      paths = manifest["files"].map { |file| file["path"] }
+      refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
+        "manifest should publish only curated tui-subprocess copies, not live logs"
+      assert_includes paths, "tui-subprocess/hive-tui-spawn-LIVE.log"
+    end
+  end
+
+  def test_env_snapshot_is_json_with_schema_version
+    with_dirs do |scenario_dir, sandbox, run_home|
+      collect(scenario_dir, sandbox, run_home)
+
+      json_path = File.join(scenario_dir, "env-snapshot.json")
+      assert File.exist?(json_path), "env-snapshot must be JSON, not plaintext"
+
+      payload = JSON.parse(File.read(json_path))
+      assert_equal "hive-e2e-env-snapshot", payload["schema"]
+      assert_equal 1, payload["schema_version"]
+      assert_kind_of String, payload["ruby"]
+      assert_kind_of String, payload["platform"]
     end
   end
 
@@ -188,21 +221,6 @@ class E2EArtifactCaptureTest < Minitest::Test
       paths = manifest.fetch("files").map { |file| file.fetch("path") }
       refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
              "manifest should not include unbounded live TUI logs"
-    end
-  end
-
-  def test_env_snapshot_is_json_with_schema_version
-    with_dirs do |scenario_dir, sandbox, run_home|
-      collect(scenario_dir, sandbox, run_home)
-
-      json_path = File.join(scenario_dir, "env-snapshot.json")
-      assert File.exist?(json_path), "env-snapshot must be JSON, not plaintext"
-
-      payload = JSON.parse(File.read(json_path))
-      assert_equal "hive-e2e-env-snapshot", payload["schema"]
-      assert_equal 1, payload["schema_version"]
-      assert_kind_of String, payload["ruby"]
-      assert_kind_of String, payload["platform"]
     end
   end
 end

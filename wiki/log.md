@@ -2,6 +2,35 @@
 
 Append-only log of all wiki operations.
 
+<!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-06-07T14:41:00Z] docs - add public Discord link to README
+
+**Action:** Added the public Hive Discord invite from Ivan's Hive announcement post to the top of the GitHub README, verified the invite redirects through `discord.com/invite/Qg5E7rMt` with HTTP 200, and recorded the canonical community URL in [[operating]]. No command/API behavior changed.
+
+**Refreshed pages:**
+- [[operating]]
+
+## [2026-06-07T12:50:58Z] wiki — refresh OpenClaw wiki-command coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `b47231e8` extended the OpenClaw `/hive` skill and focused tests for the `hive wiki compile-log` surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "openclaw hive wiki compile-log fragments slash command"` and the configured master wiki path produced no relevant prior guidance. Verified the committed diff plus current `openclaw/skills/hive/SKILL.md`, `openclaw/README.md`, `lib/hive/commands/wiki.rb`, `lib/hive/wiki_log.rb`, `test/integration/wiki_command_test.rb`, `test/unit/openclaw_skills_test.rb`, [[commands/wiki]], [[commands]], [[operating]], and [[testing]]. Updated wiki command coverage for the OpenClaw `/hive wiki compile-log --check` path, the fragment-first policy, legacy-entry/template-prose behavior, focused command/OpenClaw tests, the representative OpenClaw source map, and the remaining lack of a live OpenClaw invocation artifact. Page count stayed 75, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/wiki]]
+- [[commands]]
+- [[operating]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-05T22:15:00Z] wiki — fragment-based changelog compilation
+
+**Action:** Added `hive wiki compile-log`, `Hive::WikiLog`, and the `wiki/log.d/*.md` fragment flow so concurrent PRs can record wiki updates without all editing the hot `wiki/log.md` tail. Updated managed llm-wiki bootstrap prompts/context, checked-in AGENTS/CLAUDE guidance, and the current generated `.llm-wiki/*.sh` scripts to ask agents for fragments instead of direct compiled-log edits in feature PRs, initialized new projects with `wiki/log.d/.gitkeep`, documented the command, and added compiler/CLI/init coverage. Review follow-ups tightened legacy-body extraction so fresh wiki template prose is not preserved as a bogus changelog entry and added the OpenClaw `/wiki` skill surface for the new Thor command.
+
+**Refreshed pages:**
+- [[commands/wiki]]
+- [[index]]
+- [[testing]]
+<!-- END GENERATED WIKI LOG FRAGMENTS -->
+
 ## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
 
 **Action:** Refreshed command/API surface coverage after commit `dc0f540f` (`fix(babysitter): detect stale runtime`) changed `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, and existing babysitter wiki notes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "command API surface routes handlers README entrypoint"` surfaced prior command/API refresh context, and the configured master wiki path had only generic route/command guidance. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[cli]], and [[operating]]. Documented the new `hive babysit restart` lifecycle subcommand, the boundary that `reload` refreshes config/log settings but not loaded Ruby source, the source-mtime stale-process recommendation printed by `status`, and the remaining lack of a live detached-process stale-runtime smoke artifact. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

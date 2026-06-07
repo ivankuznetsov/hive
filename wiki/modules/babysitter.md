@@ -62,6 +62,7 @@ Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-er
 - Separate PID and log files: `$HIVE_HOME/.babysitter.pid`, `$HIVE_HOME/logs/babysitter.log`.
 - Per-project opt-in only: `babysitter.enabled`.
 - `hive babysit reload` is config/log-setting only. The detached process keeps Ruby code loaded from its original start; after checkout updates or release upgrades, use `hive babysit restart --detach`. `hive babysit status` compares the PID-file `started_at` to the current source mtime and prints a restart recommendation when the running process predates the checkout. This prevents stale validators from silently skipping projects after config enum changes such as `patrol.trigger: continuous`.
+- `ProjectTick` asks `gh pr list` for `mergeStateStatus` and sorts selected candidates by actionability before applying `babysitter.max_concurrent_prs`: `DIRTY` / `BLOCKED` / `UNSTABLE` first, then `BEHIND` / `UNKNOWN`, then clean or missing states. Updated time remains the tie-breaker. This prevents a large old backlog of neutral PRs from starving conflicted/red PRs such as patrol output that needs immediate repair.
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.
 - No Telegram or install/service integration in v1.
 - No success PR comments.

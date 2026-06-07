@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -14,6 +14,7 @@ tags: [command, babysitter, daemon, github]
 ```bash
 hive babysit start [--detach] [--dry-run]
 hive babysit stop
+hive babysit restart [--detach] [--dry-run]
 hive babysit status
 hive babysit reload
 hive babysit tail
@@ -25,7 +26,9 @@ The command is bare-text in v1; it does not emit a `--json` envelope.
 
 ## Lifecycle
 
-`start` writes `$HIVE_HOME/.babysitter.pid` and runs `Hive::Babysitter::Dispatcher`. The PID payload mirrors `hive daemon`: YAML with `pid`, `process_start_time`, and `started_at`, guarded against PID reuse through shared `Hive::PidFile` helpers. `stop` sends TERM, `reload` sends HUP, and `status` reports running/not-running plus uptime.
+`start` writes `$HIVE_HOME/.babysitter.pid` and runs `Hive::Babysitter::Dispatcher`. The PID payload mirrors `hive daemon`: YAML with `pid`, `process_start_time`, and `started_at`, guarded against PID reuse through shared `Hive::PidFile` helpers. `stop` sends TERM, `restart` stops an existing process when the PID file exists and then starts a new one, `reload` sends HUP, and `status` reports running/not-running plus uptime.
+
+`reload` is only a config/log-settings refresh; it does not reload Ruby code into an already-running detached process. `status` compares the PID-file `started_at` timestamp with the latest mtime under `bin/hive`, `lib/hive.rb`, and `lib/hive/**/*.rb`. When the process predates the current source checkout, `status` prints a restart recommendation and `reload` warns the operator to run `hive babysit restart --detach` instead.
 
 The log file is `$HIVE_HOME/logs/babysitter.log`, written by `Hive::Babysitter::Logger` as rotated JSON lines using the same global log-size knobs as the daemon.
 
@@ -75,7 +78,7 @@ The dry-run guard is best-effort: an agent that invokes absolute binary paths ca
 
 ## Tests
 
-- `test/unit/commands/babysit_test.rb` covers CLI flag validation and lifecycle helpers.
+- `test/unit/commands/babysit_test.rb` covers CLI flag validation, lifecycle helpers, `restart`, stale-runtime status recommendations, and stale-runtime reload warnings.
 - `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard, `git --output` write skips, and git exec/write guard regressions for scoped config injection, `--exec-path`, grep pager execution including bundled `-nO`, and pass-through cases for `git diff -O`, `--output-indicator-*`, and `git grep -c`.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 

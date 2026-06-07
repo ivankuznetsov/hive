@@ -653,8 +653,9 @@ module Hive
       Subcommands:
         start [--detach] [--dry-run]      Run the babysitter loop.
         stop                              Send SIGTERM to the running babysitter.
+        restart [--detach] [--dry-run]   Stop then start the babysitter.
         status                            Show running / not-running.
-        reload                            Send SIGHUP to reload config.
+        reload                            Send SIGHUP to reload config/log settings.
         tail                              Stream babysitter.log.
 
       One-shot:

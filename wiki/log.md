@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
+
+**Action:** Refreshed command/API surface coverage after commit `dc0f540f` (`fix(babysitter): detect stale runtime`) changed `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, and existing babysitter wiki notes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "command API surface routes handlers README entrypoint"` surfaced prior command/API refresh context, and the configured master wiki path had only generic route/command guidance. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[cli]], and [[operating]]. Documented the new `hive babysit restart` lifecycle subcommand, the boundary that `reload` refreshes config/log settings but not loaded Ruby source, the source-mtime stale-process recommendation printed by `status`, and the remaining lack of a live detached-process stale-runtime smoke artifact. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[cli]]
+- [[operating]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-07T10:45:00Z] wiki - refresh OpenClaw command/API coverage after ClawHub listing copy commit
 
 **Action:** Refreshed command/API surface coverage after commit `704b9705` (`docs(openclaw): improve ClawHub skill listing`) changed README/OpenClaw documentation, `openclaw/skills/hive/SKILL.md`, `test/unit/openclaw_skills_test.rb`, and existing wiki pages. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; also read `.llm-wiki/config.json`. `qmd search "command API surface routes handlers entrypoints README"` returned existing OpenClaw and release-context hits. Verified the committed diff plus `README.md`, `openclaw/README.md`, `openclaw/skills/hive/SKILL.md`, `test/unit/openclaw_skills_test.rb`, [[operating]], [[cli]], and [[commands]]. The commit does not add Ruby routes, HTTP handlers, Thor command handlers, or executable entrypoints; the changed public surface is the OpenClaw/ClawHub wrapper over the existing CLI.
@@ -165,6 +176,10 @@ Append-only log of all wiki operations.
 - [[stages/review]]
 - [[commands/run]]
 - [[modules/markers]]
+
+## [2026-06-07T11:05:00Z] babysitter - detect stale detached runtime
+
+**Action:** Diagnosed a live babysitter process that had been running since 2026-06-03 and was still rejecting `patrol.trigger: continuous`, even though current `main` accepts and documents that trigger. Added `hive babysit restart`, made `hive babysit status` recommend restart when the PID-file `started_at` predates the current Hive source checkout, and made `hive babysit reload` warn that SIGHUP only reloads config/log settings, not Ruby code. Updated [[modules/babysitter]] with the operational rule.
 
 ## [2026-06-05T13:30:00Z] patrol - make `continuous` the default trigger
 

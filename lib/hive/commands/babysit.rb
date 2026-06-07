@@ -13,7 +13,7 @@ module Hive
     class Babysit
       include Hive::PidFile
 
-      VALID_SUBCOMMANDS = %w[start stop status reload tail].freeze
+      VALID_SUBCOMMANDS = %w[start stop restart status reload tail].freeze
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, hive_home: Hive::Paths.state_home)
@@ -37,10 +37,11 @@ module Hive
 
         case @subcommand
         when "start"  then start_daemon
-        when "stop"   then stop_daemon
-        when "status" then status_daemon
-        when "reload" then reload_daemon
-        when "tail"   then tail_daemon
+        when "stop"    then stop_daemon
+        when "restart" then restart_daemon
+        when "status"  then status_daemon
+        when "reload"  then reload_daemon
+        when "tail"    then tail_daemon
         end
       end
 
@@ -202,10 +203,16 @@ module Hive
         puts "hive babysitter: stopped (pid #{pid})"
       end
 
+      def restart_daemon
+        stop_daemon if File.exist?(pid_file)
+        start_daemon
+      end
+
       def status_daemon
         running = false
         pid = nil
         uptime_sec = nil
+        payload = nil
         if File.exist?(pid_file)
           payload = read_pid_file_payload
           pid = payload && payload["pid"]
@@ -217,6 +224,10 @@ module Hive
 
         if running
           puts "hive babysitter: running (pid #{pid}, uptime #{uptime_sec}s)"
+          if stale_runtime?(payload)
+            puts "hive babysitter: restart recommended; running process predates current Hive source " \
+                 "checkout (run `hive babysit restart --detach`)"
+          end
         else
           puts "hive babysitter: not running"
           raise Hive::Error, "babysitter not running"
@@ -239,6 +250,10 @@ module Hive
           raise Hive::Error, "PID #{pid} appears reused (start_time mismatch); refusing HUP"
         when :unverified
           raise Hive::Error, "cannot verify PID #{pid} is the hive babysitter; refusing HUP"
+        end
+        if stale_runtime?(payload)
+          warn "hive: babysitter process predates current Hive source checkout; " \
+               "reload will not update Ruby code. Run `hive babysit restart --detach`."
         end
 
         send_signal_safely(pid, :HUP)
@@ -264,6 +279,33 @@ module Hive
           end
         end
       rescue Interrupt
+        nil
+      end
+
+      def stale_runtime?(payload)
+        started_at = parse_started_at(payload && payload["started_at"])
+        source_mtime = current_source_mtime
+        started_at && source_mtime && started_at < source_mtime
+      end
+
+      def parse_started_at(value)
+        return value if value.is_a?(Time)
+        return nil unless value.is_a?(String) && !value.empty?
+
+        Time.parse(value)
+      rescue ArgumentError
+        nil
+      end
+
+      def current_source_mtime
+        root = File.expand_path("../../..", __dir__)
+        files = [
+          File.join(root, "bin", "hive"),
+          File.join(root, "lib", "hive.rb"),
+          *Dir.glob(File.join(root, "lib", "hive", "**", "*.rb"))
+        ].select { |path| File.file?(path) }
+        files.map { |path| File.mtime(path) }.max
+      rescue SystemCallError
         nil
       end
     end

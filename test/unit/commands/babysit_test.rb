@@ -178,4 +178,21 @@ class HiveCommandsBabysitTest < Minitest::Test
     command.call
     assert_equal %i[stop start], calls
   end
+
+  def test_stale_runtime_ignores_malformed_started_at
+    command = babysit("status")
+    command.define_singleton_method(:current_source_mtime) { Time.now + 60 }
+
+    refute command.send(:stale_runtime?, { "started_at" => "not-a-time" })
+  end
+
+  def test_current_source_mtime_returns_nil_when_source_scan_fails
+    command = babysit("status")
+    original_glob = Dir.method(:glob)
+    Dir.define_singleton_method(:glob) { |_pattern| raise Errno::EACCES, "blocked" }
+
+    assert_nil command.send(:current_source_mtime)
+  ensure
+    Dir.define_singleton_method(:glob, original_glob) if original_glob
+  end
 end

@@ -1,7 +1,7 @@
 ---
 title: Operating Hive
 type: operating
-source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
 updated: 2026-06-07
 tags: [operating, daemon, bot, systemd, launchd, install]
@@ -282,9 +282,13 @@ Inspect `<project>/.hive-state/babysitter/events.jsonl`,
 results look right, stop the dry-run process and start live mode:
 
 ```bash
-hive babysit stop
-hive babysit start --detach
+hive babysit restart --detach
 ```
+
+`hive babysit reload` refreshes config/log settings only; the detached
+Ruby process keeps the source code it loaded at start. After pulling a
+new checkout or upgrading Hive, run `hive babysit status` and restart if
+it reports that the process predates the current source checkout.
 
 Kill switch: set `babysitter.enabled: false`; the dispatcher reloads
 project config each tick. v1 has no launchd/systemd install command for

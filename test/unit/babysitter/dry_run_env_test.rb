@@ -80,6 +80,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # `git grep --textconv` runs configured *.textconv helpers — same exec
       # class as diff/log/show, screened in the grep region.
       assert_stubbed env, "git", "grep", "--textconv", "needle"
+      # `git cat-file --textconv/--filters` run *.textconv and clean/smudge
+      # filters over blob contents — same exec class, screened in cat-file.
+      assert_stubbed env, "git", "cat-file", "--textconv", "HEAD:README.md"
+      assert_stubbed env, "git", "cat-file", "--filters", "HEAD:README.md"
+      # `git log/show --show-signature` spawns gpg.program to verify signatures.
+      assert_stubbed env, "git", "log", "--show-signature"
+      assert_stubbed env, "git", "show", "--show-signature", "HEAD"
       # Trailing bare two-token global option must not underflow / crash.
       assert_stubbed env, "git", "-c"
       assert_stubbed env, "git", "-C"
@@ -103,6 +110,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "git", "remote"
       assert_passes env, "git", "remote", "-v"
       assert_passes env, "git", "remote", "show", "-n", "origin"
+      # `git cat-file -p`/`git log`/`git show` without the exec opt-in flags stay
+      # read-only and must pass through.
+      assert_passes env, "git", "cat-file", "-p", "HEAD"
+      assert_passes env, "git", "log", "--oneline"
+      # `git remote show <name>` contacts the remote unless -n is passed, so the
+      # stub injects -n; it still passes, but strictly local.
+      assert_passes env, "git", "remote", "show", "origin"
       assert_passes env, "git", "remote", "get-url", "--push", "origin"
 
       skipped = File.read(log_path)
@@ -135,6 +149,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git grep -Otouch pwned needle skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch pwned needle skipped"
       assert_includes skipped, "git grep --textconv needle skipped"
+      assert_includes skipped, "git cat-file --textconv HEAD:README.md skipped"
+      assert_includes skipped, "git cat-file --filters HEAD:README.md skipped"
+      assert_includes skipped, "git log --show-signature skipped"
+      assert_includes skipped, "git show --show-signature HEAD skipped"
       assert_includes skipped, "git --output=patch.diff diff skipped"
       assert_includes skipped, "git log --output=log.txt skipped"
       assert_includes skipped, "git show --output=show.txt skipped"
@@ -150,6 +168,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-git --no-pager remote"
       assert_includes real_invocations, "real-git --no-pager remote -v"
       assert_includes real_invocations, "real-git --no-pager remote show -n origin"
+      assert_includes real_invocations, "real-git --no-pager cat-file -p HEAD"
+      assert_includes real_invocations, "real-git --no-pager log --no-ext-diff --no-textconv --oneline"
       assert_includes real_invocations, "real-git --no-pager remote get-url --push origin"
     end
   end

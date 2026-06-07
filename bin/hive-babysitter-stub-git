@@ -188,6 +188,18 @@ end
 #                                      option is screened in the grep region
 #                                      alone (no --no-textconv neutralization is
 #                                      needed the way it is for diff/show).
+#   --textconv / --filters (cat-file)  `git cat-file --textconv` runs configured
+#                                      *.textconv helpers and `--filters` runs
+#                                      clean/smudge filters over blob contents,
+#                                      so both spawn arbitrary commands. cat-file
+#                                      honours neither by default, so the explicit
+#                                      opt-in flags are screened in the cat-file
+#                                      region alone.
+#   --show-signature (log/show)        verifies commit/tag signatures, which
+#                                      spawns gpg.program (or the configured
+#                                      signature helper). Off by default, so the
+#                                      explicit flag is screened in the log/show
+#                                      region.
 def dangerous_global_option?(arg)
   case arg
   when "-c", "--config-env", "--paginate", "-p"
@@ -223,19 +235,44 @@ def exec_or_write_screened?(argv, rest)
     rest.drop(1).any? { |arg| enables_external_diff_or_textconv?(arg) }
   return true if rest.first == "grep" &&
     rest.drop(1).any? { |arg| grep_pager_option?(arg) || arg == "--textconv" }
+  return true if rest.first == "cat-file" &&
+    rest.drop(1).any? { |arg| arg == "--textconv" || arg == "--filters" }
+  return true if %w[log show].include?(rest.first.to_s) &&
+    rest.drop(1).include?("--show-signature")
 
   false
 end
 
 def safe_read_argv(argv, rest)
   safe_argv = [ "--no-pager", *argv ]
+  subcommand_index = argv.length - rest.length
 
   if diff_rendering_command?(rest.first.to_s)
-    subcommand_index = argv.length - rest.length
     safe_argv.insert(subcommand_index + 2, "--no-ext-diff", "--no-textconv")
+  else
+    inject_remote_no_network(safe_argv, rest, subcommand_index)
   end
 
   safe_argv
+end
+
+# `git remote show <name>` contacts the remote (SSH transport / credential
+# helpers) to list its refs unless -n is passed. Screening alone cannot prevent
+# that network round-trip without skipping a legitimate read, so inject -n right
+# after the show subcommand to keep the dry-run read strictly local.
+def inject_remote_no_network(safe_argv, rest, subcommand_index)
+  return unless rest.first == "remote"
+
+  args = rest[1..] || []
+  leading = 0
+  leading += 1 while [ "-v", "--verbose" ].include?(args[leading])
+  return unless args[leading] == "show"
+  return if args.include?("-n")
+
+  # safe_argv = ["--no-pager", *argv], so the show token sits one slot to the
+  # right of its argv index; insert -n immediately after it.
+  show_index = subcommand_index + 1 + leading
+  safe_argv.insert(show_index + 2, "-n")
 end
 
 def read_only?(rest)

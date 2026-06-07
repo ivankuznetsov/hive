@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-04-29
+updated: 2026-06-07
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -43,6 +43,12 @@ Supported step kinds:
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
 
 Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
+
+### Schema validation
+
+`json_assert` uses `Hive::E2E::JsonValidator` (`test/e2e/lib/json_validator.rb`). The validator resolves schema names against `Hive::Schemas.schema_path` first for command envelopes such as `hive-status`, then against `Hive::E2E::Schemas.schema_path` for harness-owned envelopes such as `hive-e2e-report`.
+
+Tests that synthesize command-envelope payload fixtures should derive `schema_version` from `Hive::Schemas::SCHEMA_VERSIONS.fetch("<schema>")` rather than hardcoding an integer. Harness-owned producers use `Hive::E2E::Schemas.version_for(...)`, and `test/e2e/lib/schemas_test.rb` pins those emitted `hive-e2e-*` schema names to the E2E registry.
 
 ### Trust boundary
 

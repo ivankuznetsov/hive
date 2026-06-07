@@ -3590,6 +3590,14 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 **Refreshed pages:**
 - [[testing]]
 
+## [2026-06-07T14:20:40Z] wiki — post-commit E2E schema-fixture coverage audit
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `91b7c246` changed `test/e2e/lib/json_validator_test.rb`, [[testing]], and [[log]]. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "status validator fixture schema version e2e json validator"` found existing [[e2e]], [[testing]], [[dependencies]], [[decisions]], and [[gaps]] context, and the configured master wiki path had no relevant hit. Inspected the committed diff plus current `test/e2e/lib/json_validator.rb`, `test/e2e/lib/json_validator_test.rb`, `test/e2e/lib/schemas.rb`, `test/e2e/lib/schemas_test.rb`, `test/e2e/lib/step_executor.rb`, `lib/hive.rb`, and targeted schema-version searches. Updated [[e2e]] with the command-vs-harness schema resolution/versioning rule and [[gaps]] with the remaining convention-only drift risk; [[index]] stayed unchanged because page count and catalog coverage did not change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[gaps]]
+
 ## [2026-06-07T15:05:00Z] wiki — audit archive filter marker-agnostic coverage
 
 **Action:** Refreshed command/API wiki coverage after the archive-filter cleanup removed the unused `marker_name` parameter from `Hive::ArchiveFilter.hide?` and both Status/TUI callers. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "ArchiveFilter hide archive status TUI folder_mtime"` found the existing status/archive coverage, and the configured master wiki path had no matching context. Inspected the committed diff plus current `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, and relevant status/TUI/testing wiki pages. Corrected stale text that described archive hiding as clean-marker-only, documented the marker-agnostic and no-timestamp fail-open contract, and carried the same uncertainty forward: no in-tree live registered-project artifact proves the full archive workflow after aged done folders exist. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

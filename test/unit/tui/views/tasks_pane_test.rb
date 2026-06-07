@@ -446,14 +446,18 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   def test_wide_icon_does_not_shift_the_id_column
+    # Contrast a wide double-cell emoji (🤖) against an action that
+    # falls back to the narrow DEFAULT_ICON ("agent_working" is not in
+    # ICONS): if either icon mis-pads to the fixed ICON_WIDTH the id
+    # column shifts, so the offsets must stay equal across both.
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
-        make_task(slug: "ready-task", id: 8, action: "ready_to_plan", action_label: "Ready to plan")
+        make_task(slug: "working-task", id: 8, action: "agent_working", action_label: "Agent working")
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    rows = out.lines.grep(/running-task|ready-task/)
+    rows = out.lines.grep(/running-task|working-task/)
 
     id_offsets = rows.map do |row|
       prefix = row.split(/\d/, 2).first
@@ -580,6 +584,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "no tasks"
   end
 
+  def test_height_clips_task_rows_but_keeps_cursor_visible
+    tasks = 15.times.map { |idx| make_task(slug: "task-#{idx}", id: idx) }
+    snap = make_snapshot([ { "name" => "hive", "tasks" => tasks } ])
+
+    out = Hive::Tui::Views::TasksPane.render(
+      make_model(snapshot: snap, cursor: [ 0, 14 ]), width: 100, height: 8
+    )
+
+    assert_equal 8, out.lines.count
+    assert_includes out, "task-14", "task viewport must follow the selected cursor"
+    refute_includes out, "task-0", "offscreen tasks must be clipped instead of overflowing the pane"
+  end
+
   # ---- compute_layout adaptive column dropping ----
   # The full 6-column layout needs ~53 inner cells (icon=2, id=4,
   # stage=12, status=18, age=4, separators=5, name_min=8). Below that, columns
@@ -636,5 +653,27 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def test_format_age_handles_days
     assert_equal "3d", Hive::Tui::Views::Format.age(259_200)
+  end
+
+  # ---- Format.truncate wide-glyph boundary ----
+
+  def test_truncate_never_splits_a_double_width_glyph
+    # "🤖🤖" is 4 cells. Truncating to 3 must keep the first whole emoji
+    # plus the ellipsis (width 3) rather than emitting half of the
+    # second glyph — the take_cells break guard prevents the overflow.
+    result = Hive::Tui::Views::Format.truncate("🤖🤖", 3)
+
+    assert_equal "🤖…", result, "truncation must land on a glyph boundary, not split a wide emoji"
+    assert_operator Hive::Tui::Views::Format.display_width(result), :<=, 3,
+                    "truncated output must never exceed the requested cell width"
+  end
+
+  def test_truncate_below_two_cells_drops_a_wide_glyph_without_ellipsis
+    # max_width < 2 has no room for the ellipsis suffix, so it hard-cuts.
+    # A single cell can't hold a 2-cell emoji, so the result is empty
+    # rather than a half-glyph.
+    result = Hive::Tui::Views::Format.truncate("🤖", 1)
+
+    assert_equal "", result, "a 1-cell budget cannot hold a 2-cell glyph and must not split it"
   end
 end

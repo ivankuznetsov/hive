@@ -3,10 +3,12 @@ require "open3"
 require "time"
 require "yaml"
 require "hive/config"
+require "hive/display_name/generator"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/paths"
 require "hive/stages"
+require "hive/task"
 require "hive/task_counter"
 require "hive/task_meta"
 
@@ -45,8 +47,9 @@ module Hive
       # `Hive::Commands::Status#detect_legacy_stage_dirs`.
       SLUG_RE = Hive::Stages::SLUG_RE
 
-      def initialize(project_path = Dir.pwd)
+      def initialize(project_path = Dir.pwd, display_name_generator: Hive::DisplayName::Generator)
         @project_path = File.expand_path(project_path)
+        @display_name_generator = display_name_generator
       end
 
       def call
@@ -56,6 +59,7 @@ module Hive
 
         moved = []
         backfilled_count = 0
+        no_move_message = nil
         Hive::Lock.with_commit_lock(hive_state) do
           plan = build_migration_plan(stages)
           config_changed = rewrite_legacy_config_keys(hive_state)
@@ -64,29 +68,43 @@ module Hive
             backfilled_count = backfill_task_ids(stages)
             if config_changed || backfilled_count.positive?
               commit_migration(hive_state, moved, config_only: config_changed, backfilled_count: backfilled_count)
-              puts migration_no_move_message(config_changed: config_changed, backfilled_count: backfilled_count)
+              no_move_message = migration_no_move_message(config_changed: config_changed, backfilled_count: backfilled_count)
             elsif already_migrated?(stages)
-              puts "hive: migrate found nothing to move (target stage directories look already-migrated)"
+              no_move_message = "hive: migrate found nothing to move (target stage directories look already-migrated)"
             else
-              puts "hive: migrate found nothing to move"
+              no_move_message = "hive: migrate found nothing to move"
             end
-            return moved
-          end
+          else
 
-          # Pre-flight: all destinations must be free BEFORE we issue
-          # any `mv`. Mid-loop collisions left the filesystem partially
-          # renamed with no rollback — pre-flighting closes that hole.
-          preflight_collisions!(plan)
-          plan.each { |op| FileUtils.mv(op[:src], op[:dst]) }
-          moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
-          ensure_current_stage_dirs(stages)
-          backfilled_count = backfill_task_ids(stages)
-          commit_migration(hive_state, moved, config_only: false, backfilled_count: backfilled_count)
+            # Pre-flight: all destinations must be free BEFORE we issue
+            # any `mv`. Mid-loop collisions left the filesystem partially
+            # renamed with no rollback — pre-flighting closes that hole.
+            preflight_collisions!(plan)
+            plan.each { |op| FileUtils.mv(op[:src], op[:dst]) }
+            moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
+            ensure_current_stage_dirs(stages)
+            backfilled_count = backfill_task_ids(stages)
+            commit_migration(hive_state, moved, config_only: false, backfilled_count: backfilled_count)
+          end
         end
 
-        puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" \
-             "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''})"
-        restart_daemon_if_running!
+        display_name_count = backfill_display_names(stages)
+        if display_name_count.positive?
+          Hive::Lock.with_commit_lock(hive_state) do
+            commit_display_name_backfill(hive_state, display_name_count)
+          end
+        end
+
+        if moved.empty?
+          puts no_move_message
+        else
+          puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved" \
+               "#{backfilled_count.positive? ? ", #{backfilled_count} id#{backfilled_count == 1 ? '' : 's'} backfilled" : ''})"
+        end
+        if display_name_count.positive?
+          puts "hive: migrate backfilled #{display_name_count} display name#{display_name_count == 1 ? '' : 's'}"
+        end
+        restart_daemon_if_running! if moved.any?
         moved
       end
 
@@ -179,6 +197,16 @@ module Hive
         targets.size
       end
 
+      def backfill_display_names(stages)
+        cfg = Hive::Config.load(@project_path)
+        targets = task_folders(stages).select { |folder| Hive::TaskMeta.read(folder)[:display_name].nil? }
+
+        targets.count do |folder|
+          name = @display_name_generator.new(Hive::Task.new(folder), cfg: cfg, commit: false).call
+          !name.to_s.strip.empty?
+        end
+      end
+
       def task_folders(stages)
         return [] unless Dir.exist?(stages)
 
@@ -246,6 +274,22 @@ module Hive
              "#{e.class}: #{e.message}"
         warn "hive: recover with:  git -C #{hive_state} add -A && " \
              "git -C #{hive_state} commit -m '#{message}'"
+      end
+
+      def commit_display_name_backfill(hive_state, display_name_count)
+        ops = Hive::GitOps.new(@project_path)
+        ops.run_git!("-C", hive_state, "add", "-A")
+        _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
+        return if status.success?
+
+        ops.run_git!("-C", hive_state, "commit", "-m",
+                     "hive: migrate display names (#{display_name_count} task#{display_name_count == 1 ? '' : 's'})")
+      rescue Hive::GitError => e
+        warn "hive: migrate generated display names but could not commit them " \
+             "to the hive-state git history: #{e.class}: #{e.message}"
+        warn "hive: recover with:  git -C #{hive_state} add -A && " \
+             "git -C #{hive_state} commit -m 'hive: migrate display names " \
+             "(#{display_name_count} task#{display_name_count == 1 ? '' : 's'})'"
       end
 
       def migrate_commit_message(moved, config_only:, backfilled_count: 0)

@@ -4,6 +4,9 @@
 
 # Hive
 
+Community: [join the Hive Discord](https://discord.gg/Qg5E7rMt) for questions,
+feedback, and release discussions.
+
 Hive turns a rough software idea into a merge-ready pull request through a multi-agent pipeline you can watch as it works. You sketch an idea in a few sentences, open the `hive tui` dashboard, and watch the work move forward: brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent.
 
 The mental model is folders. Every task is a directory; the folder's location is the task state. Moving a task from `2-brainstorm/` to `3-plan/` is the approval gesture, and every stage writes a durable artefact the next stage can trust. That practice — making each step's output strong enough for the next one to run autonomously — is called *compound engineering*. It's how Hive carries work from rough idea to merged PR while letting humans drop in on their own terms instead of a chat thread's.
@@ -62,21 +65,31 @@ To have Claude Code, Codex, or another agent CLI install Hive for you (with OS d
 
 ## Works with OpenClaw.ai
 
-Hive includes OpenClaw skill definitions under [openclaw/skills](openclaw/skills) so OpenClaw agents can invoke Hive through slash commands such as `/hive`, `/plan`, `/work`, and `/ce-review`.
-
-Install the Hive CLI first using one of the channels above, then install the umbrella skill from a checkout:
+Hive publishes one OpenClaw skill through ClawHub:
 
 ```bash
-openclaw skills install ./openclaw/skills/hive --as hive
+openclaw skills install hive-cli
 ```
 
-After the skills are published to ClawHub, the intended marketplace install is:
+Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
 
-```bash
-openclaw skills install hive
+That listing installs the `/hive` slash command. Ask OpenClaw to run the guided
+setup:
+
+```text
+/hive setup
 ```
 
-Optional shortcut skills are published as separate ClawHub slugs, for example `hive-plan`, `hive-work`, and `hive-ce-review`. The bundle ships 22 slash commands in total; see [openclaw/README.md](openclaw/README.md) for the full skill table, local install loop, and publish checklist.
+The guided setup installs the Hive CLI through the documented platform channel,
+verifies `hive`/`hv`, runs `hive daemon install`, and optionally initializes the
+current project. After setup, pass Hive CLI commands through `/hive ...`, for
+example `/hive status --json`, `/hive new . "build this feature"`, and
+`/hive review <task-slug>`.
+
+For local checkout testing, run `openclaw skills install ./openclaw/skills/hive
+--as hive`. See [openclaw/README.md](openclaw/README.md) for the publish
+checklist and the reason the ClawHub slug is `hive-cli` while the slash command
+is `/hive`.
 
 ## Five-Minute TUI Getting Started
 
@@ -166,6 +179,8 @@ hive bot stop        # stop the background bot
 ```
 
 If the bot stays silent, check `hive bot tail`, confirm the allowlist contains the numeric chat id, and send a fresh Telegram message before rerunning `getUpdates`. A Telegram `404 Not Found` usually means the token is missing or mistyped. If a token leaks, rotate it in `@BotFather` with `/revoke` and restart `hive bot`.
+
+Voice-note idea capture also needs an OpenAI-compatible transcription key. Put it in the same env file as the Telegram token, for example `HIVE_WHISPER_API_KEY=...`; the key is read from the environment and is never written into Hive config.
 
 ## Drive Hive From Your Coding Agent
 

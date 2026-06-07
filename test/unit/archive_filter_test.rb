@@ -32,25 +32,14 @@ class ArchiveFilterTest < Minitest::Test
     )
   end
 
-  # marker-state no longer influences hide?; folder age alone decides, so
-  # a row past the threshold is hidden regardless of its former marker.
-  def test_hides_archived_rows_past_threshold_regardless_of_former_marker
+  def test_hides_archived_rows_regardless_of_marker_state
     now = Time.utc(2026, 6, 4, 12, 0, 0)
+
     assert Hive::ArchiveFilter.hide?(
       stage: Hive::Stages::DIRS.last,
       folder_mtime: now - (10 * 86_400),
       now: now
-    ), "archived rows past the threshold must be hidden by age"
-  end
-
-  def test_archived_row_is_hidden_by_archive_age
-    now = Time.utc(2026, 6, 4, 12, 0, 0)
-
-    assert Hive::ArchiveFilter.hide?(
-      stage: Hive::Stages::DIRS.last,
-      folder_mtime: now - (5 * 86_400),
-      now: now
-    )
+    ), "archived rows past the threshold must be hidden by age alone"
   end
 
   def test_row_mtime_takes_precedence_over_folder_mtime

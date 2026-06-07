@@ -114,7 +114,7 @@ module Hive
     end
 
     # Verifies whether `invocation` (e.g. "/plan",
-    # "/compound-engineering:ce-plan") resolves to a real on-disk
+    # "/ce-plan" or legacy "/compound-engineering:ce-plan") resolves to a real on-disk
     # skill/command for this agent. Profiles supply a callable via the
     # `skill_verifier:` constructor kwarg (typically one of the
     # `Hive::SkillCheck::*` modules). When no verifier is supplied the
@@ -136,7 +136,7 @@ module Hive
     # with a non-default syntax, such as pi's `/skill:<name>`, need the
     # bare skill name in both cases.
     def format_skill_invocation(skill)
-      raw = skill.to_s
+      raw = normalize_legacy_compound_engineering_invocation(skill.to_s)
       if raw.start_with?("/")
         return raw if @skill_syntax_format == "/%{skill}"
 
@@ -145,6 +145,10 @@ module Hive
       raw = raw.split(":", 2).last if @skill_syntax_format != "/%{skill}" && raw.include?(":")
 
       format(@skill_syntax_format, skill: raw)
+    end
+
+    def normalize_legacy_compound_engineering_invocation(raw)
+      raw.sub(%r{\A/?compound-engineering:(ce-[A-Za-z0-9-]+)\z}, '\1')
     end
 
     # Resolved binary path: env override (if env_bin_override_key set and

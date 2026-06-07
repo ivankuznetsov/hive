@@ -2,6 +2,264 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `a8774462` changed `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and existing babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub env var config injection"` found the current babysitter docs and prior refresh history, while the configured master collection had no relevant hit. Inspected the committed diff plus `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/cli.rb`, and focused dry-run tests. Updated [[commands/babysit]] to describe option screening as scoped to each CLI's honored option regions, refreshed [[testing]] metadata, and tied the remaining live-agent dry-run smoke gap to `a8774462`. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
+
+**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+<!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-06-07T17:00:00Z] review fix-pass 03 — finalize healer doc/observability polish
+
+**Action:** Applied 6-review pass-03 findings to `Hive::Daemon::StaleAgentHealer`, its logger, tests, and [[modules/daemon]]. Dropped the unreferenced `MARKER_ERROR_REASONS`/`HEAL_LOG_LABELS` constants; unified the heal event attempt-count key to plural `attempts:` across `marker_healed` and `marker_heal_exhausted`; derived the review-path `marker_heal_failed` reason label from the row (so a `review_agent_died` failure is no longer mislabeled as the tmux-death channel); and made `observe_pre_clear_mtime` emit a new `marker_heal_observer_missing` debug event instead of silently no-op'ing when a controller lacks the method. Tightened the class doc: removed the inaccurate "auth" cause of the unpushed-commits marker (auth raises before the push gate), reordered the finalize re-run checks to "auth, clean-exit, push" to match `finalize.rb#run!`, softened the limit wording to "configured limit (default 3)", and noted the intentional asymmetry with `review_error_signature`. Extended the exhausted-event comment to call out the SIGHUP-reload reset of the `seen` dedup maps. Reverted the manual `wiki/log.md` edits (fragments already exist in `wiki/log.d/`). Added focused tests: status-JSON error-row marker_id contract, observer-missing logging, and exhausted-event one-shot suppression across 3+ heal passes; the redispatch integration test now derives its `action` from the real status pipeline.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-06-07T16:13:56Z] wiki — audit entrypoint help rewrite coverage fragment
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after this branch changed `bin/hive` and `bin/hive-e2e` help rewriting. Read `AGENTS.md`, `.llm-wiki/config.json`, [[cli]], [[commands]], [[e2e]], [[testing]], and [[gaps]] first; `qmd search "bin hive-e2e --version command-local help wrapper"` returned no local hits, while the configured master wiki search surfaced the existing Hive CLI/e2e/testing pages. Inspected the rebased diff and current `bin/hive`, `bin/hive-e2e`, `test/integration/cli_version_test.rb`, and `test/e2e/lib/hive_e2e_binary_test.rb`. Confirmed existing [[cli]], [[commands]], [[e2e]], [[testing]], and [[gaps]] coverage matches the code: command-local help now preserves any leading wrapper options before the subcommand, rewrites to `help <cmd>`, and drops command arguments after the subcommand so option-bearing requests such as `hive approve --from 2-brainstorm --help` and `bin/hive-e2e run --filter tui --help` print usage instead of running partial command validation. [[gaps]] records the remaining uncertainty that the packaged `hive` executable has not been release-install-smoked for this path; `bin/hive-e2e` remains checkout-only. Page coverage did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands]]
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T16:00:00Z] review fix-pass — finalize unpushed healer hardening
+
+**Action:** Applied 6-review findings to `Hive::Daemon::StaleAgentHealer` and its tests. Collapsed duplicated marker reason helpers into one `marker_reason(row)`, extracted the review-path heal-label ternary into `review_heal_label`, and documented the intentional silent no-op when `clear_current` returns false (no event, no retry budget consumed). Added a dispatcher-level integration test proving finalize re-dispatches (not `:record_baseline`) after the unpushed-commits clear via the seeded pre-clear mtime, plus unit tests for clear-false-no-budget, duplicate rows in one heal pass, and per-process budget reset on a fresh healer instance. Strengthened existing assertions with explicit non-default mtime, `Markers.current.none?`, and `refute marker_heal_failed` on negative skips. Noted in [[modules/daemon]] that the recovery budget is in-memory and resets on restart/SIGHUP reload.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-06-07T15:52:00Z] daemon — expose exhausted marker-heal budgets
+
+**Action:** Added `marker_heal_exhausted` as a one-shot daemon log event when bounded marker auto-recovery gives up. The event now carries `budget_scope=per_process`, `suggested_next_action=manual_fix`, and a remediation hint so operators know the budget refills after daemon restart/SIGHUP and can recover manually. Strengthened finalize unpushed recovery tests for fresh marker-id retries, per-task budget isolation, race-shaped no-id marker guards, duplicate rows in one heal pass, and pre-clear baseline redispatch.
+
+**Tests:** Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/unit/daemon/logger_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T15:05:00Z] daemon — auto-heal interrupted finalize push leftovers
+
+**Action:** Extended `Hive::Daemon::StaleAgentHealer` so `8-finalize` rows with `ERROR reason=unpushed_commits` and no live task lock are automatically cleared with a bounded per-process retry budget. The clear uses the observed `marker_id` when present, falling back to legacy no-id markers only, so a stale status row cannot erase a newer same-reason error marker. After a successful clear, the healer seeds the controller's edit-resume baseline with the pre-clear state-file mtime; the next status read sees the marker-clear rewrite as newer than that baseline and dispatches finalize after the normal debounce instead of first-sight `record_baseline` stranding the row. The retry does not push directly inside the healer; it lets the normal daemon dispatch rerun finalize, preserving the existing clean-exit scope check, residue auto-commit path, GitHub auth check, and push validation. Manual-only finalize errors such as `ensure_clean_on_exit_failed` remain red for operator inspection, and repeated push failures stay red after the budget is exhausted.
+
+**Tests:** Added focused unit coverage for unpushed finalize auto-recovery, live-lock skip, non-finalize skip, manual clean-exit skip, retry-budget exhaustion, and marker-clear failure logging. Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/unit/task_action_test.rb`, and `test/integration/run_finalize_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T14:41:00Z] docs - add public Discord link to README
+
+**Action:** Added the public Hive Discord invite from Ivan's Hive announcement post to the top of the GitHub README, verified the invite redirects through `discord.com/invite/Qg5E7rMt` with HTTP 200, and recorded the canonical community URL in [[operating]]. No command/API behavior changed.
+
+**Refreshed pages:**
+- [[operating]]
+
+## [2026-06-07T14:17:52Z] wiki — audit finalize unpushed auto-retry coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the finalize unpushed auto-retry change updated `Hive::Daemon::StaleAgentHealer`, focused unit tests, and the daemon/finalize/testing wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "finalize unpushed commits stale healer auto retry"` found only existing CLI/log context, and the configured master wiki path had no relevant Hive context. Inspected the committed diff and current `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/stages/finalize.rb`, `lib/hive/gh.rb`, `lib/hive/task_action.rb`, `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/integration/run_finalize_test.rb`. The existing [[modules/daemon]] and [[stages/finalize]] updates were source-synced; refreshed [[testing]] to include the existing status-to-healer integration test, and recorded missing live-daemon retry evidence in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T12:50:58Z] wiki — refresh OpenClaw wiki-command coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `b47231e8` extended the OpenClaw `/hive` skill and focused tests for the `hive wiki compile-log` surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "openclaw hive wiki compile-log fragments slash command"` and the configured master wiki path produced no relevant prior guidance. Verified the committed diff plus current `openclaw/skills/hive/SKILL.md`, `openclaw/README.md`, `lib/hive/commands/wiki.rb`, `lib/hive/wiki_log.rb`, `test/integration/wiki_command_test.rb`, `test/unit/openclaw_skills_test.rb`, [[commands/wiki]], [[commands]], [[operating]], and [[testing]]. Updated wiki command coverage for the OpenClaw `/hive wiki compile-log --check` path, the fragment-first policy, legacy-entry/template-prose behavior, focused command/OpenClaw tests, the representative OpenClaw source map, and the remaining lack of a live OpenClaw invocation artifact. Page count stayed 75, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/wiki]]
+- [[commands]]
+- [[operating]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-05T22:15:00Z] wiki — fragment-based changelog compilation
+
+**Action:** Added `hive wiki compile-log`, `Hive::WikiLog`, and the `wiki/log.d/*.md` fragment flow so concurrent PRs can record wiki updates without all editing the hot `wiki/log.md` tail. Updated managed llm-wiki bootstrap prompts/context, checked-in AGENTS/CLAUDE guidance, and the current generated `.llm-wiki/*.sh` scripts to ask agents for fragments instead of direct compiled-log edits in feature PRs, initialized new projects with `wiki/log.d/.gitkeep`, documented the command, and added compiler/CLI/init coverage. Review follow-ups tightened legacy-body extraction so fresh wiki template prose is not preserved as a bogus changelog entry and added the OpenClaw `/wiki` skill surface for the new Thor command.
+
+**Refreshed pages:**
+- [[commands/wiki]]
+- [[index]]
+- [[testing]]
+<!-- END GENERATED WIKI LOG FRAGMENTS -->
+
+## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
+
+**Action:** Refreshed command/API surface coverage after commit `dc0f540f` (`fix(babysitter): detect stale runtime`) changed `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, and existing babysitter wiki notes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "command API surface routes handlers README entrypoint"` surfaced prior command/API refresh context, and the configured master wiki path had only generic route/command guidance. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[cli]], and [[operating]]. Documented the new `hive babysit restart` lifecycle subcommand, the boundary that `reload` refreshes config/log settings but not loaded Ruby source, the source-mtime stale-process recommendation printed by `status`, and the remaining lack of a live detached-process stale-runtime smoke artifact. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[cli]]
+- [[operating]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T10:45:00Z] wiki - refresh OpenClaw command/API coverage after ClawHub listing copy commit
+
+**Action:** Refreshed command/API surface coverage after commit `704b9705` (`docs(openclaw): improve ClawHub skill listing`) changed README/OpenClaw documentation, `openclaw/skills/hive/SKILL.md`, `test/unit/openclaw_skills_test.rb`, and existing wiki pages. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; also read `.llm-wiki/config.json`. `qmd search "command API surface routes handlers entrypoints README"` returned existing OpenClaw and release-context hits. Verified the committed diff plus `README.md`, `openclaw/README.md`, `openclaw/skills/hive/SKILL.md`, `test/unit/openclaw_skills_test.rb`, [[operating]], [[cli]], and [[commands]]. The commit does not add Ruby routes, HTTP handlers, Thor command handlers, or executable entrypoints; the changed public surface is the OpenClaw/ClawHub wrapper over the existing CLI.
+
+**Coverage:** Expanded [[commands]] so it covers `bin/hv`, the single ClawHub `hive-cli` listing, `/hive` slash-command dispatch, guided setup aliases, safe argument passing, JSON preference, and destructive/foreground confirmation rules. Updated [[operating]] source metadata and OpenClaw operating text for the public listing URL and checked-in skill version `0.1.1`. Recorded in [[gaps]] that `clawhub inspect` evidence is logged but the explicit `clawhub scan --slug hive-cli --version 0.1.1 --json` command did not return a durable checked-in artifact. No page count change, so [[index]] did not need a catalog edit. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands]]
+- [[operating]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T10:37:00Z] openclaw - improve ClawHub listing copy
+
+**Action:** Checked live ClawHub examples and confirmed the public detail page uses `SKILL.md` frontmatter `description` as the hero/search/OpenGraph summary, then renders the opening markdown body under the `SKILL.md` tab. Updated Hive's single `hive-cli` ClawHub skill to version `0.1.1` with a more specific summary for the folder-based coding-agent pipeline, added a visible install/common-path section before the agent runtime rules, kept the single `/hive` umbrella model, and refreshed README/OpenClaw docs plus [[index]] and [[operating]]. Published `hive-cli@0.1.1` under `ivankuznetsov`; `clawhub inspect hive-cli --json` now reports `latest: 0.1.1` and the new summary. The explicit `clawhub scan --slug hive-cli --version 0.1.1 --json` command submitted but hung without returning; the registry inspect moderation fields still report `verdict: clean`, `isSuspicious: false`, and `isMalwareBlocked: false`.
+
+**Tests:** `bundle exec ruby -Itest test/unit/openclaw_skills_test.rb`; `bundle exec rubocop --format simple test/unit/openclaw_skills_test.rb`; YAML frontmatter parse check; `git diff --check`.
+
+**Refreshed pages:**
+- [[index]]
+- [[operating]]
+- [[log]]
+
+## [2026-06-06T19:12:04Z] bot - tighten audio answer coverage docs
+
+**Action:** Followed up the audio-answer E2E work after the CI coverage gate exposed unhit voice edge branches. Added focused coverage for legacy answer-prompt reattach, unmatched voice replies, no-project voice confirm, missing voice file IDs, payload/download failures, disabled answer transcription, no-speech/unsupported/failed audio answers, failed idea transcription with an existing non-voice draft, default transcriber client setup, and malformed transcription language entries. Refreshed stale [[commands/bot]] and [[modules/bot]] metadata/TLDR so the bot overview mentions transcribed voice answers. The earlier PR #332 wiki lookup used `qmd search "telegram voice e2e audio answers bot"` and found no relevant project guidance; no new page coverage was needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[log]]
+
+## [2026-06-06T19:07:48Z] bot - cover audio ideas and audio answers in live E2E
+
+**Action:** Added voice-answer coverage to the Telegram voice-note branch. The router now routes voice notes sent during active or reattached `/answer` conversations to `transcribe_voice` with answer context; `Supervisor#execute_transcribe_voice` writes successful answer transcripts through the existing brainstorm answer writer instead of creating an idea draft. Extended `test/e2e/tg/run_idea_e2e.sh` so `TG_IDEA_MODE=voice` drives both a new audio idea and a seeded audio `/answer` path with the checked-in voice fixture. Added focused router, supervisor, and in-process bot scenario coverage. Refreshed [[commands/bot]], [[modules/bot]], [[testing]], and [[gaps]].
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-06T06:58:00Z] bot - apply transcription reload review fixes
+
+**Action:** Addressed pass-2 review findings on the voice-note branch. `Supervisor#reload_config_if_requested` now rebuilds `Hive::Bot::Transcriber` from the reloaded `bot.transcription` config so endpoint/model/retry/language settings apply on `hive bot reload`; the `:ok` transcription path now logs and replies if the draft disappears before transcript storage instead of sending a dead Confirm button. Added focused coverage for reload rebuild, unsupported-language hint wording, failed-fallback staging cleanup, secondary post-`getFile` size guard, malformed `no_speech_prob`, and transcription config validation branches. Refreshed [[modules/bot]] reload behavior.
+
+**Refreshed pages:**
+- [[modules/bot]]
+
+## [2026-06-06T06:45:00Z] bot - hard-fail missing voice E2E secret
+
+**Action:** Resolved the pass-2 voice E2E review escalation by making explicit `TG_IDEA_MODE=voice` fail when `HIVE_WHISPER_API_KEY` is unset instead of reporting a green skip. Updated the shell wrapper message, the voice fixture README, and [[testing]] so the documented contract matches the driver.
+
+**Refreshed pages:**
+- [[testing]]
+
+## [2026-06-06T06:31:00Z] bot - voice fixture and draft-preservation review fix
+
+**Action:** Addressed 6-review pass-2 voice findings on the Telegram voice-note idea branch. Added the checked-in `test/fixtures/voice/voice-idea.oga` Ogg/Opus speech sample used by the secret-gated voice E2E, and documented it in [[testing]]. Guarded `Router`/`Supervisor` so a bare voice note sent while a non-voice idea draft is open replies with an explicit finish/discard prompt and preserves the existing draft instead of clearing it through `IdeaDraftStore#start`. Refreshed [[modules/bot]] and narrowed [[gaps]] to the remaining live Telegram/OpenAI smoke evidence.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-06T00:00:00Z] review - voice-transcription fix pass ([[commands/bot]])
+
+**Action:** Applied 6-review auto-fix findings on the voice-note idea-capture branch. Code: normalized the Whisper language gate so full-name `language` output ("english"/"russian") matches ISO-code `supported_languages` ("en"/"ru") — the default config previously rejected every real voice note; derived `Transcriber::DEFAULT_CONFIG` from `Hive::Config::DEFAULTS["bot"]["transcription"]` (single source of truth); dropped Faraday `:raise_error` so the 4xx-vs-5xx handling runs in production as tested; narrowed the broad `rescue StandardError` to transport/parse errors so programmer bugs surface; added a `Transcriber::Result` STATUSES guard and `IdeaDraftStore` PHASES/ORIGINS validation; gated voice-draft reuse/clear on `origin == :voice` (data-loss fix); split the supervisor download-vs-staging rescue with accurate messages + chat_id-tagged failure logging; derived the unsupported-language hint from config; guarded oversize on the payload size before the getFile round-trip; extracted shared `IdeaKeyboards` (transcript/confirm/project helpers). Docs: corrected the `/idea` voice flow ordering (picker appears only after `Confirm`) and added the OpenAI-vs-OpenRouter (plan Q1) rationale. Added the checked-in `test/fixtures/voice/voice-idea.oga` speech fixture and made the voice E2E fail (not skip) when the Whisper secret is set but the fixture is absent.
+
+## [2026-06-05T22:04:03Z] wiki — refresh pass 02 patrol/archive/tui coverage
+
+**Action:** Refreshed wiki coverage after commit `217459fe` (`fix(review): apply pass 02 findings`). Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff archive filter tui format"` only surfaced the prior related log entry, so verification used the committed diff plus direct source reads. Checked `lib/hive/patrol/review_handoff.rb`, `lib/hive/archive_filter.rb`, `lib/hive/tui/snapshot.rb`, `lib/hive/tui/views/archive_pane.rb`, `lib/hive/tui/views/format.rb`, and focused unit tests. Documented patrol handoff's sparse-finding normalization, archive filtering's nil-timestamp fail-open behavior, Archive-pane display-cell alignment, and the expanded unit-test edge cases. No page coverage changed, and no new uncertainty was found beyond existing patrol/archive live-smoke gaps. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/patrol]]
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+
+## [2026-06-05T22:00:24Z] wiki — audit residual handoff/format coverage commit
+
+**Action:** Audited commit `8d3c93ce` after it committed residual wiki changes from 6-review. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv tui executable fallback"` found prior testing/gaps/log context. Verified the committed wiki diff plus the `HEAD` versions of `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, and `test/unit/tui/views/format_test.rb`. Confirmed [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]] are source-synced for patrol `idea.md` provenance, nil/sparse evidence formatting, project-pane display-cell padding, and focused unit coverage. Page coverage did not change and no new uncertainty was found beyond existing [[gaps]] patrol live-smoke coverage; did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T21:54:00Z] patrol/tui — refresh handoff evidence and cell-format coverage
+
+**Action:** Refreshed command/API wiki coverage after commit `b8d4c157` tightened patrol review handoff rendering and TUI project-row formatting. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff idea_text evidence TUI Format ljust_cells"` had no indexed hits for this exact cleanup. Verified the committed diff plus current `lib/hive/patrol/review_handoff.rb`, `lib/hive/tui/views/projects_pane.rb`, `lib/hive/tui/views/format.rb`, `test/unit/patrol/review_handoff_test.rb`, `test/unit/tui/views/format_test.rb`, [[commands/patrol]], [[modules/patrol]], [[commands/tui]], [[state-model]], and [[testing]]. Documented the intentional `idea.md` body/`original_text` duplication for patrol tasks, nil-evidence handling, project-pane display-cell padding, and focused unit coverage. No new page coverage or new uncertainty was found; did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/patrol]]
+- [[commands/tui]]
+- [[state-model]]
+- [[testing]]
+
+## [2026-06-05T21:41:29Z] wiki - post-commit audit of `hv` documentation refresh
+
+**Action:** Audited commit `dba72bbd` after it refreshed wiki coverage for the RubyGem `hv` executable fix. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "RubyGem hv executable install wrapper"` found the updated operating-page context. Verified the committed wiki diff plus commit `02591fbb`, current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, `test/unit/hv_test.rb`, [[cli]], [[operating]], [[testing]], and the existing [[gaps]] channel-smoke entry. Confirmed the pages are source-synced and page coverage did not change; no new uncertainty was found beyond the already-recorded missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T21:10:00Z] wiki - audit RubyGem `hv` executable coverage
+
+**Action:** Audited commit `02591fbb` after it fixed the broken RubyGems `hv` executable surface. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol command bin hv fallback command bin"` found prior `hv`/testing/gaps context. Verified the committed diff plus current `hive.gemspec`, `install.sh`, `bin/hv`, Homebrew/AUR packaging templates, `test/unit/gemspec_test.rb`, `test/unit/install_script_test.rb`, [[cli]], [[operating]], and [[testing]]. Clarified that the bash installer always writes its internal `hv` wrapper and only conditionally exposes it in the user bin directory, and recorded the missing published-channel smoke evidence. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
+## [2026-06-06T20:24:46Z] openclaw — publish as one ClawHub skill
+
+**Action:** Corrected the OpenClaw publishing model after live ClawHub preflight showed that installing one skill folder is the right user surface. Hive now documents and tests a single ClawHub listing, `hive-cli`, whose installed `SKILL.md` still exposes `/hive`; all workflows are invoked as `/hive ...` arguments rather than separate shortcut listings. Deleted the accidental `ivankuznetsov` ClawHub shortcut listings `hive-accept-finding`, `hive-archive`, `hive-artifacts`, and `hive-babysit`; `hive-bot` never published because ClawHub rejected it at the new-skill rate limit. Refreshed the README, OpenClaw README, [[index]], [[operating]], and [[gaps]] so future publication uses only `clawhub skill publish openclaw/skills/hive --slug hive-cli`.
+
+**Refreshed pages:**
+- [[index]]
+- [[operating]]
+- [[gaps]]
+
+## [2026-06-05T20:52:02Z] release/install - remove `hv` from RubyGem executables
+
+**Action:** Fixed the RubyGem executable surface so `hive.gemspec` advertises only the Ruby `hive` entrypoint, not the bash `bin/hv` launcher that RubyGems would wrap in an unusable Ruby binstub. Adjusted `install.sh` so it no longer moves a gem-installed `hv` shim before writing its own working `hv` wrapper. Added focused assertions in `gemspec_test.rb` and `install_script_test.rb`; verified an isolated `gem build` + `gem install` creates `bin/hive` and no `bin/hv`. Refreshed `[[cli]]`, `[[operating]]`, and `[[testing]]` to document that channel installers own `hv` creation.
+
+**Refreshed pages:**
+- [[cli]]
+- [[operating]]
+- [[testing]]
+
+## [2026-06-05T17:35:00Z] daemon/review - heal wedged review locks and Claude prompt-footer readiness
+
+**Action:** Added daemon recovery for `REVIEW_WORKING` rows whose recorded Claude child has died while the Ruby review parent still holds `.lock` but has no child processes. `StatusConsumer::Row` now carries marker attrs; `StaleAgentHealer` logs `reason=review_agent_died` with `phase`/`pass`, clears the stale `REVIEW_WORKING` marker, terminates the wedged holder, and deletes the lock so the daemon sees the row as ready and retries review instead of counting it as `Agent running` until wall-clock expiry. The healer only takes this path when child inspection succeeds and returns empty; live children or failed inspection are left alone. Also fixed the Claude tmux readiness detector for the observed patrol failure where the captured tail omitted the `Claude Code` banner but showed the live prompt footer (`PR #316 ... for agents`), causing `pr-review-toolkit` to time out while Claude was idle. Added focused unit coverage for both paths.
+## [2026-06-06T12:12:34Z] agents - normalize legacy Compound Engineering invocations
+
+**Action:** Double-checked the installed Compound Engineering plugin metadata (`compound-engineering` v3.11.1): the CE workflows are still exposed as bare `/ce-*` skills such as `/ce-code-review`; the official `/code-review` command is a separate PR-comment workflow and does not satisfy Hive's reviewer-file contract. Updated Hive defaults, templates, and docs to emit `/ce-brainstorm`, `/ce-code-review`, `/ce-commit-push-pr`, and `/ce-test-browser` forms. Added `AgentProfile#format_skill_invocation` compatibility normalization so existing `compound-engineering:ce-*` config values still render to current CE syntax for Claude/Codex and `/skill:ce-*` for Pi.
+
+**Refreshed pages:**
+- [[modules/agent_profile]]
+- [[stages/brainstorm]]
+- [[stages/open-pr]]
+- [[stages/review]]
+- [[commands/doctor]]
+
 ## [2026-06-05T15:00:00Z] review - fix partial-failure regression + operator breadcrumbs (PR #313 review)
 
 **Action:** Addressed `/pr-review-toolkit:review-pr` findings on PR #313. **Critical:** `pass_completion_status` returned `:triage_incomplete` whenever `errors-NN.md` existed, checked *before* the fix-success resolution — so a pass that hit a partial reviewer failure but still triaged + fixed surviving findings would re-run reviewers on re-entry and clobber the operator's `[x]` marks. Reordered so a fresh `fix-success-NN.md` keeps the pass `:complete` regardless of a lingering `errors-NN.md`; the errors-driven retry now fires only while the fix is incomplete. **Minor:** moved the `reviewer_partial_failure` CLI next-action from the now-dead `REVIEW_WAITING` branch to `REVIEW_ERROR` (JSON + human paths), so an operator is pointed at `reviews/errors-NN.md` (resolving the [[gaps]] note about the stale legacy branch); and branched the bot cause sentence so a partial failure reads "some reviewers failed; coverage is incomplete" instead of "the review agent crashed". Added regression tests (`pass_completion_status` errors-after-fix, the migrated `REVIEW_ERROR` next-action, the partial-failure cause sentence). 100% line coverage, rubocop clean.
@@ -22,6 +280,10 @@ Append-only log of all wiki operations.
 - [[stages/review]]
 - [[commands/run]]
 - [[modules/markers]]
+
+## [2026-06-07T11:05:00Z] babysitter - detect stale detached runtime
+
+**Action:** Diagnosed a live babysitter process that had been running since 2026-06-03 and was still rejecting `patrol.trigger: continuous`, even though current `main` accepts and documents that trigger. Added `hive babysit restart`, made `hive babysit status` recommend restart when the PID-file `started_at` predates the current Hive source checkout, and made `hive babysit reload` warn that SIGHUP only reloads config/log settings, not Ruby code. Updated [[modules/babysitter]] with the operational rule.
 
 ## [2026-06-05T13:30:00Z] patrol - make `continuous` the default trigger
 
@@ -86,6 +348,44 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:**
 - [[commands/tui]]
+
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear without a
+multi-second loading grid (a generous 5s regression bound, not a benchmark).
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T22:12:41Z] wiki — audit TUI startup seed coverage
+
+**Action:** Audited commit `570beeba` after it added synchronous
+`StateSource#refresh_now` startup seeding for `hive tui`. Read `AGENTS.md`,
+`.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]]
+entries first; `qmd search "StateSource refresh_now TUI startup seed first
+useful paint"` returned no indexed hits, and the configured master wiki path had
+no matching TUI startup note. Inspected the committed diff and current
+`lib/hive/tui/app.rb`, `lib/hive/tui/state_source.rb`, TUI PTY smoke tests, and
+the existing Charm API solution note. Confirmed [[commands/tui]] already covered
+the boot-time synchronous refresh and updated the test-coverage documentation so
+the new state-source startup seed and first-useful-paint PTY assertion are not
+missing from the wiki. No page count or catalog coverage changed, so [[index]]
+did not need a structural update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[testing]]
+- [[commands/tui]]
+- [[log]]
 
 ## [2026-06-05T00:00:00Z] tui/daemon - latency-reduction review fixes (6-review pass 1)
 
@@ -2951,7 +3251,34 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[commands/tui]]
 - [[commands/markers]]
 - [[modules/markers]]
+## [2026-06-05T16:04:21Z] e2e — refresh `bin/hive-e2e` usage exit-code coverage
 
+**Action:** Refreshed executable-entrypoint wiki coverage after commit `d51455e6` changed `bin/hive-e2e` so Thor usage failures always re-raise through the outer rescue and exit `64`, including human unknown-command and missing-required-argument paths. Verified the committed diff plus `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], [[testing]], [[cli]], and relevant [[gaps]] entries. Documented the e2e binary's success/failure/usage/config exit-code contract, the `hive-e2e-error` JSON envelope behavior, the focused executable tests, and the remaining lack of installed-binary smoke evidence. Page coverage count did not change. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-05T16:25:44Z] wiki/e2e — audit residual e2e wiki refresh commit
+
+**Action:** Audited commit `654e25cd` after it committed residual wiki refresh changes for the `bin/hive-e2e` usage-exit contract. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e usage exit-code e2e testing gaps"` returned no indexed hits, so verification used the committed wiki diff plus direct reads of `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, [[e2e]], and [[testing]]. Confirmed page coverage did not change, kept [[index]] unchanged, and added the current human-mode stderr prefix expectation (`hive-e2e:`). Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[log]]
+
+## [2026-06-05T16:38:55Z] wiki/e2e — audit residual e2e wiki commit and scenario coverage
+
+**Action:** Audited commit `02717784` after it committed residual e2e wiki refresh changes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bin/hive-e2e usage exit-code e2e testing gaps"` returned no indexed hits. Verified the committed wiki diff plus current `bin/hive-e2e`, `test/e2e/lib/hive_e2e_binary_test.rb`, and the scenario files under `test/e2e/scenarios/`. Kept [[index]] unchanged, preserved both archive-listing and e2e usage-exit gap entries while resolving the wiki merge state, and refreshed [[e2e]] / [[testing]] so scenario coverage no longer refers to the old seven/six-scenario inventory. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+  
 ## [2026-05-26T13:42:13Z] tui — guard ERROR recovery with marker_id
 
 **Action:** Added generated `marker_id` attrs to new `ERROR` markers and changed TUI error recovery / kill-class auto-heal to clear by `--match-attr marker_id=...` when available. This closes the same-exit-code aliasing window where a stale recovery worker could clear a fresh `ERROR reason=exit_code exit_code=1` marker that the operator never reviewed. Legacy rows without `marker_id` fall back to observed `reason` and `exit_code` attrs when present.
@@ -3179,6 +3506,63 @@ TTL config.
 - [[modules/bot]]
 - [[state-model]]
 
+## [2026-06-05T15:14:59Z] babysitter — refresh dry-run git stub write guard coverage
+
+**Action:** Refreshed command/API and executable-stub wiki coverage after commit `29532639` changed `bin/hive-babysitter-stub-git`. Verified the committed diff plus the current git/gh dry-run stubs, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, [[commands/babysit]], [[modules/babysitter]], and [[gaps]]. Documented that otherwise read-only `git` commands now skip when they include `--output` / `--output=...`, while plain read forms such as `git diff --name-only` still pass through. Recorded that the change is unit-pinned but still lacks a live `hive babysit --once PROJECT --dry-run` agent smoke artifact. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+
+## [2026-06-05T16:45:15Z] wiki — audit babysitter dry-run refresh coverage
+
+**Action:** Audited residual wiki commit `e4d6fdab` after it committed the babysitter dry-run documentation refresh. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output residual worktree"` only surfaced earlier babysitter wiki history, so verification used the committed diff plus direct source reads. Checked source commit `29532639` against `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, `lib/hive/commands/babysit.rb`, and `lib/hive/babysitter/`. Confirmed existing [[commands/babysit]], [[modules/babysitter]], and [[gaps]] coverage matches the code: broad read-only `git` commands skip `--output` / `--output=...`, `git diff --name-only` still passes through, and live `hive babysit --once PROJECT --dry-run` agent smoke evidence remains absent. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:52:58+01:00] babysitter — refresh dry-run git exec/env stub coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `f748deed` changed `bin/hive-babysitter-stub-git` and `test/unit/babysitter/dry_run_env_test.rb`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git exec env bypass grep output pager config-env"` had no exact indexed hits, so verification used the committed diff plus direct source reads. Documented that dry-run git screening is now structurally scoped: config injection is screened only in global options, `--exec-path` is a global exec screen, `--output` is exact so `--output-indicator-*` passes, and grep pager execution includes bundled short flags such as `-nO...`; also documented scrubbing of `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and `GIT_CONFIG*`, plus the exit-127 diagnostic for invalid `HIVE_BABYSITTER_REAL_GIT`. The live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains open. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-05T17:26:02Z] wiki — audit patrol handoff residual log coverage
+
+**Action:** Audited residual wiki commit `a94719a0`, which only appended the previous babysitter dry-run audit entry to [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review handoff opened PR residual wiki"` surfaced the existing patrol handoff coverage. Verified the residual commit diff directly, then checked the underlying patrol PR #312 source commit `598fd191` against `lib/hive/patrol/review_handoff.rb`, `lib/hive/patrol/pr_opener.rb`, `lib/hive/commands/patrol.rb`, `lib/hive/daemon/patrol_scheduler.rb`, `lib/hive/config.rb`, `templates/project_config.yml.erb`, and the focused patrol/config tests. Confirmed current [[commands/patrol]], [[modules/patrol]], [[modules/config]], [[stages/review]], [[state-model]], [[testing]], and [[gaps]] already match the code: patrol handoff is defaulted through `patrol.review_prs: true`, synthetic review slugs are globally unique across stages, handoff failures are retryable and surfaced in `review_handoff_errors`, successful handoff keeps the patrol worktree for `6-review`, and `patrol.trigger` is now `continuous` by default. No page-list or gap changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
+## [2026-06-05T18:00:00Z] babysit — dry-run git stub screens exec/write options across argv
+
+**Action:** Hardened `bin/hive-babysitter-stub-git` after a review pass found that the read-only allowlist plus the original-`argv` `exec` let several non-mutating-looking commands run arbitrary code via real git: `-c diff.external=<cmd>`/`*.textconv`/`core.pager` config injection (silently stripped by `stripped_global_options` yet preserved in the exec argv), `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` pager exec, and global-position `--output`. Replaced the one-entry `no_write_options?` (`--output` only, on the stripped `rest`) with `dangerous_option?` + `no_exec_or_write_options?` that screen the entire invocation — `-c`, `--config-env`, `--output`, `-O`, `--open-files-in-pager` — before exec, so the guard no longer trusts the stripped subcommand alone. Also guarded `stripped_global_options` against `shift(2)` on a trailing valueless option and made `log_skip` warn instead of silently swallowing `SystemCallError`. Added regression tests in `test/unit/babysitter/dry_run_env_test.rb` for each exec/write vector plus a passing `git grep needle`, and updated [[commands/babysit]] to document the broadened screening.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[log]]
+
+## [2026-06-05T18:30:39+01:00] wiki — refresh babysitter dry-run executable coverage after argv-wide guard
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `b5f53f98` hardened `bin/hive-babysitter-stub-git`. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config"` surfaced prior babysitter dry-run history, so verification used the committed diff plus direct source reads. Checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Updated [[commands/babysit]], [[modules/babysitter]], and [[gaps]] so command tests, module/boundary coverage, and live-smoke uncertainty mention `-c`, `--config-env`, `-O`, `--open-files-in-pager`, and `--output` screening across the original argv. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[commands/babysit]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-05T18:45:40+01:00] wiki — audit residual babysitter dry-run coverage commit
+
+**Action:** Audited residual wiki commit `557e6ef4`, which committed the previous babysitter dry-run documentation refresh as 6-review residue. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub dangerous option output pager config residual"` surfaced prior babysitter dry-run history. Verified the committed diff, then checked `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], and [[modules/babysitter]]. Confirmed the current pages already match the code and tests: dry-run git allowlisted read subcommands still pass through only after argv-wide screening for config-injection, pager-exec, and output-file vectors; the live `hive babysit --once PROJECT --dry-run` agent-smoke gap remains recorded in [[gaps]]. Page coverage count stayed 74, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
 ## [2026-06-05T14:22:45Z] cli/status — refresh no-target archive listing coverage
 
 **Action:** Refreshed command/API wiki coverage after commit `93fb45fb` changed `hive archive` from a target-required workflow-only command into a split surface: no target lists archived tasks through `Hive::Commands::Status.new(archive: true)`, while `hive archive <target>` still runs the `StageAction` promote-or-run workflow verb. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "archive status command"` found existing workflow/archive wiki context. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/status.rb`, `lib/hive/archive_filter.rb`, and focused CLI/status tests. Documented no-target text and JSON archive listing, empty archive output, and the CLI overlay boundary. Recorded that live registered-project archive workflow evidence is still missing. Did not run `qmd update` or `qmd embed`.
@@ -3204,56 +3588,138 @@ TTL config.
 - [[index]]
 - [[gaps]]
 
-## [2026-06-05T21:03:33Z] cli/install — refresh hv semver candidate guard
+## [2026-06-05T17:42:09Z] migrate — backfill legacy display names for all task sources
 
-**Action:** Refreshed executable-entrypoint wiki coverage after commit `7e6f474a` tightened `bin/hv` so probed candidates must return a bare `X.Y.Z` from `--version` before the wrapper will `exec` them. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hv fallback launcher bin/hv Apache Hive candidate"` had no indexed hits, so verification used the committed diff plus direct reads of `bin/hv`, `test/unit/hv_test.rb`, [[cli]], [[operating]], and [[testing]]. Documented the bare-semver guard, updated unit-test coverage notes, and kept the live Apache Hive collision smoke uncertainty in [[gaps]]. Page coverage count did not change. Did not run `qmd update` or `qmd embed`.
-
-**Refreshed pages:**
-- [[cli]]
-- [[operating]]
-- [[testing]]
-- [[gaps]]
-
-## [2026-06-05T22:33:41Z] wiki/post-commit — verify hv wiki residue commit
-
-**Action:** Refreshed planning/documentation coverage after commit `6ed10a39` touched only wiki pages (`[[cli]]`, `[[operating]]`, `[[testing]]`, `[[gaps]]`, and [[log]]) as a residual 6-review auto-commit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hv fallback launcher Apache Hive semver"` returned no indexed hits. Verified the committed wiki diff against current `bin/hv`, `bin/hive`, `lib/hive/cli.rb`, `lib/hive.rb`, and `test/unit/hv_test.rb`. The committed pages already match the source: `hv` probes only the documented install paths, rejects self-recursion, and execs only candidates whose `--version` is a bare `X.Y.Z`; `hv_test.rb` covers the override path and Apache-style `Hive 4.0.0` rejection. No page coverage change or new uncertainty beyond the existing live Apache-Hive collision smoke gap in [[gaps]]. Did not run `qmd update` or `qmd embed`.
+**Action:** Extended `hive migrate` beyond task-id repair so it also scans every canonical task folder with a missing/null `display_name` and runs `Hive::DisplayName::Generator` with commits disabled, then records successful name writes in a separate `.hive-state` commit. This uses the same agent-backed naming pipeline as `hive generate-name`, preserves existing names (including patrol handoff names), and leaves failed generations retryable. Added focused migration and generator tests and updated command/state docs.
 
 **Refreshed pages:**
-- [[log]]
+- [[commands/migrate]]
+- [[state-model]]
+- [[stages/inbox]]
 
-## [2026-06-06T18:04:12Z] wiki/post-commit — verify residual log-only refresh
+## [2026-06-05T18:02:00Z] patrol — allocate task ids for review handoff tasks
 
-**Action:** Refreshed planning/documentation coverage after commit `6ccfbc89` touched only [[log]] as a residual 6-review auto-commit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hv fallback launcher Apache Hive semver"` returned no indexed hits. Verified the committed diff plus the prior wiki-refresh commit `6ed10a39` against current `bin/hv`, `bin/hive`, `lib/hive/cli.rb`, `lib/hive.rb`, `test/unit/hv_test.rb`, [[cli]], [[operating]], [[testing]], and [[gaps]]. The committed log entry accurately describes the already-refreshed hv coverage: the fallback probes the documented install paths, avoids self-recursion, requires bare-semver `--version` output before exec, and leaves only the existing live Apache-Hive collision smoke gap. Page coverage did not change, so [[index]] was left unchanged; no new uncertainty was found for [[gaps]]. Did not run `qmd update` or `qmd embed`.
-
-**Refreshed pages:**
-- [[log]]
-
-## [2026-06-06T18:10:17Z] schemas/init — document hive-init v2 compatibility bump
-
-**Action:** Refreshed command/API wiki coverage after commit `cc45f88f` bumped `Hive::Schemas::SCHEMA_VERSIONS["hive-init"]` to 2, restored `schemas/hive-init.v1.json` with `patrol_reviewers` required for pinned consumers, and added `schemas/hive-init.v2.json` without `patrol_reviewers` because the current producer no longer emits it. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hive-init schema patrol_reviewers init json"` found existing init/config/testing wiki coverage. Verified the committed diff plus current `lib/hive.rb`, `lib/hive/commands/init.rb`, `lib/hive/cli.rb`, `schemas/hive-init.v1.json`, `schemas/hive-init.v2.json`, `test/unit/schema_files_test.rb`, and `test/integration/init_test.rb`. Documented the current `hive-init.v2` JSON surface, the preserved v1 back-compat contract, and the ADR-025 schema-version policy application. Recorded follow-up uncertainty that `lib/hive/cli.rb`, `docs/cli.md`, and `test/integration/init_test.rb` still contain v1 residue; no focused tests were run during this wiki refresh. Page coverage did not change, so [[index]] was left unchanged. Did not run `qmd update` or `qmd embed`.
+**Action:** Changed `Hive::Patrol::ReviewHandoff` so synthetic `6-review/patrol-.../` tasks allocate a normal `Hive::TaskCounter` id instead of writing `id: nil` unconditionally. The fail-soft behavior now matches `hive new`: counter lock contention leaves the id null, but the task is still enqueued and `hive migrate` can repair it later. Added patrol handoff/opener coverage and corrected the task sidecar docs.
 
 **Refreshed pages:**
-- [[cli]]
-- [[commands/init]]
+- [[state-model]]
+
+## [2026-06-05T20:05:00Z] tui — vertical resize viewport and reduced dashboard chrome
+
+**Action:** Made the grid composer height-aware: it subtracts footer/stalled-banner rows from `model.rows`, passes the remaining budget into `ProjectsPane` and `TasksPane`, and each pane clips/pads with a cursor-following viewport. Removed the persistent grid metadata strip and hidden-archive footer prefix so the first frame prioritizes panes and the footer stays visible under vertical terminal resize. Added focused pane viewport tests plus a PTY Charm smoke that performs a real vertical `winsize` + `SIGWINCH` resize and verifies the footer remains visible.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-06-05T22:45:00Z] bot — refresh voice idea command/API coverage
+
+**Action:** Refreshed command/API wiki coverage after the voice-idea implementation series (`e96e024b`, `1e61c1ff`, `9a79198a`, `a740bab7`, `21813bb2`, `b09a18db`, `6f7aa97b`, `89937845`) added Telegram voice metadata parsing, an OpenAI-compatible transcriber, transcription config validation, transcript-confirm draft state, router/callback confirm-edit-discard handling, supervisor transcription execution, transcript-only capture integration coverage, fallback audio retention, fake Telegram voice injection, and opt-in live Telegram voice E2E hooks. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "telegram voice idea confirmation bot router callback slash handlers"` returned no indexed hits, so verification used direct wiki/source reads. Inspected the committed diffs plus `lib/hive/bot/router.rb`, `lib/hive/bot/handlers/slash_handlers.rb`, `lib/hive/bot/handlers/callback_handlers.rb`, `lib/hive/bot/supervisor.rb`, `lib/hive/bot/transcriber.rb`, `lib/hive/bot/telegram.rb`, `lib/hive/bot/idea_draft_store.rb`, `lib/hive/config.rb`, `test/integration/bot/scenarios/s6_voice_idea_test.rb`, `test/eval/support/fake_telegram.rb`, and `test/e2e/tg/drive_idea.py`. Documented bare voice-note idea capture, transcript confirm/discard/edit/re-record callbacks, immediate commit after project selection for voice-only drafts, failed-transcription audio fallback, transcription config validation, Faraday multipart usage, env-only `HIVE_WHISPER_API_KEY`, and secret-gated E2E behavior. Recorded that live Telegram download and live OpenAI transcription smoke evidence is still missing unless the opt-in E2E is run with a real fixture/key. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
 - [[modules/config]]
-- [[decisions]]
-- [[testing]]
-- [[gaps]]
-- [[log]]
+- [[architecture]]
+- [[dependencies]]
+## [2026-06-05T21:27:50Z] claude-launcher — fail fast on dead tmux expected-output waits
 
-## [2026-06-06T18:21:52Z] wiki/post-commit — verify hive-init v2 residual wiki commit
-
-**Action:** Refreshed planning/documentation coverage after commit `be910753` touched only wiki pages (`[[cli]]`, `[[commands/init]]`, `[[decisions]]`, `[[gaps]]`, `[[modules/config]]`, `[[testing]]`, and [[log]]) as a residual 6-review auto-commit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hive-init schema patrol_reviewers init json"` returned stale indexed snippets still mentioning `hive-init.v1`, so verification used the committed diff plus direct reads. Checked current `lib/hive.rb`, `lib/hive/cli.rb`, `lib/hive/commands/init.rb`, `schemas/hive-init.v1.json`, `schemas/hive-init.v2.json`, `test/unit/schema_files_test.rb`, `test/integration/init_test.rb`, and `docs/cli.md`. The committed wiki pages accurately document `hive-init.v2`, the preserved `hive-init.v1` back-compat schema, and the ADR-025 schema-version policy application. Narrowed [[gaps]] entry 24 because `lib/hive/cli.rb` and `test/integration/init_test.rb` are now source-synced; only `docs/cli.md` still says `hive-init.v1`. Page coverage did not change, so [[index]] was left unchanged. Did not run `qmd update` or `qmd embed`.
+**Action:** Fixed `Hive::ClaudeLauncher.wait_for_expected_output` so Claude/tmux reviewer waits observe tmux session liveness even before the expected artifact exists. A disappeared session now returns `status: :error` with `tmux_session_terminated...` instead of holding `REVIEW_WORKING` until the full reviewer timeout; a non-empty artifact is accepted after session death only when Claude's Stop hook already wrote `.done`, so partial reviewer files are retried instead of promoted. Added bounded daemon auto-recovery for no-live-lock `REVIEW_ERROR reason=review_agent_died` rows and for `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` rows whose `reviews/errors-NN.md` contains only this tmux expected-output session-death shape, so common Claude/tmux crashes retry without an operator clicking autofix while repeated identical failures stay red after the default 3 clears. Added unit regressions for missing-output fast-fail, partial-output rejection, done-signaled preservation, auto-clear, retry-budget exhaustion, live-lock skip, and mixed-error non-clear, and refreshed agent/daemon/state/testing docs.
 
 **Refreshed pages:**
+- [[modules/agent]]
+- [[modules/daemon]]
+- [[state-model]]
+- [[testing]]
+
+## [2026-06-05T23:20:00Z] tui — seed first snapshot before Bubbletea loop
+
+**Action:** Investigated slow `hive tui` startup. `hive status --json` and
+`StateSource` were fast in isolation, but a PTY probe showed the background
+`StateSource#refresh_once` entering before the first frame and then being
+starved by the Bubbletea render/input loop, leaving the UI on the loading grid.
+Added synchronous `StateSource#refresh_now` and seeded the initial TUI model with
+that snapshot before starting the runner. Local PTY first useful paint improved
+to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
+
+**Verified:**
+- `bundle exec ruby -Itest test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+- `bundle exec rubocop --format simple lib/hive/tui/app.rb lib/hive/tui/state_source.rb test/unit/tui/state_source_test.rb test/integration/tui_smoke_test.rb test/integration/tui_smoke_charm_test.rb`
+
+**Refreshed pages:**
+- [[commands/tui]]
+## [2026-06-07T10:45:00Z] agent — classify provider limits before generic agent failures
+
+**Action:** Added `Hive::AgentLimit` and wired it into headless `Hive::Agent#handle_exit` plus Claude tmux readiness, terminal-marker, and expected-output waits. Provider quota/rate-limit text and Claude's usage-credit menu now surface as `limits reached for <agent>:` / `ERROR reason=limits_reached` before generic `exit_code`, `timeout`, `tmux_session_terminated`, or "interactive prompt did not become ready" failures. Checked the current red Hive rows: `patrol-command-bin-hive-e2e-effc81e9` and `patrol-command-bin-hive-e2e-bb21a633` had the exact Claude "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu behind `triage_failed` / `timeout`; other apparent matches were historical `[stream]` log lines containing source line numbers or review text, not provider-limit evidence. Added focused regressions in `agent_limit_test.rb`, `agent_test.rb`, and `claude_launcher_test.rb`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[stages/index]]
+- [[state-model]]
+- [[testing]]
+
+## [2026-06-06T10:14:41Z] patrol — scoped review reviewers for patrol PR handoff
+
+**Action:** Added a separate `patrol.review.reviewers` config list for synthetic `Patrol: ...` review tasks. Fresh `hive init` now asks for patrol PR reviewers separately from normal `review.reviewers`, defaults patrol PR review to `codex-ce-code-review` only, and lets operators opt into `claude-ce-code-review`; `pr-review-toolkit` is intentionally excluded from the patrol prompt. The 6-review runner selects `patrol.review.reviewers` when `task.md` frontmatter has `source: patrol`, while normal tasks continue using `review.reviewers`. Updated [[commands/init]], [[commands/patrol]], [[modules/config]], and [[stages/review]].
+
+## [2026-06-06T10:45:00Z] wiki — audit scoped patrol reviewer command/API coverage
+
+**Action:** Audited commit `464b64a9` after it touched CLI help, init prompts, config defaults/validation, the 6-review reviewer selector, the `hive-init.v1` schema, the project config template, and public architecture docs. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "patrol review reviewers config init"` found existing config/index/gaps context. Verified the committed diff plus `lib/hive/commands/init.rb`, `lib/hive/commands/init/prompts.rb`, `lib/hive/config.rb`, `lib/hive/stages/review.rb`, `templates/project_config.yml.erb`, `schemas/hive-init.v1.json`, and focused init/config/schema/review tests. Refreshed command/API coverage for the new `patrol_reviewers` init payload field, `patrol.review.reviewers` config surface, and patrol-sourced reviewer selection; recorded that the scoped patrol reviewer path is still not live-smoked through a real patrol PR plus daemon/TUI pickup. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[index]]
+- [[architecture]]
+- [[commands/init]]
+- [[commands/patrol]]
+- [[modules/config]]
+- [[stages/review]]
+- [[testing]]
 - [[gaps]]
-- [[log]]
 
-## [2026-06-06T18:31:54Z] docs/status — verify hive-init docs and archive rule cleanup
+## [2026-06-06T19:45:07Z] openclaw — guided Hive setup through umbrella skill
 
-**Action:** Refreshed planning/documentation coverage after commit `469ec06e` corrected two stale documentation statements: `docs/cli.md` now says `hive init --json` emits `hive-init.v2`, and [[commands/status]] no longer claims unresolved old `9-done` rows remain visible in daily status. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; read `.llm-wiki/config.json`; `qmd search "hive-init schema archive filter 9-done"` returned stale indexed snippets for older archive wording, so verification used the committed diff plus direct reads. Checked `docs/cli.md`, `lib/hive.rb`, `lib/hive/commands/init.rb`, `schemas/hive-init.v1.json`, `schemas/hive-init.v2.json`, `test/unit/schema_files_test.rb`, `test/integration/init_test.rb`, `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, `test/unit/commands/status_test.rb`, `test/unit/tui/snapshot_test.rb`, [[cli]], [[commands/init]], [[commands/status]], [[commands/tui]], and [[testing]]. The source and tests confirm the current contracts: init emits schema version 2 while preserving the explicit v1 schema for pinned consumers, and archive hiding applies to all old `9-done` rows by row `mtime` with `folder_mtime` only as a fallback. Closed [[gaps]] entry 24 because the remaining `docs/cli.md` v1 residue is fixed. Page coverage did not change, so [[index]] was left unchanged. Did not run focused tests, `qmd update`, or `qmd embed`.
+**Action:** Updated the OpenClaw skill model so the umbrella `/hive` skill is the first-use setup path instead of hard-failing when the Hive CLI is missing. The umbrella skill is now always visible, declares macOS Homebrew installer metadata, detects strict Hive CLI versions via `hive` or `hv`, guides confirmed platform install commands, runs `hive daemon install`, and optionally initializes the current project. Shortcut skills remain gated on the `hive` binary so workflow shortcuts only appear after setup. Refreshed the OpenClaw README, top-level README, [[operating]], and [[gaps]] to distinguish ClawHub skill installation from guided setup.
+
+**Follow-up:** During ClawHub preflight, `clawhub inspect hive` showed the naked `hive` slug is already owned by another publisher and describes a different integration. Updated the intended umbrella ClawHub slug to `hive-cli`; the installed skill still exposes `/hive`, and shortcut listings remain `hive-*`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
+## [2026-06-07T10:42:24Z] wiki — post-commit agent-limit coverage audit
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `d22caf37` added `Hive::AgentLimit` and already touched [[modules/agent]], [[stages/index]], [[state-model]], [[testing]], and [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "agent limit provider quota rate limit claude usage credits"` returned no indexed hits, so verification used direct source/wiki search plus the configured master wiki path (no relevant hit). Inspected the committed diff and current `lib/hive/agent_limit.rb`, `lib/hive/agent.rb`, `lib/hive/claude_launcher.rb`, focused unit tests, and the touched wiki pages. Updated [[modules/agent]] to map the new classifier source file, refreshed [[architecture]] to remove stale inode-based concurrent-edit wording and document limit precedence in headless/tmux paths, updated [[gaps]] with the new source-coverage row and missing post-fix live-smoke evidence, and bumped [[index]] because page coverage metadata changed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[architecture]]
+- [[gaps]]
+- [[index]]
+
+## [2026-06-07T14:20:00Z] babysitter — prioritize dirty PRs and snapshot pre-fix residue
+
+**Action:** Investigated why babysitter skipped PR #341 even though it was `DIRTY`. The project had a large open-PR backlog and `ProjectTick` selected only the oldest updated PRs before `PrFixer` could inspect merge state, so newer conflicted PRs could starve behind neutral rows. Updated the selection contract to request `mergeStateStatus` from `gh pr list` and sort actionable states ahead of age before applying `babysitter.max_concurrent_prs`.
+
+**Action:** Changed 6-review pre-fix dirty-worktree cleanup to auto-commit all existing residue with `Hive-Auto-Commit-Reason: pre_fix_dirty_worktree`. Normal clean-exit and finalize backstop scope checks remain strict; the permissive path only snapshots pre-existing residue before the fix agent starts so `fix_dirty_worktree` does not block routine recovery.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[stages/review]]
+
+## [2026-06-07T14:35:00Z] wiki — audit babysitter dirty-priority refresh coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the dirty-priority branch already touched [[modules/babysitter]], [[stages/review]], and [[log]]. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dirty priority pre fix dirty worktree review residue"` returned no indexed hits, and the configured master wiki path had no matching context. Inspected the committed diff and current `lib/hive/babysitter/project_tick.rb`, `lib/hive/gh.rb`, `lib/hive/stages/clean_exit.rb`, `lib/hive/stages/review.rb`, plus focused babysitter/GitHub/review tests. Updated [[decisions]] because ADR-034 still described the old pre-fix dirty guard, corrected the stale Phase 4 text in [[stages/review]], and recorded the missing live-smoke evidence for dirty-priority selection and out-of-scope pre-fix snapshots in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[decisions]]
+- [[stages/review]]
+- [[gaps]]
+
+## [2026-06-07T15:05:00Z] wiki — audit archive filter marker-agnostic coverage
+
+**Action:** Refreshed command/API wiki coverage after the archive-filter cleanup removed the unused `marker_name` parameter from `Hive::ArchiveFilter.hide?` and both Status/TUI callers. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "ArchiveFilter hide archive status TUI folder_mtime"` found the existing status/archive coverage, and the configured master wiki path had no matching context. Inspected the committed diff plus current `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, and relevant status/TUI/testing wiki pages. Corrected stale text that described archive hiding as clean-marker-only, documented the marker-agnostic and no-timestamp fail-open contract, and carried the same uncertainty forward: no in-tree live registered-project artifact proves the full archive workflow after aged done folders exist. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
 
 **Refreshed pages:**
 - [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
 - [[gaps]]
-- [[log]]

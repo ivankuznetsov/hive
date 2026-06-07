@@ -23,11 +23,12 @@ claude:
 # be installed alongside your agent CLI. Plan defaults are agent-aware:
 # claude → `/plan`, codex → `/llm-wiki:wiki-plan`, pi →
 # `/skill:wiki-plan` after profile formatting. Brainstorm defaults to
-# `/compound-engineering:ce-brainstorm`. Override here to pin a
+# `/ce-brainstorm`. Legacy `/compound-engineering:ce-*` values are
+# normalized before prompts are rendered. Override here to pin a
 # different skill per project.
 brainstorm:
   agent: <%= planning_agent %>
-  # skill: /compound-engineering:ce-brainstorm
+  # skill: /ce-brainstorm
   # Legacy configs may still carry brainstorm.runtime; new projects use
   # the project-global claude.mode setting above.
 plan:
@@ -214,6 +215,33 @@ patrol:
     lint: null
     typecheck: null
     test: null
+  # Review handoff for patrol-created PRs uses a narrower reviewer set
+  # than normal feature PRs. Keep Codex on by default; optionally add
+  # Claude during init when you want broader patrol review coverage.
+  review:
+    max_context_files: 24
+    max_owned_files: 12
+    reviewers:
+<% if patrol_reviewers.include?("codex-ce-code-review") -%>
+      - name: codex-ce-code-review
+        kind: agent
+        agent: codex
+        skill: ce-code-review
+        output_basename: codex-ce-code-review
+        prompt_template: reviewer_codex_ce_code_review.md.erb
+        budget_usd: 50
+        timeout_sec: 5400
+<% end -%>
+<% if patrol_reviewers.include?("claude-ce-code-review") -%>
+      - name: claude-ce-code-review
+        kind: agent
+        agent: claude
+        skill: ce-code-review
+        output_basename: claude-ce-code-review
+        prompt_template: reviewer_claude_ce_code_review.md.erb
+        budget_usd: 50
+        timeout_sec: 5400
+<% end -%>
 
 # Auto-rebase pre-step for `hive run` (plan
 # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).

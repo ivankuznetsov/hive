@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/task_counter"
 require "hive/task_meta"
 
 module Hive
@@ -34,10 +35,16 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: nil,
+          id: allocate_task_id,
           slug: slug,
           display_name: display_name(finding)
         )
+      end
+
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now)
@@ -73,6 +80,9 @@ module Hive
       end
 
       def write_idea_md(task_folder, slug, finding, now)
+        # The TUI reads `original_text` from frontmatter; the body is the
+        # human-facing copy. They are deliberately identical, so compute
+        # the text once and interpolate into both positions.
         text = idea_text(finding)
         write_frontmatter_md(
           File.join(task_folder, "idea.md"),
@@ -176,7 +186,8 @@ module Hive
       end
 
       def evidence_text(evidence)
-        evidence.map do |entry|
+        Array(evidence).map do |entry|
+          entry = {} unless entry.is_a?(Hash)
           location = [ entry["file"], entry["line"] ].compact.join(":")
           snippet = entry["snippet"].to_s.strip
           line = location.empty? ? "- evidence" : "- `#{location}`"

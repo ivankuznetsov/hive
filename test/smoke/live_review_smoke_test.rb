@@ -25,6 +25,8 @@ class LiveReviewSmokeTest < Minitest::Test
     skip "claude binary not on PATH" unless system("which claude > /dev/null 2>&1")
     Hive::AgentProfiles.reset_for_tests!
     load File.expand_path("../../lib/hive/agent_profiles/claude.rb", __dir__)
+    load File.expand_path("../../lib/hive/agent_profiles/codex.rb", __dir__)
+    load File.expand_path("../../lib/hive/agent_profiles/pi.rb", __dir__)
   end
 
   def teardown
@@ -86,6 +88,7 @@ class LiveReviewSmokeTest < Minitest::Test
 
   def write_smoke_config(project_dir, worktree_root)
     cfg = {
+      "default_branch" => "master",
       "worktree_root" => worktree_root,
       "review" => {
         "max_passes" => 1,
@@ -96,7 +99,7 @@ class LiveReviewSmokeTest < Minitest::Test
             "name" => "claude-ce-code-review",
             "kind" => "agent",
             "agent" => "claude",
-            "skill" => "compound-engineering:ce-code-review",
+            "skill" => "ce-code-review",
             "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
             "output_basename" => "claude-ce-code-review"
           }

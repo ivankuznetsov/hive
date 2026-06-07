@@ -1,6 +1,7 @@
 require "securerandom"
 require "time"
 require "hive/bot/notification_builders"
+require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
 
 module Hive
@@ -66,6 +67,43 @@ module Hive
           project_picker_result(token: draft.token)
         end
 
+        def voice(update)
+          voice = update.voice || {}
+          file_id = voice[:file_id]
+          # A voice payload with no file_id can't be fetched. This runs inside
+          # the router, before execute_transcribe_voice's rescue, so a raised
+          # KeyError would escape to the poll loop and leave the operator with
+          # no reply at all. Reply gracefully instead of a silent no-reply.
+          if file_id.to_s.empty?
+            return @result_class.new(action: :reply,
+                                     text: "Couldn't read that voice note - please send it again.")
+          end
+
+          @result_class.new(
+            action: :transcribe_voice,
+            attachment: {
+              chat_id: update.chat_id,
+              file_id: file_id,
+              file_size: voice[:file_size]
+            }
+          )
+        end
+
+        def edit_transcript_text(update)
+          text = update.text.to_s.strip
+          return @result_class.new(action: :reply, text: "Send corrected transcript text, or a new voice note.") if text.empty?
+
+          draft = @idea_draft_store.get(chat_id: update.chat_id)
+          return @result_class.new(action: :reply, text: "That voice idea draft expired. Send the voice note again.") unless draft
+
+          @idea_draft_store.set_transcript(chat_id: update.chat_id, text: text)
+          @result_class.new(
+            action: :reply,
+            text: Hive::Bot::IdeaKeyboards.transcript_preview_text(text),
+            reply_markup: Hive::Bot::IdeaKeyboards.voice_confirm_keyboard(draft.token)
+          )
+        end
+
         def media(update)
           draft = @idea_draft_store.get(chat_id: update.chat_id)
           started_here = draft.nil?
@@ -124,7 +162,7 @@ module Hive
           @result_class.new(
             action: :reply,
             text: "Pick a project for the idea.",
-            reply_markup: project_keyboard(projects, token)
+            reply_markup: Hive::Bot::IdeaKeyboards.project_keyboard(projects, token, last_project: @last_project.call)
           )
         end
 
@@ -325,16 +363,6 @@ module Hive
           # (an escape here would skip write_last_seen and let Telegram
           # redeliver the update). Degrade to a soft retry hint instead.
           [ nil, "Status lookup failed — try again in a moment." ]
-        end
-
-        def project_keyboard(projects, token)
-          sorted = projects.sort_by { |project| project["name"] == @last_project.call ? 0 : 1 }
-          rows = sorted.map do |project|
-            label = project["name"] == @last_project.call ? "★ #{project['name']}" : project["name"]
-            [ { text: label, callback_data: "idea_project:#{project['name']}:#{token}" } ]
-          end
-          rows << [ { text: "+ new project", callback_data: "idea_project_new:#{token}" } ]
-          rows
         end
       end
     end

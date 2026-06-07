@@ -56,7 +56,7 @@ The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix,
 | `hive approve TARGET` | Move a task to the next stage or `--to <stage>`. |
 | `hive markers clear FOLDER --name NAME` | Clear a recovery marker through the allowlisted path. |
 | `hive rebase-status TARGET` | Inspect whether the next run would auto-rebase. |
-| `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts. |
+| `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts and backfill legacy task metadata. |
 | `hive tree` | Print the Thor command tree. |
 
 Use these when building scripts, recovering a task, or checking idempotency.

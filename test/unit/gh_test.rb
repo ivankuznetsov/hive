@@ -357,6 +357,7 @@ def test_list_open_prs_parses_gh_json_array
     assert_equal 42, prs.first.fetch("number")
   end
   assert_includes captured.first, "list"
+  assert_match(/(^|,)mergeStateStatus(,|$)/, captured.first.fetch(captured.first.index("--json") + 1))
   assert_equal "/tmp/repo", captured.last.fetch(:chdir)
 end
 

@@ -45,11 +45,12 @@ module Hive
            (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
         4. Development agent (drives 4-execute)                  — default codex
         5. Review agents (multi-select over 3 default reviewers) — default all
-        6. Triage bias (courageous / safetyist)                  — default courageous
-        7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        8. Daemon enrollment                                     — default enabled
-        9. Hive babysitter enrollment                            — default enabled
-       10. Daemon autostart                                      — default disabled
+        6. Patrol PR review agents                               — default codex only
+        7. Triage bias (courageous / safetyist)                  — default courageous
+        8. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        9. Daemon enrollment                                     — default enabled
+       10. Hive babysitter enrollment                            — default enabled
+       11. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -61,8 +62,8 @@ module Hive
 
         hive: using defaults — planning=claude, claude_mode=tmux,
         claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
-        triage=courageous, limits=defaults, daemon=enabled,
-        babysitter=enabled, daemon_autostart=disabled
+        patrol_reviewers=codex, triage=courageous, limits=defaults,
+        daemon=enabled, babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
       hive-init.v2 success payload containing the resolved answers plus
@@ -70,7 +71,10 @@ module Hive
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
-      for the schema). Piped STDIN is intentionally NOT consumed.
+      for the schema). Legacy Compound Engineering skill values such as
+      `/compound-engineering:ce-brainstorm` are normalized to the current
+      `/ce-brainstorm` form before prompts are rendered. Piped STDIN is
+      intentionally NOT consumed.
 
       Exit codes:
         0  — initialised successfully
@@ -238,6 +242,27 @@ module Hive
     def migrate(project_path = Dir.pwd)
       require "hive/commands/migrate"
       Hive::Commands::Migrate.new(project_path).call
+    end
+
+    desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"
+    long_desc <<~DESC
+      Subcommands:
+        compile-log [PROJECT_PATH]    Rebuild wiki/log.md from wiki/log.d/*.md
+                                      fragments plus the legacy log body.
+
+      PRs should add a uniquely named fragment under wiki/log.d/ instead of
+      editing wiki/log.md directly; run this command after merge/rebase when a
+      concrete checkout needs the compiled changelog.
+    DESC
+    option :check, type: :boolean, default: false,
+                   desc: "exit non-zero when wiki/log.md is not the generated output"
+    def wiki(subcommand, project_path = Dir.pwd)
+      require "hive/commands/wiki"
+      Hive::Commands::Wiki.new(
+        subcommand,
+        project_path,
+        check: options[:check]
+      ).call
     end
 
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
@@ -649,8 +674,9 @@ module Hive
       Subcommands:
         start [--detach] [--dry-run]      Run the babysitter loop.
         stop                              Send SIGTERM to the running babysitter.
+        restart [--detach] [--dry-run]   Stop then start the babysitter.
         status                            Show running / not-running.
-        reload                            Send SIGHUP to reload config.
+        reload                            Send SIGHUP to reload config/log settings.
         tail                              Stream babysitter.log.
 
       One-shot:

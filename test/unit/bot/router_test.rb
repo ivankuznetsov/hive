@@ -24,7 +24,7 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil,
-             photo: nil, document: nil, caption: nil)
+             photo: nil, document: nil, voice: nil, caption: nil)
     Hive::Bot::Telegram::Update.new(
       update_id: 1,
       chat_id: chat_id,
@@ -34,6 +34,7 @@ class HiveBotRouterTest < Minitest::Test
       reply_to_text: reply_to_text,
       photo: photo,
       document: document,
+      voice: voice,
       caption: caption
     )
   end
@@ -132,6 +133,88 @@ class HiveBotRouterTest < Minitest::Test
     assert_match(/Pick a project/, result.text)
   end
 
+  def test_voice_update_emits_transcribe_action
+    result = @router.handle(update(voice: {
+      file_id: "voice-file",
+      file_size: 1234
+    }))
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "voice-file", result.attachment.fetch(:file_id)
+    assert_equal 1234, result.attachment.fetch(:file_size)
+  end
+
+  def test_text_while_awaiting_transcript_confirm_replaces_transcript
+    draft = @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
+                               text: "old", token: "tok", origin: :voice)
+
+    result = @router.handle(update(text: "corrected transcript"))
+
+    assert_equal :reply, result.action
+    assert_match(/corrected transcript/, result.text)
+    assert_equal "Confirm", result.reply_markup.first.first[:text]
+    assert_equal "idea_voice_confirm:tok", result.reply_markup.first.first[:callback_data]
+    assert_equal "corrected transcript", @draft_store.get(chat_id: draft.chat_id).text
+  end
+
+  def test_voice_while_awaiting_transcript_confirm_retranscribes
+    @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
+                       text: "old", token: "tok", origin: :voice)
+
+    result = @router.handle(update(voice: {
+      file_id: "voice-two",
+      file_size: 222
+    }))
+
+    # Re-transcribe is handled transparently by ensure_voice_draft (it reuses
+    # the existing voice draft), so a replacement voice note routes to the
+    # same :transcribe_voice action — no separate edit flag is carried.
+    assert_equal :transcribe_voice, result.action
+    assert_equal "voice-two", result.attachment.fetch(:file_id)
+  end
+
+  def test_voice_while_non_voice_draft_is_open_preserves_current_draft
+    @draft_store.start(chat_id: 12345, phase: :collecting_files, text: "typed idea", token: "tok")
+
+    result = @router.handle(update(voice: {
+      file_id: "voice-two",
+      file_size: 222
+    }))
+
+    assert_equal :reply, result.action
+    assert_match(/Finish or discard the current idea draft/, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal :collecting_files, draft.phase
+    assert_equal "typed idea", draft.text
+    assert_equal "tok", draft.token
+  end
+
+  def test_text_while_awaiting_text_after_voice_fallback_routes_to_capture
+    # After a transcription failure the supervisor leaves a voice-origin draft
+    # in :awaiting_text. Plain text must route to idea text capture, not the
+    # unknown/help fallback — otherwise the operator's idea is dropped.
+    @draft_store.start(chat_id: 12345, phase: :awaiting_text, token: "tok", origin: :voice)
+
+    assert_equal :idea_text_capture, @router.classify(update(text: "the actual idea"))
+
+    result = @router.handle(update(text: "the actual idea"))
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal "the actual idea", @draft_store.get(chat_id: 12345).text
+  end
+
+  def test_active_brainstorm_conversation_wins_for_plain_text_while_transcript_awaits_confirm
+    @draft_store.start(chat_id: 12345, phase: :awaiting_transcript_confirm,
+                       text: "old", token: "tok", origin: :voice)
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd", question_n: 1)
+
+    result = @router.handle(update(text: "answer body"))
+
+    assert_equal :write_answer_then_reply, result.action
+    assert_equal "answer body", result.answer_text
+    assert_equal "old", @draft_store.get(chat_id: 12345).text
+  end
+
   def test_media_without_caption_starts_file_first_draft
     result = @router.handle(update(document: {
       file_id: "doc",
@@ -197,6 +280,67 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "slug-260514-abcd", result.slug
     assert_equal 1, result.question_n
     assert_equal "answer body", result.answer_text
+  end
+
+  def test_voice_inside_active_conversation_transcribes_as_answer
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd", question_n: 1)
+
+    result = @router.handle(update(voice: {
+      file_id: "voice-answer",
+      file_size: 2345
+    }))
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "hive", result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_equal 1, result.question_n
+    assert_equal :path_b, result.mode
+    assert_equal :answer, result.attachment.fetch(:purpose)
+    assert_equal "voice-answer", result.attachment.fetch(:file_id)
+    assert_equal 2345, result.attachment.fetch(:file_size)
+  end
+
+  def test_voice_reply_can_reattach_to_slug_after_restart
+    result = @router.handle(
+      update(
+        reply_to_text: "hive/slug-260514-abcd (2-brainstorm)",
+        voice: { file_id: "voice-answer", file_size: 2345 }
+      )
+    )
+
+    assert_equal :transcribe_voice, result.action
+    assert_equal "hive", result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_nil result.question_n
+    assert_equal :path_b, result.mode
+    assert_equal :answer, result.attachment.fetch(:purpose)
+  end
+
+  def test_voice_reply_can_reattach_to_legacy_answer_mode_prompt
+    result = @router.handle(
+      update(
+        reply_to_text: "Answer mode started for slug-260514-abcd.",
+        voice: { file_id: "voice-answer", file_size: 2345 }
+      )
+    )
+
+    assert_equal :transcribe_voice, result.action
+    assert_nil result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_equal :answer, result.attachment.fetch(:purpose)
+  end
+
+  def test_unmatched_voice_reply_remains_a_new_voice_idea
+    result = @router.handle(
+      update(
+        reply_to_text: "plain old message",
+        voice: { file_id: "voice-idea", file_size: 2345 }
+      )
+    )
+
+    assert_equal :transcribe_voice, result.action
+    assert_nil result.slug
+    assert_nil result.attachment[:purpose]
   end
 
   def test_free_text_inside_path_a_conversation_continues_codex
@@ -293,6 +437,8 @@ class HiveBotRouterTest < Minitest::Test
       "details:hive:slug-260514-abcd" => :callback_show_details,
       "refresh_diagnose:hive:slug-260514-abcd:6-review" => :callback_refresh_diagnose,
       "answer:hive:slug-260514-abcd" => :callback_answer,
+      "idea_voice_confirm:token" => :callback_idea_voice_confirm,
+      "idea_voice_discard:token" => :callback_idea_voice_discard,
       "idea_done:token" => :callback_idea_done,
       "idea_skip:token" => :callback_idea_skip,
       "path_a_yes:hive:slug-260514-abcd" => :callback_path_a_yes,

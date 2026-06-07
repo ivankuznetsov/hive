@@ -261,7 +261,7 @@ class HiveCommandsBabysitTest < Minitest::Test
     error = assert_raises(Hive::Error) { command.call }
 
     assert_equal [ :stop ], calls
-    assert_includes error.message, "restart aborted"
+    assert_includes error.message, "stop failed"
   end
 
   def test_stop_leaves_pid_file_when_kill_ownership_becomes_unverified
@@ -277,8 +277,10 @@ class HiveCommandsBabysitTest < Minitest::Test
     times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
 
     _out, err = capture_io do
-      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
-        command.call
+      assert_raises(Hive::Error) do
+        with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+          command.call
+        end
       end
     end
 

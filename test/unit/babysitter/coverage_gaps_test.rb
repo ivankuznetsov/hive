@@ -205,7 +205,7 @@ class BabysitterCoverageGapsTest < Minitest::Test
 
       File.write(cmd.pid_file, { "pid" => 123 }.to_yaml)
       cmd.define_singleton_method(:pid_ownership) { |_payload, _pid| :unverified }
-      _out, err = capture_io { cmd.call }
+      _out, err = capture_io { assert_raises(Hive::Error) { cmd.call } }
       assert_includes err, "cannot verify"
 
       File.write(cmd.pid_file, { "pid" => 123 }.to_yaml)
@@ -233,7 +233,7 @@ class BabysitterCoverageGapsTest < Minitest::Test
       after_kill_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 6
       times = [ Time.at(0), Time.at(after_grace), Time.at(after_grace), Time.at(after_kill_grace) ]
       with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(after_kill_grace) }) do
-        cmd.call
+        assert_raises(Hive::Error) { cmd.call }
       end
       assert_includes signals, :KILL
     end

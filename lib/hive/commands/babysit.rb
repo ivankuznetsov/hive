@@ -41,7 +41,7 @@ module Hive
 
         case @subcommand
         when "start"  then start_daemon
-        when "stop"    then stop_daemon
+        when "stop"    then stop_daemon_or_raise
         when "restart" then restart_daemon
         when "status"  then status_daemon
         when "reload"  then reload_daemon
@@ -222,12 +222,14 @@ module Hive
         true
       end
 
+      def stop_daemon_or_raise
+        return true if stop_daemon
+
+        raise Hive::Error, "hive babysitter: stop failed; inspect #{pid_file}"
+      end
+
       def restart_daemon
-        if File.exist?(pid_file) && !stop_daemon
-          raise Hive::Error,
-                "hive babysitter: restart aborted because the existing process did not stop; " \
-                "inspect #{pid_file}"
-        end
+        stop_daemon_or_raise if File.exist?(pid_file)
         reexec_detached_start! if @detach
 
         start_daemon

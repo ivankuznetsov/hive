@@ -2,6 +2,26 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `a8774462` changed `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and existing babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub env var config injection"` found the current babysitter docs and prior refresh history, while the configured master collection had no relevant hit. Inspected the committed diff plus `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/cli.rb`, and focused dry-run tests. Updated [[commands/babysit]] to describe option screening as scoped to each CLI's honored option regions, refreshed [[testing]] metadata, and tied the remaining live-agent dry-run smoke gap to `a8774462`. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
+
+**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
 ## [2026-06-07T17:00:00Z] review fix-pass 03 — finalize healer doc/observability polish
 

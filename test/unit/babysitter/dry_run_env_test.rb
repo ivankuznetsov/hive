@@ -49,11 +49,27 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--raw-field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input", "payload.json"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "q=@secret"
       assert_stubbed env, "gh", "workflow", "run", "release.yml"
       assert_stubbed env, "gh", "totally-new-write-command", "arg"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+
+      # Glued/inline @file payload forms must be caught on explicit GET too,
+      # not just the space-separated `-F q=@secret` form: each branch
+      # reimplements the @-prefix check, so they need independent coverage.
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-Fq=@secret"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--field=q=@secret"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input=payload.json"
+      # Glued/inline forms with scalar values stay read-only on explicit GET.
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-Fstate=open"
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--field=state=open"
+      # A trailing `-F` with no argument must not crash the stub; with no
+      # payload value it stays read-only on explicit GET.
+      assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F"
 
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
       assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
@@ -181,6 +197,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --raw-field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input payload.json skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues -F q=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues -Fq=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues --field=q=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input=payload.json skipped"
       assert_includes skipped, "gh workflow run release.yml skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
@@ -201,6 +222,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
+      assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
       assert_includes real_invocations, "real-git -C #{dir} status --short"
       assert_includes real_invocations, "real-git config --get remote.origin.url"
       assert_includes real_invocations, "real-git config --get-all remote.origin.fetch"

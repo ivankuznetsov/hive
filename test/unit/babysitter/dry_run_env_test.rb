@@ -254,6 +254,50 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+
+  def test_gh_stub_scrubs_exec_influencing_environment_before_passthrough
+    with_tmp_dir do |dir|
+      env_keys = %w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY]
+      real_gh = recording_env_binary(dir, "real-gh", env_keys)
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_PAGER" => "touch pager-pwned",
+        "PAGER" => "touch pager-pwned",
+        "GH_BROWSER" => "touch browser-pwned",
+        "BROWSER" => "touch browser-pwned",
+        "GH_EDITOR" => "touch editor-pwned",
+        "GIT_EDITOR" => "touch editor-pwned",
+        "VISUAL" => "touch editor-pwned",
+        "EDITOR" => "touch editor-pwned",
+        "GH_FORCE_TTY" => "80"
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+
+      assert status.success?, err
+      assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_gh_stub_skips_browser_launch_flags
+    with_tmp_dir do |dir|
+      real_gh = recording_binary(dir, "real-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_BROWSER" => "touch browser-pwned",
+        "BROWSER" => "touch browser-pwned"
+      }
+
+      assert_stubbed env, "gh", "repo", "view", "owner/repo", "--web"
+      assert_stubbed env, "gh", "repo", "view", "owner/repo", "--web=true"
+      assert_stubbed env, "gh", "pr", "view", "42", "--web"
+      assert_stubbed env, "gh", "repo", "view", "owner/repo", "-w"
+
+      refute File.exist?(File.join(dir, "real.log"))
+    end
+  end
   private
 
   def assert_stubbed(env, binary, *args)
@@ -293,5 +337,21 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def stub_path(binary)
     File.expand_path("../../../bin/hive-babysitter-stub-#{binary}", __dir__)
+  end
+
+  def recording_env_binary(dir, name, keys)
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      keys = #{keys.inspect}
+      File.open(#{File.join(dir, "env.log").dump}, "a") do |file|
+        keys.each do |key|
+          value = ENV.key?(key) ? ENV.fetch(key) : "<unset>"
+          file.puts("\#{key}=\#{value}")
+        end
+      end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
   end
 end

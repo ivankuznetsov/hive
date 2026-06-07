@@ -110,13 +110,16 @@ def read_only?(rest)
   end
 end
 
-def browser_option?(arg)
-  arg == "--web" || arg.start_with?("--web=") || arg == "-w" || arg.start_with?("-w=")
+def external_launcher_option?(rest)
+  return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
+  return false unless [%w[pr view], %w[repo view], %w[run view], %w[workflow view]].include?(rest[0, 2])
+
+  rest.drop(2).any? { |arg| arg == "-w" || arg.start_with?("-w") }
 end
 
 rest = stripped_global_options(argv)
 
-unless !argv.any? { |arg| browser_option?(arg) } && read_only?(rest)
+unless read_only?(rest) && !external_launcher_option?(rest)
   log_skip(argv)
   warn "[dry-run] gh #{argv.join(' ')} skipped"
   exit 0
@@ -127,5 +130,6 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
   exit 127
 end
-%w[GH_BROWSER BROWSER].each { |key| ENV.delete(key) }
+
+%w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY].each { |key| ENV.delete(key) }
 exec(real, *argv)

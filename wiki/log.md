@@ -3509,3 +3509,13 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 ## [2026-06-07T04:26:42+01:00] babysitter - block gh browser flags in dry-run stub
 
 **Action:** Fixed the babysitter dry-run `gh` stub so allowed read-looking commands still skip when their argv contains browser-opening `--web` / `-w` options. The previous subcommand allowlist passed through commands such as `gh pr view 42 --web`, `gh repo view --web`, `gh workflow view ... --web`, and `gh run view ... -w` to the real GitHub CLI. Added focused regression coverage in `test/unit/babysitter/dry_run_env_test.rb` and refreshed [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Did not run `qmd update` or `qmd embed`.
+
+## [2026-06-07T04:50:36+01:00] babysitter - scope gh browser flag guard by command
+
+**Action:** Refreshed command/API wiki coverage after commit `0c5c6e3f` changed `bin/hive-babysitter-stub-gh` so dry-run browser flag detection is scoped to `gh` subcommands where `--web` / `-w` opens a browser. The stub now treats `pr checks/diff/list/view`, `repo view`, `run view`, and `workflow view` as web-capable, detects `--web`, `--web=...`, bare/valued `-w`, and bundled short clusters containing `w`, and deliberately does not classify `run list` / `workflow list` as browser-capable so workflow-filter `-w` forms can still pass when otherwise read-only. Read `AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter gh dry-run browser web workflow stub"` found the prior babysitter dry-run wiki log context, and the master collection search found no matching cross-project result. Inspected the committed diff plus `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Updated docs to avoid the stale blanket "`gh -w` always means browser" wording, and recorded in [[gaps]] that the new command-scoped pass-through and bundled-short behavior was not covered by focused test assertions found in-tree. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]

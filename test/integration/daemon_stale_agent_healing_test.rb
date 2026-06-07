@@ -84,12 +84,14 @@ class DaemonStaleAgentHealingTest < Minitest::Test
           slug: task["slug"],
           stage: task["stage"],
           marker: task["marker"],
+          marker_attrs: task["attrs"],
           folder: task["folder"],
           state_file: task["state_file"],
           state_file_mtime: task["mtime"] ? Time.parse(task["mtime"]) : nil,
           action: task["action"],
           suggested_command: task["suggested_command"],
           claude_pid_alive: task["claude_pid_alive"],
+          live_task_lock: task["live_task_lock"],
           diagnostic: task["diagnostic"]
         )
       end

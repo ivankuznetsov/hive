@@ -749,6 +749,29 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_finalize_unpushed_recovery_skips_when_state_file_mtime_is_missing
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        mtime: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      assert_match(/ERROR reason=unpushed_commits/, File.read(state_file),
+                   "without a pre-clear mtime the healer cannot seed redispatch safely")
+    end
+  end
+
   def test_does_not_auto_recover_finalize_unpushed_commits_with_live_lock
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")

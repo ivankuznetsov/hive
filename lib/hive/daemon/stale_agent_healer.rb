@@ -151,6 +151,10 @@ module Hive
       def heal_error_if_auto_recoverable(row)
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row)
+        # The clear makes a markerless finalize row take the edit-resume
+        # path; without a pre-clear mtime to seed as the dispatch baseline,
+        # that row can strand as first-sight `record_baseline`.
+        return if row.state_file_mtime.nil?
 
         reason = marker_reason(row)
         recovery_key = error_auto_recovery_key(row, reason: reason)
@@ -212,8 +216,10 @@ module Hive
         marker_id = attrs["marker_id"].to_s
         match_attrs = { "reason" => reason }
         if marker_id.empty?
-          current_marker_id = Hive::Markers.current(row.state_file).attrs["marker_id"].to_s
-          match_attrs["marker_id"] = "__row_missing_marker_id__" unless current_marker_id.empty?
+          # Match legacy no-id markers only. `clear_current` evaluates this
+          # under the markers lock, so a stale row without marker_id cannot
+          # clear a newer marker that gained one between status and heal.
+          match_attrs["marker_id"] = nil
         else
           match_attrs["marker_id"] = marker_id
         end

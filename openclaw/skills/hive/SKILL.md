@@ -23,7 +23,7 @@ metadata:
 
 Hive turns a repository into a folder-based coding-agent pipeline: ideas become tasks, tasks move through brainstorm, plan, develop, review, artifacts, and finalize stages, and the daemon keeps enrolled projects moving in the background.
 
-Use this skill when the user wants to install Hive from OpenClaw, initialize the current project, create a task, inspect status, move a task through plan/develop/review, run diagnostics, or administer Hive's daemon, bot, markers, metrics, and task registry.
+Use this skill when the user wants to install Hive from OpenClaw, initialize the current project, create a task, inspect status, move a task through plan/develop/review, run diagnostics, compile wiki changelog fragments, or administer Hive's daemon, bot, markers, metrics, and task registry.
 
 ## Install From ClawHub
 
@@ -45,6 +45,7 @@ That listing installs the `/hive` slash command. First run should normally be:
 - `/hive status --json` shows the task board and next actions.
 - `/hive new . "build this feature"` creates a new Hive task in the current project.
 - `/hive plan <task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>` advance a task through the main coding workflow.
+- `/hive wiki compile-log --check` verifies that `wiki/log.md` matches the fragments in `wiki/log.d/`.
 - `/hive doctor` checks local runtime and skill configuration.
 
 ## CLI Detection
@@ -86,6 +87,8 @@ After install, run the strict `hive` / `hv` version check again. If neither comm
 Treat `/hive setup`, `/hive install`, and `/hive bootstrap` as requests for the guided setup flow above. Otherwise, treat the user's slash-command text after `/hive` as arguments for `hive_cmd`. If no arguments are supplied and Hive is already installed, run `"${hive_cmd}" --help` and summarize the available workflow. Run commands from the current project/workspace directory unless the user gives another path. Pass arguments safely; do not interpolate raw user text into a shell string.
 
 Prefer `--json` when the Hive command supports it and you need structured output. Summarize the result, including task slug, stage/action, marker, and next command when present.
+
+For `hive wiki compile-log`, prefer `--check` when verifying an aggregate wiki changelog. Run the mutating compile command only after merge/rebase or when the user explicitly wants `wiki/log.md` refreshed; feature PRs should add `wiki/log.d/<timestamp>-<slug>.md` fragments instead of editing the compiled log directly.
 
 ## Safety Boundaries
 

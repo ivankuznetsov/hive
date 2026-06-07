@@ -24,6 +24,7 @@ module Hive
         CLAUDE.md
         wiki/index.md
         wiki/log.md
+        wiki/log.d/.gitkeep
         wiki/gaps.md
         wiki/architecture.md
         wiki/decisions.md
@@ -35,6 +36,7 @@ module Hive
         .llm-wiki
         .claude
         wiki
+        wiki/log.d
         raw
         raw/notes
       ].freeze

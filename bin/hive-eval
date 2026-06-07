@@ -23,11 +23,15 @@ parser = OptionParser.new do |parser|
     options[:no_judge] = true
   end
 end
-parser.parse!
 
-unless ARGV.empty?
-  warn "hive-eval: unexpected argument: #{ARGV.first}"
-  warn parser.banner
+begin
+  parser.parse!
+  if ARGV.any?
+    warn "hive-eval: unexpected argument: #{ARGV.first}"
+    exit 64
+  end
+rescue OptionParser::ParseError => e
+  warn "hive-eval: #{e.message}"
   exit 64
 end
 

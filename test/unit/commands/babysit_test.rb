@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/babysit"
+require "hive/invoked_binary"
 
 class HiveCommandsBabysitTest < Minitest::Test
   include HiveTestHelper
@@ -189,12 +190,14 @@ class HiveCommandsBabysitTest < Minitest::Test
     command.define_singleton_method(:start_daemon) { calls << :start }
 
     exec_args = nil
-    with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
-      assert_raises(UncaughtThrowError) { command.call }
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/tmp/hive-wrapper/bin/hive" }) do
+      with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
+        assert_raises(UncaughtThrowError) { command.call }
+      end
     end
 
     assert_equal [ :stop ], calls
-    assert_equal [ Process.argv0, "babysit", "start", "--detach", "--dry-run" ], exec_args
+    assert_equal [ "/tmp/hive-wrapper/bin/hive", "babysit", "start", "--detach", "--dry-run" ], exec_args
   end
 
   def test_detached_restart_without_dry_run_omits_dry_run_flag
@@ -202,14 +205,16 @@ class HiveCommandsBabysitTest < Minitest::Test
     home = @home
     command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
     File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
-    command.define_singleton_method(:stop_daemon) { nil }
+    command.define_singleton_method(:stop_daemon) { true }
 
     exec_args = nil
-    with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
-      assert_raises(UncaughtThrowError) { command.call }
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/tmp/hive-wrapper/bin/hv" }) do
+      with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
+        assert_raises(UncaughtThrowError) { command.call }
+      end
     end
 
-    assert_equal [ Process.argv0, "babysit", "start", "--detach" ], exec_args
+    assert_equal [ "/tmp/hive-wrapper/bin/hv", "babysit", "start", "--detach" ], exec_args
   end
 
   def test_detached_restart_surfaces_reexec_failure
@@ -220,11 +225,43 @@ class HiveCommandsBabysitTest < Minitest::Test
     File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
     command.define_singleton_method(:stop_daemon) { calls << :stop }
 
-    with_replaced_singleton_method(Kernel, :exec, ->(*_args) { raise Errno::ENOENT, "missing hive" }) do
-      error = assert_raises(Hive::Error) { command.call }
-      assert_includes error.message, "failed to re-exec detached start"
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/tmp/hive-wrapper/bin/hive" }) do
+      with_replaced_singleton_method(Kernel, :exec, ->(*_args) { raise Errno::ENOENT, "missing hive" }) do
+        error = assert_raises(Hive::Error) { command.call }
+        assert_includes error.message, "failed to re-exec detached start"
+      end
     end
     assert_equal [ :stop ], calls
+  end
+
+  def test_detached_restart_errors_when_invoked_binary_cannot_be_resolved
+    command = babysit("restart", detach: true)
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { nil }) do
+      error = assert_raises(Hive::Error) { command.call }
+      assert_includes error.message, "failed to resolve invoked hive binary"
+    end
+    assert_equal [ :stop ], calls
+  end
+
+  def test_restart_aborts_when_stop_leaves_existing_process_alive
+    command = babysit("restart")
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop; false }
+    command.define_singleton_method(:start_daemon) { calls << :start }
+
+    error = assert_raises(Hive::Error) { command.call }
+
+    assert_equal [ :stop ], calls
+    assert_includes error.message, "restart aborted"
   end
 
   def test_stop_leaves_pid_file_when_kill_ownership_becomes_unverified

@@ -1,8 +1,8 @@
 require "fileutils"
-require "rbconfig"
 require "time"
 require "yaml"
 require "hive/config"
+require "hive/invoked_binary"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
@@ -167,7 +167,7 @@ module Hive
       def stop_daemon
         unless File.exist?(pid_file)
           warn "hive: babysitter not running (no PID file at #{pid_file})"
-          return
+          return true
         end
 
         payload = read_pid_file_payload
@@ -175,23 +175,23 @@ module Hive
         if pid.nil? || pid <= 0
           FileUtils.rm_f(pid_file)
           warn "hive: babysitter PID file at #{pid_file} is malformed; removing"
-          return
+          return true
         end
 
         unless pid_alive?(pid)
           FileUtils.rm_f(pid_file)
           warn "hive: babysitter PID #{pid} is not alive; removed stale #{pid_file}"
-          return
+          return true
         end
 
         case pid_ownership(payload, pid)
         when :reused
           FileUtils.rm_f(pid_file)
           warn "hive: PID #{pid} appears reused (start_time mismatch); refusing to signal. Removed stale #{pid_file}."
-          return
+          return true
         when :unverified
           warn "hive: cannot verify PID #{pid} is the hive babysitter; refusing to signal. Manually confirm and clean #{pid_file}."
-          return
+          return false
         end
 
         send_signal_safely(pid, :TERM)
@@ -204,7 +204,7 @@ module Hive
           if %i[reused unverified].include?(ownership_now)
             warn "hive: babysitter PID #{pid} still alive after TERM but ownership is #{ownership_now}; " \
                  "refusing KILL and leaving #{pid_file} for manual inspection"
-            return
+            return false
           end
           warn "hive: babysitter PID #{pid} did not stop within #{STOP_GRACE_SEC}s; sending KILL"
           send_signal_safely(pid, :KILL)
@@ -214,15 +214,20 @@ module Hive
           end
           if pid_alive?(pid)
             warn "hive: babysitter PID #{pid} is still alive after KILL; leaving #{pid_file}"
-            return
+            return false
           end
         end
         FileUtils.rm_f(pid_file)
         puts "hive babysitter: stopped (pid #{pid})"
+        true
       end
 
       def restart_daemon
-        stop_daemon if File.exist?(pid_file)
+        if File.exist?(pid_file) && !stop_daemon
+          raise Hive::Error,
+                "hive babysitter: restart aborted because the existing process did not stop; " \
+                "inspect #{pid_file}"
+        end
         reexec_detached_start! if @detach
 
         start_daemon
@@ -231,18 +236,19 @@ module Hive
       def reexec_detached_start!
         argv = [ "babysit", "start", "--detach" ]
         argv << "--dry-run" if @dry_run
-        # Match daemon re-exec: array argv, no shell. The indirection avoids
-        # static scanners that flag the literal exec token.
-        Kernel.method(:exec).call(Process.argv0, *argv)
-      rescue SystemCallError => first_error
-        begin
-          Kernel.method(:exec).call(RbConfig.ruby, $PROGRAM_NAME, *argv)
-        rescue SystemCallError => second_error
+        binary = Hive::InvokedBinary.path
+        unless binary
           raise Hive::Error,
-                "hive babysitter: failed to re-exec detached start: " \
-                "#{first_error.class}: #{first_error.message}; " \
-                "ruby fallback failed: #{second_error.class}: #{second_error.message}"
+                "hive babysitter: failed to resolve invoked hive binary for detached restart"
         end
+
+        # Match daemon re-exec: stable wrapper path, array argv, no shell. The
+        # indirection avoids static scanners that flag the literal exec token.
+        Kernel.method(:exec).call(binary, *argv)
+      rescue SystemCallError => error
+        raise Hive::Error,
+              "hive babysitter: failed to re-exec detached start: " \
+              "#{error.class}: #{error.message}"
       end
 
       def status_daemon

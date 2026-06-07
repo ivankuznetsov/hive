@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-07T09:35:00Z] wiki — audit babysitter gh dry-run side-effect coverage
+
+**Action:** Audited commit `fb620990` after it changed the executable `bin/hive-babysitter-stub-gh`, focused dry-run tests, and babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run gh web cache side effects"` surfaced prior babysitter wiki history, and direct wiki/source reads provided the rest of the coverage check. Verified the committed diff plus current `bin/hive-babysitter-stub-gh`, `bin/hive-babysitter-stub-git`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/commands/babysit.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[testing]], [[modules/babysitter]], and [[gaps]]. Confirmed [[commands/babysit]] and [[testing]] already describe the `gh` local side-effect screens; refreshed [[modules/babysitter]] so the module boundary also documents `--web`, `--cache`, and `-w` skips before read-only passthrough, and updated [[gaps]] to tie the remaining live-smoke uncertainty to `fb620990`. No page coverage changed, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[gaps]]
+- [[log]]
+
 ## [2026-06-07T08:46:17Z] babysitter - block gh web/cache dry-run side effects
 
 **Action:** Tightened `bin/hive-babysitter-stub-gh` so allowlisted read commands skip before passthrough when the invocation includes local side-effect options: `--web`, the `-w` web shorthand on web-capable read commands, and `gh api --cache`. Added focused `test/unit/babysitter/dry_run_env_test.rb` coverage for `gh pr view --web`, `gh repo view --web`, `gh run view -w`, and `gh api --cache`, while keeping plain read-only `gh pr view` / `gh api --method GET ... -f` passthrough coverage. Refreshed [[commands/babysit]], [[testing]], and [[gaps]].

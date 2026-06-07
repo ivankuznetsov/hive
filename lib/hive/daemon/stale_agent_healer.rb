@@ -152,7 +152,7 @@ module Hive
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row)
 
-        reason = auto_recoverable_error_reason(row)
+        reason = marker_reason(row)
         recovery_key = error_auto_recovery_key(row, reason: reason)
         attempts = @error_auto_recoveries[recovery_key]
         if attempts >= @error_auto_recovery_limit
@@ -168,6 +168,13 @@ module Hive
           return
         end
 
+        # A false return is an intentional, silent no-op: either a benign
+        # race (finalize already advanced and rewrote/removed the marker)
+        # or a marker_id mismatch (the on-disk marker is newer than this
+        # stale status row). Either way we must NOT consume a retry or log
+        # — the budget increment below is deliberately ordered AFTER this
+        # guard so only a real clear counts against the limit. The next
+        # tick re-reads the marker and reconciles.
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :error,
@@ -196,12 +203,8 @@ module Hive
                       error: "#{e.class}: #{e.message}")
       end
 
-      def auto_recoverable_error_reason(row)
-        marker_attrs_for(row)["reason"].to_s
-      end
-
       def auto_recoverable_error?(row)
-        row.stage.to_s == "8-finalize" && auto_recoverable_error_reason(row) == "unpushed_commits"
+        row.stage.to_s == "8-finalize" && marker_reason(row) == "unpushed_commits"
       end
 
       def auto_recoverable_error_match_attrs(row, reason:)
@@ -240,7 +243,7 @@ module Hive
         return if row.live_task_lock == true
         return unless auto_recoverable_review_error?(row)
 
-        reason = auto_recoverable_review_error_reason(row)
+        reason = marker_reason(row)
         marker_attrs = review_marker_attrs(row)
         marker_attrs["reason"] = reason
         recovery_key = review_error_auto_recovery_key(row, reason: reason)
@@ -250,7 +253,7 @@ module Hive
             @review_error_recovery_exhausted,
             recovery_key,
             row,
-            reason: reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated",
+            reason: review_heal_label(reason),
             marker_reason: reason,
             attempts: attempts,
             max_attempts: @review_error_auto_recovery_limit,
@@ -274,7 +277,7 @@ module Hive
                       slug: row.slug,
                       stage: row.stage,
                       prior_marker: row.marker,
-                      reason: reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated",
+                      reason: review_heal_label(reason),
                       state_file: row.state_file,
                       phase: marker_attrs["phase"],
                       pass: marker_attrs["pass"],
@@ -304,8 +307,21 @@ module Hive
                       }.merge(attrs))
       end
 
-      def auto_recoverable_review_error_reason(row)
+      # The marker's own `reason=` attribute, the single source the
+      # finalize and review auto-recovery paths both key recovery budgets
+      # and match-attrs off of.
+      def marker_reason(row)
         marker_attrs_for(row)["reason"].to_s
+      end
+
+      # Map a review marker reason to the healer's `reason:` log label.
+      # `review_agent_died` keeps its own label; every other
+      # auto-recoverable review reason (today only the tmux-death subset
+      # of `reviewer_partial_failure`) logs as
+      # `reviewer_tmux_session_terminated`. The marker's literal reason is
+      # carried separately as `marker_reason:`.
+      def review_heal_label(reason)
+        reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated"
       end
 
       def review_error_auto_recovery_key(row, reason:)

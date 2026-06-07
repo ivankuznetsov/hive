@@ -63,29 +63,6 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
-  def test_manifest_records_capture_error_when_file_disappears_during_digest
-    with_dirs do |scenario_dir, sandbox, run_home|
-      racy_path = File.join(scenario_dir, "racy.log")
-      File.write(racy_path, "racy\n")
-      original_digest_file = Digest::SHA256.method(:file)
-      Digest::SHA256.define_singleton_method(:file) do |path|
-        raise Errno::ENOENT, path if path == racy_path
-
-        original_digest_file.call(path)
-      end
-
-      collect(scenario_dir, sandbox, run_home)
-
-      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
-      refute_includes manifest["files"].map { |entry| entry["path"] }, "racy.log"
-      error = manifest["capture_errors"].find { |entry| entry["label"] == "manifest:racy.log" }
-      assert error, "manifest should record disappeared files instead of raising"
-      assert_includes error["error"], "Errno::ENOENT"
-    ensure
-      Digest::SHA256.define_singleton_method(:file, original_digest_file) if original_digest_file
-    end
-  end
-
   def test_log_tails_are_last_n_lines_per_log_file
     with_dirs do |scenario_dir, sandbox, run_home|
       logs_root = File.join(sandbox, ".hive-state", "logs", "myslug")
@@ -244,6 +221,29 @@ class E2EArtifactCaptureTest < Minitest::Test
       paths = manifest.fetch("files").map { |file| file.fetch("path") }
       refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
              "manifest should not include unbounded live TUI logs"
+    end
+  end
+
+  def test_manifest_records_capture_error_when_file_disappears_during_digest
+    with_dirs do |scenario_dir, sandbox, run_home|
+      racy_path = File.join(scenario_dir, "racy.log")
+      File.write(racy_path, "racy\n")
+      original_digest_file = Digest::SHA256.method(:file)
+      Digest::SHA256.define_singleton_method(:file) do |path|
+        raise Errno::ENOENT, path if path == racy_path
+
+        original_digest_file.call(path)
+      end
+
+      collect(scenario_dir, sandbox, run_home)
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      refute_includes manifest["files"].map { |entry| entry["path"] }, "racy.log"
+      error = manifest["capture_errors"].find { |entry| entry["label"] == "manifest:racy.log" }
+      assert error, "manifest should record disappeared files instead of raising"
+      assert_includes error["error"], "Errno::ENOENT"
+    ensure
+      Digest::SHA256.define_singleton_method(:file, original_digest_file) if original_digest_file
     end
   end
 end

@@ -219,6 +219,30 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_prepare_claude_session_reports_limits_after_ready_wait_exits
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-limited-after-wait" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) { |bytes:| "Claude Code\nstill starting\n" }
+
+    monotonic_now = 1_000.0
+    calls = 0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      with_replaced_singleton_method(Hive::AgentLimit, :limit_reached?, lambda { |_text|
+        calls += 1
+        calls >= 2
+      }) do
+        with_replaced_singleton_method(Hive::AgentLimit, :error_message, ->(_text, agent:) { "limits reached for #{agent}: after wait" }) do
+          err = assert_raises(Hive::AgentError) do
+            Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
+          end
+
+          assert_equal "limits reached for claude: after wait", err.message
+        end
+      end
+    end
+  end
+
   def test_send_prompt_and_wait_clamps_wait_timeout_to_remaining_deadline
     with_tmp_task do |task|
       runner = Object.new

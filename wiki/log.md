@@ -3563,3 +3563,32 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[architecture]]
 - [[gaps]]
 - [[index]]
+
+## [2026-06-07T14:20:00Z] babysitter — prioritize dirty PRs and snapshot pre-fix residue
+
+**Action:** Investigated why babysitter skipped PR #341 even though it was `DIRTY`. The project had a large open-PR backlog and `ProjectTick` selected only the oldest updated PRs before `PrFixer` could inspect merge state, so newer conflicted PRs could starve behind neutral rows. Updated the selection contract to request `mergeStateStatus` from `gh pr list` and sort actionable states ahead of age before applying `babysitter.max_concurrent_prs`.
+
+**Action:** Changed 6-review pre-fix dirty-worktree cleanup to auto-commit all existing residue with `Hive-Auto-Commit-Reason: pre_fix_dirty_worktree`. Normal clean-exit and finalize backstop scope checks remain strict; the permissive path only snapshots pre-existing residue before the fix agent starts so `fix_dirty_worktree` does not block routine recovery.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+- [[stages/review]]
+
+## [2026-06-07T14:35:00Z] wiki — audit babysitter dirty-priority refresh coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the dirty-priority branch already touched [[modules/babysitter]], [[stages/review]], and [[log]]. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dirty priority pre fix dirty worktree review residue"` returned no indexed hits, and the configured master wiki path had no matching context. Inspected the committed diff and current `lib/hive/babysitter/project_tick.rb`, `lib/hive/gh.rb`, `lib/hive/stages/clean_exit.rb`, `lib/hive/stages/review.rb`, plus focused babysitter/GitHub/review tests. Updated [[decisions]] because ADR-034 still described the old pre-fix dirty guard, corrected the stale Phase 4 text in [[stages/review]], and recorded the missing live-smoke evidence for dirty-priority selection and out-of-scope pre-fix snapshots in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[decisions]]
+- [[stages/review]]
+- [[gaps]]
+
+## [2026-06-07T15:05:00Z] wiki — audit archive filter marker-agnostic coverage
+
+**Action:** Refreshed command/API wiki coverage after the archive-filter cleanup removed the unused `marker_name` parameter from `Hive::ArchiveFilter.hide?` and both Status/TUI callers. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "ArchiveFilter hide archive status TUI folder_mtime"` found the existing status/archive coverage, and the configured master wiki path had no matching context. Inspected the committed diff plus current `lib/hive/archive_filter.rb`, `lib/hive/commands/status.rb`, `lib/hive/tui/snapshot.rb`, `test/unit/archive_filter_test.rb`, and relevant status/TUI/testing wiki pages. Corrected stale text that described archive hiding as clean-marker-only, documented the marker-agnostic and no-timestamp fail-open contract, and carried the same uncertainty forward: no in-tree live registered-project artifact proves the full archive workflow after aged done folders exist. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[commands/tui]]
+- [[testing]]
+- [[gaps]]

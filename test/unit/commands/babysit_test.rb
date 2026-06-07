@@ -289,6 +289,31 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_includes err, "refusing KILL"
   end
 
+  def test_stop_does_not_remove_replacement_pid_file_after_process_exits
+    command = babysit("stop")
+    write_pid_payload(pid: 1234, process_start_time: "old-start")
+    replacement_payload = {
+      "pid" => 9999,
+      "process_start_time" => "new-start",
+      "started_at" => Time.now.utc.iso8601
+    }
+    alive = true
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :owned }
+    command.define_singleton_method(:send_signal_safely) do |_pid, signal|
+      signals << signal
+      alive = false
+      File.write(command.pid_file, replacement_payload.to_yaml)
+    end
+
+    out, _err = capture_io { command.call }
+
+    assert_equal [ :TERM ], signals
+    assert_includes out, "stopped"
+    assert_equal replacement_payload, YAML.safe_load(File.read(command.pid_file))
+  end
+
   def test_stop_succeeds_when_process_exits_during_post_grace_ownership_check
     command = babysit("stop")
     write_pid_payload(pid: 1234)

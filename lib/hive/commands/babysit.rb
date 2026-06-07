@@ -175,21 +175,24 @@ module Hive
         payload = read_pid_file_payload
         pid = payload && payload["pid"]
         if pid.nil? || pid <= 0
-          FileUtils.rm_f(pid_file)
-          warn "hive: babysitter PID file at #{pid_file} is malformed; removing"
+          removed = remove_pid_file_if_current(payload)
+          action = removed ? "removing" : "not removing because it changed"
+          warn "hive: babysitter PID file at #{pid_file} is malformed; #{action}"
           return true
         end
 
         unless pid_alive?(pid)
-          FileUtils.rm_f(pid_file)
-          warn "hive: babysitter PID #{pid} is not alive; removed stale #{pid_file}"
+          removed = remove_pid_file_if_current(payload)
+          action = removed ? "removed stale" : "left changed"
+          warn "hive: babysitter PID #{pid} is not alive; #{action} #{pid_file}"
           return true
         end
 
         case pid_ownership(payload, pid)
         when :reused
-          FileUtils.rm_f(pid_file)
-          warn "hive: PID #{pid} appears reused (start_time mismatch); refusing to signal. Removed stale #{pid_file}."
+          removed = remove_pid_file_if_current(payload)
+          action = removed ? "Removed stale" : "Left changed"
+          warn "hive: PID #{pid} appears reused (start_time mismatch); refusing to signal. #{action} #{pid_file}."
           return true
         when :unverified
           warn "hive: cannot verify PID #{pid} is the hive babysitter; refusing to signal. Manually confirm and clean #{pid_file}."
@@ -202,12 +205,12 @@ module Hive
           sleep POLL_INTERVAL_SEC
         end
         if pid_alive?(pid)
-          ownership_now = pid_ownership(payload, pid)
           unless pid_alive?(pid)
-            FileUtils.rm_f(pid_file)
+            remove_pid_file_if_current(payload)
             puts "hive babysitter: stopped (pid #{pid})"
             return true
           end
+          ownership_now = pid_ownership(payload, pid)
           if %i[reused unverified].include?(ownership_now)
             warn "hive: babysitter PID #{pid} still alive after TERM but ownership is #{ownership_now}; " \
                  "refusing KILL and leaving #{pid_file} for manual inspection"
@@ -224,8 +227,20 @@ module Hive
             return false
           end
         end
-        FileUtils.rm_f(pid_file)
+        remove_pid_file_if_current(payload)
         puts "hive babysitter: stopped (pid #{pid})"
+        true
+      end
+
+      def remove_pid_file_if_current(expected_payload)
+        current_payload = begin
+          read_pid_file_payload
+        rescue StandardError
+          nil
+        end
+        return false unless current_payload == expected_payload
+
+        FileUtils.rm_f(pid_file)
         true
       end
 
@@ -252,8 +267,8 @@ module Hive
         end
 
         # Match daemon re-exec: stable wrapper path, array argv, no shell. The
-        # indirection avoids static scanners that flag the literal exec token.
-        Kernel.method(:exec).call(binary, *argv)
+        # wrapper path comes from the process that launched this Hive command.
+        Kernel.exec(binary, *argv)
       rescue SystemCallError => error
         raise Hive::Error,
               "hive babysitter: failed to re-exec detached start: " \

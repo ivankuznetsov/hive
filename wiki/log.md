@@ -3538,3 +3538,13 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 **Refreshed pages:**
 - [[operating]]
 - [[gaps]]
+
+## [2026-06-07T10:42:24Z] wiki — post-commit agent-limit coverage audit
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `d22caf37` added `Hive::AgentLimit` and already touched [[modules/agent]], [[stages/index]], [[state-model]], [[testing]], and [[log]]. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "agent limit provider quota rate limit claude usage credits"` returned no indexed hits, so verification used direct source/wiki search plus the configured master wiki path (no relevant hit). Inspected the committed diff and current `lib/hive/agent_limit.rb`, `lib/hive/agent.rb`, `lib/hive/claude_launcher.rb`, focused unit tests, and the touched wiki pages. Updated [[modules/agent]] to map the new classifier source file, refreshed [[architecture]] to remove stale inode-based concurrent-edit wording and document limit precedence in headless/tmux paths, updated [[gaps]] with the new source-coverage row and missing post-fix live-smoke evidence, and bumped [[index]] because page coverage metadata changed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[architecture]]
+- [[gaps]]
+- [[index]]

@@ -51,6 +51,7 @@ module Hive
         guard("state") { copy_tree(File.join(@sandbox_dir, ".hive-state", "stages"), File.join(@scenario_dir, "state")) }
         guard("logs") { copy_logs_with_tails }
         guard("tui-subprocess") { copy_tui_subprocess_diagnostics }
+        guard("tui-subprocess-live") { remove_live_tui_subprocess_diagnostics }
         guard("step-results.json") { write("step-results.json", JSON.pretty_generate(step_results)) }
         write_manifest
       end
@@ -146,6 +147,11 @@ module Hive
         else
           FileUtils.cp(source, dest)
         end
+      end
+
+      def remove_live_tui_subprocess_diagnostics
+        live_dir = File.join(@scenario_dir, "tui-subprocess-live")
+        FileUtils.rm_rf(live_dir)
       end
 
       def tail_lines(path, count)

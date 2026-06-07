@@ -200,4 +200,27 @@ class E2EArtifactCaptureTest < Minitest::Test
       assert_kind_of String, payload["platform"]
     end
   end
+
+  def test_tui_subprocess_live_logs_are_removed_before_manifest
+    with_dirs do |scenario_dir, sandbox, run_home|
+      live_dir = File.join(scenario_dir, "tui-subprocess-live")
+      FileUtils.mkdir_p(live_dir)
+      oversized_bytes = Hive::E2E::ArtifactCapture::TUI_SPAWN_CAPTURE_MAX_BYTES + 10
+      spawn_log = File.join(live_dir, "hive-tui-spawn-BIG.log")
+      File.write(spawn_log, "x" * oversized_bytes)
+
+      collect(scenario_dir, sandbox, run_home, tui_log_dir: live_dir)
+
+      copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
+      assert File.exist?(copied_spawn), "bounded per-spawn copy should be retained"
+      assert_operator File.size(copied_spawn), :<, oversized_bytes,
+                      "oversized live output should only be retained through the truncated copy"
+      refute File.directory?(live_dir), "unbounded live TUI log directory should not remain in the bundle"
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      paths = manifest.fetch("files").map { |file| file.fetch("path") }
+      refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
+             "manifest should not include unbounded live TUI logs"
+    end
+  end
 end

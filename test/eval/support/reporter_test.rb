@@ -4,6 +4,21 @@ require "json"
 require "open3"
 
 class HiveEvalReporterTest < Minitest::Test
+  def test_cli_rejects_positional_scenario_argument
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "positional.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "s1_status", "--no-judge", "--report", report
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_match(/unexpected argument: s1_status/, err)
+      refute File.exist?(report), "unexpected positional args must exit before running eval scenarios"
+    end
+  end
+
   def test_cli_writes_report_for_passing_scenario
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "s1.json")
@@ -21,18 +36,21 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
-  def test_cli_rejects_traversal_scenario_basename_without_report
+  def test_cli_ignores_ambient_test_when_running_all_scenarios
     Dir.mktmpdir("hive-eval-report") do |dir|
-      report = File.join(dir, "escape.json")
+      report = File.join(dir, "all.json")
 
-      _out, err, status = Open3.capture3(
-        { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", "../../unit/hv", "--no-judge", "--report", report
+      _out, err, _status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1", "TEST" => "test/unit/config_test.rb" },
+        "bin/hive-eval", "--no-judge", "--report", report
       )
 
-      assert_equal 64, status.exitstatus
-      assert_match(/scenario must be a safe basename/, err)
-      refute File.exist?(report), "invalid scenario names must not write an eval report"
+      assert File.exist?(report), "expected hive-eval to write an eval report, not run ambient TEST: #{err}"
+      doc = JSON.parse(File.read(report))
+      files = doc.fetch("scenarios").map { |entry| entry.fetch("file") }
+      refute_empty files
+      assert files.all? { |file| file.include?("/test/eval/scenarios/") }, files.join("\n")
+      refute_includes files, File.expand_path("test/unit/config_test.rb")
     end
   end
 
@@ -81,6 +99,28 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal "fail", entry.fetch("status")
       assert_match(/intentional failure for HiveEvalReporterTest fixture/,
                    entry.fetch("failures").join("\n"))
+    end
+  end
+
+  def test_cli_ignores_inherited_test_when_running_all_scenarios
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      root = File.expand_path("../../..", __dir__)
+      scenario_dir = File.join(root, "test", "eval", "scenarios") + File::SEPARATOR
+      report = File.join(dir, "all.json")
+
+      _out, err, _status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1", "TEST" => "test/eval/support/scaffold_test.rb" },
+        "bin/hive-eval", "--no-judge", "--report", report
+      )
+
+      assert File.exist?(report), err
+      files = JSON.parse(File.read(report))
+        .fetch("scenarios")
+        .map { |entry| File.expand_path(entry.fetch("file"), root) }
+
+      refute_empty files
+      assert files.all? { |file| file.start_with?(scenario_dir) },
+             "expected only scenario files, got #{files.inspect}"
     end
   end
 
@@ -135,6 +175,126 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal 64, status.exitstatus
       assert_match(/scenario must be a safe basename/, err)
       refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_invalid_option_as_usage_error
+    _out, err, status = Open3.capture3(
+      { "HIVE_EVAL_NO_JUDGE" => "1" },
+      "bin/hive-eval", "--bogus"
+    )
+
+    refute status.success?
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-eval: invalid option: --bogus/, err)
+    refute_match(/OptionParser::/, err)
+  end
+
+  def test_cli_rejects_missing_scenario_value_as_usage_error
+    _out, err, status = Open3.capture3(
+      { "HIVE_EVAL_NO_JUDGE" => "1" },
+      "bin/hive-eval", "--scenario"
+    )
+
+    refute status.success?
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-eval: missing argument: --scenario/, err)
+    refute_match(/OptionParser::/, err)
+  end
+
+  def test_cli_rejects_missing_report_value_as_usage_error
+    _out, err, status = Open3.capture3(
+      { "HIVE_EVAL_NO_JUDGE" => "1" },
+      "bin/hive-eval", "--report"
+    )
+
+    refute status.success?
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-eval: missing argument: --report/, err)
+    refute_match(/OptionParser::/, err)
+  end
+
+  def test_cli_rejects_unexpected_positional_arguments
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "unexpected.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report, "extra"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/hive-eval: unexpected argument: extra/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_unknown_options_with_usage
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "unknown-option.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--bogus", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/invalid option: --bogus/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_missing_option_values_with_usage
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "missing-scenario.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--report", report, "--scenario"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/missing argument: --scenario/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_stray_positional_scenario_names
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "positional.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "definitely-not-a-scenario", "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/unexpected argument\(s\): definitely-not-a-scenario/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute File.exist?(report)
+    end
+  end
+
+  def test_cli_rejects_traversal_scenario_basename_without_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "escape.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "../../unit/hv", "--no-judge", "--report", report
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario must be a safe basename/, err)
+      refute File.exist?(report), "invalid scenario names must not write an eval report"
     end
   end
 end

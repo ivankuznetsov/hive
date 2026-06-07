@@ -1,7 +1,7 @@
 ---
 title: Testing
 type: reference
-source: test/, bin/hive-eval, Rakefile, .rubocop.yml
+source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
 updated: 2026-06-07
 tags: [test, minitest, fixtures]
@@ -146,9 +146,7 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 
 `test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
 
-`bin/hive-eval` runs only scenario files. When `--scenario NAME` is set, it rejects `/` and `\` before normalizing optional `.rb` and `_test` suffixes, then requires the basename to match `\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z` before joining it under `test/eval/scenarios/` or the test-only `HIVE_EVAL_SCENARIO_ROOT` override. Invalid names exit 64 before the report directory/file is created. Valid runs write a `hive-eval-report` JSON document with per-scenario assertions/messages/log events and exit non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
-
-`test/eval/support/reporter_test.rb` covers the eval runner's report contract, deliberate-failure report shape, and invalid `--scenario` rejection for traversal strings, slash/backslash separators, and unsafe basename characters without writing the requested report.
+`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
 
 ## Lint
 

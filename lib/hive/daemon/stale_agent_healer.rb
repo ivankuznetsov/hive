@@ -49,21 +49,24 @@ module Hive
     #                        on a kill. Clear the marker + drop any stale
     #                        lock so review re-dispatches.
     #
-    # ERROR reason=unpushed_commits at 8-finalize is also auto-retryable:
-    # the finalize push gate can fail during ordinary interruptions
-    # (sleep/network) even though the task state remains
-    # recoverable by rerunning finalize. Clearing that specific marker
-    # lets finalize rerun its existing auth, clean-exit, and push checks
-    # up to the configured limit (default 3) before leaving the marker red
-    # for manual recovery. There is no healer-side backoff between those
-    # retries — the only thing spacing them is finalize's own re-dispatch
-    # runtime (a full finalize agent run), not any delay enforced here.
+    # Some terminal ERROR markers are also auto-retryable. `8-finalize`
+    # `reason=unpushed_commits` can fail during ordinary interruptions
+    # (sleep/network) even though the task state remains recoverable by
+    # rerunning finalize. Later-stage `reason=tmux_session_terminated`
+    # and `reason=agent_orphaned` markers in 7-artifacts / 8-finalize
+    # also describe a lost agent session, not a task-domain failure.
+    # Clearing those specific markers lets the normal daemon dispatch
+    # rerun the stage up to the configured limit (default 3) before
+    # leaving the marker red for manual recovery. There is no healer-side
+    # backoff between those retries — the only thing spacing them is the
+    # stage's own re-dispatch runtime, not any delay enforced here.
     #
-    # Unlike the review path (`review_error_signature`), the finalize
-    # recovery key (`error_auto_recovery_key`) deliberately omits a failure
-    # signature: every push failure on a task shares one retry budget by
-    # design, so a genuinely different push error does not silently earn a
-    # fresh budget. This asymmetry is intentional, not an oversight.
+    # Unlike the review path (`review_error_signature`), the terminal
+    # ERROR recovery key (`error_auto_recovery_key`) deliberately omits a
+    # failure signature: repeated failures for the same task/stage/reason
+    # share one retry budget by design, so a fresh marker id does not
+    # silently earn a fresh budget. This asymmetry is intentional, not an
+    # oversight.
     #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
@@ -147,25 +150,26 @@ module Hive
       def heal_error_if_auto_recoverable(row)
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row)
-        # The clear makes a markerless finalize row take the edit-resume
-        # path; without a pre-clear mtime to seed as the dispatch baseline,
-        # that row can strand as first-sight `record_baseline`.
+        # The clear makes a markerless terminal-error row take the
+        # edit-resume path; without a pre-clear mtime to seed as the
+        # dispatch baseline, that row can strand as first-sight
+        # `record_baseline`.
         return if row.state_file_mtime.nil?
 
-        reason = marker_reason(row)
-        recovery_key = error_auto_recovery_key(row, reason: reason)
+        marker_reason = marker_reason(row)
+        heal_label = error_heal_label(row, marker_reason)
+        recovery_key = error_auto_recovery_key(row, reason: marker_reason)
         attempts = @error_auto_recoveries[recovery_key]
         if attempts >= @error_auto_recovery_limit
           log_recovery_exhausted_once(
             @error_recovery_exhausted,
             recovery_key,
             row,
-            reason: "finalize_unpushed_commits",
-            marker_reason: reason,
+            reason: heal_label,
+            marker_reason: marker_reason,
             attempts: attempts,
             max_attempts: @error_auto_recovery_limit,
-            remediation: "rerun finalize (`hive run #{row.project} #{row.slug}`) " \
-                         "or push the branch manually"
+            remediation: error_recovery_remediation(row, marker_reason)
           )
           return
         end
@@ -180,7 +184,7 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :error,
-          match_attrs: auto_recoverable_error_match_attrs(row, reason: reason)
+          match_attrs: auto_recoverable_error_match_attrs(row, reason: marker_reason)
         )
 
         observe_pre_clear_mtime(row)
@@ -191,8 +195,8 @@ module Hive
                       slug: row.slug,
                       stage: row.stage,
                       prior_marker: row.marker,
-                      reason: "finalize_unpushed_commits",
-                      marker_reason: reason,
+                      reason: heal_label,
+                      marker_reason: marker_reason,
                       state_file: row.state_file,
                       attempts: attempts,
                       max_attempts: @error_auto_recovery_limit)
@@ -201,12 +205,33 @@ module Hive
                       project: row.project,
                       slug: row.slug,
                       stage: row.stage,
-                      reason: "finalize_unpushed_commits",
+                      reason: error_heal_label(row, marker_reason(row)),
                       error: "#{e.class}: #{e.message}")
       end
 
       def auto_recoverable_error?(row)
-        row.stage.to_s == "8-finalize" && marker_reason(row) == "unpushed_commits"
+        reason = marker_reason(row)
+        return true if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
+
+        %w[7-artifacts 8-finalize].include?(row.stage.to_s) &&
+          %w[tmux_session_terminated agent_orphaned].include?(reason)
+      end
+
+      def error_heal_label(row, reason)
+        return "finalize_unpushed_commits" if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
+
+        "terminal_agent_loss"
+      end
+
+      def error_recovery_remediation(row, reason)
+        command = "hive run #{row.slug} --project #{row.project} --stage #{row.stage}"
+
+        if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
+          return "rerun finalize (`#{command}`) or push the branch manually"
+        end
+
+        "rerun #{row.stage} (`#{command}`) " \
+          "after confirming no live agent still owns the task"
       end
 
       def auto_recoverable_error_match_attrs(row, reason:)

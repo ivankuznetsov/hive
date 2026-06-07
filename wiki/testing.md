@@ -146,7 +146,7 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 
 `test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
 
-`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
+`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. CLI usage errors (invalid options, missing option values, and unexpected positional arguments) exit 64 before report setup or scenario execution. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
 
 ## Lint
 

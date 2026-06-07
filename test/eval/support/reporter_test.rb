@@ -140,6 +140,58 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_invalid_option_as_usage_error
+    _out, err, status = Open3.capture3(
+      { "HIVE_EVAL_NO_JUDGE" => "1" },
+      "bin/hive-eval", "--bogus"
+    )
+
+    refute status.success?
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-eval: invalid option: --bogus/, err)
+    refute_match(/OptionParser::/, err)
+  end
+
+  def test_cli_rejects_missing_scenario_value_as_usage_error
+    _out, err, status = Open3.capture3(
+      { "HIVE_EVAL_NO_JUDGE" => "1" },
+      "bin/hive-eval", "--scenario"
+    )
+
+    refute status.success?
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-eval: missing argument: --scenario/, err)
+    refute_match(/OptionParser::/, err)
+  end
+
+  def test_cli_rejects_missing_report_value_as_usage_error
+    _out, err, status = Open3.capture3(
+      { "HIVE_EVAL_NO_JUDGE" => "1" },
+      "bin/hive-eval", "--report"
+    )
+
+    refute status.success?
+    assert_equal 64, status.exitstatus
+    assert_match(/hive-eval: missing argument: --report/, err)
+    refute_match(/OptionParser::/, err)
+  end
+
+  def test_cli_rejects_unexpected_positional_arguments
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "unexpected.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report, "extra"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/hive-eval: unexpected argument: extra/, err)
+      refute File.exist?(report)
+    end
+  end
+
   def test_cli_rejects_scenario_with_backslash_path_separator
     # The backslash branch of scenario_path raises the same
     # "must be a basename" error as the slash branch (Windows-style

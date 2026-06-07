@@ -53,7 +53,7 @@ module Hive
         guard("tui-subprocess") { copy_tui_subprocess_diagnostics }
         guard("tui-subprocess-live") { remove_live_tui_subprocess_diagnostics }
         guard("step-results.json") { write("step-results.json", JSON.pretty_generate(step_results)) }
-        write_manifest
+        guard("manifest.json") { write_manifest }
       end
 
       private
@@ -218,21 +218,13 @@ module Hive
       end
 
       def write_manifest
-        files = Dir[File.join(@scenario_dir, "**", "*")]
-          .select { |path| File.file?(path) }
-          .reject { |path| live_tui_log_file?(path) }
-          .sort
+        files = Dir[File.join(@scenario_dir, "**", "*")].select { |path| File.file?(path) }.sort
+        file_entries = files.filter_map { |path| manifest_entry(path) }
         manifest = {
           "schema" => "hive-e2e-manifest",
           "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-manifest"),
           "generated_at" => Time.now.utc.iso8601,
-          "files" => files.map do |path|
-            {
-              "path" => path.sub("#{@scenario_dir}/", ""),
-              "size" => File.size(path),
-              "sha256" => Digest::SHA256.file(path).hexdigest
-            }
-          end,
+          "files" => file_entries,
           "capture_errors" => @capture_errors
         }
         path = File.join(@scenario_dir, "manifest.json")
@@ -241,10 +233,16 @@ module Hive
         File.rename(tmp, path)
       end
 
-      def live_tui_log_file?(path)
-        return false unless @tui_log_dir
-
-        path.start_with?("#{@tui_log_dir}/")
+      def manifest_entry(path)
+        relative = path.sub("#{@scenario_dir}/", "")
+        {
+          "path" => relative,
+          "size" => File.size(path),
+          "sha256" => Digest::SHA256.file(path).hexdigest
+        }
+      rescue StandardError => e
+        @capture_errors << { "label" => "manifest:#{relative || path}", "error" => "#{e.class}: #{e.message}" }
+        nil
       end
     end
   end

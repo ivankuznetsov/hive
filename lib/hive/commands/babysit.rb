@@ -18,6 +18,8 @@ module Hive
       # Give an active PR repair tick time to drain; PrFixer may be inside
       # a synchronous agent spawn with child processes and temporary worktrees.
       STOP_GRACE_SEC = 600
+      KILL_GRACE_SEC = 5
+      POLL_INTERVAL_SEC = 0.5
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, hive_home: Hive::Paths.state_home)
@@ -197,10 +199,15 @@ module Hive
         send_signal_safely(pid, :TERM)
         deadline = Time.now + STOP_GRACE_SEC
         while pid_alive?(pid) && Time.now < deadline
-          sleep 0.5
+          sleep POLL_INTERVAL_SEC
         end
         if pid_alive?(pid)
           ownership_now = pid_ownership(payload, pid)
+          unless pid_alive?(pid)
+            FileUtils.rm_f(pid_file)
+            puts "hive babysitter: stopped (pid #{pid})"
+            return true
+          end
           if %i[reused unverified].include?(ownership_now)
             warn "hive: babysitter PID #{pid} still alive after TERM but ownership is #{ownership_now}; " \
                  "refusing KILL and leaving #{pid_file} for manual inspection"
@@ -208,9 +215,9 @@ module Hive
           end
           warn "hive: babysitter PID #{pid} did not stop within #{STOP_GRACE_SEC}s; sending KILL"
           send_signal_safely(pid, :KILL)
-          kill_deadline = Time.now + 5
+          kill_deadline = Time.now + KILL_GRACE_SEC
           while pid_alive?(pid) && Time.now < kill_deadline
-            sleep 0.5
+            sleep POLL_INTERVAL_SEC
           end
           if pid_alive?(pid)
             warn "hive: babysitter PID #{pid} is still alive after KILL; leaving #{pid_file}"

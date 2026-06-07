@@ -289,6 +289,33 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_includes err, "refusing KILL"
   end
 
+  def test_stop_succeeds_when_process_exits_during_post_grace_ownership_check
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive_checks = 0
+    signals = []
+    command.define_singleton_method(:pid_alive?) do |_pid|
+      alive_checks += 1
+      alive_checks < 4
+    end
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      signals.empty? ? :verified : :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
   def test_stale_runtime_ignores_malformed_started_at
     command = babysit("status")
     command.define_singleton_method(:current_source_mtime) { Time.now + 60 }

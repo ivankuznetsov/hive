@@ -1,2 +1,0 @@
-[dry-run] gh pr list -w skipped
-[dry-run] gh pr diff --web skipped

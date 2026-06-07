@@ -45,6 +45,8 @@
 /.daemon.pid
 /daemon.pid
 /logs/
+# Local babysitter dry-run output (stub-run artifact, not source).
+/.babysitter-dry-run-skipped.log
 .qmd/
 /.llm-wiki/qmd-cache/
 /.llm-wiki/post-commit-refresh.log

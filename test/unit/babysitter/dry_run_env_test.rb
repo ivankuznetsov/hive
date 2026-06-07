@@ -298,6 +298,22 @@ class BabysitterDryRunEnvTest < Minitest::Test
       refute File.exist?(File.join(dir, "real.log"))
     end
   end
+
+  def test_git_stub_scrubs_trace_env_before_read_only_passthrough
+    with_tmp_git_repo do |dir|
+      trace_path = File.join(dir, "trace.log")
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => "git",
+        "GIT_TRACE" => trace_path
+      }
+
+      out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
+
+      assert status.success?, err
+      assert_empty out
+      refute_path_exists trace_path
+    end
+  end
   private
 
   def assert_stubbed(env, binary, *args)

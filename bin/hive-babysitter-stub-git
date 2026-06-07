@@ -193,6 +193,14 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
   exit 127
 end
+
+# Even an allowlisted read-only subcommand can execute arbitrary commands or
+# write files if these env vars reach real git, and argv screening structurally
+# cannot see them. Scrub the whole side-effect-capable family before handing off.
+%w[GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND].each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
+
 begin
   # Array-form exec (no shell) hands argv straight to the real git binary.
   exec real, *argv

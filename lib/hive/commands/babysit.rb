@@ -212,6 +212,11 @@ module Hive
           end
           ownership_now = pid_ownership(payload, pid)
           if %i[reused unverified].include?(ownership_now)
+            unless pid_alive?(pid)
+              remove_pid_file_if_current(payload)
+              puts "hive babysitter: stopped (pid #{pid})"
+              return true
+            end
             warn "hive: babysitter PID #{pid} still alive after TERM but ownership is #{ownership_now}; " \
                  "refusing KILL and leaving #{pid_file} for manual inspection"
             return false

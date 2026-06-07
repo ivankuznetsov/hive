@@ -341,6 +341,38 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_includes out, "stopped"
   end
 
+  def test_stop_succeeds_when_process_exits_during_ownership_probe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive = true
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      alive = false if signals.any?
+      alive ? :verified : :unverified
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_guarded_pid_cleanup_returns_false_when_current_payload_is_unreadable
+    command = babysit("stop")
+    command.define_singleton_method(:read_pid_file_payload) { raise "unreadable" }
+
+    refute command.send(:remove_pid_file_if_current, { "pid" => 1234 })
+  end
+
   def test_stale_runtime_ignores_malformed_started_at
     command = babysit("status")
     command.define_singleton_method(:current_source_mtime) { Time.now + 60 }

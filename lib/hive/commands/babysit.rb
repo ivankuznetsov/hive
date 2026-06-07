@@ -190,11 +190,21 @@ module Hive
 
         case pid_ownership(payload, pid)
         when :reused
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            warn "hive: babysitter PID #{pid} exited before signaling; removed stale #{pid_file}"
+            return true
+          end
           removed = remove_pid_file_if_current(payload)
           action = removed ? "Removed stale" : "Left changed"
           warn "hive: PID #{pid} appears reused (start_time mismatch); refusing to signal. #{action} #{pid_file}."
           return true
         when :unverified
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            warn "hive: babysitter PID #{pid} exited before signaling; removed stale #{pid_file}"
+            return true
+          end
           warn "hive: cannot verify PID #{pid} is the hive babysitter; refusing to signal. Manually confirm and clean #{pid_file}."
           return false
         end

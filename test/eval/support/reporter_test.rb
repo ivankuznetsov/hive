@@ -282,4 +282,20 @@ class HiveEvalReporterTest < Minitest::Test
       refute File.exist?(report)
     end
   end
+
+  def test_cli_rejects_path_separators_in_scenario_basename
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "traversal.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", "../../unit/invoked_binary", "--no-judge", "--report", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario basename must not contain path separators/, err)
+      refute File.exist?(report)
+    end
+  end
 end

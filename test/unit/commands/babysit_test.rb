@@ -366,6 +366,125 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_includes out, "stopped"
   end
 
+  def test_stop_refuses_kill_when_ownership_changes_before_kill
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    signals = []
+    ownership_checks = 0
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      ownership_checks += 1
+      ownership_checks < 3 ? :verified : :reused
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    _out, err = capture_io do
+      assert_raises(Hive::Error) do
+        with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    assert File.exist?(command.pid_file)
+    assert_includes err, "before KILL"
+  end
+
+  def test_stop_succeeds_when_process_exits_before_kill_reprobe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive_checks = 0
+    signals = []
+    command.define_singleton_method(:pid_alive?) do |_pid|
+      alive_checks += 1
+      alive_checks < 5
+    end
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_succeeds_when_process_exits_during_pre_kill_ownership_probe
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    alive = true
+    ownership_checks = 0
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| alive }
+    command.define_singleton_method(:pid_ownership) do |_payload, _pid|
+      ownership_checks += 1
+      if ownership_checks >= 3
+        alive = false
+        :unverified
+      else
+        :verified
+      end
+    end
+    command.define_singleton_method(:send_signal_safely) { |_pid, signal| signals << signal }
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::STOP_GRACE_SEC + 1) }) do
+        command.call
+      end
+    end
+
+    assert_equal [ :TERM ], signals
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
+  def test_stop_kill_grace_loop_sleeps_before_process_exits
+    command = babysit("stop")
+    write_pid_payload(pid: 1234)
+    kill_sent = false
+    kill_loop_checks = 0
+    slept = false
+    signals = []
+    command.define_singleton_method(:pid_alive?) do |_pid|
+      if kill_sent
+        kill_loop_checks += 1
+        kill_loop_checks < 2
+      else
+        true
+      end
+    end
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) do |_pid, signal|
+      signals << signal
+      kill_sent = true if signal == :KILL
+    end
+    command.define_singleton_method(:sleep) { |_sec| slept = true }
+    after_grace = Hive::Commands::Babysit::STOP_GRACE_SEC + 1
+    times = [ Time.at(0), Time.at(after_grace), Time.at(after_grace), Time.at(after_grace) ]
+
+    out, _err = capture_io do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(after_grace) }) do
+        command.call
+      end
+    end
+
+    assert_equal %i[TERM KILL], signals
+    assert slept
+    refute File.exist?(command.pid_file)
+    assert_includes out, "stopped"
+  end
+
   def test_stop_succeeds_when_process_exits_during_initial_ownership_probe
     command = babysit("stop")
     write_pid_payload(pid: 1234)
@@ -406,6 +525,24 @@ class HiveCommandsBabysitTest < Minitest::Test
     command.define_singleton_method(:read_pid_file_payload) { raise "unreadable" }
 
     refute command.send(:remove_pid_file_if_current, { "pid" => 1234 })
+  end
+
+  def test_pid_file_mutex_times_out_when_lock_cannot_be_acquired
+    command = babysit("stop")
+    fake_lock = Object.new
+    fake_lock.define_singleton_method(:flock) do |mode|
+      mode == File::LOCK_UN ? true : false
+    end
+    command.define_singleton_method(:sleep) { |_sec| nil }
+    times = [ Time.at(0), Time.at(0), Time.at(Hive::Commands::Babysit::PID_LOCK_WAIT_SEC + 1) ]
+
+    error = assert_raises(Hive::Error) do
+      with_replaced_singleton_method(Time, :now, -> { times.shift || Time.at(Hive::Commands::Babysit::PID_LOCK_WAIT_SEC + 1) }) do
+        command.send(:acquire_pid_file_mutex, fake_lock)
+      end
+    end
+
+    assert_includes error.message, "timed out waiting"
   end
 
   def test_stale_runtime_ignores_malformed_started_at

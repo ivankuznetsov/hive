@@ -19,6 +19,7 @@ module Hive
       # a synchronous agent spawn with child processes and temporary worktrees.
       STOP_GRACE_SEC = 600
       KILL_GRACE_SEC = 5
+      PID_LOCK_WAIT_SEC = 10
       POLL_INTERVAL_SEC = 0.5
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
@@ -237,6 +238,22 @@ module Hive
             return false
           end
           warn "hive: babysitter PID #{pid} did not stop within #{STOP_GRACE_SEC}s; sending KILL"
+          unless pid_alive?(pid)
+            remove_pid_file_if_current(payload)
+            puts "hive babysitter: stopped (pid #{pid})"
+            return true
+          end
+          ownership_before_kill = pid_ownership(payload, pid)
+          if %i[reused unverified].include?(ownership_before_kill)
+            unless pid_alive?(pid)
+              remove_pid_file_if_current(payload)
+              puts "hive babysitter: stopped (pid #{pid})"
+              return true
+            end
+            warn "hive: babysitter PID #{pid} ownership is #{ownership_before_kill} before KILL; " \
+                 "leaving #{pid_file} for manual inspection"
+            return false
+          end
           send_signal_safely(pid, :KILL)
           kill_deadline = Time.now + KILL_GRACE_SEC
           while pid_alive?(pid) && Time.now < kill_deadline
@@ -270,11 +287,23 @@ module Hive
         lock_path = "#{pid_file}.lock"
         FileUtils.mkdir_p(File.dirname(lock_path))
         File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+          acquire_pid_file_mutex(lock)
           yield
         ensure
           lock.flock(File::LOCK_UN) unless lock.closed?
         end
+      end
+
+      def acquire_pid_file_mutex(lock)
+        deadline = Time.now + PID_LOCK_WAIT_SEC
+        loop do
+          return true if lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+          break if Time.now >= deadline
+
+          sleep POLL_INTERVAL_SEC
+        end
+        raise Hive::Error, "timed out waiting for babysitter PID-file lock #{pid_file}.lock"
       end
 
       def stop_daemon_or_raise

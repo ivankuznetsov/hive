@@ -3528,3 +3528,11 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 - [[index]]
 - [[gaps]]
 - [[log]]
+
+## [2026-06-07T12:30:35+01:00] wiki - audit residual wiki-only babysitter gap refresh
+
+**Action:** Refreshed wiki coverage after commit `f54afd9f`, a 6-review residue commit that touched only [[gaps]], [[index]], and [[log]]. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter gh dry-run browser web workflow stub"` surfaced prior babysitter changelog context, and the configured master wiki path still had no babysitter-specific hit. Inspected the committed diff plus `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Confirmed command/module/testing docs still match the source-backed command-scoped `gh --web` / `-w` handling, page coverage stayed at 74, and the latest wiki-only commit does not close the missing focused-test/live-smoke evidence for the `0c5c6e3f` browser-flag edge cases. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+- [[log]]

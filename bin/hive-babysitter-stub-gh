@@ -91,6 +91,11 @@ def api_read_only?(rest)
   !payload
 end
 
+def browser_launch_option?(arg)
+  arg == "--web" || arg.start_with?("--web=") ||
+    arg == "-w" || arg.start_with?("-w=")
+end
+
 def read_only?(rest)
   case rest[0]
   when "api"
@@ -115,10 +120,12 @@ def browser_option?(arg)
 end
 
 rest = stripped_global_options(argv)
+browser_launch_screened = argv.any? { |arg| browser_launch_option?(arg) }
 
-unless !argv.any? { |arg| browser_option?(arg) } && read_only?(rest)
+unless !browser_launch_screened && read_only?(rest)
   log_skip(argv)
-  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  reason = browser_launch_screened ? " (browser-launch option screened)" : ""
+  warn "[dry-run] gh #{argv.join(' ')} skipped#{reason}"
   exit 0
 end
 
@@ -127,5 +134,6 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
   exit 127
 end
-%w[GH_BROWSER BROWSER].each { |key| ENV.delete(key) }
+
+%w[GH_BROWSER BROWSER GH_PAGER PAGER].each { |key| ENV.delete(key) }
 exec(real, *argv)

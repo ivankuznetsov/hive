@@ -3619,5 +3619,33 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 **Refreshed pages:**
 - [[commands/status]]
 - [[commands/tui]]
+
+## [2026-06-07T15:05:00Z] daemon — auto-heal interrupted finalize push leftovers
+
+**Action:** Extended `Hive::Daemon::StaleAgentHealer` so `8-finalize` rows with `ERROR reason=unpushed_commits` and no live task lock are automatically cleared with a bounded per-process retry budget. The clear uses the observed `marker_id` when present, falling back to `reason` only for legacy markers, so a stale status row cannot erase a newer same-reason error marker. After a successful clear, the healer seeds the controller's edit-resume baseline with the pre-clear state-file mtime; the next status read sees the marker-clear rewrite as newer than that baseline and dispatches finalize after the normal debounce instead of first-sight `record_baseline` stranding the row. The retry does not push directly inside the healer; it lets the normal daemon dispatch rerun finalize, preserving the existing clean-exit scope check, residue auto-commit path, GitHub auth check, and push validation. Manual-only finalize errors such as `ensure_clean_on_exit_failed` remain red for operator inspection, and repeated push failures stay red after the budget is exhausted.
+
+**Tests:** Added focused unit coverage for unpushed finalize auto-recovery, live-lock skip, non-finalize skip, manual clean-exit skip, retry-budget exhaustion, and marker-clear failure logging. Verified `test/unit/daemon/stale_agent_healer_test.rb`, `test/unit/task_action_test.rb`, and `test/integration/run_finalize_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T15:52:00Z] daemon — expose exhausted marker-heal budgets
+
+**Action:** Added `marker_heal_exhausted` as a one-shot daemon log event when bounded marker auto-recovery gives up. Strengthened finalize unpushed recovery tests for fresh marker-id retries and per-task budget isolation, and refreshed [[modules/daemon]], [[stages/finalize]], and [[testing]] with the narrower push-gate recovery contract.
+
+**Tests:** Verified `test/unit/daemon/stale_agent_healer_test.rb` and `test/unit/daemon/logger_test.rb`.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/finalize]]
+- [[testing]]
+
+## [2026-06-07T14:17:52Z] wiki — audit finalize unpushed auto-retry coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after the finalize unpushed auto-retry change updated `Hive::Daemon::StaleAgentHealer`, focused unit tests, and the daemon/finalize/testing wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "finalize unpushed commits stale healer auto retry"` found only existing CLI/log context, and the configured master wiki path had no relevant Hive context. Inspected the committed diff and current `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/daemon/dispatcher.rb`, `lib/hive/stages/finalize.rb`, `lib/hive/gh.rb`, `lib/hive/task_action.rb`, `test/unit/daemon/stale_agent_healer_test.rb`, `test/integration/daemon_stale_agent_healing_test.rb`, and `test/integration/run_finalize_test.rb`. The existing [[modules/daemon]] and [[stages/finalize]] updates were source-synced; refreshed [[testing]] to include the existing status-to-healer integration test, and recorded missing live-daemon retry evidence in [[gaps]]. Page count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
 - [[testing]]
 - [[gaps]]

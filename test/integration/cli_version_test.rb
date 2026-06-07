@@ -21,4 +21,19 @@ class CliVersionTest < Minitest::Test
     assert_includes out, "approve"
     refute_includes err, "No value provided for required arguments"
   end
+
+  def test_bin_hive_accepts_json_before_status_command
+    with_tmp_global_config do
+      leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json", "status"))
+      trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json"))
+
+      assert_equal without_generated_at(trailing), without_generated_at(leading)
+    end
+  end
+
+  private
+
+  def without_generated_at(payload)
+    payload.reject { |key, _value| key == "generated_at" }
+  end
 end

@@ -130,9 +130,11 @@ stage does not move and no workflow verb fires from either path.
    daemon restart or SIGHUP config reload rebuilds the healer (`dispatcher.rb`
    reconstructs `StaleAgentHealer` on reload without a persisted limit),
    dropping the accumulated counts so an exhausted row becomes eligible again.
-   The healer logs `marker_healed`,
-   `marker_heal_failed`, and a one-shot `marker_heal_exhausted` event when a
-   bounded recovery path gives up.
+   The healer logs `marker_healed`, `marker_heal_failed`, and a one-shot
+   `marker_heal_exhausted` event when a bounded recovery path gives up; the
+   exhausted event carries `budget_scope=per_process` and
+   `suggested_next_action=manual_fix` so operators do not mistake it for a
+   persisted terminal state.
 
 ## External liveness and capacity
 

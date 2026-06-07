@@ -69,11 +69,14 @@ module Hive
     #     advance these)
     #   - placeholder marker still within grace (slow but normal dispatch)
     class StaleAgentHealer
-      # Closed set of structured recovery reasons emitted by the healer.
-      # The agent/review-orphaned values are also written onto ERROR
-      # markers; finalize_unpushed_commits is logged when the healer
-      # clears an existing finalize ERROR reason=unpushed_commits marker.
-      REASONS = %i[
+      # Reason attrs the healer writes onto ERROR markers.
+      MARKER_ERROR_REASONS = %i[
+        agent_died
+        agent_orphaned
+      ].freeze
+
+      # Structured labels emitted as marker_healed / marker_heal_* reasons.
+      HEAL_LOG_LABELS = %i[
         agent_died
         agent_orphaned
         review_agent_died
@@ -309,7 +312,9 @@ module Hive
                         slug: row.slug,
                         stage: row.stage,
                         prior_marker: row.marker,
-                        state_file: row.state_file
+                        state_file: row.state_file,
+                        budget_scope: "per_process",
+                        suggested_next_action: "manual_fix"
                       }.merge(attrs))
       end
 

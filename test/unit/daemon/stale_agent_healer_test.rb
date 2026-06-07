@@ -728,6 +728,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_finalize_unpushed_recovery_does_not_clear_marker_that_gains_id_after_snapshot
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=fresh -->\n")
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/ERROR reason=unpushed_commits marker_id=fresh/, File.read(state_file),
+                   "a legacy row snapshot must not clear a modern marker written before heal")
+    end
+  end
+
   def test_finalize_unpushed_recovery_ignores_missing_or_malformed_marker_attrs
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR -->\n")
@@ -877,6 +899,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal "unpushed_commits", exhausted.first[1][:marker_reason]
       assert_equal 1, exhausted.first[1][:attempts]
       assert_equal 1, exhausted.first[1][:max_attempts]
+      assert_equal "per_process", exhausted.first[1][:budget_scope]
+      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
     end
   end
 
@@ -1164,6 +1188,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal "review_agent_died", exhausted.first[1][:marker_reason]
       assert_equal "reviewers", exhausted.first[1][:phase]
       assert_equal "1", exhausted.first[1][:pass]
+      assert_equal "per_process", exhausted.first[1][:budget_scope]
+      assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
     end
   end
 

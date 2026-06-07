@@ -628,9 +628,15 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_auto_recovers_finalize_unpushed_commits_error
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits detail=\"push failed\" marker_id=err-a -->\n")
+      # Explicit non-default mtime so the observed_mtimes assertion below
+      # actually pins that observe_pre_clear_mtime forwards the row's own
+      # state_file_mtime — not the make_row default, which would pass even
+      # if the pass-through were hard-coded.
+      pre_clear_mtime = NOW - 4242
       row = make_row(
         state_file,
         pid_alive: nil,
+        mtime: pre_clear_mtime,
         stage: "8-finalize",
         marker: "error",
         marker_attrs: {
@@ -649,9 +655,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal "finalize_unpushed_commits", heal_event[1][:reason]
       assert_equal "unpushed_commits", heal_event[1][:marker_reason]
       assert_equal 1, heal_event[1][:attempt]
-      assert_equal [ { project: "p", slug: "s", mtime: NOW - 1000 } ], @controller.observed_mtimes
-      refute_match(/ERROR/, File.read(state_file),
-                   "auto-recoverable unpushed finalize marker should clear so daemon can rerun finalize")
+      assert_equal [ { project: "p", slug: "s", mtime: pre_clear_mtime } ], @controller.observed_mtimes
+      assert Hive::Markers.current(state_file).none?,
+             "auto-recoverable unpushed finalize marker should clear to :none so daemon can rerun finalize"
     end
   end
 
@@ -696,7 +702,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal_event = @logger.events.find { |name, _| name == :marker_healed }
       assert heal_event, "expected legacy finalize marker to clear, got: #{@logger.events.inspect}"
-      refute_match(/ERROR/, File.read(state_file))
+      assert Hive::Markers.current(state_file).none?,
+             "legacy no-marker_id finalize marker should clear to :none"
     end
   end
 
@@ -758,6 +765,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a live-lock skip must be a clean no-op, not a logged failure"
       assert_match(/ERROR reason=unpushed_commits/, File.read(state_file))
     end
   end
@@ -778,6 +787,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a wrong-stage skip must be a clean no-op, not a logged failure"
       assert_match(/ERROR reason=unpushed_commits/, File.read(state_file))
     end
   end
@@ -798,6 +809,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a wrong-reason (non-recoverable) skip must be a clean no-op, not a logged failure"
       assert_match(/ERROR reason=ensure_clean_on_exit_failed/, File.read(state_file))
     end
   end
@@ -934,6 +947,99 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_finalize_unpushed_clear_false_consumes_no_budget_and_emits_no_event
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      # On-disk marker is NEWER than the stale status row's marker_id, so
+      # the reason matches but the marker_id guard makes clear_current
+      # return false. That branch must be a pure no-op: no event of any
+      # kind, and crucially no retry budget consumed.
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=newer -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "older" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_empty @logger.events,
+                   "a clear_current=false skip must emit no event at all, got: #{@logger.events.inspect}"
+      assert_empty @controller.observed_mtimes,
+                   "no mtime baseline should be seeded when nothing was cleared"
+
+      # The single retry budget must be intact: once the on-disk marker
+      # matches the row again, the same task still heals on the first try.
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=older -->\n")
+      matching = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "older" },
+        action: "error",
+        live_task_lock: false
+      )
+      heal([ matching ])
+
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size,
+                   "the earlier clear_current=false must not have consumed the single retry budget"
+      assert Hive::Markers.current(state_file).none?
+    end
+  end
+
+  def test_finalize_unpushed_budget_resets_on_fresh_healer_instance
+    # The recovery budget is in-memory and per-process. A daemon restart
+    # — or the SIGHUP rebuild of the healer in Dispatcher — drops the
+    # accumulated counts, so a row that exhausted its budget on the old
+    # instance is eligible again on a fresh one. This pins that reset as
+    # INTENDED: a future "persist the budget" change must consciously
+    # break this test.
+    row_attrs = {
+      pid_alive: nil,
+      stage: "8-finalize",
+      marker: "error",
+      marker_attrs: { "reason" => "unpushed_commits" },
+      action: "error",
+      live_task_lock: false
+    }
+
+    with_marker_file do |state_file|
+      first = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        error_auto_recovery_limit: 1
+      )
+      row = make_row(state_file, **row_attrs)
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      first.heal([ row ], now: NOW)
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
+      first.heal([ row ], now: NOW)
+      assert_match(/ERROR/, File.read(state_file),
+                   "budget must be exhausted on the first instance after the second pass")
+
+      fresh = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300,
+        error_auto_recovery_limit: 1
+      )
+      fresh.heal([ row ], now: NOW)
+
+      assert Hive::Markers.current(state_file).none?,
+             "a fresh healer instance must heal the same row again (per-process budget reset)"
+    end
+  end
+
   def test_finalize_unpushed_auto_recovery_logs_failure_when_marker_clear_raises
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits -->\n")
@@ -987,6 +1093,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed },
+             "a review live-lock skip must be a clean no-op, not a logged failure"
       assert_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end

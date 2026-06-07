@@ -6,6 +6,8 @@ require "hive/daemon/stale_agent_healer"
 require "hive/daemon/status_consumer"
 require "hive/daemon/logger"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/policy"
+require "hive/markers"
 
 # End-to-end integration: drive the real status command on a tmpdir
 # project, feed its JSON-shaped output through the daemon's
@@ -160,6 +162,68 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     # daemon crashing on first stale row in production.
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_healed
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_heal_failed
+  end
+
+  def test_finalize_unpushed_clear_redispatches_instead_of_recording_baseline
+    # The load-bearing claim behind observe_pre_clear_mtime: clearing a
+    # finalize `ERROR reason=unpushed_commits` marker leaves a markerless
+    # 8-finalize row that TaskAction classifies as `finalize_waiting`
+    # (NEEDS_INPUT → edit_resume). On FIRST sight with no dispatch
+    # baseline, Policy#decide_edit returns :record_baseline and SKIPS the
+    # dispatch — so finalize would never re-run and the task would strand
+    # as a markerless "needs your input" row, even though the heal already
+    # consumed a retry. The healer seeds the dispatch baseline with the
+    # PRE-clear mtime; the clear then bumps the file mtime past that
+    # baseline, so Policy sees a genuine edit and dispatches. This wires
+    # the real StaleAgentHealer → ConcurrencyController → Policy chain to
+    # prove finalize actually re-fires (it is NOT enough to assert the
+    # marker was removed — the unit tests already do that).
+    Dir.mktmpdir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-a -->\n")
+      pre_clear_mtime = Time.now - 1000
+      File.utime(pre_clear_mtime, pre_clear_mtime, state_file)
+
+      row = Hive::Daemon::StatusConsumer::Row.new(
+        project: "p", slug: "s", stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-a" },
+        folder: dir, state_file: state_file,
+        state_file_mtime: File.mtime(state_file),
+        action: "error", suggested_command: nil,
+        claude_pid_alive: nil, live_task_lock: false, diagnostic: nil
+      )
+
+      @healer.heal([ row ], now: Time.now)
+
+      assert Hive::Markers.current(state_file).none?,
+             "healer must clear the finalize unpushed marker"
+      baseline = @controller.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
+      assert baseline,
+             "heal must seed a dispatch baseline so the post-clear row is not treated as first-sight"
+      assert_in_delta pre_clear_mtime.to_f, baseline.to_f, 1.0,
+                      "the seeded baseline must be the PRE-clear mtime"
+
+      # The clear rewrote the file, bumping its mtime past the seeded
+      # baseline — a genuine edit from Policy's point of view.
+      post_clear_mtime = File.mtime(state_file)
+      assert post_clear_mtime > baseline,
+             "post-clear mtime must exceed the seeded pre-clear baseline"
+
+      decision = Hive::Daemon::Policy.decide(
+        action: "needs_input",
+        stage: "8-finalize",
+        command: "hive run p s",
+        state_file_mtime: post_clear_mtime,
+        last_dispatched_state_file_mtime: baseline,
+        now: post_clear_mtime + 3600,
+        edit_debounce_sec: 30
+      )
+
+      assert_equal :dispatch, decision,
+                   "finalize must re-dispatch after the unpushed_commits heal, " \
+                   "not strand on :record_baseline"
+    end
   end
 
   def test_agent_marker_grace_sec_threads_from_global_config_to_TaskAction

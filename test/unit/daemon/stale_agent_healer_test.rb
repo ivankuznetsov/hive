@@ -661,56 +661,59 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_auto_recovers_artifacts_tmux_session_terminated_error
-    with_marker_file do |state_file|
-      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=tmux-a -->\n")
-      pre_clear_mtime = NOW - 5151
-      row = make_row(
-        state_file,
-        pid_alive: nil,
-        mtime: pre_clear_mtime,
-        stage: "7-artifacts",
-        marker: "error",
-        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "tmux-a" },
-        action: "error",
-        live_task_lock: false
-      )
+  def test_auto_recovers_terminal_agent_loss_error_matrix
+    %w[7-artifacts 8-finalize].product(%w[tmux_session_terminated agent_orphaned]).each_with_index do |(stage, reason), index|
+      with_marker_file do |state_file|
+        marker_id = "terminal-#{index}"
+        File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} marker_id=#{marker_id} -->\n")
+        pre_clear_mtime = NOW - 5151 - index
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          mtime: pre_clear_mtime,
+          stage: stage,
+          marker: "error",
+          marker_attrs: { "reason" => reason, "marker_id" => marker_id },
+          action: "error",
+          live_task_lock: false
+        )
 
-      heal([ row ])
+        heal([ row ])
 
-      heal_event = @logger.events.find { |name, _| name == :marker_healed }
-      assert heal_event, "expected artifacts terminal-agent-loss auto-recovery event, got: #{@logger.events.inspect}"
-      assert_equal "terminal_agent_loss", heal_event[1][:reason]
-      assert_equal "tmux_session_terminated", heal_event[1][:marker_reason]
-      assert_equal "7-artifacts", heal_event[1][:stage]
-      assert_equal 1, heal_event[1][:attempts]
-      assert_equal [ { project: "p", slug: "s", mtime: pre_clear_mtime } ], @controller.observed_mtimes
-      assert Hive::Markers.current(state_file).none?,
-             "tmux-session terminal ERROR should clear so the daemon can rerun artifacts"
+        heal_event = @logger.events.last
+        assert_equal :marker_healed, heal_event[0]
+        assert_equal "terminal_agent_loss", heal_event[1][:reason]
+        assert_equal reason, heal_event[1][:marker_reason]
+        assert_equal stage, heal_event[1][:stage]
+        assert_equal 1, heal_event[1][:attempts]
+        assert_equal({ project: "p", slug: "s", mtime: pre_clear_mtime }, @controller.observed_mtimes.last)
+        assert Hive::Markers.current(state_file).none?,
+               "#{stage}/#{reason} terminal ERROR should clear so the daemon can rerun the stage"
+      end
     end
   end
 
-  def test_auto_recovers_finalize_agent_orphaned_error
-    with_marker_file do |state_file|
-      File.write(state_file, "# task\n\n<!-- ERROR reason=agent_orphaned marker_id=agent-a -->\n")
-      row = make_row(
-        state_file,
-        pid_alive: nil,
-        stage: "8-finalize",
-        marker: "error",
-        marker_attrs: { "reason" => "agent_orphaned", "marker_id" => "agent-a" },
-        action: "error",
-        live_task_lock: false
-      )
+  def test_terminal_agent_loss_recovery_does_not_clear_same_reasons_outside_late_stages
+    %w[tmux_session_terminated agent_orphaned].each do |reason|
+      with_marker_file do |state_file|
+        File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} -->\n")
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          stage: "6-review",
+          marker: "error",
+          marker_attrs: { "reason" => reason },
+          action: "error",
+          live_task_lock: false
+        )
 
-      heal([ row ])
+        heal([ row ])
 
-      heal_event = @logger.events.find { |name, _| name == :marker_healed }
-      assert heal_event, "expected finalize terminal-agent-loss auto-recovery event, got: #{@logger.events.inspect}"
-      assert_equal "terminal_agent_loss", heal_event[1][:reason]
-      assert_equal "agent_orphaned", heal_event[1][:marker_reason]
-      assert Hive::Markers.current(state_file).none?,
-             "orphaned-agent terminal ERROR should clear so the daemon can rerun finalize"
+        refute @logger.events.any? { |name, _| name == :marker_healed },
+               "6-review/#{reason} should stay outside terminal agent-loss auto-retry"
+        refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+        assert_match(/ERROR reason=#{reason}/, File.read(state_file))
+      end
     end
   end
 
@@ -820,7 +823,55 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal "per_process", exhausted.first[1][:budget_scope]
       assert_equal "manual_fix", exhausted.first[1][:suggested_next_action]
       assert_match(/rerun 7-artifacts/, exhausted.first[1][:remediation])
+      assert_match(/hive run s --project p --stage 7-artifacts/, exhausted.first[1][:remediation])
+      refute_match(/--from/, exhausted.first[1][:remediation])
       assert_match(/no live agent/, exhausted.first[1][:remediation])
+    end
+  end
+
+  def test_terminal_agent_loss_budget_accumulates_across_fresh_marker_ids
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      first = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "err-a" },
+        action: "error",
+        live_task_lock: false
+      )
+      second = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "err-b" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-a -->\n")
+      heal([ first ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-b -->\n")
+      heal([ second ])
+
+      assert_match(/ERROR reason=tmux_session_terminated marker_id=err-b/, File.read(state_file),
+                   "retry budget should key on task/stage/reason, not marker_id")
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, heals.size
+      assert_equal 1, exhausted.size
+      assert_equal "terminal_agent_loss", exhausted.first[1][:reason]
+      assert_equal "tmux_session_terminated", exhausted.first[1][:marker_reason]
     end
   end
 

@@ -224,12 +224,13 @@ module Hive
       end
 
       def error_recovery_remediation(row, reason)
+        command = "hive run #{row.slug} --project #{row.project} --stage #{row.stage}"
+
         if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
-          return "rerun finalize (`hive run #{row.project} #{row.slug}`) " \
-                 "or push the branch manually"
+          return "rerun finalize (`#{command}`) or push the branch manually"
         end
 
-        "rerun #{row.stage} (`hive run #{row.project} #{row.slug} --from #{row.stage}`) " \
+        "rerun #{row.stage} (`#{command}`) " \
           "after confirming no live agent still owns the task"
       end
 

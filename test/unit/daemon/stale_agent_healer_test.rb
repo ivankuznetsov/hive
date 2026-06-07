@@ -342,6 +342,32 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_heal_still_succeeds_when_stale_lock_cannot_be_deleted
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=triage pass=2 -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      FileUtils.mkdir_p(lock_path)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        mtime: NOW - 1000,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "triage", "pass" => "2" },
+        action: "agent_running",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected marker_healed despite undeletable lock, got: #{@logger.events.inspect}"
+      assert_equal "review_orphaned", heal_event[1][:reason]
+      assert File.directory?(lock_path), "undeletable lock residue should be left for a later tick"
+      refute_match(/REVIEW_WORKING|REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
   # Case B with no .lock at all (the holder died before/without recording
   # one, or a restart removed it): claude_pid_alive and live_task_lock are
   # both nil. Past grace, still healed; release_task_lock tolerates ENOENT.

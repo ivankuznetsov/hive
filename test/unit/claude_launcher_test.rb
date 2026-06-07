@@ -201,7 +201,9 @@ class ClaudeLauncherTest < Minitest::Test
     runner.define_singleton_method(:name) { "hive-limited-after-trust" }
     runner.define_singleton_method(:session_exists?) { true }
     runner.define_singleton_method(:capture_pane_tail) do |bytes:|
-      "Do you trust the files in this folder?\n" \
+      "Quick safety check\n" \
+        "❯ 1. Yes, I trust this folder\n" \
+        "Enter to confirm\n" \
         "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
     end
     runner.define_singleton_method(:send_keys) { |_keys| nil }

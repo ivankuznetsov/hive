@@ -179,6 +179,24 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_equal %i[stop start], calls
   end
 
+  def test_detached_restart_reexecs_canonical_start_command
+    command = babysit("restart", detach: true, dry_run: true)
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+    command.define_singleton_method(:start_daemon) { calls << :start }
+
+    exec_args = nil
+    with_replaced_singleton_method(Kernel, :exec, lambda { |*args| exec_args = args; throw :exec_called }) do
+      assert_raises(UncaughtThrowError) { command.call }
+    end
+
+    assert_equal [ :stop ], calls
+    assert_equal [ Process.argv0, "babysit", "start", "--detach", "--dry-run" ], exec_args
+  end
+
   def test_stale_runtime_ignores_malformed_started_at
     command = babysit("status")
     command.define_singleton_method(:current_source_mtime) { Time.now + 60 }

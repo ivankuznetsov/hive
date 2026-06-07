@@ -14,6 +14,7 @@ module Hive
       include Hive::PidFile
 
       VALID_SUBCOMMANDS = %w[start stop restart status reload tail].freeze
+      STOP_GRACE_SEC = 15
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, hive_home: Hive::Paths.state_home)
@@ -191,7 +192,7 @@ module Hive
         end
 
         send_signal_safely(pid, :TERM)
-        deadline = Time.now + 600
+        deadline = Time.now + STOP_GRACE_SEC
         while pid_alive?(pid) && Time.now < deadline
           sleep 0.5
         end
@@ -205,7 +206,15 @@ module Hive
 
       def restart_daemon
         stop_daemon if File.exist?(pid_file)
+        reexec_detached_start! if @detach
+
         start_daemon
+      end
+
+      def reexec_detached_start!
+        argv = [ "babysit", "start", "--detach" ]
+        argv << "--dry-run" if @dry_run
+        Kernel.method(:exec).call(Process.argv0, *argv)
       end
 
       def status_daemon

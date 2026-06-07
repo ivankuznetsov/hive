@@ -56,7 +56,7 @@ Gem::Specification.new do |spec|
   # transitively through telegram-bot-ruby today, but declaring them directly
   # keeps transcription from breaking with a LoadError if an upstream bump
   # drops or re-scopes them.
-  spec.add_dependency "faraday", "~> 2.0"
+  spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
   spec.add_dependency "lipgloss", "~> 0.2.2"
   spec.add_dependency "sqlite3", "~> 2.0"

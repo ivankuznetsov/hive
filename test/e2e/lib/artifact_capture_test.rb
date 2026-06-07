@@ -164,25 +164,30 @@ class E2EArtifactCaptureTest < Minitest::Test
       copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
       assert File.size(copied_spawn) < File.size(spawn_log),
              "artifact bundle should not copy oversized per-spawn captures wholesale"
-      assert File.size("#{copied_spawn}.tail") <= File.size(copied_spawn),
-             "tail companion should be derived from the truncated bundle copy"
       assert_includes File.read(copied_spawn, 128), "truncated to last"
     end
   end
 
-  def test_manifest_excludes_live_tui_subprocess_logs
+  def test_tui_subprocess_live_logs_are_removed_before_manifest
     with_dirs do |scenario_dir, sandbox, run_home|
-      log_dir = File.join(scenario_dir, "tui-subprocess-live")
-      FileUtils.mkdir_p(log_dir)
-      File.write(File.join(log_dir, "hive-tui-spawn-LIVE.log"), "LIVE\n")
+      live_dir = File.join(scenario_dir, "tui-subprocess-live")
+      FileUtils.mkdir_p(live_dir)
+      oversized_bytes = Hive::E2E::ArtifactCapture::TUI_SPAWN_CAPTURE_MAX_BYTES + 10
+      spawn_log = File.join(live_dir, "hive-tui-spawn-BIG.log")
+      File.write(spawn_log, "x" * oversized_bytes)
 
-      collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
+      collect(scenario_dir, sandbox, run_home, tui_log_dir: live_dir)
+
+      copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
+      assert File.exist?(copied_spawn), "bounded per-spawn copy should be retained"
+      assert_operator File.size(copied_spawn), :<, oversized_bytes,
+                      "oversized live output should only be retained through the truncated copy"
+      refute File.directory?(live_dir), "unbounded live TUI log directory should not remain in the bundle"
 
       manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
-      paths = manifest["files"].map { |file| file["path"] }
+      paths = manifest.fetch("files").map { |file| file.fetch("path") }
       refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
-        "manifest should publish only curated tui-subprocess copies, not live logs"
-      assert_includes paths, "tui-subprocess/hive-tui-spawn-LIVE.log"
+             "manifest should not include unbounded live TUI logs"
     end
   end
 

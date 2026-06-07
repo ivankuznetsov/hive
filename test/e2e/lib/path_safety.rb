@@ -64,12 +64,17 @@ module Hive
           raise ArgumentError, "runs_dir #{root.inspect} must not be a symlinked path" unless real == root
         end
 
-        forbidden = [ "/", Dir.home, File.expand_path("../../..", __dir__) ].map { |path| File.expand_path(path) }
+        tmp_root = File.expand_path(Dir.tmpdir)
+        forbidden = [
+          "/",
+          Dir.home,
+          File.expand_path("../../..", __dir__),
+          tmp_root
+        ].map { |path| File.expand_path(path) }
         if forbidden.any? { |path| root == path }
           raise ArgumentError, "refusing to clean unsafe runs_dir #{root.inspect}"
         end
 
-        tmp_root = File.expand_path(Dir.tmpdir)
         return root if root == default_root || contained?(tmp_root, root)
 
         raise ArgumentError, "runs_dir #{root.inspect} must be the e2e runs directory or a temp test directory"

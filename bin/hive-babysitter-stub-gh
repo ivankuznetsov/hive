@@ -110,18 +110,32 @@ def read_only?(rest)
   end
 end
 
-def external_launcher_option?(rest)
-  return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
-  return false unless [%w[pr view], %w[repo view], %w[run view], %w[workflow view]].include?(rest[0, 2])
+def browser_open_command?(rest)
+  case rest[0]
+  when "pr"
+    %w[checks diff list view].include?(rest[1])
+  when "repo"
+    rest[1] == "view"
+  when "run"
+    rest[1] == "view"
+  when "workflow"
+    rest[1] == "view"
+  else
+    false
+  end
+end
 
-  rest.drop(2).any? { |arg| arg == "-w" || arg.start_with?("-w") }
+def browser_open_screened?(rest)
+  browser_open_command?(rest) && rest.drop(2).any? { |arg| arg == "--web" || arg == "-w" }
 end
 
 rest = stripped_global_options(argv)
+screened = browser_open_screened?(rest)
 
-unless read_only?(rest) && !external_launcher_option?(rest)
+unless !screened && read_only?(rest)
   log_skip(argv)
-  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  reason = screened ? " (exec option screened)" : ""
+  warn "[dry-run] gh #{argv.join(' ')} skipped#{reason}"
   exit 0
 end
 
@@ -131,5 +145,5 @@ if real.empty?
   exit 127
 end
 
-%w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY].each { |key| ENV.delete(key) }
+%w[GH_PAGER PAGER GH_BROWSER BROWSER].each { |key| ENV.delete(key) }
 exec(real, *argv)

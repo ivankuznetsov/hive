@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-06-06T20:33:25Z] wiki - audit finalize log-only refresh commit
+
+**Action:** Audited commit `63663d77` after the finalize backstop committed a log-only wiki refresh entry. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `.llm-wiki/config.json` points at `/home/asterio/wikis/master/wiki`, and `qmd search "babysitter dry-run git output ext-diff external-diff"` returned no indexed results. Verified the committed diff against the current babysitter dry-run source and tests: `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]]. Confirmed HEAD only added [[log]] coverage for commit `e00bcf49`, and that the babysitter pages already document the `gh api` implicit-write guard plus the git `--output`, `--output=<path>`, `--ext-diff`, and `--external-diff` skip behavior. The remaining uncertainty is still the existing live-agent `hive babysit --once PROJECT --dry-run` smoke gap, so no index or gaps changes were needed. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[log]]
+
 ## [2026-06-06T14:19:59Z] wiki - audit log-only babysitter dry-run refresh commit
 
 **Action:** Audited commit `e00bcf49` after it auto-committed a log-only wiki refresh entry for the babysitter dry-run stub coverage audit. Read `AGENTS.md`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git output ext-diff external-diff"` returned no indexed results, so verification used the committed diff plus direct source reads. Checked the new [[log]] entry against commit `6ef4c3d8`, commit `9d1e0fce`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]]. Confirmed the log-only commit records the already-current dry-run stub documentation: git read allowlist entries still reject `--output`, `--output=<path>`, `--ext-diff`, and `--external-diff`; gh API payload writes remain skipped unless GET is explicit; and the existing live-agent `hive babysit --once PROJECT --dry-run` smoke gap remains the only recorded uncertainty. No index or gaps changes were needed. Did not run `qmd update` or `qmd embed`.

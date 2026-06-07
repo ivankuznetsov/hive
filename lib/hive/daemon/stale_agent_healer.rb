@@ -49,6 +49,22 @@ module Hive
     #                        on a kill. Clear the marker + drop any stale
     #                        lock so review re-dispatches.
     #
+    # ERROR reason=unpushed_commits at 8-finalize is also auto-retryable:
+    # the finalize push gate can fail during ordinary interruptions
+    # (sleep/network) even though the task state remains
+    # recoverable by rerunning finalize. Clearing that specific marker
+    # lets finalize rerun its existing auth, clean-exit, and push checks
+    # up to the configured limit (default 3) before leaving the marker red
+    # for manual recovery. There is no healer-side backoff between those
+    # retries — the only thing spacing them is finalize's own re-dispatch
+    # runtime (a full finalize agent run), not any delay enforced here.
+    #
+    # Unlike the review path (`review_error_signature`), the finalize
+    # recovery key (`error_auto_recovery_key`) deliberately omits a failure
+    # signature: every push failure on a task shares one retry budget by
+    # design, so a genuinely different push error does not silently earn a
+    # fresh budget. This asymmetry is intentional, not an oversight.
+    #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
     #     is live; do not race it)
@@ -61,26 +77,21 @@ module Hive
     #     advance these)
     #   - placeholder marker still within grace (slow but normal dispatch)
     class StaleAgentHealer
-      # Closed set of reason= attribute values the healer writes onto
-      # ERROR markers. Consumers (TaskAction's synthetic diagnostic,
-      # bot/notification rendering, future docs) can reference this
-      # constant instead of hard-coding the literal strings.
-      REASONS = %i[
-        agent_died
-        agent_orphaned
-        review_agent_died
-        review_orphaned
-        reviewer_tmux_session_terminated
-      ].freeze
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
+      ERROR_AUTO_RECOVERY_LIMIT = 3
 
       def initialize(controller:, logger:, grace_sec: 300,
-                     review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT)
+                     review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
+                     error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT)
         @controller = controller
         @logger = logger
         @grace_sec = grace_sec
         @review_error_auto_recovery_limit = review_error_auto_recovery_limit
+        @error_auto_recovery_limit = error_auto_recovery_limit
         @review_error_auto_recoveries = Hash.new(0)
+        @error_auto_recoveries = Hash.new(0)
+        @review_error_recovery_exhausted = {}
+        @error_recovery_exhausted = {}
       end
 
       # Walk the row set, heal stale agent_working markers in place.
@@ -107,6 +118,11 @@ module Hive
             next
           end
 
+          if row.marker.to_s == "error"
+            heal_error_if_auto_recoverable(row)
+            next
+          end
+
           if row.marker.to_s == "review_working"
             heal_review_row_if_stale(row, now: now)
             next
@@ -128,16 +144,143 @@ module Hive
 
       private
 
+      def heal_error_if_auto_recoverable(row)
+        return if row.live_task_lock == true
+        return unless auto_recoverable_error?(row)
+        # The clear makes a markerless finalize row take the edit-resume
+        # path; without a pre-clear mtime to seed as the dispatch baseline,
+        # that row can strand as first-sight `record_baseline`.
+        return if row.state_file_mtime.nil?
+
+        reason = marker_reason(row)
+        recovery_key = error_auto_recovery_key(row, reason: reason)
+        attempts = @error_auto_recoveries[recovery_key]
+        if attempts >= @error_auto_recovery_limit
+          log_recovery_exhausted_once(
+            @error_recovery_exhausted,
+            recovery_key,
+            row,
+            reason: "finalize_unpushed_commits",
+            marker_reason: reason,
+            attempts: attempts,
+            max_attempts: @error_auto_recovery_limit,
+            remediation: "rerun finalize (`hive run #{row.project} #{row.slug}`) " \
+                         "or push the branch manually"
+          )
+          return
+        end
+
+        # A false return is an intentional, silent no-op: either a benign
+        # race (finalize already advanced and rewrote/removed the marker)
+        # or a marker_id mismatch (the on-disk marker is newer than this
+        # stale status row). Either way we must NOT consume a retry or log
+        # — the budget increment below is deliberately ordered AFTER this
+        # guard so only a real clear counts against the limit. The next
+        # tick re-reads the marker and reconciles.
+        return unless Hive::Markers.clear_current(
+          row.state_file,
+          expected_name: :error,
+          match_attrs: auto_recoverable_error_match_attrs(row, reason: reason)
+        )
+
+        observe_pre_clear_mtime(row)
+        attempts += 1
+        @error_auto_recoveries[recovery_key] = attempts
+        @logger.event(:marker_healed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      prior_marker: row.marker,
+                      reason: "finalize_unpushed_commits",
+                      marker_reason: reason,
+                      state_file: row.state_file,
+                      attempts: attempts,
+                      max_attempts: @error_auto_recovery_limit)
+      rescue StandardError => e
+        @logger.event(:marker_heal_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      reason: "finalize_unpushed_commits",
+                      error: "#{e.class}: #{e.message}")
+      end
+
+      def auto_recoverable_error?(row)
+        row.stage.to_s == "8-finalize" && marker_reason(row) == "unpushed_commits"
+      end
+
+      def auto_recoverable_error_match_attrs(row, reason:)
+        attrs = marker_attrs_for(row)
+        marker_id = attrs["marker_id"].to_s
+        match_attrs = { "reason" => reason }
+        if marker_id.empty?
+          # Match legacy no-id markers only. `clear_current` evaluates this
+          # under the markers lock, so a stale row without marker_id cannot
+          # clear a newer marker that gained one between status and heal.
+          match_attrs["marker_id"] = nil
+        else
+          match_attrs["marker_id"] = marker_id
+        end
+        match_attrs
+      end
+
+      def observe_pre_clear_mtime(row)
+        # Production always satisfies this (ConcurrencyController defines
+        # the method). A future controller swap that dropped it would
+        # silently reintroduce the first-sight `record_baseline` stranding
+        # the seeded baseline exists to prevent — so emit a debug event
+        # instead of a silent no-op, giving the gap a log signal.
+        unless @controller.respond_to?(:observe_state_file_mtime)
+          @logger.event(:marker_heal_observer_missing,
+                        project: row.project,
+                        slug: row.slug,
+                        stage: row.stage,
+                        state_file: row.state_file)
+          return
+        end
+
+        @controller.observe_state_file_mtime(
+          project: row.project,
+          slug: row.slug,
+          mtime: row.state_file_mtime
+        )
+      end
+
+      def error_auto_recovery_key(row, reason:)
+        [
+          row.project.to_s,
+          row.slug.to_s,
+          row.stage.to_s,
+          reason.to_s
+        ]
+      end
+
       def heal_review_error_if_auto_recoverable(row)
         return if row.live_task_lock == true
         return unless auto_recoverable_review_error?(row)
 
-        reason = auto_recoverable_review_error_reason(row)
+        reason = marker_reason(row)
         marker_attrs = review_marker_attrs(row)
         marker_attrs["reason"] = reason
         recovery_key = review_error_auto_recovery_key(row, reason: reason)
         attempts = @review_error_auto_recoveries[recovery_key]
-        return if attempts >= @review_error_auto_recovery_limit
+        if attempts >= @review_error_auto_recovery_limit
+          log_recovery_exhausted_once(
+            @review_error_recovery_exhausted,
+            recovery_key,
+            row,
+            reason: review_heal_label(reason),
+            marker_reason: reason,
+            attempts: attempts,
+            max_attempts: @review_error_auto_recovery_limit,
+            phase: marker_attrs["phase"],
+            pass: marker_attrs["pass"],
+            errors_path: reviewer_errors_path(row),
+            remediation: "rerun review for this task " \
+                         "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
+          )
+          return
+        end
 
         return unless Hive::Markers.clear_current(
           row.state_file,
@@ -152,29 +295,69 @@ module Hive
                       slug: row.slug,
                       stage: row.stage,
                       prior_marker: row.marker,
-                      reason: reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated",
+                      reason: review_heal_label(reason),
                       state_file: row.state_file,
                       phase: marker_attrs["phase"],
                       pass: marker_attrs["pass"],
                       errors_path: reviewer_errors_path(row),
-                      attempt: attempts,
+                      attempts: attempts,
                       max_attempts: @review_error_auto_recovery_limit)
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
                       slug: row.slug,
                       stage: row.stage,
-                      reason: "reviewer_tmux_session_terminated",
+                      reason: review_heal_label(marker_reason(row)),
                       error: "#{e.class}: #{e.message}")
       end
 
-      def auto_recoverable_review_error_reason(row)
-        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
-        attrs["reason"].to_s
+      # Emit `marker_heal_exhausted` at most once per (process, recovery_key).
+      # The event name reads terminal, but the budget it reports is
+      # in-memory and per-process: a daemon restart — or a routine SIGHUP
+      # config reload, which rebuilds the healer in Dispatcher (see the
+      # `@stale_agent_healer = StaleAgentHealer.new` rebuild in
+      # dispatcher.rb) — drops both the retry counts AND these `seen` dedup
+      # maps. So a reload re-arms `max_attempts` fresh clears and re-arms
+      # this one-shot guard, which means the exhausted event can fire again
+      # afterwards for the same key. `budget_scope: "per_process"` flags that
+      # on the event; each call site also passes a `remediation:` hint so an
+      # operator reading the log knows how to recover now instead of
+      # over-reading "red forever".
+      def log_recovery_exhausted_once(seen, recovery_key, row, **attrs)
+        return if seen[recovery_key]
+
+        seen[recovery_key] = true
+        @logger.event(:marker_heal_exhausted,
+                      **{
+                        project: row.project,
+                        slug: row.slug,
+                        stage: row.stage,
+                        prior_marker: row.marker,
+                        state_file: row.state_file,
+                        budget_scope: "per_process",
+                        suggested_next_action: "manual_fix"
+                      }.merge(attrs))
+      end
+
+      # The marker's own `reason=` attribute, the single source the
+      # finalize and review auto-recovery paths both key recovery budgets
+      # and match-attrs off of.
+      def marker_reason(row)
+        marker_attrs_for(row)["reason"].to_s
+      end
+
+      # Map a review marker reason to the healer's `reason:` log label.
+      # `review_agent_died` keeps its own label; every other
+      # auto-recoverable review reason (today only the tmux-death subset
+      # of `reviewer_partial_failure`) logs as
+      # `reviewer_tmux_session_terminated`. The marker's literal reason is
+      # carried separately as `marker_reason:`.
+      def review_heal_label(reason)
+        reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated"
       end
 
       def review_error_auto_recovery_key(row, reason:)
-        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        attrs = marker_attrs_for(row)
         [
           row.project.to_s,
           row.slug.to_s,
@@ -197,7 +380,7 @@ module Hive
       end
 
       def auto_recoverable_review_error?(row)
-        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        attrs = marker_attrs_for(row)
         return true if attrs["reason"].to_s == "review_agent_died"
 
         return false unless attrs["phase"].to_s == "reviewers"
@@ -218,7 +401,7 @@ module Hive
       end
 
       def reviewer_errors_path(row)
-        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        attrs = marker_attrs_for(row)
         pass = Integer(attrs["pass"], exception: false)
         return nil unless pass
 
@@ -335,11 +518,18 @@ module Hive
       end
 
       def review_marker_attrs(row)
-        attrs = row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
+        attrs = marker_attrs_for(row)
         out = {}
         out["phase"] = attrs["phase"] if attrs["phase"]
         out["pass"] = attrs["pass"] if attrs["pass"]
         out
+      end
+
+      def marker_attrs_for(row)
+        return {} unless row.respond_to?(:marker_attrs)
+        return row.marker_attrs if row.marker_attrs.is_a?(Hash)
+
+        {}
       end
 
       def pid_alive?(pid)

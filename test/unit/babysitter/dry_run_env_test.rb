@@ -254,6 +254,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+
   def test_gh_stub_screens_browser_flags_and_scrubs_browser_pager_env
     with_tmp_dir do |dir|
       real_gh = recording_binary(dir, "real-gh", env_keys: %w[GH_BROWSER BROWSER GH_PAGER PAGER])
@@ -287,7 +288,6 @@ class BabysitterDryRunEnvTest < Minitest::Test
       refute_includes real_invocations, "PAGER="
     end
   end
-
   private
 
   def assert_stubbed(env, binary, *args)
@@ -313,15 +313,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
                     "#{binary} #{args.join(' ')} passed (exit 0) but never reached real #{binary}"
   end
 
-  def recording_binary(dir, name, env_keys: [])
+  def recording_binary(dir, name)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
       #!/usr/bin/env ruby
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
-        #{env_keys.inspect}.each do |key|
-          file.puts("\#{key}=\#{ENV[key]}") if ENV.key?(key)
-        end
       end
     RUBY
     FileUtils.chmod("+x", path)

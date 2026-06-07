@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/
 created: 2026-05-26
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -61,6 +61,7 @@ Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-er
 - Separate from `Hive::Daemon`; no shared `ConcurrencyController` and no task-folder dispatch.
 - Separate PID and log files: `$HIVE_HOME/.babysitter.pid`, `$HIVE_HOME/logs/babysitter.log`.
 - Per-project opt-in only: `babysitter.enabled`.
+- `hive babysit reload` is config/log-setting only. The detached process keeps Ruby code loaded from its original start; after checkout updates or release upgrades, use `hive babysit restart --detach`. `hive babysit status` compares the PID-file `started_at` to the current source mtime and prints a restart recommendation when the running process predates the checkout. This prevents stale validators from silently skipping projects after config enum changes such as `patrol.trigger: continuous`.
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.
 - No Telegram or install/service integration in v1.
 - No success PR comments.

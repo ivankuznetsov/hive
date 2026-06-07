@@ -166,6 +166,10 @@ Append-only log of all wiki operations.
 - [[commands/run]]
 - [[modules/markers]]
 
+## [2026-06-07T11:05:00Z] babysitter - detect stale detached runtime
+
+**Action:** Diagnosed a live babysitter process that had been running since 2026-06-03 and was still rejecting `patrol.trigger: continuous`, even though current `main` accepts and documents that trigger. Added `hive babysit restart`, made `hive babysit status` recommend restart when the PID-file `started_at` predates the current Hive source checkout, and made `hive babysit reload` warn that SIGHUP only reloads config/log settings, not Ruby code. Updated [[modules/babysitter]] with the operational rule.
+
 ## [2026-06-05T13:30:00Z] patrol - make `continuous` the default trigger
 
 **Action:** Flipped the default `patrol.trigger` from `new_commits` to `continuous` so patrol keeps mining existing feature slices on the `poll_interval_sec` timer (in addition to default-branch SHA changes) out of the box. Changed `Config::DEFAULTS["patrol"]["trigger"]`, the `PatrolScheduler#due?` fetch fallback, the init template (`templates/project_config.yml.erb`, with an inline mode comment), and the `config_test` default assertion. Refreshed [[commands/patrol]], [[modules/patrol]], and `docs/cli.md` to mark `continuous` as the default. `new_commits` / `timer` remain opt-in.

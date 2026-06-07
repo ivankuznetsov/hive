@@ -93,6 +93,18 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_match(/running \(pid 1234, uptime \d+s\)/, out)
   end
 
+  def test_status_recommends_restart_when_runtime_predates_source
+    command = babysit("status")
+    write_pid_payload(pid: 1234)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    command.define_singleton_method(:current_source_mtime) { Time.now + 60 }
+
+    out, _err = capture_io { command.call }
+    assert_includes out, "restart recommended"
+    assert_includes out, "hive babysit restart --detach"
+  end
+
   def test_once_unknown_project_is_usage_error
     with_tmp_global_config do
       err = assert_raises(Hive::InvalidTaskPath) do
@@ -139,5 +151,31 @@ class HiveCommandsBabysitTest < Minitest::Test
     out, _err = capture_io { command.call }
     assert_equal [ [ 1234, :HUP ] ], signals
     assert_includes out, "reload requested"
+  end
+
+  def test_reload_warns_when_runtime_predates_source
+    command = babysit("reload")
+    write_pid_payload(pid: 1234)
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) { |_pid, _signal| nil }
+    command.define_singleton_method(:current_source_mtime) { Time.now + 60 }
+
+    _out, err = capture_io { command.call }
+    assert_includes err, "reload will not update Ruby code"
+    assert_includes err, "hive babysit restart --detach"
+  end
+
+  def test_restart_stops_existing_process_then_starts
+    command = babysit("restart")
+    calls = []
+    home = @home
+    command.define_singleton_method(:pid_file) { File.join(home, ".babysitter.pid") }
+    File.write(command.pid_file, { "pid" => 1234 }.to_yaml)
+    command.define_singleton_method(:stop_daemon) { calls << :stop }
+    command.define_singleton_method(:start_daemon) { calls << :start }
+
+    command.call
+    assert_equal %i[stop start], calls
   end
 end

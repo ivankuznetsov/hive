@@ -105,6 +105,24 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_pre_fix_dirty_worktree_residue_bypasses_scope_check
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.write(File.join(worktree, "operator-note.txt"), "manual residue\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg, reason: :pre_fix_dirty_worktree
+      )
+
+      assert_equal :auto_committed, result[:status]
+      assert_includes Array(result[:paths]), "operator-note.txt"
+      assert_empty `git -C #{worktree} status --porcelain`
+      body = `git -C #{worktree} log -1 --pretty=%B`
+      assert_includes body, "Hive-Auto-Commit-Reason: pre_fix_dirty_worktree"
+    end
+  end
+
   def test_residue_with_sign_policy_fail_under_gpgsign_returns_git_failed
     with_tmp_dir do |worktree|
       init_git(worktree)

@@ -678,7 +678,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_review_fix_agent_refuses_to_auto_commit_pre_existing_dirty_worktree
+  def test_review_auto_commits_out_of_scope_pre_fix_residue_before_fix_agent
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
@@ -689,7 +689,7 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         preexisting_file = File.join(worktree, "preexisting-manual.txt")
-        agent_ran_file = File.join(worktree, "fix-agent-ran.txt")
+        agent_ran_file = File.join(worktree, "test", "fix-agent-ran.txt")
         File.write(preexisting_file, "manual before fix agent\n")
         File.write(@driver_bin, <<~SH)
           #!/usr/bin/env bash
@@ -697,22 +697,64 @@ class RunReviewTest < Minitest::Test
             echo "2.1.118 (Claude Code)"
             exit 0
           fi
+          mkdir -p "$(dirname '#{agent_ran_file}')"
           printf 'fix agent ran\n' > "#{agent_ran_file}"
           exit 0
         SH
         File.chmod(0o755, @driver_bin)
 
         _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        assert_equal 0, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+
+        assert_equal "fix agent ran\n", File.read(agent_ran_file)
+        assert_equal "", `git -C #{worktree} status --porcelain`
+
+        subjects = `git -C #{worktree} log -2 --pretty=%s`.lines.map(&:strip)
+        assert_equal "fix(review): apply pass 01 findings", subjects.fetch(0)
+        assert_equal "chore(6-review): commit residual worktree changes", subjects.fetch(1)
+        residue_body = `git -C #{worktree} log -1 --pretty=%B HEAD~1`
+        assert_includes residue_body, "Hive-Auto-Commit-Reason: pre_fix_dirty_worktree"
+        assert_includes residue_body, "Hive-Auto-Commit: residue"
+      end
+    end
+  end
+
+  def test_review_marks_dirty_when_pre_fix_cleanup_cannot_snapshot_residue
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        File.write(File.join(worktree, "preexisting-manual.txt"), "manual before fix agent\n")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          printf 'fix agent should not run\\n' > "#{File.join(worktree, 'test', 'fix-agent-ran.txt')}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        with_replaced_singleton_method(Hive::Stages::CleanExit, :run!, lambda { |**_kwargs|
+          { status: :scope_violation, paths: [ "preexisting-manual.txt" ], message: "scope check failed" }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix", marker.attrs["phase"]
         assert_equal "fix_dirty_worktree", marker.attrs["reason"]
-        assert_match(/pre-existing changes/, marker.attrs["message"])
-
-        refute File.exist?(agent_ran_file), "fix agent must not run when the worktree is already dirty"
-        git_status = `git -C #{worktree} status --porcelain`
-        assert_includes git_status, "?? preexisting-manual.txt\n"
+        refute File.exist?(File.join(worktree, "test", "fix-agent-ran.txt"))
       end
     end
   end

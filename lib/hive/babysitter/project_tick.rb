@@ -113,7 +113,18 @@ module Hive
           next if inflight.include?(inflight_key(project_entry, number))
 
           pr
-        end.sort_by { |pr| parse_time(pr["updatedAt"]) }.first(limit)
+        end.sort_by { |pr| [ selection_priority(pr), parse_time(pr["updatedAt"]) ] }.first(limit)
+      end
+
+      def selection_priority(pr)
+        case pr["mergeStateStatus"].to_s.upcase
+        when "DIRTY", "BLOCKED", "UNSTABLE"
+          0
+        when "BEHIND", "UNKNOWN"
+          1
+        else
+          2
+        end
       end
 
       def inflight_key(project_entry, pr_number)

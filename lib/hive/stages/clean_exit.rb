@@ -10,9 +10,11 @@ module Hive
     # scope_violation / git_failed result for the caller to mark as
     # `:error reason=ensure_clean_on_exit_failed`.
     #
-    # Sharing `Hive::Stages::AutoCommit` means the scope-check allowlist
-    # and sign-policy configured under `review.fix.auto_commit` apply
-    # identically here — one knob, one place.
+    # Sharing `Hive::Stages::AutoCommit` means the sign-policy configured
+    # under `review.fix.auto_commit` applies identically here. The scope
+    # allowlist applies to stage-exit residue; pre-fix dirty worktree
+    # snapshots are intentionally broader so review recovery can preserve
+    # operator/agent residue before handing the worktree to the fix agent.
     module CleanExit
       module_function
 
@@ -59,7 +61,7 @@ module Hive
           return failure_with_unstage(worktree_path, :git_failed, message: staged[:message])
         end
 
-        if AutoCommit.auto_commit_scope_check_enabled?(cfg)
+        if scope_check_required?(cfg, reason)
           violations = AutoCommit.auto_commit_scope_violations(cfg, staged[:paths])
           unless violations.empty?
             return failure_with_unstage(
@@ -121,6 +123,12 @@ module Hive
         end
 
         { status: :ok, porcelain: result[:stdout].to_s }
+      end
+
+      def scope_check_required?(cfg, reason)
+        return false if reason.to_sym == :pre_fix_dirty_worktree
+
+        AutoCommit.auto_commit_scope_check_enabled?(cfg)
       end
 
       # Wrap a non-:auto_committed result in an unstage step so a failure

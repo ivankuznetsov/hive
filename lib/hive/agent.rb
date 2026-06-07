@@ -113,6 +113,7 @@ module Hive
       log_file = log_path
       final_message = nil
       final_message_source = nil
+      limit_text = nil
       last_usage = nil
       plain_tail = +""
       stdin_file = prompt_stdin_file
@@ -148,6 +149,16 @@ module Hive
             elsif json.nil?
               plain_tail << line
               plain_tail = plain_tail.byteslice(-FINAL_MESSAGE_TAIL_BYTES, FINAL_MESSAGE_TAIL_BYTES) || plain_tail
+            end
+            # Capture a usage/credit-limit signal straight from the raw stream.
+            # Some CLIs (notably codex) report "you've hit your usage limit" as a
+            # structured {"type":"error",...} / turn.failed JSON event that
+            # MessageExtractor does not surface as a final message — so without
+            # scanning the raw line the limit text never reaches handle_exit and
+            # the run is misreported as a generic failure (exit_code=1).
+            if limit_text.nil? && Hive::AgentLimit.limit_reached?(line)
+              detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
+              limit_text = (detail || line).to_s.strip
             end
             usage = json && @profile.extract_usage_event(json)
             last_usage = usage if usage
@@ -217,6 +228,7 @@ module Hive
         log_file: log_file,
         final_message: message,
         final_message_source: message_source,
+        limit_text: limit_text,
         usage: last_usage,
         model: last_usage && last_usage[:model],
         status: nil
@@ -349,10 +361,15 @@ module Hive
     def limit_error_message(result)
       return nil if result[:exit_code] == 0 && !result[:timed_out]
 
-      text = result[:final_message].to_s
-      return nil unless Hive::AgentLimit.limit_reached?(text)
+      # Prefer the limit text captured directly from the raw stream
+      # (result[:limit_text]); it catches CLIs like codex that emit the
+      # limit notice as a structured event the final-message extractor
+      # drops. Fall back to scanning final_message for older paths.
+      limit = result[:limit_text].to_s
+      limit = result[:final_message].to_s unless Hive::AgentLimit.limit_reached?(limit)
+      return nil unless Hive::AgentLimit.limit_reached?(limit)
 
-      Hive::AgentLimit.error_message(text, agent: @profile.name)
+      Hive::AgentLimit.error_message(limit, agent: @profile.name)
     end
 
     def handle_exit_state_file_marker(result)

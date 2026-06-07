@@ -594,6 +594,54 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_classifies_limit_from_limit_text_when_final_message_is_clean
+    # Codex surfaces the usage-limit notice as a structured stream event, so
+    # final_message ends up clean (e.g. "exit_code=1") while limit_text carries
+    # the real signal. handle_exit must classify off limit_text, not just
+    # final_message.
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 1,
+        final_message: "",
+        limit_text: "You've hit your usage limit. Visit .../usage to purchase more credits."
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result[:status]
+      assert_match(/\Alimits reached for claude:/, result[:error_message])
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
+  def test_captures_usage_limit_from_structured_error_stream_event
+    # End-to-end: a codex-style {"type":"error","message":"...usage limit..."}
+    # JSON event (which MessageExtractor does not surface as a final message)
+    # plus a nonzero exit must be reported as limits_reached, not exit_code=1.
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "error",
+        "message" => "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later."
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_match(/usage limit/i, result[:limit_text].to_s,
+                   "limit text must be captured from the structured error stream event")
+      assert_equal :error, result[:status]
+      assert_match(/\Alimits reached for claude:/, result[:error_message].to_s,
+                   "must classify as limits-reached, not a generic exit_code failure")
+      assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+    end
+  end
+
   def test_output_file_mode_classifies_limits_before_missing_expected_output
     with_tmp_dir do |dir|
       task = make_task(dir)

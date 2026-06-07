@@ -13,6 +13,7 @@ require "hive/stages/clean_exit"
 require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
+require "hive/agent_limit"
 require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
@@ -355,10 +356,13 @@ module Hive
             if reviewers_result == :wall_clock_exceeded
               return finalize_wall_clock_stale(task, started_at, pass: pass)
             end
-            if reviewers_result == :all_failed
-              Hive::Markers.set(task.state_file, :review_error,
-                                phase: :reviewers, reason: "all_failed", pass: pass)
-              return { commit: "reviewers_all_failed_pass_#{format('%02d', pass)}",
+            if reviewers_result == :all_failed || reviewers_result == :all_failed_limit
+              limit = reviewers_result == :all_failed_limit
+              reason = limit ? "limits_reached" : "all_failed"
+              attrs = { phase: :reviewers, reason: reason, pass: pass }
+              attrs[:message] = "all reviewers hit a usage/credit limit" if limit
+              Hive::Markers.set(task.state_file, :review_error, attrs)
+              return { commit: "reviewers_#{reason}_pass_#{format('%02d', pass)}",
                        status: :review_error }
             end
 
@@ -975,6 +979,10 @@ module Hive
         remaining_specs = specs.length
 
         statuses = []
+        # Collect per-reviewer error messages so an all-failed phase can be
+        # classified (e.g. every reviewer hit a usage/credit limit) instead of
+        # being flattened to a generic "all_failed".
+        error_messages = []
         # Partition into claude-tmux specs vs everything else so the
         # shared tmux session covers ONLY the group that needs it: a
         # mixed reviewer list keeps non-claude reviewers running in
@@ -994,6 +1002,7 @@ module Hive
             return :wall_clock_exceeded if result == :wall_clock_exceeded
 
             statuses << result.status
+            error_messages << result.error_message if result.error?
             handle_reviewer_result(task, cfg, ctx, spec, result)
             remaining_specs -= 1
           end
@@ -1020,6 +1029,7 @@ module Hive
               return :wall_clock_exceeded if result == :wall_clock_exceeded
 
               statuses << result.status
+              error_messages << result.error_message if result.error?
               handle_reviewer_result(task, cfg, ctx, spec, result)
               remaining_specs -= 1
             end
@@ -1035,6 +1045,7 @@ module Hive
             return :wall_clock_exceeded if result == :wall_clock_exceeded
 
             statuses << result.status
+            error_messages << result.error_message if result.error?
             handle_reviewer_result(task, cfg, ctx, spec, result)
             remaining_specs -= 1
           end
@@ -1043,7 +1054,19 @@ module Hive
         return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
                                        wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
-        statuses.all?(:error) ? :all_failed : :ok
+        if statuses.all?(:error)
+          # Every reviewer failed. If the failures are usage/credit-limit
+          # errors (e.g. codex "you've hit your usage limit"), surface that
+          # distinctly so the run is marked limits_reached rather than a
+          # generic all_failed.
+          if error_messages.any? { |m| Hive::AgentLimit.limit_reached?(m.to_s) }
+            :all_failed_limit
+          else
+            :all_failed
+          end
+        else
+          :ok
+        end
       end
 
       def reviewer_specs_for(cfg, task)

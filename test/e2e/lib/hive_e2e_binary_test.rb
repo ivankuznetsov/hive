@@ -290,4 +290,38 @@ class E2EBinaryTest < Minitest::Test
     refute_equal 0, status.exitstatus,
                  "bin/hive-e2e should exit non-zero on unknown commands (got #{status.exitstatus.inspect})"
   end
+
+  def test_leading_json_before_list_emits_parseable_envelope
+    out, err, status = Open3.capture3(hive_e2e, "--json", "list")
+    assert status.success?, "bin/hive-e2e --json list should exit 0, stderr was: #{err}"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-scenarios", payload["schema"]
+    assert_equal 1, payload["schema_version"]
+    assert_kind_of Array, payload["scenarios"]
+  end
+
+  def test_leading_json_before_replay_dispatches_replay_usage_path
+    out, err, status = Open3.capture3(hive_e2e, "--json", "replay")
+    refute_equal 0, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  def test_leading_json_before_run_dispatches_run_path
+    out, err, status = Open3.capture3(hive_e2e, "--json", "run", "definitely-no-scenario")
+    assert_equal 64, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal "no_scenarios", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  end
 end

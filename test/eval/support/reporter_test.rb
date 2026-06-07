@@ -36,6 +36,24 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_ignores_ambient_test_when_running_all_scenarios
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "all.json")
+
+      _out, err, _status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1", "TEST" => "test/unit/config_test.rb" },
+        "bin/hive-eval", "--no-judge", "--report", report
+      )
+
+      assert File.exist?(report), "expected hive-eval to write an eval report, not run ambient TEST: #{err}"
+      doc = JSON.parse(File.read(report))
+      files = doc.fetch("scenarios").map { |entry| entry.fetch("file") }
+      refute_empty files
+      assert files.all? { |file| file.include?("/test/eval/scenarios/") }, files.join("\n")
+      refute_includes files, File.expand_path("test/unit/config_test.rb")
+    end
+  end
+
   def test_cli_reports_failing_scenario_and_exits_nonzero
     # s3_noise used to be the always-failing scenario the reporter exercised.
     # Now that daemon-gated ready_to_X suppression has landed (commit

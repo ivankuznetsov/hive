@@ -244,6 +244,27 @@ module Hive
       Hive::Commands::Migrate.new(project_path).call
     end
 
+    desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"
+    long_desc <<~DESC
+      Subcommands:
+        compile-log [PROJECT_PATH]    Rebuild wiki/log.md from wiki/log.d/*.md
+                                      fragments plus the legacy log body.
+
+      PRs should add a uniquely named fragment under wiki/log.d/ instead of
+      editing wiki/log.md directly; run this command after merge/rebase when a
+      concrete checkout needs the compiled changelog.
+    DESC
+    option :check, type: :boolean, default: false,
+                   desc: "exit non-zero when wiki/log.md is not the generated output"
+    def wiki(subcommand, project_path = Dir.pwd)
+      require "hive/commands/wiki"
+      Hive::Commands::Wiki.new(
+        subcommand,
+        project_path,
+        check: options[:check]
+      ).call
+    end
+
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
     def new_task(project, *text_parts)
       require "hive/commands/new"

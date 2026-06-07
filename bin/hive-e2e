@@ -246,9 +246,8 @@ def rewrite_help_flag!(argv)
   help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
-  cmd = argv.delete_at(cmd_idx)
-  argv.delete_at(cmd_idx + help_idx)
-  argv.unshift("help", cmd)
+  cmd = argv[cmd_idx]
+  argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
 begin

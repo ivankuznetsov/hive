@@ -73,7 +73,8 @@ Refresh this project's LLM wiki data-model coverage after a commit touched schem
 migration, model, or entity files. Read AGENTS.md, wiki/index.md,
 wiki/architecture.md, wiki/dependencies.md, wiki/gaps.md, and recent wiki/log.md
 entries first. Inspect the committed diff and relevant source files. Update affected
-wiki pages, update wiki/index.md if page coverage changes, append wiki/log.md, and
+wiki pages, update wiki/index.md if page coverage changes, add a new
+wiki/log.d/<timestamp>-<slug>.md fragment without editing compiled wiki/log.md, and
 record uncertainty in wiki/gaps.md. Do not run qmd update or qmd embed yourself; the
 post-commit wrapper runs bounded qmd maintenance after refreshes finish. Do not
 invent facts.
@@ -88,7 +89,8 @@ touched routes, handlers, commands, executable entrypoints, or README content. R
 AGENTS.md, wiki/index.md, wiki/architecture.md, wiki/decisions.md, wiki/gaps.md,
 and recent wiki/log.md entries first. Inspect the committed diff and relevant source
 files. Update affected wiki pages, update wiki/index.md if page coverage changes,
-append wiki/log.md, and record uncertainty in wiki/gaps.md. Do not run qmd update or
+add a new wiki/log.d/<timestamp>-<slug>.md fragment without editing compiled wiki/log.md,
+and record uncertainty in wiki/gaps.md. Do not run qmd update or
 qmd embed yourself; the post-commit wrapper runs bounded qmd maintenance after
 refreshes finish. Do not invent facts.
 PROMPT
@@ -101,7 +103,8 @@ Refresh this project's LLM wiki dependency coverage after a commit touched depen
 files. Read AGENTS.md, wiki/index.md, wiki/dependencies.md, wiki/gaps.md, and recent
 wiki/log.md entries first. Inspect the committed diff and dependency files. Update
 wiki/dependencies.md and related pages if facts changed, update wiki/index.md if page
-coverage changes, append wiki/log.md, and record uncertainty in wiki/gaps.md. Do not
+coverage changes, add a new wiki/log.d/<timestamp>-<slug>.md fragment without editing
+compiled wiki/log.md, and record uncertainty in wiki/gaps.md. Do not
 run qmd update or qmd embed yourself; the post-commit wrapper runs bounded qmd
 maintenance after refreshes finish. Do not
 invent facts.
@@ -115,7 +118,8 @@ Refresh this project's LLM wiki planning and documentation coverage after a comm
 touched docs, plans, notes, context files, or the wiki itself. Read AGENTS.md,
 wiki/index.md, wiki/decisions.md, wiki/gaps.md, and recent wiki/log.md entries first.
 Inspect the committed diff and relevant source files. Update stale pages, update
-wiki/index.md if page coverage changes, append wiki/log.md, and record uncertainty in
+wiki/index.md if page coverage changes, add a new wiki/log.d/<timestamp>-<slug>.md
+fragment without editing compiled wiki/log.md, and record uncertainty in
 wiki/gaps.md. Do not run qmd update or qmd embed yourself; the post-commit wrapper
 runs bounded qmd maintenance after refreshes finish. Do not invent facts.
 PROMPT

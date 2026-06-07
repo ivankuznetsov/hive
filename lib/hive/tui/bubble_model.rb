@@ -3154,9 +3154,9 @@ module Hive
 
       # Compose the v2 two-pane layout: header strip + ProjectsPane |
       # TasksPane | footer strip. Below TWO_PANE_MIN_COLS the project
-      # pane is suppressed and only the tasks pane renders, with the
-      # scope label prefixed onto the header so cross-project context
-      # isn't lost.
+      # pane is suppressed and only the tasks pane renders; cross-project
+      # context isn't lost because `header_strip` always carries the
+      # `scope=` label in both width modes.
       def compose_two_pane_view(footer: nil)
         cols = @hive_model.cols.to_i
         rows = @hive_model.rows.to_i

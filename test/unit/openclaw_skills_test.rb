@@ -47,6 +47,8 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "/hive plan <task-slug>"
     assert_includes body, "/hive develop <task-slug>"
     assert_includes body, "/hive review <task-slug>"
+    assert_includes body, "/hive wiki compile-log --check"
+    assert_includes body, "wiki/log.d/<timestamp>-<slug>.md"
     assert_includes body, "hive --version"
     assert_includes body, "hv --version"
     assert_includes body, "brew install ivankuznetsov/hive/hive"

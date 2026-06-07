@@ -31,6 +31,10 @@ not add a second runtime and does not publish one ClawHub listing per Hive verb.
 `archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
 findings, metrics, update/uninstall, registry maintenance, and `--json`
 envelopes where the command page says they exist.
+The wrapper also normalizes command-local help before Thor dispatch:
+`hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
+`hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
+instead of being treated as partially-valid command invocations.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
@@ -54,10 +58,12 @@ and optionally run non-interactive `hive init` for the current repository.
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include
 `/hive status --json`, `/hive new . "build this feature"`, `/hive plan
-<task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>`.
-The skill tells agents to pass arguments safely rather than interpolate raw user
-text into a shell string, to prefer `--json` when structured output is useful,
-and to confirm before destructive or foreground/blocking admin commands.
+<task-slug>`, `/hive develop <task-slug>`, `/hive review <task-slug>`,
+and `/hive wiki compile-log --check`. The skill tells agents to pass arguments
+safely rather than interpolate raw user text into a shell string, to prefer
+`--json` when structured output is useful, to use `--check` when verifying a
+compiled wiki changelog, and to confirm before destructive or
+foreground/blocking admin commands.
 
 OpenClaw does not introduce Ruby routes, HTTP handlers, controllers, resolvers,
 or new executable entrypoints. It is an agent-facing wrapper over the existing
@@ -67,7 +73,10 @@ CLI.
 
 `bin/hive-e2e` is the opt-in outer test harness for scenario-driven,
 subprocess-level verification. It is documented in [[e2e]] rather than treated
-as an end-user workflow command.
+as an end-user workflow command. It mirrors the main wrapper's entrypoint
+conventions for top-level `--version` and command-local help, so
+`bin/hive-e2e run --filter tui --help` prints the `run` usage instead of
+selecting scenarios or running preflight checks.
 
 ## Backlinks
 

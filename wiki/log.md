@@ -3505,3 +3505,7 @@ to about 0.24s and the smoke tests now assert seeded projects appear within 2s.
 **Refreshed pages:**
 - [[operating]]
 - [[gaps]]
+
+## [2026-06-07T04:26:42+01:00] babysitter - block gh browser flags in dry-run stub
+
+**Action:** Fixed the babysitter dry-run `gh` stub so allowed read-looking commands still skip when their argv contains browser-opening `--web` / `-w` options. The previous subcommand allowlist passed through commands such as `gh pr view 42 --web`, `gh repo view --web`, `gh workflow view ... --web`, and `gh run view ... -w` to the real GitHub CLI. Added focused regression coverage in `test/unit/babysitter/dry_run_env_test.rb` and refreshed [[commands/babysit]], [[modules/babysitter]], and [[testing]]. Did not run `qmd update` or `qmd embed`.

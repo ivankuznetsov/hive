@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/
 created: 2026-05-26
-updated: 2026-06-05
+updated: 2026-06-07
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -64,7 +64,7 @@ Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-er
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.
 - No Telegram or install/service integration in v1.
 - No success PR comments.
-- Dry-run is best-effort because absolute-path binary invocations can bypass the PATH overlay. Within the overlay, the `git` / `gh` stubs are default-deny: they strip leading global options, skip unknown commands, and only pass through known read-only commands to the real binary. `gh api` passes through only when it has no method and no payload flags, or when the method is explicitly GET; payload flags such as `-f`, `-F`, `--raw-field`, `--field`, and `--input` make a no-method call skip because the GitHub CLI can treat them as write payloads. `git config` only passes through for read forms (`--get`, `--get-all`, `--list`). Even after a subcommand is allowed, the git stub screens for exec/write options in the regions where git honors them: global `-c`, `--config-env`, and `--exec-path`; exact `--output` / `--output=...` anywhere; and `git grep`'s pager options (`-O`, bundled forms like `-nO...`, and `--open-files-in-pager[=...]`). This blocks read-looking invocations such as `git -c diff.external=<cmd> diff`, `git -c core.pager=<cmd> show`, `git --exec-path=/tmp/evil diff`, `git grep -nO<cmd> needle`, and `git diff --output=patch.diff`, while allowing non-exec read flags that reuse the spelling in safe contexts (`git grep -c`, `git diff -Oorderfile`, and `git diff --output-indicator-*`). Before handing off to real git, the stub scrubs `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and the `GIT_CONFIG*` family from the environment.
+- Dry-run is best-effort because absolute-path binary invocations can bypass the PATH overlay. Within the overlay, the `git` / `gh` stubs are default-deny: they strip leading global options, skip unknown commands, and only pass through known read-only commands to the real binary. `gh api` passes through only when it has no method and no payload flags, or when the method is explicitly GET; payload flags such as `-f`, `-F`, `--raw-field`, `--field`, and `--input` make a no-method call skip because the GitHub CLI can treat them as write payloads. Read-looking `gh` commands still skip when they include browser-opening `--web` / `-w` options. `git config` only passes through for read forms (`--get`, `--get-all`, `--list`). Even after a subcommand is allowed, the git stub screens for exec/write options in the regions where git honors them: global `-c`, `--config-env`, and `--exec-path`; exact `--output` / `--output=...` anywhere; and `git grep`'s pager options (`-O`, bundled forms like `-nO...`, and `--open-files-in-pager[=...]`). This blocks read-looking invocations such as `git -c diff.external=<cmd> diff`, `git -c core.pager=<cmd> show`, `git --exec-path=/tmp/evil diff`, `git grep -nO<cmd> needle`, and `git diff --output=patch.diff`, while allowing non-exec read flags that reuse the spelling in safe contexts (`git grep -c`, `git diff -Oorderfile`, and `git diff --output-indicator-*`). Before handing off to real git, the stub scrubs `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_SSH`, `GIT_SSH_COMMAND`, and the `GIT_CONFIG*` family from the environment.
 
 ## Backlinks
 

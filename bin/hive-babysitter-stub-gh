@@ -61,7 +61,13 @@ def api_read_only?(rest)
   !payload
 end
 
+def browser_option?(rest)
+  rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") || arg == "-w" || arg.start_with?("-w=") }
+end
+
 def read_only?(rest)
+  return false if browser_option?(rest)
+
   case rest[0]
   when "api"
     api_read_only?(rest)

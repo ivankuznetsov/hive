@@ -46,6 +46,7 @@ module Hive
       :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
       :red_status_detail_state, # Model::RedStatusDetailState or nil — :red_status_detail mode only
       :token_stats_state, # Model::TokenStatsState or nil — :token_stats mode only
+      :help_scroll_offset, # Integer — scroll offset for :help; clamped by Update and reset on open
       :cols,             # Integer — terminal width (set on WindowSized)
       :rows,             # Integer — terminal height
       :last_error        # Exception or nil — last poll failure
@@ -154,6 +155,7 @@ module Hive
           tail_state: nil,
           red_status_detail_state: nil,
           token_stats_state: nil,
+          help_scroll_offset: 0,
           cols: cols,
           rows: rows,
           last_error: nil

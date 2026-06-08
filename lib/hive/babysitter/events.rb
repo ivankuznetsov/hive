@@ -10,6 +10,7 @@ module Hive
         noop
         skipped
         agent-fix
+        rebase
         force-push
         pr-comment
         label-apply
@@ -20,6 +21,7 @@ module Hive
       OUTCOMES = %w[
         success
         failure
+        conflict
         timeout
         budget_exhausted
         gh-error

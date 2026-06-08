@@ -45,11 +45,12 @@ babysitter:
   max_concurrent_prs: 2
   labels_ignore: [wip, do-not-merge, draft]
   dry_run: false
+  auto_rebase: true
   budget_minutes: 30
   budget_usd: 50
 ```
 
-`ProjectTick` reloads the project config on every tick, so changing `babysitter.enabled: false` is the kill switch and takes effect within one poll interval. `interval` accepts integer seconds or strings like `10m`, `30s`, and `1h`.
+`ProjectTick` reloads the project config on every tick, so changing `babysitter.enabled: false` is the kill switch and takes effect within one poll interval. `interval` accepts integer seconds or strings like `10m`, `30s`, and `1h`. `auto_rebase` (default `true`; `false` disables) controls auto-rebasing green-but-`BEHIND` PRs — see PR Processing below.
 
 ## PR Processing
 
@@ -62,7 +63,7 @@ For each enabled project, the babysitter:
 5. Sorts oldest-updated first and truncates to `max_concurrent_prs`.
 6. Runs `Hive::Babysitter::PrFixer` on each selected PR.
 
-`PrFixer` first checks `gh pr view --json mergeable,statusCheckRollup`. If the PR is mergeable and checks are successful or queued, it records a `noop` event and does not spawn an agent. Otherwise it materializes `<project>/.hive-state/babysitter/worktrees/<pr-number>/`, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
+`PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (`git fetch origin <base>` then `git rebase origin/<base>`), and on a clean rebase force-pushes with `--force-with-lease` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
 
 On success, the babysitter is silent on the PR. On failure, timeout, or budget exhaustion it applies `babysitter/needs-human` and posts one give-up comment per PR per UTC hour.
 

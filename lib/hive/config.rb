@@ -308,6 +308,10 @@ module Hive
         "max_concurrent_prs" => 2,
         "labels_ignore" => %w[wip do-not-merge draft],
         "dry_run" => false,
+        # Auto-rebase green-but-BEHIND PRs onto their base and force-push so
+        # strict "branch must be up-to-date" protection can merge them.
+        # Conflicting rebases are left for a human. Set to false to disable.
+        "auto_rebase" => true,
         "budget_minutes" => 30,
         "budget_usd" => 50
       },
@@ -1569,7 +1573,7 @@ module Hive
       babysitter = cfg["babysitter"]
       return if babysitter.nil?
 
-      %w[enabled dry_run].each do |key|
+      %w[enabled dry_run auto_rebase].each do |key|
         value = babysitter[key]
         next if value.nil? || value == true || value == false
 

@@ -20,6 +20,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Bubbletea::KeyMessage.new(key_type: key_type, runes: runes)
   end
 
+  def mouse_message(button:, action: Bubbletea::MouseMessage::ACTION_PRESS)
+    Bubbletea::MouseMessage.new(x: 1, y: 1, button: button, action: action)
+  end
+
   def make_task_row(action_key: "needs_input", slug: "some-slug", stage: "2-brainstorm",
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
@@ -437,6 +441,66 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model.update(Hive::Tui::Messages::RawTextInput.new(text: "paste", paste: true))
 
     assert_equal before, @model.hive_model
+  end
+
+  def test_translate_mouse_wheel_down_in_help_returns_help_scroll
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :help),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(
+      :translate,
+      mouse_message(button: Bubbletea::MouseMessage::BUTTON_WHEEL_DOWN)
+    )
+
+    assert_kind_of Hive::Tui::Messages::HelpScroll, msg
+    assert_equal :down, msg.direction
+    assert_equal Hive::Tui::BubbleModel::HELP_WHEEL_SCROLL_LINES, msg.amount
+  end
+
+  def test_translate_mouse_wheel_up_in_help_returns_help_scroll
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :help),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(
+      :translate,
+      mouse_message(button: Bubbletea::MouseMessage::BUTTON_WHEEL_UP)
+    )
+
+    assert_kind_of Hive::Tui::Messages::HelpScroll, msg
+    assert_equal :up, msg.direction
+    assert_equal Hive::Tui::BubbleModel::HELP_WHEEL_SCROLL_LINES, msg.amount
+  end
+
+  def test_translate_mouse_wheel_in_grid_mode_is_noop
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(
+      :translate,
+      mouse_message(button: Bubbletea::MouseMessage::BUTTON_WHEEL_DOWN)
+    )
+
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_translate_non_wheel_mouse_press_is_noop
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :help),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(
+      :translate,
+      mouse_message(button: Bubbletea::MouseMessage::BUTTON_LEFT)
+    )
+
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   # ---- View dispatch by mode ----

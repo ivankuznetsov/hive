@@ -100,7 +100,8 @@ module Hive
             bubble_model,
             alt_screen: true,
             input_timeout: 5,
-            bracketed_paste: true
+            bracketed_paste: true,
+            mouse_cell_motion: true
           )
           bubble_model.dispatch = runner.method(:send)
 

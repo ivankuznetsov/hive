@@ -32,6 +32,16 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_relocates_falsey_json_before_status_command
+    with_tmp_global_config do
+      leading = run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json=false", "status")
+      trailing = run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json=false")
+
+      refute_match(/Usage:/, leading, "leading --json=false should dispatch, not print usage")
+      assert_equal trailing, leading
+    end
+  end
+
   private
 
   def without_generated_at(payload)

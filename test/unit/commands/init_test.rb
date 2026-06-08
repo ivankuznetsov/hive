@@ -40,6 +40,7 @@ class HiveCommandsInitTest < Minitest::Test
   def test_project_config_binding_accepts_complete_prompt_answers
     answers = project_config_answers.merge(
       "claude_mode" => "headless",
+      "patrol_mode" => "high",
       "triage_bias" => "safetyist",
       "daemon_enabled" => false
     )
@@ -54,6 +55,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal "codex", config_binding.development_agent
     assert_equal Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES, config_binding.enabled_reviewers
     assert_equal Hive::Commands::Init::Prompts::DEFAULT_PATROL_REVIEWER_NAMES, config_binding.patrol_reviewers
+    assert_equal "high", config_binding.patrol_mode
     assert_equal "safetyist", config_binding.triage_bias
     assert_equal default_init_limits("budget_usd"), config_binding.budgets
     assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
@@ -384,6 +386,7 @@ def test_emit_json_summary_swallows_epipe
     "development_agent" => "codex",
     "enabled_reviewers" => [],
     "patrol_reviewers" => [ "codex-ce-code-review" ],
+    "patrol_mode" => "medium",
     "triage_bias" => "courageous",
     "budgets" => {},
     "timeouts" => {},

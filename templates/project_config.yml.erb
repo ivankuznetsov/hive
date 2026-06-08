@@ -189,11 +189,10 @@ babysitter:
 # only surfaces validated fixes as GitHub PRs. No findings are written
 # to 1-inbox or any stage folder.
 patrol:
-  enabled: false
-  # trigger: continuous (default) scans on default-branch SHA change OR
-  # every poll_interval_sec; new_commits = SHA-change only; timer = interval only.
-  trigger: continuous
-  poll_interval_sec: 600
+  # ultrapatrol = every 30m, high = every 2h, medium = every 4h,
+  # low = new commits only, off = disabled. Explicit trigger /
+  # poll_interval_sec / enabled keys can still override the mode.
+  mode: <%= patrol_mode.inspect %>
   agent: claude
   min_confidence_to_fix: medium
   max_findings_per_feature: 10

@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/config"
 require "hive/patrol/fixer"
 require "hive/patrol/finding"
+require "hive/usage_db"
 
 class HivePatrolFixerTest < Minitest::Test
   include HiveTestHelper
@@ -32,6 +33,26 @@ class HivePatrolFixerTest < Minitest::Test
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
       fingerprint: "abcdef1234567890"
     )
+  end
+
+  def with_usage_db
+    old_path = Hive::UsageDb.path
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      yield
+    ensure
+      Hive::UsageDb.path = old_path
+    end
+  end
+
+  def usage_rows
+    require "sqlite3"
+
+    db = SQLite3::Database.new(Hive::UsageDb.path)
+    db.results_as_hash = true
+    db.execute("SELECT agent, model, project_slug, task_slug, stage, input, output, cached FROM token_usage")
+  ensure
+    db&.close
   end
 
   def test_successful_fix_is_committed_and_patch_recorded
@@ -164,6 +185,111 @@ class HivePatrolFixerTest < Minitest::Test
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new
+    end
+  end
+
+  def test_run_agent_wrapper_records_patrol_fix_usage
+    with_tmp_git_repo do |repo|
+      with_usage_db do
+        fixer_cfg = cfg(repo)
+        fixer_cfg["patrol"]["agent"] = "codex"
+        fixer = Hive::Patrol::Fixer.new(repo, cfg: fixer_cfg)
+        fake_agent = Object.new
+        def fake_agent.run!
+          {
+            status: :ok,
+            model: "fallback-model",
+            usage: { input: 80, output: 20, cached: 10 }
+          }
+        end
+
+        profiles_singleton = class << Hive::AgentProfiles; self; end
+        agent_singleton = class << Hive::Agent; self; end
+        profiles_lookup = Hive::AgentProfiles.method(:lookup)
+        agent_new = Hive::Agent.method(:new)
+        profile = Struct.new(:name).new("codex")
+        profiles_singleton.define_method(:lookup) { |*| profile }
+        agent_singleton.define_method(:new) { |*| fake_agent }
+
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+
+        rows = usage_rows
+        assert_equal 1, rows.size
+        row = rows.first
+        assert_equal "codex", row["agent"]
+        assert_equal "fallback-model", row["model"]
+        assert_equal File.basename(repo), row["project_slug"]
+        assert_equal "patrol-fix", row["task_slug"]
+        assert_equal "patrol-fix", row["stage"]
+        assert_equal 80, row["input"]
+        assert_equal 20, row["output"]
+        assert_equal 10, row["cached"]
+      ensure
+        profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+        agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      end
+    end
+  end
+
+  def test_run_agent_wrapper_does_not_raise_when_usage_recording_fails
+    with_tmp_git_repo do |repo|
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      fake_agent = Object.new
+      def fake_agent.run!
+        { status: :ok, usage: { input: 1, output: 2, cached: 3 } }
+      end
+
+      profiles_singleton = class << Hive::AgentProfiles; self; end
+      agent_singleton = class << Hive::Agent; self; end
+      usage_singleton = class << Hive::UsageDb; self; end
+      profiles_lookup = Hive::AgentProfiles.method(:lookup)
+      agent_new = Hive::Agent.method(:new)
+      usage_record = Hive::UsageDb.method(:record!)
+      profiles_singleton.define_method(:lookup) { |*| Struct.new(:name).new("claude") }
+      agent_singleton.define_method(:new) { |*| fake_agent }
+      usage_singleton.define_method(:record!) { |**| raise "db locked" }
+
+      result = nil
+      _out, err = capture_io do
+        result = fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+      end
+
+      assert_equal({ status: :ok, usage: { input: 1, output: 2, cached: 3 } }, result)
+      assert_match(/usage record failed: db locked/, err)
+    ensure
+      profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+      agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      usage_singleton.define_method(:record!, usage_record) if usage_singleton && usage_record
+    end
+  end
+
+  def test_run_agent_wrapper_falls_back_to_config_agent_for_nameless_profile
+    with_tmp_git_repo do |repo|
+      with_usage_db do
+        fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+        fake_agent = Object.new
+        def fake_agent.run!
+          { status: :ok, usage: { input: 1, output: 2, cached: 3 } }
+        end
+
+        profiles_singleton = class << Hive::AgentProfiles; self; end
+        agent_singleton = class << Hive::Agent; self; end
+        profiles_lookup = Hive::AgentProfiles.method(:lookup)
+        agent_new = Hive::Agent.method(:new)
+        # A profile object WITHOUT #name exercises profile_name's config fallback.
+        profiles_singleton.define_method(:lookup) { |*| Object.new }
+        agent_singleton.define_method(:new) { |*| fake_agent }
+
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+
+        rows = usage_rows
+        assert_equal 1, rows.size
+        assert_equal "claude", rows.first["agent"],
+                     "a profile without #name must fall back to the configured patrol agent (default claude)"
+      ensure
+        profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+        agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      end
     end
   end
 

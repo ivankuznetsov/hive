@@ -406,6 +406,7 @@ module Hive
           "development_agent" => answers.fetch("development_agent"),
           "enabled_reviewers" => answers.fetch("enabled_reviewers"),
           "patrol_reviewers" => answers.fetch("patrol_reviewers"),
+          "patrol_mode" => answers.fetch("patrol_mode", Hive::Commands::Init::Prompts::DEFAULT_PATROL_MODE),
           "triage_bias" => answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS),
           "budgets" => answers.fetch("budgets"),
           "timeouts" => answers.fetch("timeouts"),
@@ -536,8 +537,8 @@ module Hive
       # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / claude_mode /
       # claude_permission_mode / development_agent / enabled_reviewers /
-      # patrol_reviewers / triage_bias / budgets / timeouts / daemon_enabled /
-      # babysitter_enabled / daemon_autostart). The single source of truth
+      # patrol_reviewers / patrol_mode / triage_bias / budgets / timeouts /
+      # daemon_enabled / babysitter_enabled / daemon_autostart). The single source of truth
       # for the answers hash is `Prompts#collect`; this binding never invents
       # defaults of its own — callers always supply `answers:` (production:
       # from Prompts; tests: explicit hashes).
@@ -554,6 +555,7 @@ module Hive
           @development_agent = answers.fetch("development_agent")
           @enabled_reviewers = answers.fetch("enabled_reviewers")
           @patrol_reviewers = answers.fetch("patrol_reviewers")
+          @patrol_mode = answers.fetch("patrol_mode")
           @triage_bias = answers.fetch("triage_bias")
           @budgets = required_limit_answers(answers.fetch("budgets"), "budgets")
           @timeouts = required_limit_answers(answers.fetch("timeouts"), "timeouts")
@@ -564,7 +566,7 @@ module Hive
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :planning_agent, :claude_mode, :claude_permission_mode, :development_agent,
-                    :enabled_reviewers, :patrol_reviewers, :triage_bias, :budgets, :timeouts,
+                    :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :budgets, :timeouts,
                     :daemon_enabled, :babysitter_enabled, :daemon_autostart
 
         def binding_for_erb

@@ -30,6 +30,8 @@ module Hive
         CLAUDE_MODES = Hive::Config::CLAUDE_MODES
         CLAUDE_PERMISSION_MODES = Hive::Config::CLAUDE_PERMISSION_MODES
         CLAUDE_MODE_CHOICES = [ "tmux", "headless" ].freeze
+        DEFAULT_PATROL_MODE = Hive::Config::DEFAULT_PATROL_MODE
+        PATROL_MODE_CHOICES = Hive::Config::PATROL_MODES
         # Display/index order for the prompt menu; CLAUDE_PERMISSION_MODES is the
         # sorted allowlist used for validation. They must cover the same set —
         # numeric answers index CHOICES while name answers match MODES, so drift
@@ -115,6 +117,7 @@ module Hive
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "patrol_reviewers"  => Array<String>,    # subset of PATROL_REVIEWER_NAMES
+        #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
@@ -133,6 +136,7 @@ module Hive
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
           patrol_reviewers = prompt_patrol_reviewers
+          patrol_mode = prompt_patrol_mode
           triage_bias = prompt_triage_bias
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
@@ -146,6 +150,7 @@ module Hive
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
             "patrol_reviewers" => patrol_reviewers,
+            "patrol_mode" => patrol_mode,
             "triage_bias" => triage_bias,
             "budgets" => budgets,
             "timeouts" => timeouts,
@@ -177,6 +182,7 @@ module Hive
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "patrol_reviewers" => DEFAULT_PATROL_REVIEWER_NAMES.dup,
+            "patrol_mode" => DEFAULT_PATROL_MODE,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
@@ -193,6 +199,7 @@ module Hive
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
             "patrol_reviewers=codex, " \
+            "patrol_mode=#{DEFAULT_PATROL_MODE}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled, " \
             "babysitter=enabled, daemon_autostart=disabled"
           )
@@ -358,6 +365,38 @@ module Hive
             choices: PATROL_REVIEWER_NAMES,
             empty_message: "input had no patrol reviewer tokens; type a name/index list, or blank for codex only"
           )
+        end
+
+        def prompt_patrol_mode
+          @output.puts ""
+          @output.puts "Patrol mode — scales scan frequency only:"
+          @output.puts "  1) ultrapatrol - timer scan every 30 minutes"
+          @output.puts "  2) high        - timer scan every 2 hours"
+          @output.puts "  3) medium      - timer scan every 4 hours (recommended)"
+          @output.puts "  4) low         - scan only when new commits land"
+          @output.puts "  5) off         - disable patrol"
+          loop do
+            @output.print "Patrol mode [#{DEFAULT_PATROL_MODE}]: "
+            @output.flush
+            answer = read_line
+            return DEFAULT_PATROL_MODE if answer.empty?
+
+            resolved = resolve_patrol_mode_choice(answer)
+            return resolved if resolved
+
+            @output.puts "  unknown patrol mode #{answer.inspect}; pick " \
+                         "#{PATROL_MODE_CHOICES.join('/')} or 1..#{PATROL_MODE_CHOICES.size}"
+          end
+        end
+
+        def resolve_patrol_mode_choice(answer)
+          if answer =~ /\A\d+\z/
+            idx = answer.to_i
+            return PATROL_MODE_CHOICES[idx - 1] if idx.between?(1, PATROL_MODE_CHOICES.size)
+
+            return nil
+          end
+          PATROL_MODE_CHOICES.find { |mode| mode.casecmp(answer).zero? }
         end
 
         def resolve_reviewer_tokens_from(answer, choices:, empty_message:)
@@ -539,6 +578,7 @@ module Hive
           @output.puts "  development_agent       = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
           @output.puts "  patrol_reviewers  = [#{answers['patrol_reviewers'].join(', ')}]"
+          @output.puts "  patrol_mode       = #{answers['patrol_mode']}"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"

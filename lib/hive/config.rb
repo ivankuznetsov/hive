@@ -317,6 +317,7 @@ module Hive
       # in isolated worktrees, validate configured commands, and surface
       # successful fixes only as GitHub PRs.
       "patrol" => {
+        "mode" => "medium",
         "enabled" => false,
         "trigger" => "continuous",
         "poll_interval_sec" => 600,
@@ -475,6 +476,7 @@ module Hive
       else
                {}
       end
+      resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
@@ -526,6 +528,24 @@ module Hive
         cursor = cursor[key]
       end
       true
+    end
+
+    def resolve_patrol_mode!(data)
+      unless data.key?("patrol")
+        data["patrol"] = {}
+      end
+
+      patrol = data["patrol"]
+      return unless patrol.is_a?(Hash)
+
+      mode = nested_key?(data, "patrol", "mode") ? patrol["mode"] : DEFAULT_PATROL_MODE
+      mode = "off" if mode == false
+      return unless PATROL_MODES.include?(mode)
+
+      PATROL_MODE_KNOBS.fetch(mode).each do |key, value|
+        patrol[key] = value unless nested_key?(data, "patrol", key)
+      end
+      patrol["mode"] = mode
     end
 
     # Only `Config.load` knows whether the user actually wrote
@@ -1594,6 +1614,32 @@ module Hive
     end
 
     PATROL_TRIGGERS = %w[new_commits timer continuous].freeze
+    PATROL_MODES = %w[ultrapatrol high medium low off].freeze
+    DEFAULT_PATROL_MODE = "medium".freeze
+    PATROL_MODE_KNOBS = {
+      "ultrapatrol" => {
+        "trigger" => "timer",
+        "poll_interval_sec" => 1800,
+        "enabled" => true
+      },
+      "high" => {
+        "trigger" => "timer",
+        "poll_interval_sec" => 7200,
+        "enabled" => true
+      },
+      "medium" => {
+        "trigger" => "timer",
+        "poll_interval_sec" => 14_400,
+        "enabled" => true
+      },
+      "low" => {
+        "trigger" => "new_commits",
+        "enabled" => true
+      },
+      "off" => {
+        "enabled" => false
+      }
+    }.freeze
     PATROL_CONFIDENCE_LEVELS = %w[low medium high].freeze
     PATROL_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 60 ],
@@ -1604,6 +1650,13 @@ module Hive
     def validate_patrol!(cfg, source_path)
       patrol = cfg["patrol"]
       return if patrol.nil?
+
+      mode = patrol["mode"]
+      unless PATROL_MODES.include?(mode)
+        raise ConfigError,
+              "patrol.mode in #{describe_source(source_path)} must be one of " \
+              "#{PATROL_MODES.inspect}; got #{mode.inspect} (#{mode.class})"
+      end
 
       enabled = patrol["enabled"]
       unless enabled.nil? || enabled == true || enabled == false

@@ -6,6 +6,7 @@ class HiveTuiViewsTokenStatsTest < Minitest::Test
   def aggregate
     data = Hive::UsageDb.zero_aggregate
     data[:agents][:claude][:today] = { input: 1_500, output: 1_234_000, cached: 400_000 }
+    data[:patrol][:today] = { input: 2_000, output: 300, cached: 10 }
     data[:total][:today] = { input: 1_500, output: 1_234_000, cached: 400_000 }
     data
   end
@@ -25,6 +26,8 @@ class HiveTuiViewsTokenStatsTest < Minitest::Test
     assert_includes out, "agent"
     assert_includes out, "claude"
     assert_includes out, "1.5k/1.2M/400k"
+    assert_includes out, "patrol"
+    assert_includes out, "2k/300/10"
     assert_includes out, "TOTAL"
     assert_includes out, "drill"
   end

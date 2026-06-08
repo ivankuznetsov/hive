@@ -60,6 +60,18 @@ class TuiTokenStatsTest < Minitest::Test
         output: 300,
         cached: 10
       )
+      Hive::UsageDb.record!(
+        agent: "codex",
+        model: "model",
+        project_slug: "demo",
+        task_slug: "task-one",
+        stage: "patrol-review",
+        started_at: Time.now.utc,
+        ended_at: Time.now.utc,
+        input: 50,
+        output: 5,
+        cached: 1
+      )
       model = Hive::Tui::Model.initial(cols: 120, rows: 30).with(
         snapshot: snapshot,
         cursor: [ 0, 0 ],
@@ -73,6 +85,8 @@ class TuiTokenStatsTest < Minitest::Test
       assert_equal :token_stats, bubble.hive_model.mode
       assert_includes out, "scope: demo / task-one"
       assert_includes out, "2k/300/10"
+      assert_includes out, "patrol"
+      assert_includes out, "50/5/1"
 
       bubble.update(Hive::Tui::Messages::CLOSE_TOKEN_STATS)
 

@@ -3,11 +3,11 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/usage_db.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-05-26
+updated: 2026-06-08
 tags: [observability, tui, sqlite, agent]
 ---
 
-**TLDR**: Hive records token usage only for hive-driven agent spawns. `Hive::Agent#spawn_and_wait` captures the last structured usage event seen in the child stream, `Hive::Stages::Base.spawn_agent` writes one SQLite row after the spawn returns, and `hive tui` surfaces scoped aggregates in the footer plus a full-screen `T` matrix. There is no historical log backfill and no ingestion of ad-hoc agent sessions.
+**TLDR**: Hive records token usage only for hive-driven agent spawns. `Hive::Agent#spawn_and_wait` captures the last structured usage event seen in the child stream, `Hive::Stages::Base.spawn_agent` writes one SQLite row after normal stage spawns, patrol reviewer/fixer wrappers write `patrol-*` rows after patrol agent spawns, and `hive tui` surfaces scoped aggregates in the footer plus a full-screen `T` matrix with a patrol attribution row. There is no historical log backfill and no ingestion of ad-hoc agent sessions.
 
 ## Capture Boundary
 
@@ -16,8 +16,9 @@ Usage is captured at the same boundary that runs stage agents:
 1. `Hive::Agent#spawn_and_wait` reads every stdout/stderr line from the child process, writes it to the stage log, parses JSON once, and passes decoded records to the current `Hive::AgentProfile#usage_extractor`.
 2. The last non-nil usage hash becomes `result[:usage]`; `result[:model]` is kept as a best-effort model field.
 3. `Hive::Stages::Base.spawn_agent` calls `Hive::UsageDb.record!` after `agent.run!` returns, even when the spawn exits non-zero, as long as a usage event was captured.
+4. Patrol is not a stage runner, so `Hive::Patrol::Reviewer` and `Hive::Patrol::Fixer` call `Hive::UsageDb.record!` directly after their default `run_agent` wrappers return. They use `stage` / `task_slug` values of `patrol-review` and `patrol-fix`, with `project_slug` set to the project folder basename.
 
-That placement deliberately excludes sessions launched outside Hive and avoids scraping `~/.claude/projects/*.jsonl` or any on-disk agent log after the fact. See [[modules/agent]], [[modules/agent_profile]], and [[stages/index]].
+That placement deliberately excludes sessions launched outside Hive and avoids scraping `~/.claude/projects/*.jsonl` or any on-disk agent log after the fact. See [[modules/agent]], [[modules/agent_profile]], [[modules/patrol]], and [[stages/index]].
 
 ## Agent Extractors
 
@@ -67,6 +68,8 @@ Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug, start
 
 The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is normally paired with `project_slug` by the TUI so same-named tasks in different projects stay distinguishable.
 
+The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, or `pi`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
+
 ## TUI Surfaces
 
 `hive tui` shows a compact usage block in the grid-mode footer. On wide terminals, the keybinding hints render first, then ` · `, then the compact usage block so right-side truncation clips token counters before actions. Below 80 usable columns, the existing compact-only footer path still renders just the usage block. The compact block intentionally omits the `30d` bucket; use the full `T` matrix for that window:
@@ -81,7 +84,7 @@ The tuple is `input/output/cached`. Units use `k` and `M` with compact one-decim
 - project when the left pane is focused on a project,
 - task when the right pane has a focused row.
 
-Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. In the stats mode:
+Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
 
 - `Left` / `Right` or `h` / `l` drill between all, project, and task scope.
 - `Up` / `Down` or `k` / `j` select the project or task at the current drill level.

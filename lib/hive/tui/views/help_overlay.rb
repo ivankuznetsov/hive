@@ -25,7 +25,9 @@ module Hive
         }.freeze
 
         TITLE = "hive tui — keybindings".freeze
-        DISMISS_HINT = "↑/↓ j/k PgUp/PgDn scroll · Esc/? close".freeze
+        # Close affordance leads so it survives footer truncation at the
+        # minimum width (≈40 cols), where the scroll-key hint is clipped.
+        DISMISS_HINT = "Esc/? close · ↑/↓ j/k PgUp/PgDn scroll".freeze
         TOO_SMALL_MESSAGE = "Terminal too small for help (need 10×40)".freeze
         MIN_ROWS = 10
         MIN_COLS = 40
@@ -44,7 +46,9 @@ module Hive
 
           rows = scrollable_rows(model)
           content = content_lines(model)
-          max_offset = max_scroll_offset(model)
+          # Derive the bound from the content we already wrapped rather
+          # than calling `max_scroll_offset` (which re-wraps everything).
+          max_offset = [ content.length - rows, 0 ].max
           offset = [ [ model.help_scroll_offset.to_i, 0 ].max, max_offset ].min
           visible = Array(content[offset, rows]).first(rows)
           visible += Array.new(rows - visible.length, "") if visible.length < rows

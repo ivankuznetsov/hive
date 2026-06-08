@@ -11,8 +11,8 @@ module Hive
       # through this module.
       # Naming note: the `_cells` suffix (`ljust_cells`/`rjust_cells`)
       # distinguishes the cell-aware padders from String's column-naive
-      # `ljust`/`rjust`. `truncate`/`display_width` keep their bare names
-      # for their many external callers but are equally cell-aware.
+      # `ljust`/`rjust`. `truncate`/`display_width`/`wrap` keep their bare
+      # names for their many external callers but are equally cell-aware.
       #
       # Nil-tolerance contract: every public helper coerces its label
       # through `.to_s`, so a nil label is treated as the empty string

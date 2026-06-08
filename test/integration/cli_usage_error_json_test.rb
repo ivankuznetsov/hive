@@ -15,6 +15,7 @@ class CliUsageErrorJsonTest < Minitest::Test
   def test_json_usage_errors_emit_envelopes_before_command_dispatch
     cases = [
       [ %w[run --json], "hive-run" ],
+      [ %w[--json=true run], "hive-run" ],
       [ %w[approve --json], "hive-approve" ],
       [ %w[markers clear --json], "hive-markers-clear" ]
     ]

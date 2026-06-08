@@ -13,10 +13,17 @@ end
 
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
+def truthy_json_option?(arg)
+  arg == "--json" || (arg.is_a?(String) && arg.match?(/\A--json=(true|1|yes)\z/i))
+end
+
 def normalize_leading_json_options!(argv)
-  json_options = %w[--json --no-json --skip-json]
+  json_options = %w[--no-json --skip-json]
   leading = []
-  leading << argv.shift while json_options.include?(argv.first)
+  while truthy_json_option?(argv.first) || json_options.include?(argv.first)
+    option = argv.shift
+    leading << (truthy_json_option?(option) ? "--json" : option)
+  end
   return if leading.empty?
 
   cmd_idx = argv.index { |a| !a.start_with?("-") }
@@ -45,7 +52,7 @@ normalize_leading_json_options!(ARGV)
 rewrite_help_flag!(ARGV)
 
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(true|1|yes)\z/i) }
+  argv.any? { |arg| truthy_json_option?(arg) }
 end
 
 def json_usage_error_contract(argv)

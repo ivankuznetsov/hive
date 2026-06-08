@@ -103,21 +103,25 @@ class TmuxRunnerTest < Minitest::Test
   def test_send_prompt_times_out_when_enter_submit_hangs
     with_tmp_dir do |dir|
       log_path = File.join(dir, "tmux.log")
-      fake = write_fake_tmux(dir, <<~RUBY)
-        #!/usr/bin/env ruby
-        args = ARGV.dup
-        args.shift(2) if args.first == "-L"
-        File.open(#{log_path.dump}, "a") { |log| log.puts(args.join(" ")) }
-        case args.first
-        when "load-buffer", "paste-buffer", "delete-buffer"
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/bin/sh
+        log=#{log_path.dump}
+        if [ "$1" = "-L" ]; then
+          shift 2
+        fi
+        printf '%s\\n' "$*" >> "$log"
+        case "$1" in
+        load-buffer|paste-buffer|delete-buffer)
           exit 0
-        when "send-keys"
-          sleep 5
+          ;;
+        send-keys)
+          exec sleep 5
+          ;;
+        *)
           exit 0
-        else
-          exit 0
-        end
-      RUBY
+          ;;
+        esac
+      SH
       runner = Hive::TmuxRunner.new(
         name: unique_name("submit-hang"),
         cwd: dir,
@@ -125,11 +129,8 @@ class TmuxRunnerTest < Minitest::Test
         socket_name: @socket_name
       )
 
-      # 1.0s, not 0.25s: each fake-tmux invocation is a fresh Ruby process
-      # (~100-200ms startup, more under CI load), so the FIRST `load-buffer`
-      # call can exceed a sub-second budget and trip the timeout on the wrong
-      # command before `send-keys`'s 5s sleep is reached. Give Ruby startup
-      # comfortable headroom; the timeout still fires at 1s on send-keys.
+      # Keep the fake tmux lightweight so setup commands cannot consume the
+      # timeout budget before the intentionally hanging `send-keys` call.
       error = with_env("HIVE_TMUX_COMMAND_TIMEOUT_SEC" => "1.0") do
         assert_raises(Hive::TmuxRunner::CommandTimedOut) do
           runner.send_prompt("hello")

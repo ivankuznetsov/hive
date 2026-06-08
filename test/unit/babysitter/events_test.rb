@@ -29,6 +29,33 @@ class BabysitterEventsTest < Minitest::Test
     end
   end
 
+  def test_emit_accepts_rebase_action_and_conflict_outcome
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      record = Hive::Babysitter::Events.emit(
+        project: project,
+        pr: 42,
+        action: "rebase",
+        outcome: "conflict",
+        duration_ms: 5
+      )
+      assert_equal "rebase", record.fetch("action")
+      assert_equal "conflict", record.fetch("outcome")
+    end
+  end
+
+  def test_emit_raises_on_unknown_action_and_outcome
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      assert_raises(ArgumentError) do
+        Hive::Babysitter::Events.emit(project: project, action: "teleport", outcome: "success")
+      end
+      assert_raises(ArgumentError) do
+        Hive::Babysitter::Events.emit(project: project, action: "rebase", outcome: "exploded")
+      end
+    end
+  end
+
   def test_status_writer_appends_summary_lines
     with_tmp_dir do |dir|
       project = project_entry(dir)

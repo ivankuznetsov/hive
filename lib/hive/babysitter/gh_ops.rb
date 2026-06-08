@@ -6,6 +6,20 @@ module Hive
     module GhOps
       GIVE_UP_LABEL = "babysitter/needs-human".freeze
 
+      # Outcome of an auto-rebase attempt. `status` is one of :success
+      # (fetch + rebase clean), :conflict (rebase failed and was aborted —
+      # left for a human), or :failure (some other git error, e.g. the
+      # fetch failed). `success?` and `conflict?` keep call sites readable.
+      RebaseResult = Struct.new(:status, :stdout, :stderr, keyword_init: true) do
+        def success?
+          status == :success
+        end
+
+        def conflict?
+          status == :conflict
+        end
+      end
+
       module_function
 
       def force_push_with_lease(worktree, branch, cfg:, dry_run:)
@@ -17,6 +31,37 @@ module Hive
           cfg: cfg
         )
         result(status.success?, out, err)
+      end
+
+      # Rebase the worktree's HEAD onto origin/<base_ref> so a green-but-
+      # BEHIND PR becomes up-to-date with its base. Fetches the base first
+      # (a stale local origin/<base> would rebase onto the wrong commit).
+      # A rebase that hits conflicts is aborted (best-effort) and reported
+      # as :conflict so the caller leaves it for a human rather than
+      # force-pushing a half-rebased branch.
+      def rebase_onto_base(worktree, base_ref, cfg:, dry_run:)
+        return rebase_result(:success, "[dry-run] git rebase skipped", "") if dry_run
+
+        fetch_out, fetch_err, fetch_status = Hive::Gh.capture3(
+          "git", "fetch", "origin", base_ref,
+          chdir: worktree,
+          cfg: cfg
+        )
+        return rebase_result(:failure, fetch_out, fetch_err) unless fetch_status.success?
+
+        out, err, status = Hive::Gh.capture3(
+          "git", "rebase", "origin/#{base_ref}",
+          chdir: worktree,
+          cfg: cfg
+        )
+        return rebase_result(:success, out, err) if status.success?
+
+        abort_out, abort_err, _abort_status = Hive::Gh.capture3(
+          "git", "rebase", "--abort",
+          chdir: worktree,
+          cfg: cfg
+        )
+        rebase_result(:conflict, "#{out}\n#{abort_out}", "#{err}\n#{abort_err}")
       end
 
       def add_label(worktree, pr_number, label, cfg:, dry_run:)
@@ -113,6 +158,10 @@ module Hive
 
       def result(success, stdout, stderr)
         Hive::Gh::PushResult.new(success: success, stdout: stdout.to_s, stderr: stderr.to_s)
+      end
+
+      def rebase_result(status, stdout, stderr)
+        RebaseResult.new(status: status, stdout: stdout.to_s, stderr: stderr.to_s)
       end
     end
   end

@@ -1966,6 +1966,7 @@ class ConfigTest < Minitest::Test
           "max_concurrent_prs" => 2,
           "labels_ignore" => %w[wip do-not-merge draft],
           "dry_run" => false,
+          "auto_rebase" => true,
           "budget_minutes" => 30,
           "budget_usd" => 50
         },
@@ -1988,6 +1989,32 @@ class ConfigTest < Minitest::Test
       assert_equal "10m", cfg.dig("babysitter", "interval")
       assert_equal 2, cfg.dig("babysitter", "max_concurrent_prs")
       assert_equal %w[wip do-not-merge draft], cfg.dig("babysitter", "labels_ignore")
+    end
+  end
+
+  def test_load_babysitter_auto_rebase_defaults_true_and_round_trips
+    with_tmp_dir do |dir|
+      assert_equal true, Hive::Config.load(dir).dig("babysitter", "auto_rebase")
+
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        babysitter:
+          auto_rebase: false
+      YAML
+      assert_equal false, Hive::Config.load(dir).dig("babysitter", "auto_rebase")
+    end
+  end
+
+  def test_load_rejects_non_boolean_babysitter_auto_rebase
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        babysitter:
+          auto_rebase: "yes"
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/babysitter\.auto_rebase.*must be a boolean/, err.message)
     end
   end
 

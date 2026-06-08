@@ -181,6 +181,10 @@ babysitter:
     - do-not-merge
     - draft
   dry_run: false
+  # Rebase green PRs that have fallen BEHIND the base branch and force-push
+  # so strict "branch must be up-to-date" protection can still merge them.
+  # Conflicting rebases are left for a human. Set false to disable.
+  auto_rebase: true
   budget_minutes: 30
   budget_usd: 50
 

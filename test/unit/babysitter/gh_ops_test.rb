@@ -41,4 +41,63 @@ class BabysitterGhOpsTest < Minitest::Test
     end
     refute called
   end
+
+  def test_rebase_onto_base_fetches_then_rebases_on_success
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      [ "ok", "", ok ]
+    }) do
+      result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
+      assert result.success?
+      refute result.conflict?
+    end
+
+    assert_equal %w[git fetch origin main], commands[0]
+    assert_equal %w[git rebase origin/main], commands[1]
+    assert_equal 2, commands.size, "no abort on a clean rebase"
+  end
+
+  def test_rebase_onto_base_aborts_and_reports_conflict_on_failure
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    bad = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      status = cmd[0, 2] == %w[git rebase] && cmd[2] != "--abort" ? bad : ok
+      [ "out", "err", status ]
+    }) do
+      result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
+      assert result.conflict?
+      refute result.success?
+    end
+
+    assert_equal %w[git rebase --abort], commands.last
+  end
+
+  def test_rebase_onto_base_reports_failure_when_fetch_fails
+    bad = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      [ "out", "fetch boom", bad ]
+    }) do
+      result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
+      refute result.success?
+      refute result.conflict?
+      assert_equal :failure, result.status
+    end
+
+    assert_equal 1, commands.size, "stops after a failed fetch"
+  end
+
+  def test_rebase_onto_base_dry_run_skips_git
+    called = false
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { called = true }) do
+      result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: true)
+      assert result.success?
+    end
+    refute called
+  end
 end

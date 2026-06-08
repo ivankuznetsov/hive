@@ -59,9 +59,9 @@ module Hive
             end
 
           case outcome
-          when :success then summary[:fixed] += 1
+          when :success, :rebased then summary[:fixed] += 1
           when :already_green, :noop, :dry_run then summary[:untouched] += 1
-          when :give_up, :failure, :timeout, :budget_exhausted, :fork_pr then summary[:needs_human] += 1
+          when :give_up, :failure, :timeout, :budget_exhausted, :fork_pr, :rebase_conflict then summary[:needs_human] += 1
           end
         end
 

@@ -45,16 +45,7 @@ module Hive
         # config, and the result is threaded into ContextBuilder so the second
         # call reuses this rollup rather than re-fetching.
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
-        if already_green?(status)
-          Hive::Babysitter::Events.emit(
-            project: @project,
-            pr: number,
-            action: "noop",
-            outcome: "already-green",
-            duration_ms: duration_ms(started)
-          )
-          return :already_green
-        end
+        return handle_green(status, started) if already_green?(status)
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
         context = Hive::Babysitter::ContextBuilder.build(
@@ -112,6 +103,84 @@ module Hive
 
       def already_green?(status)
         status["mergeable"].to_s == "MERGEABLE" && checks_green_or_queued?(status["statusCheckRollup"])
+      end
+
+      # A green PR is normally a noop. But strict branch protection on the
+      # base requires the head to be up-to-date with it, so a green PR that
+      # is BEHIND main can never merge until rebased. When auto-rebase is on
+      # (default), rebase onto the base and force-push so the PR becomes
+      # CLEAN/mergeable; conflicts are left for a human (no force-push).
+      def handle_green(status, started)
+        return auto_rebase(started) if behind?(status) && auto_rebase_enabled?
+
+        Hive::Babysitter::Events.emit(
+          project: @project,
+          pr: number,
+          action: "noop",
+          outcome: "already-green",
+          duration_ms: duration_ms(started)
+        )
+        :already_green
+      end
+
+      def behind?(status)
+        merge_state = status["mergeStateStatus"]
+        merge_state = @pr["mergeStateStatus"] if merge_state.nil?
+        merge_state.to_s.upcase == "BEHIND"
+      end
+
+      # nil (key absent) is treated as enabled; only an explicit `false`
+      # opts out. Mirrors the "do not silently flip legacy projects"
+      # convention used elsewhere in babysitter config.
+      def auto_rebase_enabled?
+        @cfg.dig("babysitter", "auto_rebase") != false
+      end
+
+      def auto_rebase(started)
+        if @dry_run
+          Hive::Babysitter::Events.emit(
+            project: @project,
+            pr: number,
+            action: "rebase",
+            outcome: "dry_run",
+            duration_ms: duration_ms(started)
+          )
+          return :dry_run
+        end
+
+        worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
+        rebase = Hive::Babysitter::GhOps.rebase_onto_base(
+          worktree.path,
+          @pr.fetch("baseRefName"),
+          cfg: @cfg,
+          dry_run: @dry_run
+        )
+
+        unless rebase.success?
+          Hive::Babysitter::Events.emit(
+            project: @project,
+            pr: number,
+            action: "rebase",
+            outcome: rebase.conflict? ? "conflict" : "failure",
+            duration_ms: duration_ms(started)
+          )
+          return rebase.conflict? ? :rebase_conflict : :failure
+        end
+
+        push = Hive::Babysitter::GhOps.force_push_with_lease(
+          worktree.path,
+          worktree.branch,
+          cfg: @cfg,
+          dry_run: @dry_run
+        )
+        Hive::Babysitter::Events.emit(
+          project: @project,
+          pr: number,
+          action: "rebase",
+          outcome: push.success? ? "success" : "failure",
+          duration_ms: duration_ms(started)
+        )
+        push.success? ? :rebased : :failure
       end
 
       def checks_green_or_queued?(checks)

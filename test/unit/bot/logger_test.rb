@@ -25,7 +25,7 @@ class HiveBotLoggerTest < Minitest::Test
       assert_equal 2, lines.size
       first = JSON.parse(lines[0])
       assert_equal "hive-bot-log", first["schema"]
-      assert_equal 1, first["schema_version"]
+      assert_equal 2, first["schema_version"]
       assert_equal "bot_started", first["event"]
       assert_equal "0.1.0", first["version"]
       assert_match(/^\d{4}-\d{2}-\d{2}T/, first["ts"])
@@ -40,7 +40,7 @@ class HiveBotLoggerTest < Minitest::Test
   end
 
   def test_every_documented_event_is_accepted_and_schema_valid
-    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v1.json", __dir__))))
+    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__))))
 
     with_log do |logger, path|
       Hive::Bot::Logger::EVENTS.each { |event| logger.event(event) }

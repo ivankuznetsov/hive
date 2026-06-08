@@ -389,8 +389,6 @@ module Hive
           "no_speech_threshold" => 0.6,
           "supported_languages" => %w[en ru]
         },
-        "codex_budget_usd" => 1,
-        "codex_timeout_sec" => 120,
         "shutdown_grace_sec" => 60,
         "pid_file" => "~/Dev/hive/.bot.pid",
         "log_file" => "~/Dev/hive/logs/bot.log",
@@ -1723,8 +1721,6 @@ module Hive
       [ "idea_attachment_max_bytes", 1, 20 * 1024 * 1024 ],
       [ "idea_attachment_max_count", 1, 10 ],
       [ "idea_draft_ttl_sec", 60, nil ],
-      [ "codex_budget_usd", 0, nil ],
-      [ "codex_timeout_sec", 10, nil ],
       [ "shutdown_grace_sec", 0, nil ],
       [ "log_max_bytes", 1024, nil ],
       [ "log_max_files", 1, nil ]

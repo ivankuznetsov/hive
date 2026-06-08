@@ -343,13 +343,15 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil result.attachment[:purpose]
   end
 
-  def test_free_text_inside_path_a_conversation_continues_codex
+  def test_free_text_inside_path_a_conversation_writes_answer_deterministically
+    # The Codex draft flow was removed: a path_a conversation now writes the
+    # answer directly, just like path_b, instead of spawning Codex.
     @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd",
                  question_n: 1, mode: :path_a)
 
     result = @router.handle(update(text: "clarifying answer"))
 
-    assert_equal :start_codex, result.action
+    assert_equal :write_answer_then_reply, result.action
     assert_equal "hive", result.project
     assert_equal "slug-260514-abcd", result.slug
     assert_equal "clarifying answer", result.answer_text
@@ -443,12 +445,13 @@ class HiveBotRouterTest < Minitest::Test
       "idea_skip:token" => :callback_idea_skip,
       "path_a_yes:hive:slug-260514-abcd" => :callback_path_a_yes,
       "path_a_type:hive:slug-260514-abcd" => :callback_path_a_just_type,
-      "codex_write:hive:slug-260514-abcd:1" => :callback_codex_write_draft,
-      "codex_edit:hive:slug-260514-abcd:1" => :callback_codex_edit,
-      "codex_cancel:hive:slug-260514-abcd:1" => :callback_codex_cancel,
       "findings:accept_all:hive:slug-260514-abcd:6-review" => :callback_findings_accept_all,
       "findings:reject_all:hive:slug-260514-abcd:6-review" => :callback_findings_reject_all,
       "idea_project_new:token" => :callback_idea_project_new,
+      # Retired Codex draft-assist callbacks no longer parse to an intent.
+      "codex_write:hive:slug-260514-abcd:1" => :unknown,
+      "codex_edit:hive:slug-260514-abcd:1" => :unknown,
+      "codex_cancel:hive:slug-260514-abcd:1" => :unknown,
       "unknown:hive:slug-260514-abcd" => :unknown
     }
 
@@ -511,7 +514,7 @@ class HiveBotRouterTest < Minitest::Test
     assert_match(/action :teleport is not allowed/, error.message)
   end
 
-  def test_done_refuses_when_pending_codex_confirm_exists
+  def test_done_refuses_when_pending_confirm_exists
     @store.start(chat_id: 12345, slug: "slug", question_n: 1)
     @store.update(chat_id: 12345, slug: "slug", awaiting_confirm: true)
 

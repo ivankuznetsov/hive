@@ -188,8 +188,6 @@ bot:
   alert_state_file: ~/.local/state/hive/.bot.alert_state.json
   recovery_reminder_window_sec: 28800
   conversation_ttl_sec: 3600
-  codex_budget_usd: 1
-  codex_timeout_sec: 120
   shutdown_grace_sec: 60
   pid_file: ~/.local/state/hive/.bot.pid
   log_file: ~/.local/state/hive/logs/bot.log

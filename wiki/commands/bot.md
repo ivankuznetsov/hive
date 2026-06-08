@@ -245,19 +245,25 @@ the bot after rotating).
 ## Structured log
 
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
-`hive-bot-log.v1`. The event enum is closed in
+`hive-bot-log.v2` (`SCHEMA_VERSION = 2`). The event enum is closed in
 `Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
 
-The schema evolves additively: new event values may be appended to
-`v1` without changing `schema_version`. Breaking changes (removing an
-event, renaming it, or changing the payload shape of an existing
-event) require a `v2` schema file alongside `v1`, bumped `$id`, and
-synchronized `schema_version` constant. Downstream consumers that pin
-on the `$id` URL must therefore tolerate unknown event values when
-parsing v1; that's the read-side compat invariant.
+`v2` was introduced when the Telegram "Codex draft-assist" feature was
+retired: it drops the `codex_spawned` / `codex_succeeded` / `codex_failed`
+events from the enum. `schemas/hive-bot-log.v1.json` is kept as-is for
+historical log lines emitted before the bump.
+
+The schema evolves additively: new event values may be appended to the
+current version without changing `schema_version`. Breaking changes
+(removing an event, renaming it, or changing the payload shape of an
+existing event) require a new schema file alongside the prior one, with
+bumped `$id` and a synchronized `schema_version` constant — exactly what
+the v1 → v2 retirement did. Downstream consumers that pin on the `$id`
+URL must therefore tolerate unknown event values; that's the read-side
+compat invariant.
 Events include `bot_started`, `poll_failure`, `update_received`,
 `notification_sent`, `dispatched_command`, `command_completed`,
-`codex_spawned`, `answer_written`, `reconnect_summary`, and `fatal`.
+`answer_written`, `reconnect_summary`, and `fatal`.
 
 ## Autostart
 

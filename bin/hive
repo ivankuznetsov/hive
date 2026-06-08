@@ -14,7 +14,11 @@ end
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
 def normalize_leading_json_options!(argv)
-  json_options = %w[--json --no-json --skip-json]
+  json_options = %w[
+    --json --no-json --skip-json
+    --json=true --json=TRUE --json=t --json=T
+    --json=false --json=FALSE --json=f --json=F
+  ]
   leading = []
   leading << argv.shift while json_options.include?(argv.first)
   return if leading.empty?
@@ -23,6 +27,17 @@ def normalize_leading_json_options!(argv)
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
+end
+
+def reject_unsupported_json_values!(argv)
+  invalid = argv.find do |arg|
+    arg.start_with?("--json=") && !arg.match?(/\A--json=(?:true|TRUE|t|T|false|FALSE|f|F)\z/)
+  end
+  return unless invalid
+
+  warn "ERROR: invalid value for --json: #{invalid.split("=", 2).last.inspect}"
+  warn "Expected one of: true, false, t, f, TRUE, FALSE, T, F"
+  exit Hive::ExitCodes::USAGE
 end
 
 # Thor only honours `--help` *before* the subcommand name (`hive help approve`);
@@ -41,11 +56,12 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
+reject_unsupported_json_values!(ARGV)
 normalize_leading_json_options!(ARGV)
 rewrite_help_flag!(ARGV)
 
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(true|1|yes)\z/i) }
+  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(?:true|TRUE|t|T)\z/) }
 end
 
 def json_usage_error_contract(argv)

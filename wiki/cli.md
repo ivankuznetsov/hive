@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-10
 tags: [cli, api]
 ---
 
@@ -13,9 +13,15 @@ tags: [cli, api]
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
 
-Before Thor dispatch, `bin/hive` handles two wrapper-level cases itself:
-top-level `--version` / `-v` prints `Hive::VERSION`, and command-local
-`--help` / `-h` is rewritten to `help <cmd>`. The help rewrite preserves any
+Before Thor dispatch, `bin/hive` handles wrapper-level preprocessing itself:
+top-level `--version` / `-v` prints `Hive::VERSION`; leading JSON flags are
+normalized so `hive --json status`, `hive --json=true status`, and
+`hive status --json=true` all reach Thor as command-local JSON requests; and
+command-local `--help` / `-h` is rewritten to `help <cmd>`. The wrapper accepts
+only Thor's explicit JSON boolean spellings (`true`, `false`, `t`, `f`, plus
+uppercase variants). Unsupported valued forms such as `--json=1` or
+`--json=yes` are rejected before target resolution with exit 64, so they cannot
+be mistaken for a task slug or project argument. The help rewrite preserves any
 leading dash-prefixed arguments that appear before the subcommand, then drops
 the command-local arguments after the subcommand so calls such as
 `hive approve --from 2-brainstorm --help` print the `approve` usage text
@@ -67,7 +73,7 @@ instead of validating `--from` or consuming `--help` as a positional target.
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check) and `--json` (single `hive-init.v1` success document with resolved answers and project metadata; precondition failures keep the legacy stderr + exit-code contract).
-- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v1`; `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`.
+- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). `bin/hive` treats bare `--json` and exact `--json=true` / `--json=t` spellings (uppercase accepted) as JSON requests for pre-Thor usage-error envelopes, treats `--json=false` / `--json=f` as an explicit false, and rejects other `--json=<value>` spellings before Thor parses positionals. Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v1`; `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
 

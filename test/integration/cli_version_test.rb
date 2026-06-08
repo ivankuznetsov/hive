@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "open3"
 require "rbconfig"
 
@@ -26,8 +27,25 @@ class CliVersionTest < Minitest::Test
     with_tmp_global_config do
       leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json", "status"))
       trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json"))
+      leading_valued = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json=true", "status"))
+      trailing_valued = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json=true"))
 
       assert_equal without_generated_at(trailing), without_generated_at(leading)
+      assert_equal without_generated_at(trailing), without_generated_at(leading_valued)
+      assert_equal without_generated_at(trailing), without_generated_at(trailing_valued)
+    end
+  end
+
+  def test_bin_hive_rejects_unsupported_json_values_before_target_resolution
+    with_tmp_global_config do
+      %w[--json=1 --json=yes].each do |flag|
+        out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", flag)
+
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        assert_empty out
+        assert_includes err, "invalid value for --json"
+        refute_includes err, "no task folder"
+      end
     end
   end
 

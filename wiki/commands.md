@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-08
+updated: 2026-06-10
 tags: [commands, api]
 ---
 
@@ -31,7 +31,11 @@ not add a second runtime and does not publish one ClawHub listing per Hive verb.
 `archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
 findings, metrics, update/uninstall, registry maintenance, and `--json`
 envelopes where the command page says they exist.
-The wrapper also normalizes command-local help before Thor dispatch:
+The wrapper also normalizes leading JSON flags and command-local help before
+Thor dispatch. `--json`, `--json=true`, and `--json=t` (uppercase variants
+accepted) are treated as true; `--json=false` and `--json=f` are treated as
+explicit false; unsupported valued forms such as `--json=1` / `--json=yes` are
+rejected with usage exit 64 before a positional argument can consume them.
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
 instead of being treated as partially-valid command invocations.

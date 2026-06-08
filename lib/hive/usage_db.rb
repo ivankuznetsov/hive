@@ -96,6 +96,10 @@ module Hive
             result[:total][bucket][:output] += buckets[bucket][:output]
             result[:total][bucket][:cached] += buckets[bucket][:cached]
           end
+          input, output, cached = aggregate_patrol_row(db, scope || {}, since)
+          result[:patrol][bucket][:input] = integer(input)
+          result[:patrol][bucket][:output] = integer(output)
+          result[:patrol][bucket][:cached] = integer(cached)
         end
       end
       result
@@ -111,6 +115,7 @@ module Hive
     def zero_aggregate
       {
         agents: AGENTS.to_h { |agent| [ agent, zero_buckets ] },
+        patrol: zero_buckets,
         total: zero_buckets
       }
     end
@@ -125,6 +130,22 @@ module Hive
 
     def aggregate_rows(db, scope, since)
       sql = +"SELECT agent, SUM(input), SUM(output), SUM(cached) FROM token_usage"
+      clauses, binds = aggregate_clauses(scope, since)
+      sql << " WHERE #{clauses.join(' AND ')}" unless clauses.empty?
+      sql << " GROUP BY agent"
+      db.execute(sql, binds)
+    end
+
+    def aggregate_patrol_row(db, scope, since)
+      sql = +"SELECT SUM(input), SUM(output), SUM(cached) FROM token_usage"
+      clauses, binds = aggregate_clauses(scope, since)
+      clauses << "stage LIKE ?"
+      binds << "patrol%"
+      sql << " WHERE #{clauses.join(' AND ')}"
+      db.execute(sql, binds).first || [ 0, 0, 0 ]
+    end
+
+    def aggregate_clauses(scope, since)
       clauses = []
       binds = []
       unless blank?(scope[:project_slug])
@@ -139,9 +160,7 @@ module Hive
         clauses << "started_at >= ?"
         binds << since
       end
-      sql << " WHERE #{clauses.join(' AND ')}" unless clauses.empty?
-      sql << " GROUP BY agent"
-      db.execute(sql, binds)
+      [ clauses, binds ]
     end
 
     def bucket_starts(now)

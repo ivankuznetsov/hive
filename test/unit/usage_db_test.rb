@@ -22,13 +22,14 @@ class UsageDbTest < Minitest::Test
   end
 
   def record(agent: "claude", project_slug: "alpha", task_slug: "task-a",
-             started_at: Time.utc(2026, 5, 24, 10), input: 100, output: 50, cached: 10)
+             stage: "2-brainstorm", started_at: Time.utc(2026, 5, 24, 10),
+             input: 100, output: 50, cached: 10)
     Hive::UsageDb.record!(
       agent: agent,
       model: "test-model",
       project_slug: project_slug,
       task_slug: task_slug,
-      stage: "2-brainstorm",
+      stage: stage,
       started_at: started_at,
       ended_at: started_at + 60,
       input: input,
@@ -41,6 +42,10 @@ class UsageDbTest < Minitest::Test
     aggregate.fetch(:agents).fetch(agent).fetch(bucket)
   end
 
+  def patrol_at(aggregate, bucket)
+    aggregate.fetch(:patrol).fetch(bucket)
+  end
+
   def test_record_followed_by_aggregate_counts_today_rolling_and_all
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)
@@ -51,6 +56,7 @@ class UsageDbTest < Minitest::Test
       %i[today 7d 30d all].each do |bucket|
         assert_equal({ input: 1200, output: 300, cached: 40 }, usage_at(aggregate, :claude, bucket))
         assert_equal({ input: 1200, output: 300, cached: 40 }, aggregate.fetch(:total).fetch(bucket))
+        assert_equal({ input: 0, output: 0, cached: 0 }, patrol_at(aggregate, bucket))
       end
     end
   end
@@ -141,6 +147,26 @@ class UsageDbTest < Minitest::Test
       assert_equal({ input: 3, output: 3, cached: 3 }, usage_at(aggregate, :claude, :all))
     end
   end
+
+  def test_aggregate_returns_patrol_bucket_for_patrol_stage_rows
+    with_usage_db do
+      now = Time.utc(2026, 5, 24, 12)
+      record(stage: "patrol-review", input: 10, output: 5, cached: 1, started_at: now - 3600)
+      record(agent: "codex", stage: "patrol-fix", input: 20, output: 7, cached: 2, started_at: now - (8 * 24 * 60 * 60))
+      record(stage: "2-brainstorm", input: 100, output: 50, cached: 10, started_at: now - 3600)
+      record(project_slug: "beta", stage: "patrol-review", input: 999, output: 999, cached: 999, started_at: now - 3600)
+
+      aggregate = Hive::UsageDb.aggregate(scope: { project_slug: "alpha" }, now: now)
+
+      assert_equal({ input: 10, output: 5, cached: 1 }, patrol_at(aggregate, :today))
+      assert_equal({ input: 10, output: 5, cached: 1 }, patrol_at(aggregate, :"7d"))
+      assert_equal({ input: 30, output: 12, cached: 3 }, patrol_at(aggregate, :"30d"))
+      assert_equal({ input: 30, output: 12, cached: 3 }, patrol_at(aggregate, :all))
+      assert_equal({ input: 130, output: 62, cached: 13 }, aggregate.fetch(:total).fetch(:all),
+                   "TOTAL remains the real per-agent sum and does not add the patrol row twice")
+    end
+  end
+
   def test_aggregate_with_broken_path_warns_and_returns_zero_tree
     with_tmp_dir do |dir|
       Hive::UsageDb.path = dir

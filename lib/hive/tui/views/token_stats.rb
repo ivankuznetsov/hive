@@ -37,6 +37,9 @@ module Hive
           AGENTS.each do |agent|
             rows << row_for(agent.to_s, aggregate.fetch(:agents, {}).fetch(agent, zero_buckets))
           end
+          # Patrol is a cross-cutting attribution row: the same tokens
+          # also remain counted in the per-agent rows and TOTAL.
+          rows << row_for("patrol", aggregate.fetch(:patrol, zero_buckets))
           rows << row_for("TOTAL", aggregate.fetch(:total, zero_buckets))
           widths = column_widths(rows, inner_width)
           rows.map { |row| render_row(row, widths) }.join("\n")

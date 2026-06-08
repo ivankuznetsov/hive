@@ -57,8 +57,10 @@ edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
 runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
 bounded by `max_per_tick`) for any task whose `display_name` never landed at
 `hive new`, so an interrupted name generation self-heals instead of leaving the
-task showing its raw slug. This is purely cosmetic — it touches no markers and
-never advances a stage.
+task showing its raw slug. Per-folder inflight state stores `{pid, at}` and
+expires after 120 seconds so a reused or foreign pid cannot suppress retries
+forever. This is purely cosmetic — it touches no markers and never advances a
+stage.
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|

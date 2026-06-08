@@ -13,7 +13,7 @@ tags: [architecture, overview]
 
 ```
 bin/hive                          Thor entry; rescues Hive::Error -> exit
-  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot / tui)
+  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot / web / tui)
        └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot · TUI helpers
             └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Artifacts · Finalize · Done
                  ├─ Stages::Base      template render + AgentProfile spawn helpers
@@ -230,9 +230,10 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 `hive web` ([[commands/web]]) is a browser surface over the same command and
 queue contracts rather than a second workflow engine. The command starts a
-Puma-backed Sinatra app; the Docker entrypoint runs
-`Hive::Web::Supervisor`, which starts the daemon, web server, and optionally the
-Telegram bot in one `/data`-backed container.
+Puma-backed Sinatra app; the Docker entrypoint runs under `tini` and delegates
+to `Hive::Web::Supervisor`, which starts the daemon, web server, and optionally
+the Telegram bot in one `/data`-backed container. The container healthcheck hits
+the public `/health` route.
 
 ```
 hive web  →  Hive::Commands::Web

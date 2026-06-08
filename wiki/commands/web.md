@@ -1,9 +1,9 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, lib/hive/web/
+source: lib/hive/commands/web.rb, lib/hive/web/, packaging/docker/
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-06-08
 tags: [command, web, hivebox]
 ---
 
@@ -81,12 +81,30 @@ to the waiting PTY. It does not proxy provider login pages. The design note is
 
 ## Docker
 
-`packaging/docker/` builds the hivebox image. The entrypoint runs
-`Hive::Web::Supervisor`, which starts `hive daemon start`, `hive web --bind
-0.0.0.0`, and `hive bot start --foreground` when global bot config is enabled.
+`packaging/docker/` builds the hivebox image from `ruby:3.4-slim`. The image
+installs OS tools needed by the box (`git`, `gh`, `tmux`, `nodejs`, `npm`,
+`tini`, and build/runtime helpers), copies the repository into `/app`, runs
+Bundler without development/test groups, builds the `hive-cli` gem, installs it,
+and then attempts to install the Claude, Codex, and Pi CLIs globally through npm.
+That npm install is explicitly best-effort (`|| true`), so a built image may
+still require agent CLI repair before login flows work.
+
+The Docker entrypoint is `/usr/bin/tini -- hivebox-entrypoint`. The entrypoint
+ensures `/data/home`, `/data/repos`, `/data/config`, `/data/state`,
+`/data/cache`, and `/data/share` exist, executes custom argv when arguments are
+passed, and otherwise runs `Hive::Web::Supervisor`. The supervisor starts
+`hive daemon start`, `hive web --bind 0.0.0.0`, and `hive bot start
+--foreground` when global bot config is enabled. While `run` is active it
+publishes `HIVEBOX_SUPERVISOR_PID` so the web child can SIGHUP the supervisor
+after enabling Telegram, then restores the caller's prior env value and signal
+traps on exit. The container healthcheck calls `GET /health` on
+`127.0.0.1:4567`.
+
 `/data` is the persistence boundary: `HOME`, XDG config/state/cache/data, repos,
-Hive state, and agent credential dirs all live there. The image serves plain HTTP
-on port 4567; TLS is expected at a reverse proxy or tunnel.
+Hive state, generated session secret, and agent credential dirs all live there.
+`packaging/docker/compose.example.yml` binds `./hivebox-data:/data` and passes
+`HIVEBOX_GITHUB_CLIENT_SECRET` plus optional `HIVEBOX_SESSION_SECRET`. The image
+serves plain HTTP on port 4567; TLS is expected at a reverse proxy or tunnel.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]].

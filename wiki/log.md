@@ -2,27 +2,166 @@
 
 Append-only log of all wiki operations.
 
-## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage
-
-**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `a8774462` changed `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and existing babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub env var config injection"` found the current babysitter docs and prior refresh history, while the configured master collection had no relevant hit. Inspected the committed diff plus `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/cli.rb`, and focused dry-run tests. Updated [[commands/babysit]] to describe option screening as scoped to each CLI's honored option regions, refreshed [[testing]] metadata, and tied the remaining live-agent dry-run smoke gap to `a8774462`. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
-
-**Refreshed pages:**
-- [[commands/babysit]]
-- [[testing]]
-- [[gaps]]
-- [[log]]
-
-## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
-
-**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
-
-**Refreshed pages:**
-- [[commands/babysit]]
-- [[modules/babysitter]]
-- [[testing]]
-- [[gaps]]
-- [[log]]
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-06-08T13:00:00+01:00] hivebox — restore supervisor process state after run exits
+
+**Action:** Fixed an order-dependent web test failure after rebasing PR #300:
+`Hive::Web::Supervisor#run` published `HIVEBOX_SUPERVISOR_PID` and installed
+TERM/INT/HUP traps, but did not restore that process-global state when the run
+loop returned in-process. A later Telegram token-save route inherited the stale
+pid and signalled the test process instead of redirecting reliably. `run` now
+restores the previous env value and signal handlers in its ensure path, while
+the supervisor unit test asserts that child startup still sees the supervisor
+pid before cleanup.
+
+**Tests:**
+- `bundle exec ruby -Itest -e 'require File.expand_path("test/unit/web/supervisor_test.rb"); require File.expand_path("test/unit/web/telegram_routes_test.rb")' -- --seed 37831`
+- `bundle exec ruby -Itest -e 'Dir["test/unit/web/*_test.rb"].sort.each { |f| require File.expand_path(f) }; require File.expand_path("test/integration/web/approve_flow_test.rb")' -- --seed 37831`
+
+**Refreshed pages:**
+- [[commands/web]]
+
+## [2026-06-08T12:45:42+01:00] hivebox — refresh Docker web command/API coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after
+commit `a4103844` added `.dockerignore` and `packaging/docker/` for hivebox.
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]],
+[[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search
+"hivebox docker packaging supervisor web entrypoint"` returned no indexed hits,
+and the configured master wiki had only generic Docker references. Inspected the
+committed diff plus current `packaging/docker/Dockerfile`,
+`packaging/docker/entrypoint.sh`, `packaging/docker/README.md`,
+`packaging/docker/compose.example.yml`, `.dockerignore`,
+`lib/hive/commands/web.rb`, `lib/hive/web/**`, web config validation, web unit
+tests, and the manual Playwright hivebox contract. Updated the wiki to cover the
+Docker image build path, `/data` persistence boundary, `tini` entrypoint,
+custom-argv behavior, `/health` healthcheck, compose environment, best-effort
+agent CLI npm install, web runtime gems, and the remaining lack of live
+provider/container smoke evidence. Page count stayed 76, so [[index]] did not
+need a catalog update. Did not run `qmd update` or `qmd embed`, and did not edit
+compiled [[log]].
+
+**Refreshed pages:**
+- [[commands/web]]
+- [[architecture]]
+- [[commands]]
+- [[dependencies]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-08T12:00:00Z] hivebox — rebase web command coverage onto current wiki model
+
+**Action:** Resolved PR #300's Hivebox web documentation onto the current wiki model. Kept the single OpenClaw `hive-cli` umbrella-skill policy, registered [[commands/web]] alongside the newer [[commands/wiki]] page, and recorded `hive web`/hivebox in the wiki index instead of reviving the obsolete per-command OpenClaw skill list.
+
+**Refreshed pages:**
+- [[index]]
+- [[log]]
+
+## [2026-06-08T11:51:13Z] wiki — audit bot draft-confirm residue cleanup
+
+**Action:** Refreshed command/API and handler wiki coverage after commit `c680ac29` removed dead Telegram bot confirm/draft residue left behind by the Codex draft-assist retirement. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "CodexConversation confirm draft residue conversation_store path_a bot codex draft assist"` returned no indexed hits, and the configured master wiki path had no relevant draft-assist context. Inspected the committed diff plus current `lib/hive/bot/conversation_store.rb`, `lib/hive/bot/router.rb`, `lib/hive/bot/handlers/free_text_handler.rb`, `lib/hive/bot/handlers/callback_handlers.rb`, `lib/hive/bot/handlers/slash_handlers.rb`, and focused bot tests.
+
+Documented that `ConversationStore::State` now carries only the active answer context (`chat_id`, `project`, `slug`, `question_n`, `mode`, `updated_at`), with no `history`, `draft`, `awaiting_confirm`, or `pending_confirm_count` API; that `/done` clears and dispatches the active conversation directly with no draft-confirm guard; that Path A/B is compatibility-only and both modes route through `write_answer_then_reply`; and that legacy Path-A buttons degrade to the deterministic `/answer` instructions while retired `codex_*` callback data remains unknown. Carried forward the live-smoke uncertainty for old Telegram buttons, live `:path_a` answer writes, and installed `hive-bot-log.v2` consumers. Page coverage count stayed 75, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+- [[modules/bot]]
+- [[state-model]]
+- [[gaps]]
+
+## [2026-06-08T10:59:08Z] wiki — audit retired bot Codex draft-assist coverage
+
+**Action:** Refreshed command/API, handler, config, schema, template, and executable-entrypoint wiki coverage after commit `723906be` retired the Telegram bot's Codex draft-assist flow. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "bot codex draft assist path a answer log schema"` found only older generic bot command context, and the configured master wiki path had no matching draft-assist context. Inspected the committed diff plus current `lib/hive/bot/router.rb`, `lib/hive/bot/handlers/callback_handlers.rb`, `lib/hive/bot/handlers/free_text_handler.rb`, `lib/hive/bot/logger.rb`, `lib/hive/config.rb`, `schemas/hive-bot-log.v2.json`, `templates/hive_config.yml.erb`, and focused bot/config/logger tests.
+
+Confirmed the committed [[architecture]], [[commands/bot]], [[modules/bot]], [[state-model]], and [[templates]] updates match the current code: brainstorm answering is deterministic for Path A and Path B, `Hive::Bot::CodexConversation` and its prompt template are gone, retired `codex_*` callback-data no longer parses to a live intent, the bot config no longer exposes Codex budget/timeout knobs, and `hive-bot-log.v2` removes the three Codex events while preserving `hive-bot-log.v1` for historical lines. Added [[gaps]] coverage for the remaining uncertainty: source-tree tests pin the behavior, but no in-tree live Telegram artifact proves old Path-A buttons, retired Codex callback-data, deterministic live `:path_a` answer writes, or installed log consumers against `hive-bot-log.v2`. Page coverage count stayed 75, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[commands/bot]]
+- [[modules/bot]]
+- [[state-model]]
+- [[templates]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-08T10:47:25Z] bot — retire Codex draft-assist feature
+
+**Action:** Removed the Telegram bot's "Codex draft-assist" flow (the Path-A mobile-brainstorm path where the bot spawned Codex to draft an answer to a brainstorm question, offering write-draft / edit / cancel buttons). Brainstorm answering is now deterministic Q-by-Q for every conversation mode: the operator's reply is written verbatim into the next unanswered `brainstorm.md` slot and the bot sends the next question.
+
+Specifically:
+- Deleted `lib/hive/bot/codex_conversation.rb` (`Hive::Bot::CodexConversation`) and its prompt template `templates/bot_brainstorm_codex_prompt.md.erb`.
+- Bumped `Hive::Bot::Logger::SCHEMA_VERSION` 1 → 2 and dropped the `codex_spawned` / `codex_succeeded` / `codex_failed` events from `EVENTS`.
+- Added `schemas/hive-bot-log.v2.json` (event enum minus the three codex_* events, `schema_version` const 2). `schemas/hive-bot-log.v1.json` is kept as-is for historical log lines.
+- Removed the `codex_budget_usd` / `codex_timeout_sec` bot defaults and their `BOT_NUMERIC_BOUNDS` entries from `lib/hive/config.rb`, and the matching commented lines in `templates/hive_config.yml.erb`.
+- Removed the `callback_codex_write_draft` / `callback_codex_edit` / `callback_codex_cancel` intents, the `codex_write:` / `codex_edit:` / `codex_cancel:` callback parsing, and the `start_codex` / `confirm_codex_draft` allowed-actions from `lib/hive/bot/router.rb`. Retired callback-data now classifies as `:unknown`.
+- Dropped the three codex callbacks from the legacy retirement-notice branch in `lib/hive/bot/handlers/callback_handlers.rb` (the Path-A `path_a_yes` / `path_a_just_type` legacy fallback is kept and still returns the "Codex draft flow was removed" steer).
+- Removed the `action: :start_codex` branch from `lib/hive/bot/handlers/free_text_handler.rb`; a `:path_a` conversation now falls through to the same deterministic `write_answer_then_reply` path as `:path_b`.
+
+**Kept (correctness guardrail):** The `"Answer mode started for <slug>."` reply-reattach matcher in `router.rb` and `free_text_handler.rb` is part of the GENERAL answer-mode reply flow — it lets a free-text reply to an old bot message reattach to that slug's brainstorm answer flow (`mode: :path_b`) and is independent of Codex. The text is not Codex-specific and is not sent by any removed code path, so it was retained.
+
+**Tests:** Deleted `test/unit/bot/codex_conversation_test.rb`. Updated `callback_handlers_test.rb`, `router_test.rb`, `supervisor_test.rb`, `config_test.rb`, `spawn_agent_test.rb`, `logger_test.rb` (now validates against `hive-bot-log.v2.json` and asserts `schema_version == 2`), and eval support `reason_classifier.rb` / `harness.rb` — removed draft-assist intents/fixtures/config while preserving coverage for everything that remains. Suite green.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[state-model]]
+- [[templates]]
+- [[modules/bot]]
+- [[commands/bot]]
+
+## [2026-06-08T10:15:00Z] config — document daemon.max_concurrent_patrol_scans
+
+**Action:** `wiki/modules/config.md` did not mention `daemon.max_concurrent_patrol_scans` even though the setting is live on `main` (`Config::DEFAULTS` daemon block = 1, validated `>= 1`, enforced by `Hive::Daemon::ConcurrencyController` as a `:patrol_scan_cap` separate from task-dispatch slots). Added a grounded sentence to the notable-defaults prose: daemon-scheduled `hive patrol PROJECT` scans run on their own in-flight budget so a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot (scans tagged `kind: :patrol_scan`, excluded from the per-project/global caps).
+
+**Refreshed pages:**
+- [[modules/config]]
+
+## [2026-06-08T00:00:00Z] agent/review — surface usage-limit as limits_reached, not generic failure
+
+**Action:** Patrol/review tasks were landing in a red `reason=all_failed` (and agents in generic `exit_code=1`) when the underlying CLI had actually hit a usage/credit limit. Root cause: codex reports the limit as a structured `{"type":"error","message":"…you've hit your usage limit…"}` / `turn.failed` JSON stream event, which `MessageExtractor` does not surface as a final message, so the limit text never reached `Agent#handle_exit` (which only scanned `final_message`). Fix: `Agent#spawn_and_wait` now scans every raw stream line via `Hive::AgentLimit` and captures `result[:limit_text]`; `limit_error_message` prefers it. In `Stages::Review.run_reviewers`, per-reviewer error messages are collected and an all-failed phase whose failures are limit errors returns `:all_failed_limit`, landing a `REVIEW_ERROR reason=limits_reached message="all reviewers hit a usage/credit limit"` marker instead of `reason=all_failed`. Added agent unit tests (limit_text path + end-to-end structured-error capture) and a run_reviewers `:all_failed_limit` test.
+
+**Refreshed pages:**
+- [[testing]]
+
+## [2026-06-07T20:00:00Z] daemon — tighten terminal agent-loss retry review fixes
+
+**Action:** Fixed the terminal agent-loss exhausted-budget remediation to emit a runnable
+`hive run <slug> --project <project> --stage <stage>` command, expanded unit coverage to
+the full late-stage/reason allowlist matrix, and pinned negative coverage for the same
+reasons outside late stages.
+
+**Files:**
+- `lib/hive/daemon/stale_agent_healer.rb`
+- `test/unit/daemon/stale_agent_healer_test.rb`
+
+**Impact:** Agents can use the logged manual fallback when retry budget is exhausted, and
+future changes are guarded against broadening terminal agent-loss auto-retry beyond
+`7-artifacts`/`8-finalize`.
+
+## [2026-06-07T18:55:00Z] daemon — retry late-stage terminal agent-loss errors
+
+**Action:** Extended `Hive::Daemon::StaleAgentHealer` so late-stage terminal agent-loss errors are recovered by the normal daemon flow instead of staying red after ordinary interruptions. `7-artifacts` and `8-finalize` rows with `ERROR reason=tmux_session_terminated` or `ERROR reason=agent_orphaned` now clear when no live task lock exists, using the same marker-id guard, pre-clear dispatch-baseline seeding, bounded per-process retry budget, and one-shot `marker_heal_exhausted` logging used by finalize `ERROR reason=unpushed_commits`. The healer logs these retries as `reason=terminal_agent_loss`, keeps the original marker reason in `marker_reason`, and leaves repository-state/manual failures such as `ERROR reason=git_status_failed` red for operator inspection. Added focused tests for artifacts tmux-session loss, finalize orphaned-agent loss, marker-id races, live-lock skips, git-status manual skips, and retry-budget exhaustion, then refreshed daemon, artifacts, finalize, testing, and gaps docs.
+
+**Tests:**
+- `bundle exec ruby -Itest test/unit/daemon/stale_agent_healer_test.rb`
+
+**Refreshed pages:**
+- [[modules/daemon]]
+- [[stages/artifacts]]
+- [[stages/finalize]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T18:49:17Z] wiki — audit late-stage terminal agent-loss retry coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after commit `0dde0c69` extended `Hive::Daemon::StaleAgentHealer` and already touched daemon, artifacts, finalize, testing, gaps, and log pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "stale agent healer terminal agent loss retry artifacts finalize tmux_session_terminated agent_orphaned"` surfaced existing daemon/log coverage, and the configured master wiki path had no matching context. Inspected the committed diff plus current `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/stages/artifacts.rb`, `lib/hive/stages/finalize.rb`, `lib/hive/stages/base.rb`, `lib/hive/claude_launcher.rb`, `lib/hive/markers.rb`, and focused stale-healer/status tests. Confirmed the committed page updates were source-synced, then refreshed cross-reference pages that still implied all daemon `error` rows are manual skips: [[cli]], [[commands/daemon]], [[stages/index]], and [[state-model]]. Refined [[gaps]] to record that the new late-stage terminal agent-loss retry path remains unit-pinned only; no live or integration artifact proves the full status -> healer clear -> redispatch loop for artifacts/finalize tmux loss. Page count stayed 75, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[cli]]
+- [[commands/daemon]]
+- [[stages/index]]
+- [[state-model]]
+- [[gaps]]
+
 ## [2026-06-07T17:00:00Z] review fix-pass 03 — finalize healer doc/observability polish
 
 **Action:** Applied 6-review pass-03 findings to `Hive::Daemon::StaleAgentHealer`, its logger, tests, and [[modules/daemon]]. Dropped the unreferenced `MARKER_ERROR_REASONS`/`HEAL_LOG_LABELS` constants; unified the heal event attempt-count key to plural `attempts:` across `marker_healed` and `marker_heal_exhausted`; derived the review-path `marker_heal_failed` reason label from the row (so a `review_agent_died` failure is no longer mislabeled as the tmux-death channel); and made `observe_pre_clear_mtime` emit a new `marker_heal_observer_missing` debug event instead of silently no-op'ing when a controller lacks the method. Tightened the class doc: removed the inaccurate "auth" cause of the unpushed-commits marker (auth raises before the push gate), reordered the finalize re-run checks to "auth, clean-exit, push" to match `finalize.rb#run!`, softened the limit wording to "configured limit (default 3)", and noted the intentional asymmetry with `review_error_signature`. Extended the exhausted-event comment to call out the SIGHUP-reload reset of the `seen` dedup maps. Reverted the manual `wiki/log.md` edits (fragments already exist in `wiki/log.d/`). Added focused tests: status-JSON error-row marker_id contract, observer-missing logging, and exhausted-event one-shot suppression across 3+ heal passes; the redispatch integration test now derives its `action` from the real status pipeline.
@@ -38,6 +177,21 @@ Append-only log of all wiki operations.
 - [[cli]]
 - [[commands]]
 - [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-07T16:08:13Z] babysitter — fix detached restart process identity
+
+**Action:** Live-smoked a stale babysitter after the current checkout and reproduced that `hive babysit restart --detach` could leave the long-lived process running under the `restart --detach` argv. Later restarts then waited on that process instead of quickly replacing it. Updated `Hive::Commands::Babysit#restart_daemon` so detached restart stops the old process and re-execs the canonical `hive babysit start --detach` command before daemonizing, preserving the PID-file/startup invariant. Kept the long 600-second stop drain because an active babysitter tick can be inside a synchronous PR repair agent; review pass 1 caught that shortening the drain would orphan child agents and temporary worktrees. The same review found that stop could suppress KILL after ownership became unverified yet still delete the PID file and print success, so stop now leaves the PID file and warns when the process may still be alive; KILL escalation is also explicit in stderr. Review pass 2 found that restart could still continue after such a refused stop and that detached re-exec should use the installed stable wrapper rather than raw process argv. Restart now aborts when stop leaves a live PID, direct `stop` exits non-zero in the same refused-stop paths, and detached re-exec resolves the command through `Hive::InvokedBinary.path`. Later review passes found narrow races where a process could exit during initial or post-grace ownership probes; stop now re-checks liveness around those probes and treats a now-dead PID as a clean stale cleanup instead of requiring manual intervention. The final cleanup review found that successful stop cleanup could remove a replacement PID file created by a concurrent `start`; reservation and cleanup now share a bounded sidecar lock and cleanup removes only when the file still matches the payload being stopped, while the detached re-exec call is direct/auditable. Added unit regressions for detached restart re-exec, no-dry-run argv, re-exec failure reporting, unresolved wrapper errors, restart abort after refused stop, direct stop failure on refused stop, ownership-probe clean exits including the pre-KILL recheck, replacement PID-file preservation, lock-acquire timeout, KILL-success cleanup, and skip-KILL PID-file preservation, then refreshed babysitter command/module/testing docs plus the stale-runtime gap.
+
+**Tests:**
+- `bundle exec ruby -Itest test/unit/commands/babysit_test.rb`
+- `bundle exec ruby -Itest test/unit/babysitter/coverage_gaps_test.rb`
+- `bundle exec rubocop lib/hive/commands/babysit.rb test/unit/commands/babysit_test.rb test/unit/babysitter/coverage_gaps_test.rb`
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
 - [[testing]]
 - [[gaps]]
 
@@ -106,6 +260,26 @@ Append-only log of all wiki operations.
 - [[testing]]
 <!-- END GENERATED WIKI LOG FRAGMENTS -->
 
+## [2026-06-07T13:24:34Z] wiki - audit babysitter dry-run env hardening coverage
+
+**Action:** Refreshed command/API and executable-entrypoint wiki coverage after commit `a8774462` changed `bin/hive-babysitter-stub-git`, `test/unit/babysitter/dry_run_env_test.rb`, and existing babysitter wiki pages. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter dry-run git stub env var config injection"` found the current babysitter docs and prior refresh history, while the configured master collection had no relevant hit. Inspected the committed diff plus `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh`, `lib/hive/babysitter/dry_run_env.rb`, `lib/hive/cli.rb`, and focused dry-run tests. Updated [[commands/babysit]] to describe option screening as scoped to each CLI's honored option regions, refreshed [[testing]] metadata, and tied the remaining live-agent dry-run smoke gap to `a8774462`. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
+
+## [2026-06-07T13:20:50Z] babysitter - rebase dry-run git env hardening onto stale-runtime main
+
+**Action:** Resolved PR #316 onto current `main` after the stale-runtime babysitter docs landed. Kept the `hive babysit restart` / stale detached-runtime documentation from [[commands/babysit]] and [[modules/babysitter]], while preserving the PR's final dry-run `git` hardening: fail-closed skips for known exec-capable git env seams, default-deny `GIT_CONFIG_COUNT` parsing, scoped `grep` pager and `ls-files -o` read-option handling, pathspec separator handling, and invalid real-git diagnostics. Refreshed [[testing]] and [[gaps]] to match the focused regression surface.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+- [[gaps]]
+- [[log]]
 ## [2026-06-07T10:55:00Z] wiki - refresh stale babysitter runtime command surface
 
 **Action:** Refreshed command/API surface coverage after commit `dc0f540f` (`fix(babysitter): detect stale runtime`) changed `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, and existing babysitter wiki notes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "command API surface routes handlers README entrypoint"` surfaced prior command/API refresh context, and the configured master wiki path had only generic route/command guidance. Verified the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/babysit.rb`, `test/unit/commands/babysit_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[cli]], and [[operating]]. Documented the new `hive babysit restart` lifecycle subcommand, the boundary that `reload` refreshes config/log settings but not loaded Ruby source, the source-mtime stale-process recommendation printed by `status`, and the remaining lack of a live detached-process stale-runtime smoke artifact. Page coverage count stayed 74, so [[index]] did not need a catalog update. Did not run `qmd update` or `qmd embed`.

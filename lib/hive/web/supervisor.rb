@@ -26,10 +26,13 @@ module Hive
       end
 
       def run
+        had_supervisor_pid = ENV.key?("HIVEBOX_SUPERVISOR_PID")
+        previous_supervisor_pid = ENV["HIVEBOX_SUPERVISOR_PID"]
+        previous_signal_handlers = {}
         # Children inherit this so a child (the web tier handling "enable
         # Telegram") can ask the supervisor to (re)start the bot via SIGHUP.
         ENV["HIVEBOX_SUPERVISOR_PID"] = Process.pid.to_s
-        trap_signals
+        previous_signal_handlers = trap_signals
         start_child("daemon", %w[hive daemon start])
         start_child("web", %w[hive web --bind 0.0.0.0])
         start_child("bot", %w[hive bot start --foreground]) if bot_enabled?
@@ -41,18 +44,29 @@ module Hive
           sleep 1
         end
       ensure
-        terminate_all
+        begin
+          terminate_all
+        ensure
+          if had_supervisor_pid
+            ENV["HIVEBOX_SUPERVISOR_PID"] = previous_supervisor_pid
+          else
+            ENV.delete("HIVEBOX_SUPERVISOR_PID")
+          end
+          previous_signal_handlers.each { |signal, handler| Signal.trap(signal, handler) }
+        end
       end
 
       private
 
       def trap_signals
+        previous = {}
         %w[TERM INT].each do |signal|
-          Signal.trap(signal) { @stopping = true }
+          previous[signal] = Signal.trap(signal) { @stopping = true }
         end
         # SIGHUP = reload: re-read config and bring up newly-enabled children
         # (currently the Telegram bot) without recreating the container.
-        Signal.trap("HUP") { @reload_requested = true }
+        previous["HUP"] = Signal.trap("HUP") { @reload_requested = true }
+        previous
       end
 
       def bot_enabled?

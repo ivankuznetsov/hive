@@ -142,23 +142,32 @@ class WebSupervisorTest < Minitest::Test
   end
 
   def test_run_starts_children_traps_signals_and_terminates_on_stop
-    with_tmp_global_config do
-      sup = build
-      started = stub_start_child(sup)
-      # Make the loop exit on its first iteration and turn terminate_all into a
-      # no-op (no real children were spawned).
-      sup.define_singleton_method(:terminate_all) { @terminated = true }
-      sup.instance_variable_set(:@stopping, false)
-      # Flip @stopping after the children start so the loop runs exactly once.
-      sup.define_singleton_method(:reap_once) { @stopping = true }
+    with_env("HIVEBOX_SUPERVISOR_PID" => "outer") do
+      published_pids = []
+      with_tmp_global_config do
+        sup = build
+        started = []
+        sup.define_singleton_method(:start_child) do |name, _argv|
+          started << name
+          published_pids << ENV["HIVEBOX_SUPERVISOR_PID"]
+        end
+        # Make the loop exit on its first iteration and turn terminate_all into a
+        # no-op (no real children were spawned).
+        sup.define_singleton_method(:terminate_all) { @terminated = true }
+        sup.instance_variable_set(:@stopping, false)
+        # Flip @stopping after the children start so the loop runs exactly once.
+        sup.define_singleton_method(:reap_once) { @stopping = true }
 
-      sup.run
+        sup.run
 
-      assert_includes started, "daemon", "run must start the daemon child"
-      assert_includes started, "web", "run must start the web child"
-      assert sup.instance_variable_get(:@terminated), "run must terminate_all on exit"
-      assert_equal Process.pid.to_s, ENV["HIVEBOX_SUPERVISOR_PID"],
-                   "run must publish its pid so a child can SIGHUP it"
+        assert_includes started, "daemon", "run must start the daemon child"
+        assert_includes started, "web", "run must start the web child"
+        assert_equal [ Process.pid.to_s, Process.pid.to_s ], published_pids,
+                     "run must publish its pid before children are spawned"
+        assert sup.instance_variable_get(:@terminated), "run must terminate_all on exit"
+        assert_equal "outer", ENV["HIVEBOX_SUPERVISOR_PID"],
+                     "run must restore the caller's supervisor pid when it exits"
+      end
     end
   end
 

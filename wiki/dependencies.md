@@ -7,7 +7,7 @@ updated: 2026-06-08
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Six runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`, `sqlite3`, `unicode-display_width`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
+**TLDR**: Eleven direct runtime gems (`thor`, `telegram-bot-ruby`, `faraday`, `faraday-multipart`, `bubbletea`, `lipgloss`, `puma`, `rack-protection`, `sinatra`, `sqlite3`, `unicode-display_width`); eight development/test gems (`minitest`, `rake`, `json_schemer`, `rack-test`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
 
 ## Runtime gems
 
@@ -15,8 +15,13 @@ tags: [dependencies, gems, runtime]
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
+| `faraday` | `>= 2.14.2`, `< 3.0` | HTTP client used directly by `Hive::Bot::Transcriber`; declared explicitly so voice transcription does not rely on `telegram-bot-ruby` keeping Faraday as a transitive dependency. |
+| `faraday-multipart` | `~> 1.0` | Multipart upload support for OpenAI-compatible audio transcription requests. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
+| `puma` | `~> 6.6` | Rack server for `hive web`; `Hive::Commands::Web` mounts `Hive::Web::App` on a Puma TCP listener. |
+| `rack-protection` | `~> 4.1` | Sinatra/Rack request protection used by the hivebox web app, with host authorization excluded because the configured external origin can sit behind a tunnel or reverse proxy. |
+| `sinatra` | `~> 4.1` | Web framework for `Hive::Web::App` and route files under `lib/hive/web/routes/`. |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
@@ -40,6 +45,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
+| `rack-test` | `~> 2.2` | Test-only Rack request driver for `test/unit/web/app_test.rb` and related hivebox web tests. |
 | `rubocop` | `~> 1.87` (locked 1.87.0) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 
 ## Standard library reliance

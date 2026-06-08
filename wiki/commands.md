@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, packaging/docker/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-06-09
 tags: [commands, api]
@@ -20,6 +20,7 @@ does not publish one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/web/**/*.rb`
+- `packaging/docker/entrypoint.sh`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
 
@@ -82,7 +83,9 @@ CLI.
 `hive web` starts the Sinatra/Puma browser surface documented in
 [[commands/web]]. The web app reuses the same status, approval, daemon-queue,
 agent-auth, repo, and Telegram setup contracts as the CLI/bot/daemon stack; it
-does not introduce a separate workflow engine.
+does not introduce a separate workflow engine. Docker packaging adds the
+`hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
+directories and then runs `Hive::Web::Supervisor` unless custom argv is passed.
 
 ### E2E Harness
 

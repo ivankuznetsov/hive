@@ -323,6 +323,29 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "Why:"
   end
 
+  def test_log_scroll_window_is_stable_after_shared_wrap_refactor
+    # Regression guard for moving RedStatusDetail onto the shared
+    # Format.wrap: the log panel's visible window is driven by
+    # body_lines.length, which counts the wrapped "Why:" summary rows.
+    # A wrap behavior change that added or dropped a summary row — e.g.
+    # mishandling a blank/whitespace line — would shift this "last N of M"
+    # window. Pin it at a fixed geometry so any such drift fails loudly.
+    lines = (1..50).map { |i| "line-#{i}" }
+    fixed_geometry = Hive::Tui::Model.initial.with(
+      mode: :red_status_detail,
+      red_status_detail_state: state_with_log(lines),
+      cols: 100,
+      rows: 30
+    )
+
+    output = Hive::Tui::Views::RedStatusDetail.render(fixed_geometry)
+
+    assert_match(/Log · last 10 of 50 lines/, output,
+                 "the shared-wrap refactor must not shift the log scroll window")
+    assert_includes output, "line-50", "the newest log line must remain visible"
+    refute_includes output, "line-40", "lines above the window must stay hidden"
+  end
+
   def test_sanitizes_ansi_sequences_from_diagnostic_text
     diagnostic = {
       "summary" => "\e[31mbad\e[0m",

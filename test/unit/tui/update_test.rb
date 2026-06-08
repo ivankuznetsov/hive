@@ -95,34 +95,22 @@ class HiveTuiUpdateTest < Minitest::Test
 
   def test_window_sized_in_grid_mode_leaves_help_scroll_offset_untouched
     # The re-clamp only runs in :help mode. Resizing in :grid must leave
-    # help_scroll_offset alone (it carries a stale value until help opens)
-    # and must not invoke the HelpOverlay re-wrap. An inverted guard would
-    # both clamp the offset to 0 and call max_scroll_offset — this pins
-    # both: the offset stays put and the re-clamp is never reached.
-    # (Minitest::Mock.stub isn't bundled here, so we patch the singleton
-    # method directly — same approach as rebase_test.rb.)
+    # help_scroll_offset alone (it carries a stale value until help opens).
+    # The behavioral assertions below already pin the short-circuit: a stale
+    # 1_000 offset survives a resize untouched, which only holds if the
+    # :grid branch never clamps. No need to monkey-patch the overlay to
+    # observe the internal call — that coupled the test to an implementation
+    # detail without strengthening the contract.
     starting = model.with(mode: :grid, cols: 80, rows: 14, help_scroll_offset: 1_000)
-    overlay = Hive::Tui::Views::HelpOverlay
-    original = overlay.method(:max_scroll_offset)
-    called = false
-    overlay.define_singleton_method(:max_scroll_offset) do |*args|
-      called = true
-      original.call(*args)
-    end
 
-    begin
-      new_model, _cmd = Hive::Tui::Update.apply(
-        starting,
-        Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 200)
-      )
-    ensure
-      overlay.singleton_class.send(:remove_method, :max_scroll_offset)
-      overlay.define_singleton_method(:max_scroll_offset, original)
-    end
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 200)
+    )
 
     assert_equal :grid, new_model.mode
-    assert_equal 1_000, new_model.help_scroll_offset
-    refute called, "re-clamp (HelpOverlay.max_scroll_offset) must not run in :grid mode"
+    assert_equal 1_000, new_model.help_scroll_offset,
+                 "a :grid-mode resize must not clamp the stale help offset"
   end
 
   # ---------- SnapshotArrived ----------
@@ -1710,6 +1698,74 @@ class HiveTuiUpdateTest < Minitest::Test
     )
 
     assert_same starting, new_model
+  end
+
+  def test_help_scroll_unknown_direction_logs_parity_warning
+    # The unknown-direction branch logs for parity with the red-status
+    # scroll handler. Pin the log call so it can't be silently deleted —
+    # the offset-unchanged assertion alone wouldn't catch its removal.
+    require "hive/tui/debug"
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 2)
+    debug = Hive::Tui::Debug
+    original = debug.method(:log)
+    logged = []
+    debug.define_singleton_method(:log) { |tag, message = nil| logged << [ tag, message ] }
+
+    begin
+      Hive::Tui::Update.apply(
+        starting,
+        Hive::Tui::Messages::HelpScroll.new(direction: :sideways, amount: 3)
+      )
+    ensure
+      debug.singleton_class.send(:remove_method, :log)
+      debug.define_singleton_method(:log, original)
+    end
+
+    assert(logged.any? { |tag, message| tag == "help_scroll" && message.to_s.include?("unknown direction") },
+           "an unknown scroll direction must emit the parity log call")
+  end
+
+  def test_help_end_key_route_clamps_to_bottom
+    # End-to-end via the real key route (KeyMap → HelpScroll → Update),
+    # not the raw SCROLL_TO_EDGE constant: proves End jumps to the bottom.
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 0)
+    max = Hive::Tui::Views::HelpOverlay.max_scroll_offset(starting)
+    msg = Hive::Tui::KeyMap.message_for(mode: :help, key: :key_end, row: nil, pane_focus: :left)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, msg)
+
+    assert_kind_of Hive::Tui::Messages::HelpScroll, msg
+    assert_operator max, :>, 0
+    assert_equal max, new_model.help_scroll_offset, "End must clamp to the bottom via the key route"
+  end
+
+  def test_help_g_key_route_clamps_to_bottom
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 0)
+    max = Hive::Tui::Views::HelpOverlay.max_scroll_offset(starting)
+    msg = Hive::Tui::KeyMap.message_for(mode: :help, key: "G", row: nil, pane_focus: :left)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, msg)
+
+    assert_kind_of Hive::Tui::Messages::HelpScroll, msg
+    assert_equal max, new_model.help_scroll_offset, "G must clamp to the bottom via the key route"
+  end
+
+  def test_help_page_down_advances_rendered_viewport_by_page_amount
+    # Offset arithmetic and render-at-offset are checked separately
+    # elsewhere; this ties them together so a swap of the line/page scroll
+    # amounts (1 vs 10) would be caught: a page-down must push the title
+    # out of view and surface the line a page further down.
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 0)
+    content = Hive::Tui::Views::HelpOverlay.content_lines(starting)
+    page = 10
+    paged, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: page)
+    )
+    out = Hive::Tui::Views::HelpOverlay.render(paged)
+    surfaced = content[page..].find { |line| !line.strip.empty? }
+
+    assert_equal page, paged.help_scroll_offset, "PgDn must advance the offset by the page amount"
+    refute_includes out, content.first, "the title must scroll out of the viewport after a page-down"
+    assert_includes out, surfaced, "the line a page further down must become visible"
   end
 
   def test_show_help_resets_offset_on_re_entry_while_scrolled

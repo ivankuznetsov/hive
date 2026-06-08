@@ -185,4 +185,67 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     assert_operator out.lines.count, :<=, tiny.rows
     assert out.lines.all? { |line| Hive::Tui::Views::Format.display_width(line.chomp) <= tiny.cols }
   end
+
+  def test_degenerate_height_collapses_to_bare_dimension_fallback
+    # rows: 1 leaves no room for the full TOO_SMALL_MESSAGE even after
+    # wrapping, so render_too_small must collapse to the bare "need 10×40"
+    # guidance — the exact `lines.length > height` branch the others miss.
+    out = Hive::Tui::Views::HelpOverlay.render(model(cols: 30, rows: 1))
+
+    assert_equal 1, out.lines.count, "a single-row terminal must emit exactly one line"
+    assert_includes out, "need 10×40"
+    refute_includes out, "Terminal too small", "the full message can't fit in one row"
+  end
+
+  def test_keybinding_rows_keep_key_column_alignment_at_wide_width
+    # The cheatsheet's `%-7s` key column + 2-space indent must survive
+    # wrapping verbatim on a wide terminal (no reflow when a line fits).
+    # A regression that collapses internal whitespace turns "  b        run…"
+    # into "b run…", destroying the column the feature exists to provide.
+    lines = Hive::Tui::Views::HelpOverlay.content_lines(model(cols: 120, rows: 60))
+    binding_rows = lines.select { |l| l.start_with?("  ") && l.strip.split(/\s{2,}/).length >= 2 }
+
+    refute_empty binding_rows, "expected indented `  key      desc` rows"
+    assert(binding_rows.all? { |l| l.match?(/\A {2}\S+ {2,}\S/) },
+           "each binding row must keep its 2-space indent and a multi-space key/desc gap")
+  end
+
+  def test_scrollbar_thumb_sits_mid_gutter_for_mid_range_offset
+    # Thumb position interpolates ((offset/max)*(rows-thumb)).round. At a
+    # mid-range offset the thumb must sit strictly between the top and
+    # bottom rows — pinning the interpolation so an inverted or off-by-one
+    # mapping (only checked at the extremes elsewhere) fails here.
+    total = 40
+    rows = 10
+    max_offset = total - rows
+    mid = Hive::Tui::Views::HelpOverlay.scrollbar_lines(total: total, rows: rows, offset: max_offset / 2)
+    first_thumb = mid.index("█")
+    last_thumb = mid.rindex("█")
+
+    assert first_thumb, "a mid-range offset must still draw a thumb"
+    assert_operator first_thumb, :>, 0, "mid-range thumb must leave the top row"
+    assert_operator last_thumb, :<, rows - 1, "mid-range thumb must not reach the bottom row"
+  end
+
+  def test_compact_box_does_not_pad_to_full_height_when_content_fits
+    # On a tall terminal a short cheatsheet must render compact, not
+    # balloon into a near-empty full-screen box padded with blank rows.
+    tall = model(cols: 120, rows: 90)
+    out = Hive::Tui::Views::HelpOverlay.render(tall)
+
+    assert_operator out.lines.count, :<, tall.rows,
+                    "a fitting cheatsheet must not pad the box to the full terminal height"
+  end
+
+  def test_footer_scroll_hint_truncates_at_narrow_width
+    # At a width where DISMISS_HINT can't fit, the footer is truncated to
+    # box_width - PADDING_COLS: the close affordance leads and survives,
+    # the trailing scroll-key portion is dropped.
+    narrow = model(cols: Hive::Tui::Views::HelpOverlay::MIN_COLS, rows: 24)
+    out = Hive::Tui::Views::HelpOverlay.render(narrow)
+
+    assert_includes out, "Esc/? close", "the leading close affordance must survive truncation"
+    refute_includes out, "PgUp/PgDn scroll",
+                     "the trailing scroll-key hint must be dropped when the footer is truncated"
+  end
 end

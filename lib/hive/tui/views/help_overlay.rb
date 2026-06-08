@@ -44,6 +44,20 @@ module Hive
         OUTER_MARGIN_COLS = 4
         SCROLLBAR_WIDTH = 1
         MIN_CONTENT_WIDTH = 8
+        # Column the description starts in, matching `build_lines`'
+        # `format("  %-7s  %s", …)`: 2-space indent + 7-wide key + 2 gap.
+        # Wrapped continuation rows of a binding hang here so they don't
+        # read as a fresh key entry.
+        DESCRIPTION_INDENT = 11
+
+        # One wrapped content row: its text plus whether it is a section
+        # header (title / mode header). Named so readers don't destructure
+        # an anonymous `[String, Boolean]` tuple and so the styling flag
+        # isn't boolean-blind.
+        Segment = Data.define(:text, :header) do
+          def header? = header
+        end
+        PADDING_SEGMENT = Segment.new(text: "", header: false).freeze
 
         module_function
 
@@ -52,19 +66,22 @@ module Hive
 
           rows = scrollable_rows(model)
           content = content_rows(model)
-          # Derive the bound from the content we already wrapped rather
-          # than calling `max_scroll_offset` (which re-wraps everything).
-          max_offset = [ content.length - rows, 0 ].max
+          max_offset = max_scroll_offset(model, content.length)
           offset = [ [ model.help_scroll_offset.to_i, 0 ].max, max_offset ].min
+          # Only pad to the full viewport height while the content
+          # overflows (so the scrollbar track stays put during scroll).
+          # When everything fits, leave the box compact rather than
+          # ballooning a short cheatsheet into a near-empty full-screen box.
+          overflow = content.length > rows
           visible = Array(content[offset, rows]).first(rows)
-          visible += Array.new(rows - visible.length, [ "", false ]) if visible.length < rows
+          visible += Array.new(rows - visible.length, PADDING_SEGMENT) if overflow && visible.length < rows
 
           body = Lipgloss.join_vertical(
             Lipgloss::TOP,
             scroll_window(
               model,
               visible,
-              scrollbar_lines(total: content.length, rows: rows, offset: offset)
+              scrollbar_lines(total: content.length, rows: visible.length, offset: offset)
             ),
             footer_line(model)
           )
@@ -92,7 +109,7 @@ module Hive
         end
 
         def content_lines(model)
-          content_rows(model).map(&:first)
+          content_rows(model).map(&:text)
         end
 
         # Wrapped content paired with a header flag. The text stays plain
@@ -102,13 +119,27 @@ module Hive
         # and per-mode sections read as a hierarchy, matching the sibling
         # panes (archive/projects/tasks) that style after width-bounding.
         # @api private — exposed for tests.
+        #
+        # Memoized by inner content width: both the render path and the
+        # Update-layer scroll clamp (`max_scroll_offset`) ask for the
+        # wrapped content on every keystroke, and the wrap depends only on
+        # the width (the bindings are a frozen constant). Caching by width
+        # keeps a per-scroll-key full re-wrap from running. The TUI render
+        # and Update run on the same loop thread, so the plain Hash is safe.
         def content_rows(model)
           width = inner_content_width(model)
+          (@content_rows_cache ||= {})[width] ||= build_content_rows(width)
+        end
+
+        def build_content_rows(width)
           build_lines.flat_map do |line|
             header = header_line?(line)
-            Format.wrap(line, width).map { |segment| [ segment, header ] }
+            indent = header ? 0 : DESCRIPTION_INDENT
+            Format.wrap(line, width, subsequent_indent: indent)
+                  .map { |segment| Segment.new(text: segment, header: header) }
           end
         end
+        private_class_method :build_content_rows
 
         def header_line?(line)
           line == TITLE || MODE_HEADERS.value?(line)
@@ -129,8 +160,12 @@ module Hive
           ].max
         end
 
-        def max_scroll_offset(model)
-          [ content_lines(model).length - scrollable_rows(model), 0 ].max
+        # Single source of the scroll bound. `render` passes the length of
+        # the content it already wrapped so the bound isn't recomputed from
+        # a second wrap; the Update-layer clamp calls it with no total and
+        # lets it derive the length (cheap via the `content_rows` memo).
+        def max_scroll_offset(model, total_rows = content_rows(model).length)
+          [ total_rows - scrollable_rows(model), 0 ].max
         end
 
         def box_width(model)
@@ -156,9 +191,9 @@ module Hive
 
         def scroll_window(model, visible, scrollbar)
           width = inner_content_width(model)
-          content = visible.map do |line, header|
-            padded = Format.ljust_cells(line, width)
-            header ? Styles::HEADER.render(padded) : padded
+          content = visible.map do |segment|
+            padded = Format.ljust_cells(segment.text, width)
+            segment.header? ? Styles::HEADER.render(padded) : padded
           end
           Lipgloss.join_horizontal(
             Lipgloss::TOP,

@@ -236,6 +236,11 @@ module Hive
           "Hive does not have a diagnosis yet — try Open in agent to inspect."
         end
 
+        # Routes through the shared `Format.wrap`. Deliberate behavior
+        # change vs. the old local wrapper: the fit test is now cell-aware
+        # (`display_width`) rather than `String#length`, so wide glyphs
+        # (CJK/emoji) in a captured log line wrap at the correct visual
+        # column instead of overflowing the box.
         def wrapped(text, width)
           Views::Format.wrap(safe(text), width)
         end

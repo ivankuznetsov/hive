@@ -2,6 +2,7 @@ require "test_helper"
 require "fileutils"
 require "tmpdir"
 require "hive/markers"
+require "hive/task_meta"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
@@ -2606,6 +2607,58 @@ end
     # keep this a silent no-op rather than raising.
     dispatcher.send(:enforce_child_timeouts, now: T0)
     refute events_include?(logger, :child_timeout)
+  end
+
+  # Wiring check: a tick must drive the display-name backfiller over the
+  # status rows. We swap in a backfiller with a fake spawn so no real
+  # `hive generate-name` subprocess is started, and assert the missing-
+  # name row produces a display_name_backfill event without disturbing
+  # the rest of the tick.
+  def test_tick_invokes_display_name_backfiller
+    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
+    Hive::TaskMeta.write(folder, id: 1, slug: "s1", display_name: nil)
+    rows = [ row(action: "working", marker: "agent_working", command: nil,
+                 folder: folder, claude_pid_alive: true) ]
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
+
+    spawned = []
+    backfiller = Hive::Daemon::DisplayNameBackfiller.new(
+      logger: dispatcher.instance_variable_get(:@logger),
+      dry_run: false,
+      spawn: ->(f) { spawned << f; Process.pid }
+    )
+    dispatcher.instance_variable_set(:@display_name_backfiller, backfiller)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ folder ], spawned,
+                 "tick must drive the backfiller to spawn generate-name for the unnamed task"
+    assert events_include?(logger, :display_name_backfill),
+           "tick must emit a display_name_backfill event"
+    refute events_include?(logger, :fatal),
+           "backfiller wiring must not crash the tick"
+  end
+
+  # dispatcher.rb 239: a backfiller that raises must be caught by the
+  # tick's defensive rescue so a backfiller bug can't crash the tick (and
+  # trip the unit's restart-loop cap). The error is surfaced as :fatal.
+  def test_tick_survives_display_name_backfiller_raising
+    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
+    rows = [ row(action: "working", marker: "agent_working", command: nil,
+                 folder: folder, claude_pid_alive: true) ]
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
+
+    exploding = Object.new
+    def exploding.backfill(*); raise "backfiller boom"; end
+    dispatcher.instance_variable_set(:@display_name_backfiller, exploding)
+
+    dispatcher.tick(now: T0)
+
+    fatal = logger.events.find do |(n, a)|
+      n == :fatal && a[:message].to_s.include?("display_name_backfiller raised")
+    end
+    refute_nil fatal, "a raising backfiller must be caught and logged as :fatal"
+    assert_includes fatal[1][:message], "backfiller boom"
   end
 
   private

@@ -11,6 +11,7 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
+require "hive/daemon/display_name_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
@@ -95,6 +96,14 @@ module Hive
           controller: @controller,
           logger: @logger,
           grace_sec: agent_marker_grace_sec
+        )
+        # Additive self-heal for tasks whose one-shot name generation at
+        # `hive new` never landed (agent/codex outage). Re-spawns
+        # `hive generate-name <folder>` on later ticks; never touches
+        # markers or dispatch.
+        @display_name_backfiller = DisplayNameBackfiller.new(
+          logger: @logger,
+          dry_run: @dry_run
         )
 
         @shutdown = false
@@ -216,6 +225,19 @@ module Hive
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
+        # Self-heal tasks left showing their raw slug because name
+        # generation never landed at `hive new`. Purely additive and
+        # marker-free, so order relative to dispatch is irrelevant — but
+        # it shares the healer's defensive rescue so a backfiller bug
+        # can't crash the tick (and trip the unit's restart-loop cap).
+        begin
+          @display_name_backfiller.backfill(result.rows, now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "display_name_backfiller raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -1497,6 +1519,13 @@ module Hive
             "agent_marker_grace_sec",
             Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
           )
+        )
+        # Rebuild alongside the healer on SIGHUP reload so a future
+        # operator-tunable knob (e.g. max_per_tick) would take effect
+        # within one tick; today it carries only the dry_run flag.
+        @display_name_backfiller = DisplayNameBackfiller.new(
+          logger: @logger,
+          dry_run: @dry_run
         )
         @enabled_cache.clear
         @logger.event(:config_reloaded)

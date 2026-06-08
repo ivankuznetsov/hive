@@ -3,7 +3,7 @@ title: hive generate-name
 type: command
 source: lib/hive/commands/generate_name.rb, lib/hive/display_name/generator.rb, lib/hive/display_name/sanitizer.rb, templates/display_name_prompt.md.erb
 created: 2026-06-03
-updated: 2026-06-03
+updated: 2026-06-08
 tags: [command, display-name, task-id]
 ---
 
@@ -51,7 +51,7 @@ Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, nam
 hive generate-name <task_dir>
 ```
 
-That spawn redirects the wrapper command's stdout/stderr to `<state_home>/logs/display-name.log` and intentionally does not block capture.
+That spawn redirects the wrapper command's stdout/stderr to `<state_home>/logs/display-name.log` and intentionally does not block capture. `Hive::Daemon::DisplayNameBackfiller` may start the same wrapper command on later daemon ticks for tasks whose sidecar name is still nil/blank; it keeps an in-memory `{pid, at}` inflight map to avoid double-spawning one folder while a retry is running, evicts entries older than 120 seconds to avoid reused-pid suppression, and a successful name naturally stops future retries.
 
 ## Tests
 

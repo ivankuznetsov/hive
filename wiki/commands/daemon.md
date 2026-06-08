@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [command, daemon, automation, json]
 ---
 
@@ -53,7 +53,14 @@ value) and routes. `Hive::Daemon::StaleAgentHealer` runs before this policy
 step, so selected no-live-lock `error` rows may be cleared into markerless
 edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
 `7-artifacts` / `8-finalize` `reason=tmux_session_terminated` or
-`reason=agent_orphaned`.
+`reason=agent_orphaned`. Independently, `Hive::Daemon::DisplayNameBackfiller`
+runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
+bounded by `max_per_tick`) for any task whose `display_name` never landed at
+`hive new`, so an interrupted name generation self-heals instead of leaving the
+task showing its raw slug. Per-folder inflight state stores `{pid, at}` and
+expires after 120 seconds so a reused or foreign pid cannot suppress retries
+forever. This is purely cosmetic — it touches no markers and never advances a
+stage.
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|

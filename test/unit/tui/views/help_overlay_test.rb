@@ -102,6 +102,26 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     assert_includes out, "█"
   end
 
+  def test_scrollbar_thumb_tracks_offset_to_top_and_bottom
+    total = 40
+    rows = 10
+    top = Hive::Tui::Views::HelpOverlay.scrollbar_lines(total: total, rows: rows, offset: 0)
+    bottom = Hive::Tui::Views::HelpOverlay.scrollbar_lines(total: total, rows: rows, offset: total - rows)
+
+    assert_equal "█", top.first, "thumb must sit at the top row when not scrolled"
+    refute_equal "█", top.last, "thumb must not occupy the bottom row at offset 0"
+    assert_equal "█", bottom.last, "thumb must reach the bottom row at max offset"
+    refute_equal "█", bottom.first, "thumb must leave the top row at max offset"
+  end
+
+  def test_footer_close_affordance_survives_truncation_at_min_width
+    narrow = model(cols: Hive::Tui::Views::HelpOverlay::MIN_COLS, rows: Hive::Tui::Views::HelpOverlay::MIN_ROWS)
+    out = Hive::Tui::Views::HelpOverlay.render(narrow)
+
+    assert_includes out, "Esc/? close",
+                    "the dismiss affordance must survive footer truncation at the minimum width"
+  end
+
   def test_non_overflow_omits_scrollbar_thumb
     out = Hive::Tui::Views::HelpOverlay.render(model(cols: 80, rows: 200))
 
@@ -117,6 +137,25 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     assert_operator content.length, :>, Hive::Tui::Views::HelpOverlay.build_lines.length
     assert content.all? { |line| Hive::Tui::Views::Format.display_width(line) <= inner_width }
     assert out.lines.all? { |line| Hive::Tui::Views::Format.display_width(line.chomp) <= narrow.cols }
+  end
+
+  def test_minimum_size_renders_bordered_overlay
+    out = Hive::Tui::Views::HelpOverlay.render(
+      model(cols: Hive::Tui::Views::HelpOverlay::MIN_COLS, rows: Hive::Tui::Views::HelpOverlay::MIN_ROWS)
+    )
+
+    assert_match(/[┌┐└┘─│]/, out, "at exactly the minimum size the bordered overlay must render")
+    assert_includes out, "hive tui — keybindings"
+    refute_includes out, "Terminal too small"
+  end
+
+  def test_one_column_below_minimum_falls_back
+    out = Hive::Tui::Views::HelpOverlay.render(
+      model(cols: Hive::Tui::Views::HelpOverlay::MIN_COLS - 1, rows: Hive::Tui::Views::HelpOverlay::MIN_ROWS)
+    )
+
+    assert_includes out, "Terminal too small",
+                    "one column under MIN_COLS must trip the too-small fallback"
   end
 
   def test_too_small_terminal_renders_centered_fallback_without_border

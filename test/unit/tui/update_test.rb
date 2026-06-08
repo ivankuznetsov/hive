@@ -1670,6 +1670,24 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_same starting, new_model
   end
 
+  def test_help_scroll_unknown_direction_leaves_offset_unchanged
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 2)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :sideways, amount: 3)
+    )
+
+    assert_same starting, new_model
+  end
+
+  def test_show_help_resets_offset_on_re_entry_while_scrolled
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 12)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::SHOW_HELP)
+
+    assert_equal :help, new_model.mode
+    assert_equal 0, new_model.help_scroll_offset
+  end
+
   def test_open_filter_prompt_pre_fills_buffer_with_active_filter
     starting = model.with(filter: "auth")
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_FILTER_PROMPT)

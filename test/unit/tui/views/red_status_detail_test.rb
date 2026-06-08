@@ -301,6 +301,28 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_match(/\ARED ·/, output.lines.first)
   end
 
+  def test_summary_wraps_wide_characters_by_cell_width
+    # The `wrapped` helper delegates to Format.wrap, which measures
+    # display cells (not codepoints), so a multi-cell CJK summary must
+    # stay inside the terminal margin after wrapping.
+    diagnostic = { "summary" => ("課題の詳細な説明 " * 6).strip, "artifact_paths" => [] }
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: diagnostic), cols: 60, rows: 24))
+
+    output.lines.each do |line|
+      assert_operator Hive::Tui::Views::Format.display_width(line.chomp), :<=, 60,
+                      "wide-char summary must wrap by terminal cells, not codepoint count"
+    end
+    assert_includes output, "Why:"
+  end
+
+  def test_empty_summary_still_renders_a_why_line
+    # Format.wrap returns [""] (never []) for blank input, so the
+    # "Why:" label survives even when the diagnostic summary is missing.
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: { "summary" => "" })))
+
+    assert_includes output, "Why:"
+  end
+
   def test_sanitizes_ansi_sequences_from_diagnostic_text
     diagnostic = {
       "summary" => "\e[31mbad\e[0m",

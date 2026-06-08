@@ -5,6 +5,7 @@ require "shellwords"
 require "stringio"
 require "hive/config"
 require "hive/git_ops"
+require "hive/worktree"
 require "hive/llm_wiki_bootstrap"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
@@ -496,7 +497,7 @@ module Hive
       end
 
       def worktree_root
-        File.expand_path("~/Dev/#{File.basename(@project_path)}.worktrees")
+        Hive::Worktree.default_worktree_root(File.basename(@project_path))
       end
 
       # Minimal ANSI palette for one-shot CLI summaries. Honors

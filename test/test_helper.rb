@@ -14,6 +14,16 @@ require "shellwords"
 require "English"
 require "hive"
 
+# Route the default worktree base (`<base>/<project>.worktrees`) into a
+# tmp sandbox so tests that exercise worktree creation never seed the
+# developer's real ~/Dev. `||=` lets an explicit outer override win, and
+# the `hive-test-wtbase*` name lives under Dir.tmpdir so `rake test:clean_tmp`
+# also sweeps it. Cleaned on suite exit.
+ENV["HIVE_WORKTREE_BASE"] ||= Dir.mktmpdir("hive-test-wtbase")
+Minitest.after_run do
+  FileUtils.rm_rf(ENV["HIVE_WORKTREE_BASE"]) if ENV["HIVE_WORKTREE_BASE"]&.include?("hive-test-wtbase")
+end
+
 if ENV["HIVE_COVERAGE"]
   HiveTestCoverage.install_reporter!
   HiveTestCoverage.load_all_sources! unless ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"

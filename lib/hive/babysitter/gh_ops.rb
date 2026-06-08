@@ -40,24 +40,38 @@ module Hive
         result(status.success?, out, err)
       end
 
-      # Rebase the worktree's HEAD onto origin/<base_ref> so a green-but-
-      # BEHIND PR becomes up-to-date with its base. Fetches the base first
-      # (a stale local origin/<base> would rebase onto the wrong commit).
-      # A rebase that hits conflicts is aborted (best-effort) and reported
-      # as :conflict so the caller leaves it for a human rather than
-      # force-pushing a half-rebased branch.
+      # Rebase the worktree's HEAD onto the base ref so a green-but-BEHIND
+      # PR becomes up-to-date with its base. Fetches the base first (a stale
+      # local origin/<base> would rebase onto the wrong commit), then rebases
+      # onto FETCH_HEAD.
+      #
+      # The fetch targets the remote's effective *push* URL rather than the
+      # bare `origin` remote. Origin's fetch URL may be SSH (git@github.com:…),
+      # which fails headless: the babysitter's systemd --user service has no
+      # SSH agent (SSH_AUTH_SOCK unset) and Hive::Gh.capture3 forces
+      # GIT_SSH_COMMAND="ssh -o BatchMode=yes", so an SSH fetch dies with
+      # "Permission denied (publickey)". The push URL is HTTPS (resolved via
+      # gh's credential helper) and already works for the force-push, so if we
+      # can push to a remote we can fetch the base over that same transport.
+      # If the push URL can't be resolved we fall back to bare `origin` so
+      # non-github / unusual setups behave as before.
+      #
+      # A rebase that hits conflicts is aborted (best-effort) and reported as
+      # :conflict so the caller leaves it for a human rather than force-pushing
+      # a half-rebased branch.
       def rebase_onto_base(worktree, base_ref, cfg:, dry_run:)
         return rebase_result(:success, "[dry-run] git rebase skipped", "") if dry_run
 
+        src = fetch_source(worktree, cfg: cfg)
         fetch_out, fetch_err, fetch_status = Hive::Gh.capture3(
-          "git", "fetch", "origin", base_ref,
+          "git", "fetch", src, base_ref,
           chdir: worktree,
           cfg: cfg
         )
         return rebase_result(:failure, fetch_out, fetch_err) unless fetch_status.success?
 
         out, err, status = Hive::Gh.capture3(
-          "git", "rebase", "origin/#{base_ref}",
+          "git", "rebase", "FETCH_HEAD",
           chdir: worktree,
           cfg: cfg
         )
@@ -69,6 +83,22 @@ module Hive
           cfg: cfg
         )
         rebase_result(:conflict, "#{out}\n#{abort_out}", "#{err}\n#{abort_err}")
+      end
+
+      # Resolve the remote's effective push URL so the base fetch uses the
+      # same (working, HTTPS) transport as the force-push. Falls back to the
+      # literal "origin" when the push URL can't be resolved (command failed
+      # or returned empty) so non-github / unusual remotes behave as before.
+      def fetch_source(worktree, cfg:)
+        out, _err, status = Hive::Gh.capture3(
+          "git", "remote", "get-url", "--push", "origin",
+          chdir: worktree,
+          cfg: cfg
+        )
+        push_url = out.to_s.strip
+        return "origin" unless status.success? && !push_url.empty?
+
+        push_url
       end
 
       def add_label(worktree, pr_number, label, cfg:, dry_run:)

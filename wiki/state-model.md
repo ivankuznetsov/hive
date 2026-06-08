@@ -1,10 +1,10 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb
 created: 2026-04-25
 updated: 2026-06-08
-tags: [state, filesystem, model, architecture, review, task-id, archive]
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive]
 ---
 
 **TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. The workflow "data model" is the directory layout, marker grammar, and YAML schemas described below.
@@ -66,7 +66,7 @@ slug: add-foo-260603-abcd
 display_name:
 ```
 
-`Hive::Task#id`, `#display_name`, and `#display_label` are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil}`; `display_label` then falls back to the folder slug. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserves existing display names, and generates missing display names with `Hive::DisplayName::Generator` after the locked id/config/stage migration completes. Patrol review handoff writes `meta.yml` with a normal `Hive::TaskCounter` id and display name `Patrol: <finding title>` because the task joins the standard review flow after the PR opens; only counter lock contention leaves that id null.
+`Hive::Task#id`, `#display_name`, and `#display_label` are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil}`; `display_label` then falls back to the folder slug. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserves existing display names, and generates missing display names with `Hive::DisplayName::Generator` after the locked id/config/stage migration completes. When the global daemon is running, `Hive::Daemon::DisplayNameBackfiller` also retries tasks whose sidecar `display_name` remains nil/blank by spawning `hive generate-name <folder>` on later ticks; this is cosmetic sidecar repair only, so the daemon does not write task ids, markers, or stage transitions. Patrol review handoff writes `meta.yml` with a normal `Hive::TaskCounter` id and display name `Patrol: <finding title>` because the task joins the standard review flow after the PR opens; only counter lock contention leaves that id null.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 

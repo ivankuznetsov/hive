@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-08
 tags: [command, capture, slug, task-id]
 ---
 
@@ -67,7 +67,7 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
 5. If attachments were supplied, copy them into `assets/` beside `idea.md`.
 6. Allocate a monotonic task id via `Hive::TaskCounter.next!` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
 7. `Hive::GitOps#hive_commit(stage_name: "1-inbox", slug:, action: "captured")` on `hive/state`. Diff-empty commits are skipped silently.
-8. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation.
+8. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; if the task still has a blank sidecar name later, a running daemon retries the same command from `Hive::Daemon::DisplayNameBackfiller`.
 9. Print `hive: captured <path>` and the `mv ... && hive run ...` next-step hint.
 
 ## Task metadata
@@ -80,7 +80,7 @@ slug: add-inbox-filter-260603-abcd
 display_name:
 ```
 
-`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until a later writer fills it.
+`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until the initial name generator, a manual `hive generate-name`, `hive migrate`, or the daemon backfiller fills it.
 
 ## Tests
 

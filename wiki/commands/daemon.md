@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [command, daemon, automation, json]
 ---
 

@@ -3,14 +3,15 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [daemon, module, automation, dispatcher]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
 `ConcurrencyController`) is separated from I/O (`StatusConsumer`,
-`ChildSupervisor`, `Logger`, `PrMergeWatcher`, `StaleAgentHealer`) so
+`ChildSupervisor`, `Logger`, `PrMergeWatcher`, `StaleAgentHealer`,
+`DisplayNameBackfiller`) so
 the safety-relevant decisions are unit-testable without forking.
 
 ## Module map

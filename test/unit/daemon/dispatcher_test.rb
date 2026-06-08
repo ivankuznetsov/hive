@@ -2639,6 +2639,28 @@ end
            "backfiller wiring must not crash the tick"
   end
 
+  # dispatcher.rb 239: a backfiller that raises must be caught by the
+  # tick's defensive rescue so a backfiller bug can't crash the tick (and
+  # trip the unit's restart-loop cap). The error is surfaced as :fatal.
+  def test_tick_survives_display_name_backfiller_raising
+    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
+    rows = [ row(action: "working", marker: "agent_working", command: nil,
+                 folder: folder, claude_pid_alive: true) ]
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
+
+    exploding = Object.new
+    def exploding.backfill(*); raise "backfiller boom"; end
+    dispatcher.instance_variable_set(:@display_name_backfiller, exploding)
+
+    dispatcher.tick(now: T0)
+
+    fatal = logger.events.find do |(n, a)|
+      n == :fatal && a[:message].to_s.include?("display_name_backfiller raised")
+    end
+    refute_nil fatal, "a raising backfiller must be caught and logged as :fatal"
+    assert_includes fatal[1][:message], "backfiller boom"
+  end
+
   private
 
   def events_include?(logger, name)

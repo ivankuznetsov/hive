@@ -24,9 +24,11 @@ module Hive
     #   - Once a task's name is set, the next status read no longer flags
     #     it (the meta read returns a present display_name), so it is a
     #     natural fixed point — no marker write, no state to reconcile.
-    #   - `@inflight` (folder => pid) prevents double-spawning while a
-    #     generate-name child is still running; finished pids are reaped
-    #     non-blockingly at the top of every `backfill`.
+    #   - `@inflight` (folder => {pid:, at:}) prevents double-spawning
+    #     while a generate-name child is still running; finished pids are
+    #     reaped non-blockingly at the top of every `backfill`, and an
+    #     entry that outlives MAX_INFLIGHT_AGE_SEC is evicted so a reused
+    #     pid can never pin a folder permanently.
     #   - `max_per_tick` bounds how many fresh spawns a single tick may
     #     start, so a large backlog (e.g. after an outage) drains over
     #     several ticks instead of fork-bombing the host.
@@ -36,6 +38,17 @@ module Hive
     #     the only spacing — which is acceptable for a cosmetic backfill.
     class DisplayNameBackfiller
       DEFAULT_MAX_PER_TICK = 2
+
+      # Hard ceiling on how long an inflight entry may live. Liveness is
+      # decided by `kill(0)` (see reap_inflight), but a pid can be reused
+      # by an unrelated process after our child is reaped: same-user reuse
+      # makes kill(0) succeed ("alive"), foreign-user reuse raises EPERM
+      # (also treated "alive"). Either way the entry would be pinned
+      # forever, permanently disabling backfill for that folder. This TTL
+      # (≈2× generate-name's 60s timeout) evicts such stuck entries so a
+      # folder is never blocked past the point its child could plausibly
+      # still be running.
+      MAX_INFLIGHT_AGE_SEC = 120
 
       def initialize(logger:, dry_run: false, spawn: nil, max_per_tick: DEFAULT_MAX_PER_TICK)
         @logger = logger
@@ -50,13 +63,12 @@ module Hive
       # `hive generate-name`. `now:` matches the convention used by every
       # other daemon component so a single tick observes one frozen clock.
       def backfill(rows, now: Time.now)
-        _ = now
-        reap_inflight
+        reap_inflight(now)
         spawned = 0
         rows.each do |row|
           break if spawned >= @max_per_tick
 
-          spawned += 1 if consider_row(row)
+          spawned += 1 if consider_row(row, now)
         end
       rescue StandardError => e
         # Belt-and-suspenders: even though every per-row step is itself
@@ -73,13 +85,13 @@ module Hive
       # Returns true only when a fresh spawn was started this tick (so
       # the caller can count it against max_per_tick). A single bad row
       # or meta is swallowed here so the rest of the row set still runs.
-      def consider_row(row)
+      def consider_row(row, now)
         folder = row_folder(row)
         return false if folder.nil? || folder.empty?
         return false if @inflight.key?(folder)
         return false unless display_name_missing?(folder)
 
-        backfill_row(row, folder)
+        backfill_row(row, folder, now)
       rescue StandardError => e
         @logger.event(:fatal,
                       message: "display_name_backfiller row raised: #{e.class}: #{e.message}",
@@ -99,12 +111,19 @@ module Hive
       # ours (keep it). A best-effort non-blocking `wait` is still issued
       # to clear any zombie we ourselves own, but its result never
       # decides inflight membership.
-      def reap_inflight
-        @inflight.delete_if do |_folder, pid|
-          alive = pid_alive?(pid)
-          reap_zombie(pid) unless alive
-          !alive
-        rescue StandardError
+      def reap_inflight(now)
+        @inflight.delete_if do |_folder, entry|
+          alive = pid_alive?(entry[:pid])
+          reap_zombie(entry[:pid]) unless alive
+          # Evict when the child is gone, OR when the entry has outlived
+          # MAX_INFLIGHT_AGE_SEC — the latter guards against a reused pid
+          # that keeps reporting "alive" forever (see the constant's note)
+          # so a folder is never pinned permanently.
+          !alive || (now - entry[:at]) > MAX_INFLIGHT_AGE_SEC
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "display_name_backfiller reap raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
           false
         end
       end
@@ -133,7 +152,7 @@ module Hive
         false
       end
 
-      def backfill_row(row, folder)
+      def backfill_row(row, folder, now)
         if @dry_run
           @logger.event(:display_name_backfill,
                         project: row.project,
@@ -147,7 +166,7 @@ module Hive
         pid = @spawn.call(folder)
         return false if pid.nil?
 
-        @inflight[folder] = pid
+        @inflight[folder] = { pid: pid, at: now }
         @logger.event(:display_name_backfill,
                       project: row.project,
                       slug: row.slug,

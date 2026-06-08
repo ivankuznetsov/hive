@@ -8,6 +8,7 @@ set -euo pipefail
 # locations in priority order.
 
 self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 
 # A misbehaving candidate must not hang `hv`: one that blocks reading
 # stdin, or a slow/JVM-based Apache Hive that takes seconds to boot,
@@ -29,7 +30,7 @@ probe_version() {
 
 candidates=(
   "${HIVE_BIN_OVERRIDE:-}"
-  "${XDG_BIN_HOME:-${HOME}/.local/bin}/hive"
+  "${xdg_bin_home:+$xdg_bin_home/hive}"
   "${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive"
   "/usr/local/bin/hive"
 )
@@ -49,7 +50,7 @@ for candidate in "${candidates[@]}"; do
   exec "$candidate" "$@"
 done
 
-echo "hv: hive binary not found in ${XDG_BIN_HOME:-${HOME}/.local/bin}, ${HOMEBREW_PREFIX:-/opt/homebrew}/bin, or /usr/local/bin" >&2
+echo "hv: hive binary not found in ${xdg_bin_home:-<unset XDG_BIN_HOME/HOME>}, ${HOMEBREW_PREFIX:-/opt/homebrew}/bin, or /usr/local/bin" >&2
 echo "hv: set HIVE_BIN_OVERRIDE=<path> to point at a custom install location" >&2
 echo "hv: install with 'brew install ivankuznetsov/hive/hive', 'yay -S hive-bin', or the pinned install.sh from install.md" >&2
 exit 127

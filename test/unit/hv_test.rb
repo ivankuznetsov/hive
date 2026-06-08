@@ -68,4 +68,27 @@ class HvTest < Minitest::Test
       refute_includes out, "wrong:probe"
     end
   end
+
+  def test_hive_bin_override_works_when_home_and_xdg_bin_home_are_unset
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(override))
+      File.write(override, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.2.3; exit 0; fi\necho override:$1\n")
+      FileUtils.chmod(0o755, override)
+
+      out, err, status = Open3.capture3(
+        {
+          "HOME" => nil,
+          "HIVE_BIN_OVERRIDE" => override,
+          "XDG_BIN_HOME" => nil,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew")
+        },
+        HV_BIN,
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "override:probe\n", out
+    end
+  end
 end

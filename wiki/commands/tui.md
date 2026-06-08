@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive]
 ---
 
@@ -48,7 +48,7 @@ The dashboard intentionally has no persistent metadata header. Scope and filter 
 | New idea prompt | `n` (single-project scope), or after picker selection (all-projects scope) | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Info panel | `i` on a selected right-pane task | `q` / `Esc` / `i` |
 | Archive pane | `z` | `q` / `Esc` |
-| Help overlay | `?` | any key |
+| Help overlay | `?` | `q` / `Esc` / `?` |
 
 ## Keybindings (default mode)
 
@@ -81,6 +81,8 @@ The dashboard intentionally has no persistent metadata header. Scope and filter 
 | `Esc` | back to default mode (any sub-mode) |
 
 Findings triage is no longer an in-TUI mode. Use `hive findings`, `hive accept-finding`, and `hive reject-finding` directly from a shell or coding agent; legacy `EXECUTE_WAITING findings_count` rows surface as `recover_execute` and point at `hive findings` from status JSON (see [[commands/findings]]). In red-status detail mode, `Enter` runs hive's automated recovery for the task and closes the detail screen (rows with no auto-recovery recipe surface a refusal flash that names `Open in agent` as the manual fallback before closing), `o` opens the task in the project's configured development agent and closes the detail screen, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
+
+The help overlay is height-bounded and scrollable. It word-wraps binding descriptions to the available width, shows a right-edge scrollbar when the full cheatsheet is taller than the viewport, and keeps the footer visible. Use `j` / `k`, Up / Down, PgUp / PgDn, Home / End, `g` / `G`, or the mouse wheel to scroll; `q`, `Esc`, or `?` closes. Terminals smaller than 10 rows by 40 columns render a centered "terminal too small" fallback instead of a clipped border box.
 
 ## New Idea Prompt Editing
 

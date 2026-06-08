@@ -1,5 +1,6 @@
 require "lipgloss"
 require "hive/tui/help"
+require "hive/tui/styles"
 require "hive/tui/views/format"
 
 module Hive
@@ -29,6 +30,11 @@ module Hive
         # minimum width (≈40 cols), where the scroll-key hint is clipped.
         DISMISS_HINT = "Esc/? close · ↑/↓ j/k PgUp/PgDn scroll".freeze
         TOO_SMALL_MESSAGE = "Terminal too small for help (need 10×40)".freeze
+        # Degenerate-size fallback (rows ≈ 1, or narrow-and-short): the
+        # full message can't fit, so collapse to the one piece of info the
+        # user needs — the minimum dimensions — rather than truncating to
+        # "Terminal too…" and dropping the guidance entirely.
+        TOO_SMALL_FALLBACK = "need 10×40".freeze
         MIN_ROWS = 10
         MIN_COLS = 40
         BORDER_ROWS = 2
@@ -45,13 +51,13 @@ module Hive
           return render_too_small(model) if too_small?(model)
 
           rows = scrollable_rows(model)
-          content = content_lines(model)
+          content = content_rows(model)
           # Derive the bound from the content we already wrapped rather
           # than calling `max_scroll_offset` (which re-wraps everything).
           max_offset = [ content.length - rows, 0 ].max
           offset = [ [ model.help_scroll_offset.to_i, 0 ].max, max_offset ].min
           visible = Array(content[offset, rows]).first(rows)
-          visible += Array.new(rows - visible.length, "") if visible.length < rows
+          visible += Array.new(rows - visible.length, [ "", false ]) if visible.length < rows
 
           body = Lipgloss.join_vertical(
             Lipgloss::TOP,
@@ -86,7 +92,26 @@ module Hive
         end
 
         def content_lines(model)
-          build_lines.flat_map { |line| Format.wrap(line, inner_content_width(model)) }
+          content_rows(model).map(&:first)
+        end
+
+        # Wrapped content paired with a header flag. The text stays plain
+        # so it feeds the cell-width helpers (wrap/ljust/scrollbar) without
+        # ANSI skewing the math; `Styles::HEADER` is applied later, after
+        # padding, in `scroll_window`. Headers are kept bold so the title
+        # and per-mode sections read as a hierarchy, matching the sibling
+        # panes (archive/projects/tasks) that style after width-bounding.
+        # @api private — exposed for tests.
+        def content_rows(model)
+          width = inner_content_width(model)
+          build_lines.flat_map do |line|
+            header = header_line?(line)
+            Format.wrap(line, width).map { |segment| [ segment, header ] }
+          end
+        end
+
+        def header_line?(line)
+          line == TITLE || MODE_HEADERS.value?(line)
         end
 
         def viewport_rows(model)
@@ -116,7 +141,7 @@ module Hive
           width = [ model.cols.to_i, 1 ].max
           height = [ model.rows.to_i, 1 ].max
           lines = Format.wrap(TOO_SMALL_MESSAGE, width)
-          lines = [ Format.truncate(TOO_SMALL_MESSAGE, width) ] if lines.length > height
+          lines = [ Format.truncate(TOO_SMALL_FALLBACK, width) ] if lines.length > height
 
           top = [ (height - lines.length) / 2, 0 ].max
           bottom = [ height - top - lines.length, 0 ].max
@@ -131,7 +156,10 @@ module Hive
 
         def scroll_window(model, visible, scrollbar)
           width = inner_content_width(model)
-          content = visible.map { |line| Format.ljust_cells(line, width) }
+          content = visible.map do |line, header|
+            padded = Format.ljust_cells(line, width)
+            header ? Styles::HEADER.render(padded) : padded
+          end
           Lipgloss.join_horizontal(
             Lipgloss::TOP,
             Lipgloss.join_vertical(Lipgloss::TOP, *content),
@@ -157,7 +185,7 @@ module Hive
         end
 
         def footer_line(model)
-          Format.truncate(DISMISS_HINT, box_width(model) - PADDING_COLS)
+          Styles::HINT.render(Format.truncate(DISMISS_HINT, box_width(model) - PADDING_COLS))
         end
 
         def center_line(line, width)

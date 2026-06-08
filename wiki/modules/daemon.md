@@ -26,7 +26,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
-| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus late-stage `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun through the normal daemon flow. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus late-stage `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun through the normal daemon flow. `limits_reached` markers (reviewers `REVIEW_ERROR` or single-agent `ERROR`, any stage) self-heal on a cooldown: the writer stamps `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`) and the healer clears them only once `now >= retry_after`, bounded by the same retry budget; cooldown-wait ticks do not burn budget, and a missing/unparseable stamp stays manual. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). Re-spawns fire-and-forget `hive generate-name <folder>` for any row whose `Hive::TaskMeta` `display_name` is nil/blank, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses `kill(0)` liveness plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by external callers (today: the Telegram bot via `Hive::Bot::DispatchRequestWriter`) and consumed by the dispatcher's tick loop. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: the bot writes, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
@@ -118,7 +118,27 @@ stage does not move and no workflow verb fires from either path.
    failures. It also auto-clears `8-finalize` `ERROR reason=unpushed_commits`
    with no live task lock, and treats `7-artifacts` / `8-finalize`
    `ERROR reason=tmux_session_terminated` or `reason=agent_orphaned` as
-   retryable terminal agent-loss markers. The clear matches the observed marker's
+   retryable terminal agent-loss markers. **Usage/credit limits self-heal on
+   a cooldown:** any `limits_reached` marker — the reviewers `REVIEW_ERROR
+   phase=reviewers reason=limits_reached` written by `Stages::Review`, and the
+   single-agent `ERROR reason=limits_reached` written by `ClaudeLauncher` /
+   `Agent` (any stage, since a limit can hit brainstorm/plan/execute too) —
+   carries a `retry_after` ISO8601 stamp set at write time to `now + cooldown`
+   (`Hive::AgentLimit::RETRY_COOLDOWN_SEC`, default 3600s = 1h, overridable
+   per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`). The healer reads that
+   stamp and clears the marker only once `now >= retry_after`, so the parked
+   task re-dispatches after the usage window has plausibly reset instead of
+   staying red until a human runs `hive markers clear`. A missing or
+   unparseable `retry_after` keeps the marker manual (legacy markers predate
+   the stamp). The cooldown gate is evaluated *before* the retry-budget
+   increment, so cooldown-wait ticks do **not** consume budget — a
+   persistently-limited task still gets up to the bounded number of
+   cooldown-spaced clears (default 3) before staying red for manual recovery.
+   The provider's wall-clock "try again at 4:42 PM" hint is deliberately not
+   parsed; the fixed cooldown is the robust default (reset-time parsing is a
+   noted future enhancement). Limit heals log `reason=limits_reached`
+   (terminal path) / `reason=reviewer_limits_reached` (review path) to
+   distinguish them from tmux-death retries. The clear matches the observed marker's
    `marker_id` when present, falling back to the legacy `reason` guard only for
    old markers without ids. Retry accounting is keyed by project, slug, stage,
    and marker reason, not by marker id, because retryable terminal failures can

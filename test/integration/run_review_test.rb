@@ -1,8 +1,10 @@
 require "test_helper"
 require "json"
+require "time"
 require "hive/commands/init"
 require "hive/commands/run"
 require "hive/markers"
+require "hive/agent_limit"
 require "hive/stages/review"
 
 # Integration coverage for the 6-review runner. The unit-level tests for
@@ -1439,6 +1441,39 @@ class RunReviewTest < Minitest::Test
         assert_equal "reviewers", marker.attrs["phase"]
         assert_equal "all_failed", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
+        assert_nil marker.attrs["retry_after"],
+                   "non-limit all_failed must stay manual (no cooldown auto-retry stamp)"
+      end
+    end
+  end
+
+  def test_reviewers_all_failed_limit_stamps_retry_after_cooldown
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        # Floor: retry_after is a second-precision iso8601 stamp.
+        before = Time.now.utc.floor
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(_cfg, _ctx, _task, **_kwargs) {
+          :all_failed_limit
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+        after = Time.now.utc
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "reviewers", marker.attrs["phase"]
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+
+        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
+        cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
+        assert retry_after >= before + cooldown,
+               "retry_after must be at least a full cooldown ahead of the write"
+        assert retry_after <= after + cooldown,
+               "retry_after must not exceed the write time plus the cooldown"
       end
     end
   end

@@ -1,5 +1,6 @@
 require "digest"
 require "open3"
+require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
@@ -117,12 +118,12 @@ module Hive
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
           if row.marker.to_s == "review_error"
-            heal_review_error_if_auto_recoverable(row)
+            heal_review_error_if_auto_recoverable(row, now: now)
             next
           end
 
           if row.marker.to_s == "error"
-            heal_error_if_auto_recoverable(row)
+            heal_error_if_auto_recoverable(row, now: now)
             next
           end
 
@@ -147,9 +148,9 @@ module Hive
 
       private
 
-      def heal_error_if_auto_recoverable(row)
+      def heal_error_if_auto_recoverable(row, now:)
         return if row.live_task_lock == true
-        return unless auto_recoverable_error?(row)
+        return unless auto_recoverable_error?(row, now: now)
         # The clear makes a markerless terminal-error row take the
         # edit-resume path; without a pre-clear mtime to seed as the
         # dispatch baseline, that row can strand as first-sight
@@ -209,9 +210,17 @@ module Hive
                       error: "#{e.class}: #{e.message}")
       end
 
-      def auto_recoverable_error?(row)
+      def auto_recoverable_error?(row, now:)
         reason = marker_reason(row)
         return true if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
+
+        # A usage/credit limit can hit any stage (brainstorm/plan/execute/…),
+        # so the cooldown retry is not stage-gated. Recoverable only once the
+        # stamped cooldown has elapsed; a missing/unparseable retry_after keeps
+        # the marker manual (legacy markers predate the stamp). Returning false
+        # here — before the budget increment in the caller — means waiting
+        # ticks do NOT consume the retry budget.
+        return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
 
         %w[7-artifacts 8-finalize].include?(row.stage.to_s) &&
           %w[tmux_session_terminated agent_orphaned].include?(reason)
@@ -219,6 +228,7 @@ module Hive
 
       def error_heal_label(row, reason)
         return "finalize_unpushed_commits" if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
+        return "limits_reached" if reason == "limits_reached"
 
         "terminal_agent_loss"
       end
@@ -228,6 +238,12 @@ module Hive
 
         if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
           return "rerun finalize (`#{command}`) or push the branch manually"
+        end
+
+        if reason == "limits_reached"
+          return "the usage/credit limit did not clear after #{@error_auto_recovery_limit} cooldown " \
+                 "retries — top up credits or wait for the window to reset, then rerun #{row.stage} " \
+                 "(`#{command}`) or run `hive markers clear`"
         end
 
         "rerun #{row.stage} (`#{command}`) " \
@@ -280,9 +296,9 @@ module Hive
         ]
       end
 
-      def heal_review_error_if_auto_recoverable(row)
+      def heal_review_error_if_auto_recoverable(row, now:)
         return if row.live_task_lock == true
-        return unless auto_recoverable_review_error?(row)
+        return unless auto_recoverable_review_error?(row, now: now)
 
         reason = marker_reason(row)
         marker_attrs = review_marker_attrs(row)
@@ -301,8 +317,7 @@ module Hive
             phase: marker_attrs["phase"],
             pass: marker_attrs["pass"],
             errors_path: reviewer_errors_path(row),
-            remediation: "rerun review for this task " \
-                         "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
+            remediation: review_error_recovery_remediation(row, reason)
           )
           return
         end
@@ -378,7 +393,39 @@ module Hive
       # `reviewer_tmux_session_terminated`. The marker's literal reason is
       # carried separately as `marker_reason:`.
       def review_heal_label(reason)
-        reason == "review_agent_died" ? "review_agent_died" : "reviewer_tmux_session_terminated"
+        case reason
+        when "review_agent_died" then "review_agent_died"
+        when "limits_reached" then "reviewer_limits_reached"
+        else "reviewer_tmux_session_terminated"
+        end
+      end
+
+      def review_error_recovery_remediation(row, reason)
+        if reason == "limits_reached"
+          return "all reviewers' usage/credit limit did not clear after " \
+                 "#{@review_error_auto_recovery_limit} cooldown retries — top up credits or wait " \
+                 "for the window to reset, then rerun review (`hive run #{row.project} #{row.slug}`) " \
+                 "or run `hive markers clear`"
+        end
+
+        "rerun review for this task " \
+          "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
+      end
+
+      # True only when the marker carries a `retry_after` ISO8601 stamp AND
+      # `now` is at or past it. A missing/unparseable stamp returns false so
+      # legacy `limits_reached` markers (written before the stamp existed)
+      # still require a manual `hive markers clear` rather than self-healing
+      # immediately. Parse defensively — a garbled stamp must never crash a
+      # tick or be treated as "elapsed".
+      def cooldown_elapsed?(row, now:)
+        raw = marker_attrs_for(row)["retry_after"].to_s
+        return false if raw.empty?
+
+        retry_after = Time.parse(raw)
+        now >= retry_after
+      rescue ArgumentError
+        false
       end
 
       def review_error_auto_recovery_key(row, reason:)
@@ -404,9 +451,15 @@ module Hive
         reason.to_s
       end
 
-      def auto_recoverable_review_error?(row)
+      def auto_recoverable_review_error?(row, now:)
         attrs = marker_attrs_for(row)
         return true if attrs["reason"].to_s == "review_agent_died"
+
+        # All reviewers hit a usage/credit limit: self-heal once the stamped
+        # cooldown has elapsed (a missing/unparseable retry_after stays
+        # manual). Gated before the caller's budget increment so cooldown-wait
+        # ticks do not burn the retry budget.
+        return cooldown_elapsed?(row, now: now) if attrs["reason"].to_s == "limits_reached"
 
         return false unless attrs["phase"].to_s == "reviewers"
         return false unless attrs["reason"].to_s == "reviewer_partial_failure"

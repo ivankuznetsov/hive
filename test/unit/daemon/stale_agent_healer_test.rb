@@ -1,5 +1,6 @@
 require "test_helper"
 require "tmpdir"
+require "time"
 require "hive/markers"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/status_consumer"
@@ -622,6 +623,270 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert heal_event, "expected review_agent_died auto-recovery event, got: #{@logger.events.inspect}"
       assert_equal "review_agent_died", heal_event[1][:reason]
       refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  # --- limits_reached cooldown auto-retry (review path) ----------------
+
+  def make_review_limit_row(state_file, retry_after:, pass: "1")
+    marker_attrs = { "phase" => "reviewers", "reason" => "limits_reached", "pass" => pass }
+    marker_attrs["retry_after"] = retry_after unless retry_after.nil?
+    make_row(
+      state_file,
+      pid_alive: nil,
+      stage: "6-review",
+      marker: "review_error",
+      marker_attrs: marker_attrs,
+      action: "recover_review",
+      live_task_lock: false
+    )
+  end
+
+  def write_review_limit_marker(state_file, retry_after:)
+    attrs = retry_after ? " retry_after=#{retry_after}" : ""
+    File.write(state_file,
+               "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=limits_reached pass=1#{attrs} -->\n")
+  end
+
+  def test_does_not_auto_recover_review_limits_reached_before_cooldown
+    with_marker_file do |state_file|
+      future = (NOW + 600).iso8601
+      write_review_limit_marker(state_file, retry_after: future)
+      row = make_review_limit_row(state_file, retry_after: future)
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "limits_reached must stay red until the cooldown elapses"
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_review_limits_reached_once_cooldown_has_elapsed
+    with_marker_file do |state_file|
+      past = (NOW - 60).iso8601
+      write_review_limit_marker(state_file, retry_after: past)
+      row = make_review_limit_row(state_file, retry_after: past)
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected limits_reached auto-recovery, got: #{@logger.events.inspect}"
+      assert_equal "reviewer_limits_reached", heal_event[1][:reason]
+      assert_equal 1, heal_event[1][:attempts]
+      refute_match(/REVIEW_ERROR/, File.read(state_file),
+                   "elapsed-cooldown limits_reached must clear so review re-dispatches")
+    end
+  end
+
+  def test_auto_recovers_review_limits_reached_exactly_at_cooldown_boundary
+    with_marker_file do |state_file|
+      now_stamp = NOW.iso8601
+      write_review_limit_marker(state_file, retry_after: now_stamp)
+      row = make_review_limit_row(state_file, retry_after: now_stamp)
+
+      heal([ row ])
+
+      assert @logger.events.any? { |name, _| name == :marker_healed },
+             "now == retry_after must be treated as elapsed (>=)"
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_review_limits_reached_without_retry_after
+    with_marker_file do |state_file|
+      write_review_limit_marker(state_file, retry_after: nil)
+      row = make_review_limit_row(state_file, retry_after: nil)
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "a legacy limits_reached marker lacking retry_after must stay manual"
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_review_limits_reached_with_unparseable_retry_after
+    with_marker_file do |state_file|
+      write_review_limit_marker(state_file, retry_after: "not-a-timestamp")
+      row = make_review_limit_row(state_file, retry_after: "not-a-timestamp")
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "an unparseable retry_after must stay manual, not crash or self-heal"
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_review_limits_reached_cooldown_waits_do_not_burn_budget
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      review_error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      past = (NOW - 60).iso8601
+      future = (NOW + 600).iso8601
+
+      # Three early ticks while still inside the cooldown must not consume
+      # the single-slot budget.
+      3.times do
+        write_review_limit_marker(state_file, retry_after: future)
+        heal([ make_review_limit_row(state_file, retry_after: future) ])
+        assert_match(/REVIEW_ERROR/, File.read(state_file))
+      end
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+
+      # First post-cooldown tick spends the only budget slot and clears.
+      write_review_limit_marker(state_file, retry_after: past)
+      heal([ make_review_limit_row(state_file, retry_after: past) ])
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+
+      # Second post-cooldown tick (limit still not cleared) exhausts budget.
+      write_review_limit_marker(state_file, retry_after: past)
+      heal([ make_review_limit_row(state_file, retry_after: past) ])
+      assert_match(/REVIEW_ERROR/, File.read(state_file),
+                   "persistently-limited review must stay red once the budget is spent")
+
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size, "only the post-cooldown tick should clear"
+      assert_equal "reviewer_limits_reached", heals.first[1][:reason]
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "reviewer_limits_reached", exhausted.first[1][:reason]
+      assert_equal "limits_reached", exhausted.first[1][:marker_reason]
+      assert_match(/usage\/credit limit did not clear/, exhausted.first[1][:remediation])
+      assert_match(/hive markers clear/, exhausted.first[1][:remediation])
+    end
+  end
+
+  # --- limits_reached cooldown auto-retry (terminal ERROR path) --------
+
+  def make_error_limit_row(state_file, retry_after:, stage: "4-execute")
+    marker_attrs = { "reason" => "limits_reached" }
+    marker_attrs["retry_after"] = retry_after unless retry_after.nil?
+    make_row(
+      state_file,
+      pid_alive: nil,
+      mtime: NOW - 1000,
+      stage: stage,
+      marker: "error",
+      marker_attrs: marker_attrs,
+      action: "error",
+      live_task_lock: false
+    )
+  end
+
+  def write_error_limit_marker(state_file, retry_after:)
+    attrs = retry_after ? " retry_after=#{retry_after}" : ""
+    File.write(state_file, "# task\n\n<!-- ERROR reason=limits_reached#{attrs} -->\n")
+  end
+
+  def test_does_not_auto_recover_error_limits_reached_before_cooldown
+    with_marker_file do |state_file|
+      future = (NOW + 600).iso8601
+      write_error_limit_marker(state_file, retry_after: future)
+      row = make_error_limit_row(state_file, retry_after: future)
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "terminal limits_reached must stay red until the cooldown elapses"
+      assert_match(/ERROR reason=limits_reached/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_error_limits_reached_once_cooldown_has_elapsed_any_stage
+    %w[1-brainstorm 4-execute 8-finalize].each do |stage|
+      with_marker_file do |state_file|
+        past = (NOW - 60).iso8601
+        write_error_limit_marker(state_file, retry_after: past)
+        row = make_error_limit_row(state_file, retry_after: past, stage: stage)
+
+        heal([ row ])
+
+        heal_event = @logger.events.last
+        assert_equal :marker_healed, heal_event[0],
+                     "#{stage} limits_reached should clear after cooldown"
+        assert_equal "limits_reached", heal_event[1][:reason]
+        assert_equal "limits_reached", heal_event[1][:marker_reason]
+        assert_equal stage, heal_event[1][:stage]
+        assert Hive::Markers.current(state_file).none?,
+               "#{stage} limits_reached must clear so the daemon re-dispatches"
+      end
+    end
+  end
+
+  def test_does_not_auto_recover_error_limits_reached_without_retry_after
+    with_marker_file do |state_file|
+      write_error_limit_marker(state_file, retry_after: nil)
+      row = make_error_limit_row(state_file, retry_after: nil)
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "a legacy terminal limits_reached marker must stay manual"
+      assert_match(/ERROR reason=limits_reached/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_error_limits_reached_with_unparseable_retry_after
+    with_marker_file do |state_file|
+      write_error_limit_marker(state_file, retry_after: "garbled")
+      row = make_error_limit_row(state_file, retry_after: "garbled")
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+      refute @logger.events.any? { |name, _| name == :marker_heal_failed }
+      assert_match(/ERROR reason=limits_reached/, File.read(state_file))
+    end
+  end
+
+  def test_error_limits_reached_cooldown_waits_do_not_burn_budget
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      error_auto_recovery_limit: 1
+    )
+
+    with_marker_file do |state_file|
+      future = (NOW + 600).iso8601
+      past = (NOW - 60).iso8601
+
+      3.times do
+        write_error_limit_marker(state_file, retry_after: future)
+        heal([ make_error_limit_row(state_file, retry_after: future) ])
+        assert_match(/ERROR reason=limits_reached/, File.read(state_file))
+      end
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+
+      write_error_limit_marker(state_file, retry_after: past)
+      heal([ make_error_limit_row(state_file, retry_after: past) ])
+      assert Hive::Markers.current(state_file).none?
+
+      write_error_limit_marker(state_file, retry_after: past)
+      heal([ make_error_limit_row(state_file, retry_after: past) ])
+      assert_match(/ERROR reason=limits_reached/, File.read(state_file),
+                   "persistently-limited task must stay red once the budget is spent")
+
+      heals = @logger.events.select { |name, _| name == :marker_healed }
+      assert_equal 1, heals.size
+      assert_equal "limits_reached", heals.first[1][:reason]
+
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "limits_reached", exhausted.first[1][:reason]
+      assert_equal "limits_reached", exhausted.first[1][:marker_reason]
+      assert_match(/usage\/credit limit did not clear/, exhausted.first[1][:remediation])
+      assert_match(/hive markers clear/, exhausted.first[1][:remediation])
     end
   end
 

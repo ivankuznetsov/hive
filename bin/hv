@@ -7,7 +7,20 @@ set -euo pipefail
 # hive` resolves to Apache Hive. Instead, probe known install
 # locations in priority order.
 
-self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+canonical_path() {
+  realpath "$1" 2>/dev/null && return
+  ruby -e 'puts File.realpath(ARGV.fetch(0))' "$1" 2>/dev/null && return
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null && return
+  readlink -f "$1" 2>/dev/null && return
+  # All canonicalizers absent (rare): fall back to the raw path, but warn
+  # — an unresolved path can defeat the hv->hv self-recursion guard, and
+  # under `set -euo pipefail` a silent runaway re-exec would otherwise
+  # leave no diagnostic.
+  echo "hv: warning: could not canonicalize '$1'; using it unresolved (self-recursion guard may be unreliable)" >&2
+  echo "$1"
+}
+
+self="$(canonical_path "$0")"
 xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 
 # A misbehaving candidate must not hang `hv`: one that blocks reading
@@ -39,7 +52,7 @@ for candidate in "${candidates[@]}"; do
   [[ -n "$candidate" ]] || continue
   [[ -x "$candidate" ]] || continue
 
-  resolved="$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")"
+  resolved="$(canonical_path "$candidate")"
   # Guard against `hv -> hv` chains: never exec into our own script.
   [[ "$resolved" != "$self" ]] || continue
 

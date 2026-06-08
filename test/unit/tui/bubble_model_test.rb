@@ -503,6 +503,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_translate_horizontal_wheel_in_help_is_noop
+    # Buttons ≥ 6 are horizontal-wheel events (wheel-left/right): `wheel?`
+    # accepts them, but they aren't WHEEL_UP/WHEEL_DOWN, so translate must
+    # fall through to NOOP rather than scrolling the help overlay.
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :help),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(:translate, mouse_message(button: 6))
+
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   # ---- View dispatch by mode ----
 
   def test_view_renders_grid_in_grid_mode

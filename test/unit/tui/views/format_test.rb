@@ -54,4 +54,18 @@ class HiveTuiViewsFormatWrapTest < Minitest::Test
 
     assert(rows.all? { |row| Format.display_width(row) <= 8 }, "wide glyphs must respect the cell width")
   end
+
+  def test_wide_glyph_word_wrap_respects_cells_above_truncate_threshold
+    # Width 12 is past the `max_width <= 8` truncate early-return, so this
+    # exercises the cell-aware word-wrap loop itself: six two-cell glyphs
+    # (12 cells) plus a trailing word must spill onto multiple rows, each
+    # bounded by the cell width — not the codepoint count.
+    rows = Format.wrap("一二三四五六七八 tail", 12)
+
+    assert_operator rows.length, :>, 1, "content wider than the cell width must wrap onto multiple rows"
+    assert(
+      rows.all? { |row| Format.display_width(row) <= 12 },
+      "every wrapped row must respect the cell width, not the codepoint length"
+    )
+  end
 end

@@ -93,6 +93,38 @@ class HiveTuiUpdateTest < Minitest::Test
                  new_model.help_scroll_offset
   end
 
+  def test_window_sized_in_grid_mode_leaves_help_scroll_offset_untouched
+    # The re-clamp only runs in :help mode. Resizing in :grid must leave
+    # help_scroll_offset alone (it carries a stale value until help opens)
+    # and must not invoke the HelpOverlay re-wrap. An inverted guard would
+    # both clamp the offset to 0 and call max_scroll_offset — this pins
+    # both: the offset stays put and the re-clamp is never reached.
+    # (Minitest::Mock.stub isn't bundled here, so we patch the singleton
+    # method directly — same approach as rebase_test.rb.)
+    starting = model.with(mode: :grid, cols: 80, rows: 14, help_scroll_offset: 1_000)
+    overlay = Hive::Tui::Views::HelpOverlay
+    original = overlay.method(:max_scroll_offset)
+    called = false
+    overlay.define_singleton_method(:max_scroll_offset) do |*args|
+      called = true
+      original.call(*args)
+    end
+
+    begin
+      new_model, _cmd = Hive::Tui::Update.apply(
+        starting,
+        Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 200)
+      )
+    ensure
+      overlay.singleton_class.send(:remove_method, :max_scroll_offset)
+      overlay.define_singleton_method(:max_scroll_offset, original)
+    end
+
+    assert_equal :grid, new_model.mode
+    assert_equal 1_000, new_model.help_scroll_offset
+    refute called, "re-clamp (HelpOverlay.max_scroll_offset) must not run in :grid mode"
+  end
+
   # ---------- SnapshotArrived ----------
 
   def test_snapshot_arrived_replaces_snapshot_and_clears_last_error

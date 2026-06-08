@@ -114,6 +114,23 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     refute_equal "█", bottom.first, "thumb must leave the top row at max offset"
   end
 
+  def test_scrollbar_gutter_is_blank_when_content_fits
+    # total <= rows means no overflow, so the gutter must be entirely
+    # blank — not a full-height `│` track. A regression that always drew
+    # the track would still pass the `refute_includes "█"` overflow tests.
+    assert_equal Array.new(10, " "),
+                 Hive::Tui::Views::HelpOverlay.scrollbar_lines(total: 5, rows: 10, offset: 0),
+                 "a non-overflowing viewport must render a blank gutter, not a track"
+  end
+
+  def test_scrollbar_thumb_size_stays_within_bounds
+    lines = Hive::Tui::Views::HelpOverlay.scrollbar_lines(total: 40, rows: 10, offset: 0)
+    thumb = lines.count { |cell| cell == "█" }
+
+    assert_operator thumb, :>=, 1, "thumb must be at least one row tall"
+    assert_operator thumb, :<=, 10, "thumb must never exceed the gutter height"
+  end
+
   def test_footer_close_affordance_survives_truncation_at_min_width
     narrow = model(cols: Hive::Tui::Views::HelpOverlay::MIN_COLS, rows: Hive::Tui::Views::HelpOverlay::MIN_ROWS)
     out = Hive::Tui::Views::HelpOverlay.render(narrow)

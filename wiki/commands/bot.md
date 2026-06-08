@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-06
+updated: 2026-06-08
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -42,15 +42,17 @@ hive bot install [--force] [--json]
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
-| `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
+| `/answer <slug>` | Starts deterministic brainstorm answering; each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. The historical Path A/B distinction is compatibility-only now, and both modes use the same answer writer. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
 | `/details <slug>` | Dispatches `hive status --diagnose <slug> --project <project> --stage <stage> --json` — same payload as the inline "Show details" button. |
-| `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. |
+| `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
 | `/help` | Lists the supported command set. |
 
 Free text outside an active answer conversation is rejected with a
-`/help` hint. Unauthorized chats receive no reply.
+`/help` hint unless it is a reply-to reattach message whose quoted text
+contains a project/slug or legacy "Answer mode started" slug. Unauthorized
+chats receive no reply.
 
 Media messages participate in the `/idea` flow. A photo or document with
 a caption starts an idea draft using the caption as the idea text and
@@ -156,6 +158,7 @@ Push notifications use callback data that routes to:
 - Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. `ERROR` rows prefer `marker_id=<current>` and use observed reason/exit_code attrs only for legacy markers. Manual-only recovery states show `Open laptop` / `Show details`; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
+- Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -245,19 +248,25 @@ the bot after rotating).
 ## Structured log
 
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
-`hive-bot-log.v1`. The event enum is closed in
+`hive-bot-log.v2` (`SCHEMA_VERSION = 2`). The event enum is closed in
 `Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
 
-The schema evolves additively: new event values may be appended to
-`v1` without changing `schema_version`. Breaking changes (removing an
-event, renaming it, or changing the payload shape of an existing
-event) require a `v2` schema file alongside `v1`, bumped `$id`, and
-synchronized `schema_version` constant. Downstream consumers that pin
-on the `$id` URL must therefore tolerate unknown event values when
-parsing v1; that's the read-side compat invariant.
+`v2` was introduced when the Telegram "Codex draft-assist" feature was
+retired: it drops the `codex_spawned` / `codex_succeeded` / `codex_failed`
+events from the enum. `schemas/hive-bot-log.v1.json` is kept as-is for
+historical log lines emitted before the bump.
+
+The schema evolves additively: new event values may be appended to the
+current version without changing `schema_version`. Breaking changes
+(removing an event, renaming it, or changing the payload shape of an
+existing event) require a new schema file alongside the prior one, with
+bumped `$id` and a synchronized `schema_version` constant — exactly what
+the v1 → v2 retirement did. Downstream consumers that pin on the `$id`
+URL must therefore tolerate unknown event values; that's the read-side
+compat invariant.
 Events include `bot_started`, `poll_failure`, `update_received`,
 `notification_sent`, `dispatched_command`, `command_completed`,
-`codex_spawned`, `answer_written`, `reconnect_summary`, and `fatal`.
+`answer_written`, `reconnect_summary`, and `fatal`.
 
 ## Autostart
 

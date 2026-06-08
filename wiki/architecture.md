@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [architecture, overview]
 ---
 
@@ -219,11 +219,12 @@ keeps only the confirmed transcript on the happy path, then calls
 other idea drafts. Final task files are still written through the same
 `hive new` command path.
 
-Path A brainstorm help uses Codex as a short-lived subprocess per turn
-through `Hive::Bot::CodexConversation`. Telegram-sourced text is wrapped
-with the same per-spawn `<user_supplied_<hex>>` nonce boundary as stage
-prompts, and Codex only returns a draft. The bot writes the literal
-confirmed draft; Codex never edits `brainstorm.md` directly.
+The Telegram bot answers brainstorm questions deterministically: an
+operator replies in chat (or via `/answer <slug>`), the bot writes the
+literal reply into the next unanswered slot of `brainstorm.md`, then
+sends the next question. The earlier "Codex draft-assist" flow — where
+Path A spawned Codex to draft an answer with write-draft/edit/cancel
+buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 

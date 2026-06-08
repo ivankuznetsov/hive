@@ -32,17 +32,6 @@ module Hive
 
           return blank_answer_refusal if blank?(answer_text)
 
-          if state.mode == :path_a && !state.awaiting_confirm
-            return @result_class.new(
-              action: :start_codex,
-              project: state.project,
-              slug: state.slug,
-              question_n: state.question_n,
-              answer_text: answer_text,
-              mode: :path_a
-            )
-          end
-
           @result_class.new(
             action: :write_answer_then_reply,
             project: state.project,

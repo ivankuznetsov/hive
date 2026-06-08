@@ -28,12 +28,10 @@ class HiveBotConversationStoreTest < Minitest::Test
     store.start(chat_id: 123, slug: "slug", question_n: 1)
     @now += 10
 
-    state = store.update(chat_id: 123, slug: "slug", draft: "draft", awaiting_confirm: true)
+    state = store.update(chat_id: 123, slug: "slug", question_n: 2)
 
-    assert_equal "draft", state.draft
-    assert_equal true, state.awaiting_confirm
+    assert_equal 2, state.question_n
     assert_equal @now, state.updated_at
-    assert_equal 1, store.pending_confirm_count(chat_id: 123)
   end
 
   def test_update_rejects_unknown_attrs

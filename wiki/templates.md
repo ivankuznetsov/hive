@@ -3,11 +3,11 @@ title: ERB Templates
 type: reference
 source: templates/
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-06-08
 tags: [template, erb, prompt]
 ---
 
-**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, Telegram/Codex brainstorm assistance, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, and final PR wrap-up.
+**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, and final PR wrap-up. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
 
 ## Rendering helper
 
@@ -25,7 +25,6 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `project_config.yml.erb` | `Commands::Init#render_project_config` | `project_name`, `default_branch`, `worktree_root` |
 | `idea.md.erb` | `Commands::New#render_idea` | `slug`, `original_text`, `created_at` |
 | `brainstorm_prompt.md.erb` | `Stages::Brainstorm.run!` | `project_name`, `task_folder`, `idea_text`, `user_supplied_tag` |
-| `bot_brainstorm_codex_prompt.md.erb` | `Hive::Bot::CodexConversation` (Path A mobile brainstorm help) | `question_text`, `chat_history`, `draft`, `user_input`, `user_supplied_tag` |
 | `plan_prompt.md.erb` | `Stages::Plan.run!` | `project_name`, `task_folder`, `brainstorm_text`, `user_supplied_tag` |
 | `execute_prompt.md.erb` | `Stages::Execute.run!` (impl-only since ADR-014) | `project_name`, `worktree_path`, `task_folder`, `plan_text`, `user_supplied_tag` |
 | `open_pr_prompt.md.erb` | `Stages::OpenPr.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `branch`, `plan_text`, `execute_output_text`, `user_supplied_tag` |
@@ -67,4 +66,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[commands/init]] · [[commands/new]] · [[commands/bot]]
 - [[architecture]]
 
-<!-- updated: 2026-05-14 -->
+<!-- updated: 2026-06-08 -->

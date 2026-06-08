@@ -12,7 +12,7 @@ class HiveBotFreeTextHandlerTest < Minitest::Test
   end
   Update = Struct.new(:chat_id, :text, :reply_to_text, keyword_init: true)
   LegacyUpdate = Struct.new(:chat_id, :text, keyword_init: true)
-  State = Struct.new(:slug, :project, :question_n, :mode, :awaiting_confirm, keyword_init: true)
+  State = Struct.new(:slug, :project, :question_n, :mode, keyword_init: true)
   # A media update carries its text in the caption; update.text is nil. This
   # mirrors Telegram::Update#effective_text (caption for media, text otherwise).
   MediaUpdate = Struct.new(:chat_id, :text, :caption, :reply_to_text, keyword_init: true) do
@@ -21,8 +21,8 @@ class HiveBotFreeTextHandlerTest < Minitest::Test
     end
   end
 
-  def active_state
-    State.new(slug: "slug-260522-abcd", project: "hive", question_n: 1, mode: :path_b, awaiting_confirm: false)
+  def active_state(mode: :path_b)
+    State.new(slug: "slug-260522-abcd", project: "hive", question_n: 1, mode: mode)
   end
 
   def handler(state: nil)
@@ -73,6 +73,22 @@ class HiveBotFreeTextHandlerTest < Minitest::Test
     assert_equal :write_answer_then_reply, result.action
     assert_equal "my real caption", result.answer_text,
                  "the caption must fill the answer slot, not a blank update.text"
+  end
+
+  def test_path_a_active_state_writes_answer_like_path_b
+    # The retired Codex draft-assist feature gave path_a its own :start_codex
+    # branch. With that gone, a path_a conversation must take the same
+    # deterministic :write_answer_then_reply path as path_b, only propagating
+    # its own mode.
+    result = handler(state: active_state(mode: :path_a)).handle(
+      Update.new(chat_id: 12345, text: "my path-a answer", reply_to_text: nil)
+    )
+
+    assert_equal :write_answer_then_reply, result.action,
+                 "path_a must write the answer just like path_b, not branch to a retired flow"
+    assert_equal "my path-a answer", result.answer_text
+    assert_equal "slug-260522-abcd", result.slug
+    assert_equal :path_a, result.mode, "the active conversation's mode must propagate unchanged"
   end
 
   def test_captionless_media_during_active_brainstorm_refuses_instead_of_writing_blank

@@ -2305,8 +2305,6 @@ class ConfigTest < Minitest::Test
       assert_equal 120, cfg.dig("bot", "transcription", "timeout_sec")
       assert_equal 0.6, cfg.dig("bot", "transcription", "no_speech_threshold")
       assert_equal %w[en ru], cfg.dig("bot", "transcription", "supported_languages")
-      assert_equal 1, cfg.dig("bot", "codex_budget_usd")
-      assert_equal 120, cfg.dig("bot", "codex_timeout_sec")
     end
   end
 

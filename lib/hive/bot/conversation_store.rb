@@ -5,8 +5,8 @@ module Hive
     class ConversationStore
       VALID_MODES = %i[path_a path_b].freeze
 
-      State = Struct.new(:chat_id, :project, :slug, :question_n, :history, :draft, :mode,
-                         :awaiting_confirm, :updated_at, keyword_init: true)
+      State = Struct.new(:chat_id, :project, :slug, :question_n, :mode,
+                         :updated_at, keyword_init: true)
 
       def initialize(ttl_sec: 3600, now: -> { Time.now })
         @ttl_sec = ttl_sec
@@ -33,10 +33,7 @@ module Hive
             project: project,
             slug: slug,
             question_n: question_n,
-            history: [],
-            draft: nil,
             mode: mode,
-            awaiting_confirm: false,
             updated_at: @now.call
           )
         end
@@ -77,13 +74,6 @@ module Hive
 
       def clear(chat_id:, slug:)
         synchronize { @states.delete(key(chat_id, slug)) }
-      end
-
-      def pending_confirm_count(chat_id:)
-        synchronize do
-          prune_locked
-          @states.values.count { |state| state.chat_id == chat_id && state.awaiting_confirm }
-        end
       end
 
       # True when ANY chat has a non-expired answer conversation for `slug`

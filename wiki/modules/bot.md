@@ -3,15 +3,17 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-06
+updated: 2026-06-08
 tags: [bot, telegram, module, mobile]
 ---
 
 **TLDR**: `Hive::Bot::*` is the Telegram operator surface for daemon
 human-input gates. The supervisor has three loops: Telegram long-poll,
 `hive status --json` notification polling, and child reaping. Pure
-routing/parsing logic is split away from Telegram, filesystem, Codex,
-and subprocess I/O.
+routing/parsing logic is split away from Telegram, filesystem,
+and subprocess I/O. (The earlier "Codex draft-assist" brainstorm flow —
+where Path A spawned Codex to draft answers — has been retired; brainstorm
+answering is now deterministic Q-by-Q.)
 
 ## Module map
 
@@ -19,7 +21,7 @@ and subprocess I/O.
 |--------|------|---------|
 | `Supervisor` | `lib/hive/bot/supervisor.rb` | Long-running loop. Polls Telegram, runs status ticks, reaps child commands, handles TERM/INT/HUP, writes last-seen update IDs. |
 | `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, message splitting, markdown escaping, typed `Update` records, media/voice metadata extraction, `getFile`, and file download. |
-| `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. Idea capture includes media updates, voice-note transcription/edit intents, awaiting-text drafts, project-pick callbacks, transcript confirm/discard callbacks, and Done/Skip callbacks. Voice notes sent during an active or reattached `/answer` conversation route to the transcription action with answer context instead of being treated as blank free text. |
+| `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. Idea capture includes media updates, voice-note transcription/edit intents, awaiting-text drafts, project-pick callbacks, transcript confirm/discard callbacks, and Done/Skip callbacks. Voice notes sent during an active or reattached `/answer` conversation route to the transcription action with answer context instead of being treated as blank free text. Legacy `path_a_yes:` / `path_a_type:` callbacks classify only to retirement replies; retired `codex_*` callback data has no live intent. |
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. |
 | `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, voice-origin and transcript-confirm phases, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
 | `IdeaAttachmentPolicy` | `lib/hive/bot/idea_attachment_policy.rb` | Pure classifier for Telegram photo/document attachments. Allows jpg/jpeg/png/webp/gif/pdf/txt/md/docx, enforces count/byte caps, and normalizes extensions through `Hive::Tui::ComposerStaging`. |
@@ -30,11 +32,10 @@ and subprocess I/O.
 | `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Marker/action-specific text and inline keyboards. Recovery alerts are human-readable; Autofix is exposed only when the diagnostic `suggested_next_action.kind` is `retry`, while manual-only states show laptop/details actions. Fingerprints include project, slug, stage, marker, and marker attrs. |
 | `BrainstormParser` | `lib/hive/bot/brainstorm_parser.rb` | **Back-compat alias for `Hive::BrainstormParser`** (`lib/hive/brainstorm_parser.rb`) — the pure parser moved to the top-level namespace so the daemon can share it for the answers-pending gate (see [[modules/daemon]] §"Brainstorm answers-pending gate"). Parses `## Round`, `### Q<N>.`, and `### A<N>.` blocks. **Lenient A-header**: accepts the first A-section under each Q as that Q's answer slot regardless of A-number, so a brainstorm-agent off-by-one (e.g. `### A2.` after `### Q1.`) doesn't strand the operator. `parse` is total — invalid UTF-8 and a torn concurrent read degrade rather than raise. Also exposes canonical heading helpers (`question_header(n)`, `answer_header(n)`) so writer / supervisor / future renderers share one format source of truth. |
 | `BrainstormAnswerWriter` | `lib/hive/bot/brainstorm_answer_writer.rb` | Locked, first-write-wins insertion into the next answer block, with atomic rewrite. Slot location is **Q-context-aware**: walks forward from the parser-identified target Q's line, returning the first empty A-section before the next block boundary. When Q{n} is present and unanswered but has **no `### A` slot at all**, the writer **creates** the slot at the end of the Q-block (before the next Q/Round/marker boundary, via the parser's canonical `answer_header`) and writes the answer there — so a brainstorm agent that emitted a question without an answer block no longer dead-ends the operator (issue #269; previously `:answer_slot_missing`, which with the daemon's answers-pending gate held the task indefinitely). `:answer_slot_missing` remains only as a defensive fallback when the Q line can't be located. `Errno::ENOENT` on the underlying file is mapped to `:question_not_found` (not lock contention). |
-| `ConversationStore` | `lib/hive/bot/conversation_store.rb` | In-memory per-chat active answer/Codex state with TTL. No sidecar file; `brainstorm.md` stays canonical. All `@states` reads/writes are mutex-guarded because the Telegram poll thread mutates conversations while the status-poll thread calls `active_for_slug?` and prunes. `active_for_slug?(slug, project: nil)` is prune-aware and returns true when any chat has a non-expired answer conversation for that slug. Project scoping is lenient: two fully resolved different projects do not cross-suppress, but an unscoped/project-less side still suppresses to avoid reintroducing duplicate waiting alerts. `NotificationDispatcher` uses this to avoid duplicate proactive waiting pushes while the operator is already answering. |
-| `CodexConversation` | `lib/hive/bot/codex_conversation.rb` | Short-lived Path A Codex spawn wrapper. Parses `BOT_REPLY`, `BOT_DRAFT`, and `BOT_ERROR` lines. |
+| `ConversationStore` | `lib/hive/bot/conversation_store.rb` | In-memory per-chat active answer state with TTL. No sidecar file; `brainstorm.md` stays canonical. State now carries only `chat_id`, `project`, `slug`, `question_n`, `mode`, and `updated_at`; the retired Codex draft-assist fields (`history`, `draft`, `awaiting_confirm`) and `pending_confirm_count` API are gone. All `@states` reads/writes are mutex-guarded because the Telegram poll thread mutates conversations while the status-poll thread calls `active_for_slug?` and prunes. `active_for_slug?(slug, project: nil)` is prune-aware and returns true when any chat has a non-expired answer conversation for that slug. Project scoping is lenient: two fully resolved different projects do not cross-suppress, but an unscoped/project-less side still suppresses to avoid reintroducing duplicate waiting alerts. `NotificationDispatcher` uses this to avoid duplicate proactive waiting pushes while the operator is already answering. |
 | `ChildSupervisor` | `lib/hive/bot/child_supervisor.rb` | Spawns child `hive ...` commands with `pgroup: true`, writes per-dispatch logs, reaps with `Process.wait2(-1, WNOHANG)`. After plan 2026-05-28-002 the bot only reaches this path for **non-queue-routable** verbs (read-only `hive status --diagnose` for /details, `hive new` for the idea picker, `hive approve` for the /approve slash command, `hive accept-finding` / `hive reject-finding` for findings replies). State-mutating workflow verbs are written to the daemon's dispatch-request queue instead — see `DispatchRequestWriter` below. |
 | `DispatchRequestWriter` | `lib/hive/bot/dispatch_request_writer.rb` | Producer-only client of the daemon's dispatch-request queue. Atomic tmp+rename JSON write into `<state_home>/dispatch_requests/`. Argv validated against `Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS` at the call site too, so a typo in a slash handler raises locally rather than silently writing a request the daemon would discard. Returns a `request_id` the daemon echoes back in its `dispatch_request_*` events. |
-| `Logger` | `lib/hive/bot/logger.rb` | JSON-line structured logger with size rotation and closed event enum. `notification_skipped_active_conversation` is part of `hive-bot-log.v1`, so suppress-while-answering decisions have the same audit trail shape as other notification skip paths. |
+| `Logger` | `lib/hive/bot/logger.rb` | JSON-line structured logger with size rotation and closed event enum. `SCHEMA_VERSION` is now `2`: `hive-bot-log.v2` (`schemas/hive-bot-log.v2.json`) drops the retired `codex_spawned` / `codex_succeeded` / `codex_failed` events; `v1` is kept as-is for historical log lines. `notification_skipped_active_conversation` remains part of the schema, so suppress-while-answering decisions have the same audit trail shape as other notification skip paths. |
 | `Commands::Bot` | `lib/hive/commands/bot.rb` | Thor command surface and PID-file lifecycle. |
 
 ## Wiring
@@ -61,7 +62,9 @@ download one Telegram file into draft staging; voice transcription
 downloads a Telegram voice file, runs `Hive::Bot::Transcriber`, and
 either stores/edits an idea transcript or writes an audio answer through
 the normal brainstorm answer path; commit calls `Hive::Commands::New`
-in-process to create the inbox task.
+in-process to create the inbox task. There is no `start_codex` /
+`confirm_codex_draft` result action; Path A/B remains only as an answer
+mode value for compatibility, and both modes use `write_answer_then_reply`.
 
 Recovery push notifications intentionally hide marker attrs, exception
 classes, phase names, diagnostic summaries, and diagnostic artifact
@@ -88,7 +91,7 @@ mutations go through existing `hive` commands (`new`, workflow verbs,
 two narrow in-process paths. Brainstorm answer insertion is deliberately narrow:
 `BrainstormAnswerWriter.append!` holds `Hive::Lock.with_task_lock`,
 re-parses the file under the lock, refuses non-empty answer slots, and
-inserts the literal confirmed text. Two devices racing the same question
+inserts the literal answer text. Two devices racing the same question
 therefore produce one answer and one "already answered" reply, not a
 merged or overwritten block.
 

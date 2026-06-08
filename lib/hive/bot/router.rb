@@ -37,9 +37,6 @@ module Hive
         callback_idea_skip
         callback_path_a_yes
         callback_path_a_just_type
-        callback_codex_write_draft
-        callback_codex_edit
-        callback_codex_cancel
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
@@ -61,7 +58,7 @@ module Hive
 
       ALLOWED_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
-        write_answer_then_reply start_codex confirm_codex_draft
+        write_answer_then_reply
         stage_attachment transcribe_voice commit_idea
       ].freeze
 
@@ -223,9 +220,6 @@ module Hive
         when /\Aidea_skip:/ then :callback_idea_skip
         when /\Apath_a_yes:/ then :callback_path_a_yes
         when /\Apath_a_type:/ then :callback_path_a_just_type
-        when /\Acodex_write:/ then :callback_codex_write_draft
-        when /\Acodex_edit:/ then :callback_codex_edit
-        when /\Acodex_cancel:/ then :callback_codex_cancel
         when /\Afindings:accept_all:/ then :callback_findings_accept_all
         when /\Afindings:reject_all:/ then :callback_findings_reject_all
         when /\Aidea_project_new:/ then :callback_idea_project_new

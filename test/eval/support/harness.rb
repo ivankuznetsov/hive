@@ -129,8 +129,6 @@ module Hive
           "shutdown_grace_sec" => 1,
           "last_seen_state_file" => nil,
           "clear_retry_grace_sec" => 1,
-          "codex_budget_usd" => 1,
-          "codex_timeout_sec" => 120,
           "log_file" => File.join(Dir.tmpdir, "hive-eval-bot.log"),
           "log_max_bytes" => 10_485_760,
           "log_max_files" => 5

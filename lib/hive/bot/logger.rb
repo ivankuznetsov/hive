@@ -6,7 +6,7 @@ module Hive
   module Bot
     class Logger
       SCHEMA = "hive-bot-log".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
 
       EVENTS = %i[
         bot_started
@@ -24,9 +24,6 @@ module Hive
         answer_lock_contention
         dispatched_command
         command_completed
-        codex_spawned
-        codex_succeeded
-        codex_failed
         answer_written
         answer_skipped_already_answered
         answer_slot_missing

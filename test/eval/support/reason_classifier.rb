@@ -53,9 +53,6 @@ module Hive
         callback_answer
         callback_path_a_yes
         callback_path_a_just_type
-        callback_codex_write_draft
-        callback_codex_edit
-        callback_codex_cancel
         free_text_answer
       ].freeze
 
@@ -129,9 +126,11 @@ module Hive
       def classify_answer_text(text)
         body = text.to_s
         return "fatal_error" if body.match?(/failed|not found|already answered|lock|confused/i)
-        # "Reply with your answer" is the new Q-by-Q prompt format introduced by
-        # the answer-flow cleanup; legacy prompts ("Answer mode started", etc)
-        # are kept for any older code paths that may still route here.
+        # "Reply with your answer" is the Q-by-Q prompt format; "Answer mode
+        # started" is the legacy reply-reattach prompt still recognised by the
+        # general answer flow; "Codex draft" matches the retirement notice the
+        # bot still returns for legacy Path-A callbacks after the draft-assist
+        # feature was removed.
         return "agent_blocked_question" if body.match?(/Reply with your answer|Answer mode started|Send the answer|Codex draft/i)
 
         "status_response"

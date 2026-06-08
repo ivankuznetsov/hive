@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-log.v2.json",
+  "title": "hive bot structured log line (v2)",
+  "description": "One JSON-line event emitted by Hive::Bot::Logger. v2 retires the Codex draft-assist feature: the codex_spawned, codex_succeeded, and codex_failed events are removed from the `event` enum (they no longer occur). v1 is kept as-is for historical log lines. Like v1, v2 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event) require a v3 schema file with $id and `schema_version` bumped.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["ts", "schema", "schema_version", "event"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "schema": {
+      "const": "hive-bot-log"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "event": {
+      "enum": [
+        "bot_started",
+        "bot_stopping",
+        "poll_failure",
+        "update_received",
+        "update_rejected_unauthorized",
+        "dispatch_result_rejected_unauthorized",
+        "notification_sent",
+        "notification_skipped_dedupe",
+        "notification_skipped_backoff",
+        "notification_skipped_active_conversation",
+        "notification_skipped_daemon_plan_pause",
+        "fresh_install_seeded",
+        "answer_lock_contention",
+        "dispatched_command",
+        "command_completed",
+        "answer_written",
+        "answer_skipped_already_answered",
+        "answer_slot_missing",
+        "reconnect_summary",
+        "config_reloaded",
+        "envelope_parse_failure",
+        "send_failure",
+        "callback_malformed",
+        "pid_file_corrupted",
+        "unknown_stage_label",
+        "alert_store_corrupt",
+        "deprecated_config",
+        "update_nudge_pushed",
+        "update_nudge_error",
+        "transcription_failed",
+        "fatal"
+      ]
+    }
+  }
+}

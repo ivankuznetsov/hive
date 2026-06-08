@@ -153,6 +153,13 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal 10, msg.amount
   end
 
+  def test_help_scroll_carries_direction_and_amount
+    msg = Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: 3)
+
+    assert_equal :down, msg.direction
+    assert_equal 3, msg.amount
+  end
+
   def test_terminate_requested_singleton
     # Parameterless messages use a frozen singleton so callers don't
     # allocate per-trigger and so identity comparisons work.

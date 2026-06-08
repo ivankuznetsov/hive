@@ -344,6 +344,23 @@ module Hive
         key_end: [ :down, SCROLL_TO_EDGE ]
       }.freeze
 
+      # @api private
+      # Help overlay scroll bindings. Unlike the old "any key closes"
+      # overlay, navigation keys stay in help mode and move the
+      # viewport; only explicit close keys return to the grid.
+      HELP_SCROLL_KEYS = {
+        key_up: [ :up,   1 ],
+        key_down: [ :down, 1 ],
+        "k" => [ :up,   1 ],
+        "j" => [ :down, 1 ],
+        key_pgup: [ :up,   10 ],
+        key_pgdn: [ :down, 10 ],
+        key_home: [ :up,   SCROLL_TO_EDGE ],
+        "g" => [ :up,   SCROLL_TO_EDGE ],
+        key_end: [ :down, SCROLL_TO_EDGE ],
+        "G" => [ :down, SCROLL_TO_EDGE ]
+      }.freeze
+
       def red_status_detail_message(key:, row:)
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
         if (scroll = RED_STATUS_DETAIL_SCROLL_KEYS[key])
@@ -420,12 +437,18 @@ module Hive
         key.is_a?(String) && key.length == 1
       end
 
-      # Help overlay dismisses on any key except Ctrl+V, which remains
-      # inert outside the new-idea composer instead of closing overlays.
+      # Help overlay scrolls on navigation keys and closes only on
+      # explicit close keys. Ctrl+V remains inert outside the new-idea
+      # composer instead of closing overlays.
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         return Messages::NOOP if key == :key_ctrl_v
+        return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "?" || key == "q"
+        if (scroll = HELP_SCROLL_KEYS[key])
+          direction, amount = scroll
+          return Messages::HelpScroll.new(direction: direction, amount: amount)
+        end
 
-        Messages::BACK
+        Messages::NOOP
       end
 
       # Sticky panel: only explicit close keys dismiss, so accidental typing cannot leave it.

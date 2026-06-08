@@ -47,6 +47,7 @@ module Hive
         marker_heal_failed
         marker_heal_exhausted
         marker_heal_observer_missing
+        display_name_backfill
         update_available
         update_check_no_result
         update_check_error

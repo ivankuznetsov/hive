@@ -27,7 +27,8 @@ class BabysitterPrFixerTest < Minitest::Test
     {
       "number" => 42,
       "url" => "https://example.com/pr/42",
-      "headRefName" => "feature",
+      "headRefName" => "feature-branch",
+      "headRefOid" => "prfallbackoid",
       "baseRefName" => "main"
     }
   end
@@ -135,24 +136,27 @@ class BabysitterPrFixerTest < Minitest::Test
     {
       "mergeable" => "MERGEABLE",
       "mergeStateStatus" => "BEHIND",
+      "headRefOid" => "rollupoid",
       "statusCheckRollup" => [ { "name" => "ci", "conclusion" => "SUCCESS" } ]
     }
   end
 
-  def test_green_but_behind_rebases_force_pushes_and_reports_rebased
+  def test_green_but_behind_rebases_force_pushes_to_head_ref_and_reports_rebased
     with_tmp_dir do |dir|
       project = project_entry(dir)
       worktree_path = File.join(dir, "wt")
       FileUtils.mkdir_p(worktree_path)
       pushed = []
+      pushed_kwargs = []
       spawned = false
 
       status = green_behind_status
       with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(_p, _n, **_k) { status }) do
-        with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, ->(_pr, _proj) { WorktreeResult.new(path: worktree_path, branch: "feature") }) do
+        with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, ->(_pr, _proj) { WorktreeResult.new(path: worktree_path, branch: "hive-babysitter/pr-42") }) do
           with_replaced_singleton_method(Hive::Babysitter::GhOps, :rebase_onto_base, ->(*_a, **_k) { Hive::Babysitter::GhOps::RebaseResult.new(status: :success, stdout: "", stderr: "") }) do
-            with_replaced_singleton_method(Hive::Babysitter::GhOps, :force_push_with_lease, lambda { |*args, **_k|
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :force_push_with_lease, lambda { |*args, **kwargs|
               pushed << args
+              pushed_kwargs << kwargs
               Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
             }) do
               with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_a, **_k) { spawned = true }) do
@@ -166,9 +170,69 @@ class BabysitterPrFixerTest < Minitest::Test
 
       refute spawned, "rebase path must not spawn the fix agent"
       assert_equal 1, pushed.size
-      assert_equal [ worktree_path, "feature" ], pushed.first
+      assert_equal [ worktree_path, "feature-branch" ], pushed.first,
+        "must push to the PR head branch, not the internal hive-babysitter/pr-<n> branch"
+      assert_equal "rollupoid", pushed_kwargs.first.fetch(:expected_oid),
+        "expected_oid must come from the rollup's headRefOid"
       events = read_events(project)
       assert events.any? { |e| e["action"] == "rebase" && e["outcome"] == "success" }
+    end
+  end
+
+  def test_green_but_behind_falls_back_to_pr_head_oid_when_rollup_lacks_it
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      pushed_kwargs = []
+
+      # Rollup omits headRefOid -> expected_oid falls back to @pr["headRefOid"].
+      status = { "mergeable" => "MERGEABLE", "mergeStateStatus" => "BEHIND", "statusCheckRollup" => [ { "conclusion" => "SUCCESS" } ] }
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(_p, _n, **_k) { status }) do
+        with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, ->(_pr, _proj) { WorktreeResult.new(path: worktree_path, branch: "hive-babysitter/pr-42") }) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :rebase_onto_base, ->(*_a, **_k) { Hive::Babysitter::GhOps::RebaseResult.new(status: :success, stdout: "", stderr: "") }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :force_push_with_lease, lambda { |*_args, **kwargs|
+              pushed_kwargs << kwargs
+              Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            }) do
+              outcome = Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+              assert_equal :rebased, outcome
+            end
+          end
+        end
+      end
+
+      assert_equal "prfallbackoid", pushed_kwargs.first.fetch(:expected_oid),
+        "expected_oid must fall back to @pr['headRefOid'] when the rollup omits it"
+    end
+  end
+
+  def test_green_but_behind_passes_nil_expected_oid_when_neither_source_has_it
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      pushed_kwargs = []
+
+      # Neither rollup nor @pr carries headRefOid -> nil (bare-lease fallback).
+      status = { "mergeable" => "MERGEABLE", "mergeStateStatus" => "BEHIND", "statusCheckRollup" => [ { "conclusion" => "SUCCESS" } ] }
+      pr_without_oid = pr.reject { |k, _| k == "headRefOid" }
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(_p, _n, **_k) { status }) do
+        with_replaced_singleton_method(Hive::Babysitter::Worktree, :materialize, ->(_pr, _proj) { WorktreeResult.new(path: worktree_path, branch: "hive-babysitter/pr-42") }) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :rebase_onto_base, ->(*_a, **_k) { Hive::Babysitter::GhOps::RebaseResult.new(status: :success, stdout: "", stderr: "") }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :force_push_with_lease, lambda { |*_args, **kwargs|
+              pushed_kwargs << kwargs
+              Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            }) do
+              outcome = Hive::Babysitter::PrFixer.run(pr_without_oid, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+              assert_equal :rebased, outcome
+            end
+          end
+        end
+      end
+
+      assert_nil pushed_kwargs.first.fetch(:expected_oid),
+        "expected_oid must be nil when no headRefOid is available"
     end
   end
 

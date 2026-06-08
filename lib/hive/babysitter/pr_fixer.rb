@@ -111,7 +111,7 @@ module Hive
       # (default), rebase onto the base and force-push so the PR becomes
       # CLEAN/mergeable; conflicts are left for a human (no force-push).
       def handle_green(status, started)
-        return auto_rebase(started) if behind?(status) && auto_rebase_enabled?
+        return auto_rebase(status, started) if behind?(status) && auto_rebase_enabled?
 
         Hive::Babysitter::Events.emit(
           project: @project,
@@ -136,7 +136,7 @@ module Hive
         @cfg.dig("babysitter", "auto_rebase") != false
       end
 
-      def auto_rebase(started)
+      def auto_rebase(status, started)
         if @dry_run
           Hive::Babysitter::Events.emit(
             project: @project,
@@ -167,11 +167,17 @@ module Hive
           return rebase.conflict? ? :rebase_conflict : :failure
         end
 
+        # Push to the PR's REAL head branch (worktree.branch is the
+        # babysitter's INTERNAL `hive-babysitter/pr-<n>` name and would update
+        # the wrong ref). The explicit lease (PR head OID) makes the push
+        # robust without a local remote-tracking ref; a nil OID falls back to
+        # the bare lease form.
         push = Hive::Babysitter::GhOps.force_push_with_lease(
           worktree.path,
-          worktree.branch,
+          @pr.fetch("headRefName"),
           cfg: @cfg,
-          dry_run: @dry_run
+          dry_run: @dry_run,
+          expected_oid: status["headRefOid"] || @pr["headRefOid"]
         )
         Hive::Babysitter::Events.emit(
           project: @project,

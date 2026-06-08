@@ -12,9 +12,11 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
 end
 
 # Thor treats a class option before the subcommand as input to its help path.
-# Keep `hive --json status` equivalent to `hive status --json`.
+# Keep `hive --json status` equivalent to `hive status --json`. Mirror Thor's
+# boolean grammar exactly: `--json=VALUE` is truthy iff VALUE is `true`/`t`
+# (case-insensitive); Thor rejects other values (1/yes/0/no) as extra args.
 def truthy_json_option?(arg)
-  arg == "--json" || (arg.is_a?(String) && arg.match?(/\A--json=(true|1|yes)\z/i))
+  arg == "--json" || (arg.is_a?(String) && arg.match?(/\A--json=(true|t)\z/i))
 end
 
 def normalize_leading_json_options!(argv)

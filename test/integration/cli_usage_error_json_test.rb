@@ -16,6 +16,7 @@ class CliUsageErrorJsonTest < Minitest::Test
     cases = [
       [ %w[run --json], "hive-run" ],
       [ %w[--json=true run], "hive-run" ],
+      [ %w[--json=t run], "hive-run" ],
       [ %w[approve --json], "hive-approve" ],
       [ %w[markers clear --json], "hive-markers-clear" ]
     ]

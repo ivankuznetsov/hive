@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-06
+updated: 2026-06-08
 tags: [bot, telegram, module, mobile]
 ---
 

@@ -514,16 +514,6 @@ class HiveBotRouterTest < Minitest::Test
     assert_match(/action :teleport is not allowed/, error.message)
   end
 
-  def test_done_refuses_when_pending_confirm_exists
-    @store.start(chat_id: 12345, slug: "slug", question_n: 1)
-    @store.update(chat_id: 12345, slug: "slug", awaiting_confirm: true)
-
-    result = @router.handle(update(text: "/done"))
-
-    assert_equal :reply, result.action
-    assert_match(/awaiting confirm/, result.text)
-  end
-
   LegacyCallbackUpdate = Struct.new(:update_id, :chat_id, :callback_data, keyword_init: true) do
     def callback_query?
       true

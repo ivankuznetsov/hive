@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [architecture, overview]
 ---
 

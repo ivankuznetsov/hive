@@ -128,8 +128,8 @@ class HiveBotSupervisorTest < Minitest::Test
   FakeConversationStore = Struct.new(:starts, :updates, :states, :ttl_updates, keyword_init: true) do
     def start(**kwargs)
       starts << kwargs
-      state = Struct.new(:question_n, :mode, :project, :draft, :history, :awaiting_confirm, keyword_init: true).new(
-        question_n: kwargs[:question_n], mode: kwargs[:mode], project: kwargs[:project], history: []
+      state = Struct.new(:question_n, :mode, :project, keyword_init: true).new(
+        question_n: kwargs[:question_n], mode: kwargs[:mode], project: kwargs[:project]
       )
       states[[ kwargs[:chat_id], kwargs[:slug] ]] = state
       state
@@ -158,10 +158,6 @@ class HiveBotSupervisorTest < Minitest::Test
       else
         states.delete_if { |key, _| key.first == chat_id }
       end
-    end
-
-    def pending_confirm_count(chat_id:)
-      states.count { |key, state| key.first == chat_id && state.respond_to?(:awaiting_confirm) && state.awaiting_confirm }
     end
   end
 

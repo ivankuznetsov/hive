@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-06
+updated: 2026-06-08
 tags: [command, bot, telegram, mobile, json]
 ---
 

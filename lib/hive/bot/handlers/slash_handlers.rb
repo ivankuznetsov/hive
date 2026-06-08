@@ -246,12 +246,6 @@ module Hive
         end
 
         def done(update, conversation_store)
-          pending = conversation_store.pending_confirm_count(chat_id: update.chat_id)
-          if pending.positive?
-            return @result_class.new(action: :reply,
-                                     text: "You still have #{pending} draft answers awaiting confirm.")
-          end
-
           state = conversation_store.get(chat_id: update.chat_id)
           return @result_class.new(action: :reply, text: "No active brainstorm conversation.") unless state
 

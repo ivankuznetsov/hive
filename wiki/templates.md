@@ -3,7 +3,7 @@ title: ERB Templates
 type: reference
 source: templates/
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-06-08
 tags: [template, erb, prompt]
 ---
 
@@ -66,4 +66,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[commands/init]] · [[commands/new]] · [[commands/bot]]
 - [[architecture]]
 
-<!-- updated: 2026-05-14 -->
+<!-- updated: 2026-06-08 -->

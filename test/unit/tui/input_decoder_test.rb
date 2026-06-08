@@ -338,4 +338,60 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal 1, esc_messages.size, "expected exactly one KEY_ESC"
     assert_empty enter_messages, "trailing LF must be absorbed, not promoted to KEY_ENTER"
   end
+
+  # ---- SGR mouse reports (DEC 1006), enabled by mouse_cell_motion ----
+  # Before the decoder learned to parse these, a wheel report fell through
+  # `drain_escape` as a lone ESC (→ Messages::BACK, closing help) plus
+  # literal `[<…M` text. These pin the report → Bubbletea::MouseMessage
+  # decode so the wheel scrolls rather than closing/corrupting.
+
+  def test_sgr_wheel_down_decodes_to_wheel_mouse_message
+    msg = decoder.drain("\e[<65;10;5M").first
+
+    assert_kind_of Bubbletea::MouseMessage, msg
+    assert msg.wheel?, "button 65 is a wheel report"
+    assert_equal Bubbletea::MouseMessage::BUTTON_WHEEL_DOWN, msg.button
+  end
+
+  def test_sgr_wheel_up_decodes_to_wheel_mouse_message
+    msg = decoder.drain("\e[<64;10;5M").first
+
+    assert_kind_of Bubbletea::MouseMessage, msg
+    assert_equal Bubbletea::MouseMessage::BUTTON_WHEEL_UP, msg.button
+  end
+
+  def test_sgr_mouse_report_emits_no_esc_or_residual_text
+    # The whole report is consumed: no KEY_ESC (which would close help)
+    # and no leaked `[<…M` RawTextInput (which would corrupt a composer).
+    messages = decoder.drain("\e[<0;3;4M")
+
+    assert(messages.none? { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_ESC },
+           "a mouse report must not emit KEY_ESC")
+    assert(messages.none? { |m| m.is_a?(Hive::Tui::Messages::RawTextInput) },
+           "a mouse report must not leak literal bytes as text")
+  end
+
+  def test_sgr_mouse_release_decodes_to_release_action
+    msg = decoder.drain("\e[<0;3;4m").first
+
+    assert_kind_of Bubbletea::MouseMessage, msg
+    assert msg.release?, "trailing 'm' marks a release report"
+  end
+
+  def test_fragmented_sgr_mouse_report_reassembles_across_reads
+    first = decoder.drain("\e[<65;10")
+    assert_empty first, "a partial report must buffer, not emit anything yet"
+
+    second = decoder.drain(";5M")
+    assert_kind_of Bubbletea::MouseMessage, second.first
+    assert_equal Bubbletea::MouseMessage::BUTTON_WHEEL_DOWN, second.first.button
+  end
+
+  def test_text_after_a_mouse_report_is_decoded_normally
+    messages = decoder.drain("\e[<64;1;1Mhi")
+    text = messages.find { |m| m.is_a?(Hive::Tui::Messages::RawTextInput) }
+
+    assert_kind_of Bubbletea::MouseMessage, messages.first
+    assert_equal "hi", text&.text, "bytes after the report must decode as ordinary text"
+  end
 end

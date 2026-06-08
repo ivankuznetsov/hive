@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/tui/bubble_model"
+require "hive/tui/input_decoder"
 
 # Pin the BubbleModel adapter's translation/dispatch contract:
 # framework messages → Hive Messages, KeyMessage → KeyMap.message_for,
@@ -515,6 +516,27 @@ class HiveTuiBubbleModelTest < Minitest::Test
     msg = @model.send(:translate, mouse_message(button: 6))
 
     assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_raw_sgr_wheel_bytes_scroll_help_end_to_end
+    # The live pipeline: raw terminal bytes → InputDecoder#drain →
+    # Bubbletea::MouseMessage → BubbleModel#translate → HelpScroll. This is
+    # the path `mouse_cell_motion: true` actually drives; the translate_*
+    # unit tests above hand-build the MouseMessage, so only this proves the
+    # wheel scrolls help instead of closing it.
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :help),
+      dispatch: @dispatch
+    )
+    decoder = Hive::Tui::InputDecoder.new
+    decoded = decoder.drain("\e[<65;10;5M") # SGR wheel-down report
+
+    translated = decoded.map { |m| @model.send(:translate, m) }
+    scroll = translated.find { |m| m.is_a?(Hive::Tui::Messages::HelpScroll) }
+
+    assert scroll, "a raw wheel report must translate to a HelpScroll, not Messages::BACK"
+    assert_equal :down, scroll.direction
+    assert_equal Hive::Tui::BubbleModel::HELP_WHEEL_SCROLL_LINES, scroll.amount
   end
 
   # ---- View dispatch by mode ----

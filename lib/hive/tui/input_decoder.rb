@@ -13,6 +13,24 @@ module Hive
       PASTE_START = "\e[200~".b.freeze
       PASTE_END = "\e[201~".b.freeze
 
+      # SGR mouse reports (DEC 1006), as emitted once `mouse_cell_motion`
+      # is enabled in App.run_charm: `\e[<b;x;yM` (press/wheel) and
+      # `\e[<b;x;ym` (release). bubbletea-ruby's poll_event bridge parses
+      # these in its native layer, but PasteAwareRunner drains every raw
+      # chunk through this decoder instead — so without a mouse branch a
+      # wheel report fell through `drain_escape` as a lone ESC (mapping to
+      # Messages::BACK, closing help) followed by literal `[<…M` text. We
+      # parse the report here and emit a `Bubbletea::MouseMessage` so the
+      # `translate_mouse` path (BubbleModel) turns the wheel into a
+      # HelpScroll and non-wheel reports resolve to NOOP instead of
+      # corrupting composer buffers.
+      MOUSE_SGR_PREFIX = "\e[<".b.freeze
+      MOUSE_SGR_REPORT = /\A\e\[<(\d+);(\d+);(\d+)([Mm])/n
+      # A buffer that is still a valid *prefix* of a report (terminator
+      # not yet arrived). Used to wait for the rest of a fragmented
+      # sequence rather than mis-emitting an ESC.
+      MOUSE_SGR_PARTIAL = /\A\e\[<\d*(;\d*){0,2}\z/n
+
       SEQUENCES = {
         "\e[A".b => Bubbletea::KeyMessage::KEY_UP,
         "\e[B".b => Bubbletea::KeyMessage::KEY_DOWN,
@@ -222,6 +240,8 @@ module Hive
       end
 
       def drain_escape(messages)
+        return drain_mouse(messages) if @pending.start_with?(MOUSE_SGR_PREFIX)
+
         if (sequence = sequence_match)
           consume(sequence.bytesize)
           messages << key_message(SEQUENCES.fetch(sequence))
@@ -238,6 +258,67 @@ module Hive
         # KEY_ENTER and trigger whatever Enter does in :grid.
         consume(1) if @pending.start_with?("\r".b, "\n".b)
         true
+      end
+
+      # Consume a full SGR mouse report and emit a MouseMessage. Returns
+      # false (wait for more bytes) while the buffer is still a valid
+      # partial report; on a malformed buffer that can never complete,
+      # emit a lone ESC and let the residue re-enter as text — matching
+      # the pre-mouse fallthrough so a corrupt sequence can't wedge input.
+      def drain_mouse(messages)
+        if (match = MOUSE_SGR_REPORT.match(@pending))
+          consume(match[0].bytesize)
+          mouse = build_mouse_message(match[1].to_i, match[2].to_i, match[3].to_i, match[4])
+          messages << mouse if mouse
+          return true
+        end
+
+        return false if MOUSE_SGR_PARTIAL.match?(@pending)
+
+        consume(1)
+        messages << key_message(Bubbletea::KeyMessage::KEY_ESC)
+        true
+      end
+
+      # Map an SGR button code + final byte to a Bubbletea::MouseMessage.
+      # `M` is press/wheel, `m` is release. The button byte packs modifier
+      # bits (0x04 shift, 0x08 alt, 0x10 ctrl, 0x20 motion, 0x40 wheel).
+      # Bubbletea models only vertical wheel up/down; horizontal-wheel and
+      # unmapped buttons collapse to BUTTON_NONE so translate_mouse NOOPs
+      # them rather than scrolling.
+      def build_mouse_message(button_code, x, y, final)
+        wheel = (button_code & 0x40) != 0
+        motion = (button_code & 0x20) != 0
+        action =
+          if motion && !wheel
+            Bubbletea::MouseMessage::ACTION_MOTION
+          elsif final == "M".b
+            Bubbletea::MouseMessage::ACTION_PRESS
+          else
+            Bubbletea::MouseMessage::ACTION_RELEASE
+          end
+
+        Bubbletea::MouseMessage.new(
+          x: [ x - 1, 0 ].max,
+          y: [ y - 1, 0 ].max,
+          button: mouse_button(button_code, wheel),
+          action: action,
+          shift: (button_code & 0x04) != 0,
+          alt: (button_code & 0x08) != 0,
+          ctrl: (button_code & 0x10) != 0
+        )
+      end
+
+      def mouse_button(button_code, wheel)
+        low = button_code & 0x03
+        if wheel
+          { 0 => Bubbletea::MouseMessage::BUTTON_WHEEL_UP,
+            1 => Bubbletea::MouseMessage::BUTTON_WHEEL_DOWN }.fetch(low, Bubbletea::MouseMessage::BUTTON_NONE)
+        else
+          { 0 => Bubbletea::MouseMessage::BUTTON_LEFT,
+            1 => Bubbletea::MouseMessage::BUTTON_MIDDLE,
+            2 => Bubbletea::MouseMessage::BUTTON_RIGHT }.fetch(low, Bubbletea::MouseMessage::BUTTON_NONE)
+        end
       end
 
       def drain_text(messages)

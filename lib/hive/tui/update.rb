@@ -134,8 +134,12 @@ module Hive
           [ model, nil ]
         else
           # Unknown messages flow through unchanged. Future-compat with
-          # framework messages we don't yet care about (FocusMessage,
-          # BlurMessage, MouseMessage if mouse ever gets enabled).
+          # framework messages we don't yet act on at the Update layer
+          # (FocusMessage, BlurMessage). Mouse reporting IS enabled
+          # (App.run_charm sets mouse_cell_motion), but BubbleModel
+          # translates each Bubbletea::MouseMessage into a HelpScroll /
+          # NOOP before Update sees it, so a raw MouseMessage never
+          # reaches this branch.
           # DispatchCommand / OpenLogTail / OpenInputEditor intentionally
           # fall through here — they require I/O or a runner reference
           # and are handled in BubbleModel before delegating to Update.

@@ -838,6 +838,14 @@ module Hive
         @notification_dispatcher.reset_task(**reset)
       end
 
+      # One-line plain-text advisory prepended to a `/status` reply when the
+      # StatusWatcher tolerated a forward schema-version skew (the rendered
+      # data was parsed best-effort and may be incomplete).
+      def status_skew_banner
+        "⚠️ hive status: running on a newer schema than this bot understands; " \
+          "data may be incomplete — restart the bot."
+      end
+
       def render_status_json(envelope, project_filter)
         return "{}" if envelope.nil?
 
@@ -907,6 +915,14 @@ module Hive
             error = "unknown error" if error.empty?
             safe_send_message(chat_id: update.chat_id, text: "hive status unavailable: #{error}")
             return nil
+          end
+
+          # Forward schema-version skew: the data below was parsed
+          # best-effort from a NEWER hive-status envelope than this bot
+          # understands and may be incomplete. The user otherwise sees a
+          # normal status with no hint, so prepend a one-line advisory.
+          if status_fetch_warning(fetch_result)
+            safe_send_message(chat_id: update.chat_id, text: status_skew_banner)
           end
 
           if result.respond_to?(:format) && result.format == :json
@@ -1369,6 +1385,15 @@ module Hive
 
       def status_command?(argv)
         Array(argv) == [ "hive", "status", "--json" ]
+      end
+
+      # Non-fatal forward schema-skew advisory carried on the fetch Result,
+      # if any. Tolerant of result objects that predate the `warning` field
+      # (mirrors `status_legacy_stage_dirs`).
+      def status_fetch_warning(fetch_result)
+        return nil unless fetch_result.respond_to?(:warning)
+
+        fetch_result.warning
       end
 
       def next_unanswered_question_n(brainstorm_path)

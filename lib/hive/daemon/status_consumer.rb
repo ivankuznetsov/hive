@@ -50,6 +50,11 @@ module Hive
         end
 
         doc = JSON.parse(out)
+        # Envelope SHAPE validation runs OUTSIDE the best-effort extraction
+        # rescue below: a missing schema / ok=false is a real failure whose
+        # message must ALWAYS surface, even on a newer-schema doc. Folding
+        # it into the skew degrade would relabel a genuine "ok=false:
+        # <reason>" as a misleading "restart to pick up the new version".
         validate_envelope!(doc)
         skew = schema_skew(doc)
         # An OLDER payload (a stale `hive` on PATH than this daemon
@@ -61,21 +66,29 @@ module Hive
         # long-running daemon process. The dispatcher logs `warning`.
         return Result.new(ok: false, rows: [], projects: [], error: older_skew_message(doc)) if skew == :older
 
-        rows = extract_rows(doc)
-        projects = extract_projects(doc)
+        begin
+          rows = extract_rows(doc)
+          projects = extract_projects(doc)
+        rescue StandardError => e
+          # ONLY a failure inside best-effort EXTRACTION degrades. On a
+          # newer-schema doc this is the tolerated forward-skew path, but we
+          # PRESERVE the underlying exception (class + message) in the
+          # surfaced error so a genuine extraction bug stays recoverable —
+          # an operator who restarts into the same buggy binary would
+          # otherwise keep chasing the friendly "restart" hint. On an
+          # exact/equal-version doc there is nothing to tolerate: re-raise to
+          # the outer rescue, which records the raw "#{e.class}: ...".
+          raise unless skew == :newer
+
+          return Result.new(ok: false, rows: [], projects: [],
+                            error: forward_skew_message(doc, underlying: e))
+        end
         Result.new(ok: true, rows: rows, projects: projects, error: nil,
                    warning: (skew == :newer ? forward_skew_warning(doc) : nil))
       rescue JSON::ParserError => e
         Result.new(ok: false, rows: [], projects: [],
                    error: "malformed JSON from hive status: #{e.message}")
       rescue StandardError => e
-        # A newer payload that genuinely failed best-effort extraction
-        # degrades to a clear, actionable restart message rather than an
-        # opaque "#{e.class}: ..." line that an operator can't act on.
-        if defined?(doc) && doc.is_a?(Hash) && schema_skew(doc) == :newer
-          return Result.new(ok: false, rows: [], projects: [], error: forward_skew_message(doc))
-        end
-
         Result.new(ok: false, rows: [], projects: [], error: "#{e.class}: #{e.message}")
       end
 
@@ -112,9 +125,16 @@ module Hive
           "Restart the hive daemon to pick up the new schema."
       end
 
-      def forward_skew_message(doc)
+      # `underlying` is the exception that aborted best-effort extraction on
+      # a newer-schema doc. We append its class + message so the genuine
+      # defect stays diagnosable in the daemon log / status_failure event
+      # instead of being masked by the friendly restart hint — an operator
+      # who restarts into the same buggy binary would otherwise keep
+      # chasing the hint.
+      def forward_skew_message(doc, underlying:)
         "hive status: #{forward_skew_summary(doc)}; " \
-          "restart the hive daemon to pick up the new version"
+          "restart the hive daemon to pick up the new version " \
+          "(underlying error: #{underlying.class}: #{underlying.message})"
       end
 
       def forward_skew_summary(doc)

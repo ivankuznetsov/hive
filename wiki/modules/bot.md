@@ -83,6 +83,33 @@ buttons when task metadata is available.
 
 Legacy stage-directory warnings are proactive as project-level notifications. `StatusWatcher` converts non-empty `legacy_stage_dirs` project payloads into synthetic notification inputs, `Supervisor#status_tick` feeds them through the same `NotificationDispatcher` as task rows, and `NotificationBuilders` renders a message like `Project P has N tasks hidden in legacy stage dirs (...) - run hive migrate <project_path>`. The same warning appears in `/status` and `/queue` replies. The alert-store fingerprint is project-level rather than count-level, so the warning dedupes while the project remains legacy-dirty, drops when the project returns clean, and alerts again on a later clean-to-legacy transition. Fresh alert-store seeding still suppresses historical task backlog, but legacy-stage warnings alert immediately because first bot startup after an upgrade is when operators need the migration prompt.
 
+### Forward schema-version skew on `/status`
+
+`StatusWatcher#fetch` is forward-tolerant of a newer `hive-status`
+`schema_version` than this long-running bot was built for — the shared
+mechanism is documented under [[modules/daemon]] § *Forward-tolerant
+schema-version skew*. Bot-specific behaviour (fix-forward on #416):
+
+- On a `:newer` best-effort SUCCESS the `Result` carries a non-fatal
+  `warning`. `Supervisor#execute_dispatch` prepends a one-line plain-text
+  banner ("⚠️ hive status: running on a newer schema than this bot
+  understands; data may be incomplete — restart the bot.") to the
+  `/status` (and `/queue`) reply, so the Telegram operator sees the
+  advisory rather than a normal-looking status with a silent log line.
+- The success-path skew advisory is logged under the **distinct**
+  `:poll_schema_skew` event (not the overloaded `:poll_failure`), so it
+  isn't conflated with real fetch failures. `:poll_schema_skew` is in
+  `Hive::Bot::Logger::EVENTS` and the `hive-bot-log.v2` schema enum
+  (additive append — no schema-version bump).
+- `validate_envelope!` (shape / `ok=false`) runs OUTSIDE the best-effort
+  extraction rescue: a `:newer` envelope that ALSO has `ok=false` surfaces
+  its real `envelope ok=false: <reason>`, never the skew hint. A throw
+  inside extraction on a `:newer` doc degrades to the restart message but
+  **preserves the underlying exception** in the surfaced `error` (`…
+  (underlying error: <Class>: <msg>)`) AND logs it under
+  `:poll_schema_skew` (class + message + first backtrace lines) so a real
+  extraction defect stays recoverable.
+
 ## Trust boundary
 
 The bot does not move task folders or invent approval policy. State

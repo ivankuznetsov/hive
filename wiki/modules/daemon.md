@@ -528,20 +528,35 @@ Behavior by skew (both `StatusConsumer` and `Hive::Bot::StatusWatcher`):
   newer payload is still readable. The consumer returns `ok: true` and
   carries a non-fatal `Result#warning`; the dispatcher logs it once per
   tick as `:status_schema_skew` and keeps dispatching. If best-effort
-  extraction genuinely throws downstream, it degrades to the actionable
-  failure `hive status: envelope schema vN is newer than this process
-  (vM); restart the hive daemon to pick up the new version` rather than an
-  opaque `#{e.class}: …` line.
+  extraction (`extract_rows`/`extract_projects`) genuinely throws, it
+  degrades to the actionable failure `hive status: envelope schema vN is
+  newer than this process (vM); restart the hive daemon to pick up the new
+  version (underlying error: <Class>: <msg>)` — the **underlying exception
+  is preserved**, not swallowed, so a genuine extraction bug that merely
+  coincides with a newer schema stays diagnosable instead of being
+  relabeled "just restart" forever.
 - **`:older`** (payload version < process version — a stale binary on
   PATH): not parsed as trustworthy. Returns `Result(ok: false)` with
   `… is older than this process (vM); update/reinstall the hive binary on
   PATH`.
 - **`:match`**: unchanged happy path; no warning.
 
+**Validation runs OUTSIDE the skew degrade (fix-forward on #416).**
+`validate_envelope!` (shape + `ok==true`) is called before the
+best-effort extraction block, and extraction is wrapped in its own
+`begin/rescue`. So an envelope that is both `:newer` AND `ok=false`
+surfaces its real `envelope ok=false: <reason>` message — never the skew
+restart hint. Only a throw inside extraction degrades, and only when
+`skew == :newer`; an equal/exact-version extraction throw re-raises to the
+outer rescue and surfaces the raw `#{e.class}: …` line (a real bug, not a
+skew).
+
 The contract: a long-running consumer must NEVER crash a tick (or the
 bot's `/status`) with a raw `ArgumentError` purely because a
 `schema_version` was bumped without a restart. It either keeps working
-(forward-compatible) or returns a clear "restart to pick up vN" message.
+(forward-compatible) or returns a clear "restart to pick up vN" message —
+without ever masking the real `ok=false` reason or a genuine extraction
+defect.
 
 `Hive::Bot::Supervisor#diagnose_reply_for_child` consumes the sibling
 `hive-status-diagnose` envelope but only checks `schema == ...` and never

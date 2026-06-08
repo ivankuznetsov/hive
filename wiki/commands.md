@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, packaging/docker/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, public/, hive.gemspec, packaging/docker/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-06-09
 tags: [commands, api]
@@ -20,6 +20,9 @@ does not publish one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/web/**/*.rb`
+- `lib/hive/web/views/*.erb`
+- `public/**/*`
+- `hive.gemspec`
 - `packaging/docker/entrypoint.sh`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
@@ -86,6 +89,8 @@ agent-auth, repo, and Telegram setup contracts as the CLI/bot/daemon stack; it
 does not introduce a separate workflow engine. Docker packaging adds the
 `hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
 directories and then runs `Hive::Web::Supervisor` unless custom argv is passed.
+The gem payload includes Hivebox ERB views and public CSS/JS, so the installed
+`hive web` command has the same renderable UI assets as a source checkout.
 
 ### E2E Harness
 

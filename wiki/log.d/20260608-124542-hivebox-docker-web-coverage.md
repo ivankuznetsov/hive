@@ -12,7 +12,7 @@ committed diff plus current `packaging/docker/Dockerfile`,
 `lib/hive/commands/web.rb`, `lib/hive/web/**`, web config validation, web unit
 tests, and the manual Playwright hivebox contract. Updated the wiki to cover the
 Docker image build path, `/data` persistence boundary, `tini` entrypoint,
-custom-argv behavior, `/health` healthcheck, compose environment, best-effort
+custom-argv behavior, `/health` healthcheck, compose environment, fail-closed
 agent CLI npm install, web runtime gems, and the remaining lack of live
 provider/container smoke evidence. Page count stayed 76, so [[index]] did not
 need a catalog update. Did not run `qmd update` or `qmd embed`, and did not edit

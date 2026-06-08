@@ -1,7 +1,7 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, lib/hive/web/, packaging/docker/
+source: lib/hive/commands/web.rb, lib/hive/web/, hive.gemspec, public/, packaging/docker/
 created: 2026-06-04
 updated: 2026-06-08
 tags: [command, web, hivebox]
@@ -23,9 +23,9 @@ agent profiles.
 | `--bind` | Overrides `web.bind` for this server run. |
 | `--port` | Overrides `web.port` for this server run. |
 
-`Hive::Commands::Web#call` loads `Hive::Config.load_global_web`, requires Puma
-and Rackup, mounts `Hive::Web::App`, adds one TCP listener, prints the listening
-URL, and joins the Puma server thread. It is a foreground server command.
+`Hive::Commands::Web#call` loads `Hive::Config.load_global_web`, requires Puma,
+mounts `Hive::Web::App`, adds one TCP listener, prints the listening URL, and
+joins the Puma server thread. It is a foreground server command.
 
 ## Surface
 
@@ -85,9 +85,15 @@ to the waiting PTY. It does not proxy provider login pages. The design note is
 installs OS tools needed by the box (`git`, `gh`, `tmux`, `nodejs`, `npm`,
 `tini`, and build/runtime helpers), copies the repository into `/app`, runs
 Bundler without development/test groups, builds the `hive-cli` gem, installs it,
-and then attempts to install the Claude, Codex, and Pi CLIs globally through npm.
-That npm install is explicitly best-effort (`|| true`), so a built image may
-still require agent CLI repair before login flows work.
+and installs the Claude, Codex, and Pi CLIs globally through npm. The npm
+install is fail-closed: a build missing those agent binaries fails instead of
+shipping a box whose `/agents` login flows cannot start the expected CLIs.
+
+`hive.gemspec` includes both `lib/hive/web/views/*.erb` and `public/**/*` in
+the runtime gem payload. This matters for installed `hive web` and for the
+Docker build, which runs from the built gem: the source tree can render views
+from `__dir__`, but an installed gem without those ERB templates and CSS/JS
+assets would render `/login` and other pages as server errors.
 
 The Docker entrypoint is `/usr/bin/tini -- hivebox-entrypoint`. The entrypoint
 ensures `/data/home`, `/data/repos`, `/data/config`, `/data/state`,

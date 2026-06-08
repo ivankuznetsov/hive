@@ -1,7 +1,7 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, Gemfile.lock
+source: Gemfile, hive.gemspec, Gemfile.lock
 created: 2026-04-25
 updated: 2026-06-08
 tags: [dependencies, gems, runtime]
@@ -19,7 +19,7 @@ tags: [dependencies, gems, runtime]
 | `faraday-multipart` | `~> 1.0` | Multipart upload support for OpenAI-compatible audio transcription requests. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
-| `puma` | `~> 6.6` | Rack server for `hive web`; `Hive::Commands::Web` mounts `Hive::Web::App` on a Puma TCP listener. |
+| `puma` | `~> 7.2`, `>= 7.2.1` (locked 7.2.1) | Rack server for `hive web`; `Hive::Commands::Web` mounts `Hive::Web::App` on a Puma TCP listener. |
 | `rack-protection` | `~> 4.1` | Sinatra/Rack request protection used by the hivebox web app, with host authorization excluded because the configured external origin can sit behind a tunnel or reverse proxy. |
 | `sinatra` | `~> 4.1` | Web framework for `Hive::Web::App` and route files under `lib/hive/web/routes/`. |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |

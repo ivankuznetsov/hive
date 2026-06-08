@@ -233,4 +233,37 @@ class HivePatrolReviewerTest < Minitest::Test
       end
     end
   end
+
+  def test_run_agent_wrapper_does_not_raise_when_usage_recording_fails
+    with_tmp_dir do |dir|
+      reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg)
+      fake_agent = Object.new
+      def fake_agent.run!
+        { status: :ok, usage: { input: 1, output: 2, cached: 3 } }
+      end
+
+      profiles_singleton = class << Hive::AgentProfiles; self; end
+      agent_singleton = class << Hive::Agent; self; end
+      usage_singleton = class << Hive::UsageDb; self; end
+      profiles_lookup = Hive::AgentProfiles.method(:lookup)
+      agent_new = Hive::Agent.method(:new)
+      usage_record = Hive::UsageDb.method(:record!)
+      # A profile object WITHOUT #name exercises profile_name's config fallback.
+      profiles_singleton.define_method(:lookup) { |*| Object.new }
+      agent_singleton.define_method(:new) { |*| fake_agent }
+      usage_singleton.define_method(:record!) { |**| raise "db locked" }
+
+      result = nil
+      _out, err = capture_io do
+        result = reviewer.send(:run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+      end
+
+      assert_equal({ status: :ok, usage: { input: 1, output: 2, cached: 3 } }, result)
+      assert_match(/usage record failed: db locked/, err)
+    ensure
+      profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+      agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      usage_singleton.define_method(:record!, usage_record) if usage_singleton && usage_record
+    end
+  end
 end

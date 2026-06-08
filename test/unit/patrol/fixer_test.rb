@@ -263,6 +263,36 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_run_agent_wrapper_falls_back_to_config_agent_for_nameless_profile
+    with_tmp_git_repo do |repo|
+      with_usage_db do
+        fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+        fake_agent = Object.new
+        def fake_agent.run!
+          { status: :ok, usage: { input: 1, output: 2, cached: 3 } }
+        end
+
+        profiles_singleton = class << Hive::AgentProfiles; self; end
+        agent_singleton = class << Hive::Agent; self; end
+        profiles_lookup = Hive::AgentProfiles.method(:lookup)
+        agent_new = Hive::Agent.method(:new)
+        # A profile object WITHOUT #name exercises profile_name's config fallback.
+        profiles_singleton.define_method(:lookup) { |*| Object.new }
+        agent_singleton.define_method(:new) { |*| fake_agent }
+
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+
+        rows = usage_rows
+        assert_equal 1, rows.size
+        assert_equal "claude", rows.first["agent"],
+                     "a profile without #name must fall back to the configured patrol agent (default claude)"
+      ensure
+        profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+        agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      end
+    end
+  end
+
   def test_committed_since_base_detects_branch_delta
     with_tmp_git_repo do |repo|
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))

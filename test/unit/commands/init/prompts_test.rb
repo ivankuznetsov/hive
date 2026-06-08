@@ -811,4 +811,10 @@ class InitPromptsTest < Minitest::Test
 
     assert_nil prompts.send(:resolve_claude_mode_choice, "99")
   end
+
+  def test_resolve_patrol_mode_choice_rejects_numeric_out_of_range
+    prompts, _output = make_prompts(interactive_input)
+
+    assert_nil prompts.send(:resolve_patrol_mode_choice, "99")
+  end
 end

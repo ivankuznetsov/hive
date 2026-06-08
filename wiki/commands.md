@@ -38,6 +38,9 @@ instead of being treated as partially-valid command invocations.
 It also moves leading JSON class options onto the subcommand before Thor sees
 argv, including Thor-truthy `--json=true` and `--json=t` spellings. It does
 not normalize `--json=1` or `--json=yes`, matching Thor's boolean parser.
+Leading negations `--json=false`, `--json=f`, `--no-json`, and `--skip-json`
+are relocated too, so they dispatch as command-local falsey options instead of
+falling onto Thor's help path.
 That keeps agent-style calls such as `hive --json=true run` and
 `hive --json=t run` on the same structured usage-error path as
 `hive run --json`.

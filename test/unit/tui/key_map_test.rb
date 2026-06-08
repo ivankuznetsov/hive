@@ -403,9 +403,46 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
-  def test_help_regular_key_returns_back
-    msg = Hive::Tui::KeyMap.message_for(mode: :help, key: "?", row: nil)
-    assert_same Hive::Tui::Messages::BACK, msg
+  def test_help_close_keys_return_back
+    [ :key_escape, "\e", "?", "q" ].each do |key|
+      msg = Hive::Tui::KeyMap.message_for(mode: :help, key: key, row: nil)
+      assert_same Hive::Tui::Messages::BACK, msg, "#{key.inspect} must close help"
+    end
+  end
+
+  def test_help_line_scroll_keys_return_help_scroll
+    {
+      key_down: [ :down, 1 ],
+      "j" => [ :down, 1 ],
+      key_up: [ :up, 1 ],
+      "k" => [ :up, 1 ]
+    }.each do |key, expected|
+      msg = Hive::Tui::KeyMap.message_for(mode: :help, key: key, row: nil)
+
+      assert_kind_of Hive::Tui::Messages::HelpScroll, msg
+      assert_equal expected, [ msg.direction, msg.amount ]
+    end
+  end
+
+  def test_help_page_and_edge_scroll_keys_return_help_scroll
+    {
+      key_pgdn: [ :down, 10 ],
+      key_pgup: [ :up, 10 ],
+      key_end: [ :down, Hive::Tui::KeyMap::SCROLL_TO_EDGE ],
+      "G" => [ :down, Hive::Tui::KeyMap::SCROLL_TO_EDGE ],
+      key_home: [ :up, Hive::Tui::KeyMap::SCROLL_TO_EDGE ],
+      "g" => [ :up, Hive::Tui::KeyMap::SCROLL_TO_EDGE ]
+    }.each do |key, expected|
+      msg = Hive::Tui::KeyMap.message_for(mode: :help, key: key, row: nil)
+
+      assert_kind_of Hive::Tui::Messages::HelpScroll, msg
+      assert_equal expected, [ msg.direction, msg.amount ]
+    end
+  end
+
+  def test_help_unmapped_key_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :help, key: "x", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   def test_new_idea_delete_routes_to_forward_delete

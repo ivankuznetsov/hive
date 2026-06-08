@@ -175,10 +175,11 @@ module Hive
       RedStatusDetailScroll = Data.define(:direction, :amount)
 
       # Scroll the help overlay's wrapped content viewport. `direction`
-      # is :up or :down; `amount` is a line count, except Home/End/g/G
-      # pass the `KeyMap::SCROLL_TO_EDGE` sentinel to mean "jump to the
-      # edge". Update clamps both against
-      # `Views::HelpOverlay.max_scroll_offset`.
+      # is :up or :down; `amount` is a line count — produced by the
+      # keyboard line/page keys and by the mouse wheel
+      # (`HELP_WHEEL_SCROLL_LINES`) — except Home/End/g/G pass the
+      # `KeyMap::SCROLL_TO_EDGE` sentinel to mean "jump to the edge".
+      # Update clamps both to `[0, Views::HelpOverlay.max_scroll_offset]`.
       HelpScroll = Data.define(:direction, :amount)
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or

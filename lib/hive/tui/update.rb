@@ -792,7 +792,9 @@ module Hive
         next_offset = case msg.direction
         when :up then model.help_scroll_offset.to_i - amount
         when :down then model.help_scroll_offset.to_i + amount
-        else model.help_scroll_offset.to_i
+        else
+          Hive::Tui::Debug.log("help_scroll", "scroll skipped: unknown direction=#{msg.direction.inspect}")
+          model.help_scroll_offset.to_i
         end
         clamp_help_scroll_offset(model, next_offset)
       end

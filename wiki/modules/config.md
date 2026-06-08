@@ -110,7 +110,7 @@ tags: [config, yaml, validation]
 }
 ```
 
-`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the narrower patrol list, Codex CE code review only; fresh init can optionally add Claude CE code review for patrol PRs.
+`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the narrower patrol list, Codex CE code review only; fresh init can optionally add Claude CE code review for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) bounds daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap (see `Hive::Daemon::ConcurrencyController#can_dispatch?` → `:patrol_scan_cap`).
 
 ## Module functions
 

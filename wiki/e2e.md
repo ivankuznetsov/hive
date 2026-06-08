@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -33,6 +33,7 @@ bin/hive-e2e clean              # old run cleanup
 | `78` | preflight/config failure: missing `tmux`, missing `asciinema` when required, or missing replay repro artifact |
 
 Thor is started with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
+Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json` and `clean --json`, so wrapper callers can parse stdout directly.
 `bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
 `hive-cli` executable. It handles top-level `--version` / `-v` before Thor
 dispatch and rewrites command-local `--help` / `-h` before scenario selection.

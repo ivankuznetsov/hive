@@ -11,6 +11,8 @@ class E2EBinaryTest < Minitest::Test
   def test_list_json_emits_parseable_envelope_with_schema_version_1
     out, err, status = Open3.capture3(hive_e2e, "list", "--json")
     assert status.success?, "bin/hive-e2e list --json should exit 0, stderr was: #{err}"
+    assert_equal 1, out.scan(/^\{/).count,
+                 "bin/hive-e2e list --json should emit exactly one JSON document"
 
     payload = JSON.parse(out)
     assert_equal "hive-e2e-scenarios", payload["schema"]
@@ -42,6 +44,8 @@ class E2EBinaryTest < Minitest::Test
         hive_e2e, "clean", "--json"
       )
       assert status.success?, "bin/hive-e2e clean --json should exit 0, stderr was: #{err}"
+      assert_equal 1, out.scan(/^\{/).count,
+                   "bin/hive-e2e clean --json should emit exactly one JSON document"
 
       payload = JSON.parse(out)
       assert_equal "hive-e2e-clean", payload["schema"]
@@ -206,6 +210,8 @@ class E2EBinaryTest < Minitest::Test
         hive_e2e, "clean", "--json", "--dry-run"
       )
       assert status.success?, "bin/hive-e2e clean --json --dry-run should exit 0, stderr was: #{err}"
+      assert_equal 1, out.scan(/^\{/).count,
+                   "bin/hive-e2e clean --json --dry-run should emit exactly one JSON document"
 
       payload = JSON.parse(out)
       assert_equal true, payload["dry_run"]

@@ -254,6 +254,21 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  # A NEWER envelope whose best-effort extraction still throws degrades to
+  # the actionable restart message instead of crashing the tick.
+  def test_newer_schema_failing_extraction_degrades_to_restart_message
+    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
+    # A non-Hash project entry makes extract_rows raise (Integer#[] with a
+    # String key), exercising the newer-skew rescue path.
+    payload = make_envelope(projects: [ 42 ]).merge("schema_version" => expected + 1)
+    with_fake_status(JSON.generate(payload)) do |bin|
+      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      result = consumer.fetch
+      refute result.ok, "a newer payload that fails extraction must surface a failure, not raise"
+      assert_match(/restart the hive daemon to pick up the new version/i, result.error)
+    end
+  end
+
   # Exact match keeps the pre-existing happy path: ok, no warning.
   def test_exact_schema_version_match_has_no_warning
     payload = make_envelope(projects: [ {

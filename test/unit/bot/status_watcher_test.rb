@@ -232,6 +232,26 @@ class HiveBotStatusWatcherTest < Minitest::Test
     end
   end
 
+  # A NEWER envelope whose best-effort extraction still throws (e.g. a
+  # malformed project entry) must degrade to the actionable restart
+  # message, not an opaque crash.
+  def test_fetch_newer_schema_failing_extraction_degrades_to_restart_message
+    expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    payload = envelope([])
+    payload["schema_version"] = expected + 1
+    # A non-Hash project entry makes extract_rows raise (Integer#[] with a
+    # String key), exercising the newer-skew rescue path.
+    payload["projects"] = [ 42 ]
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      logger = CapturingLogger.new
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      refute result.ok, "a newer payload that fails extraction must surface a failure, not raise"
+      assert_match(/restart the hive bot to pick up the new version/i, result.error)
+    end
+  end
+
   # Exact match keeps the pre-existing happy path: no warning, rows parse.
   def test_fetch_exact_schema_version_match_has_no_skew_warning
     with_fake_status(JSON.generate(envelope([ task(slug: "exact") ]))) do |bin|

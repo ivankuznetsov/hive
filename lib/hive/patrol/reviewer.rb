@@ -7,6 +7,7 @@ require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/state_store"
 require "hive/stages/base"
+require "hive/usage_db"
 
 module Hive
   module Patrol
@@ -146,7 +147,8 @@ module Hive
           slug: "patrol-review"
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
-        Hive::Agent.new(
+        started_at = Time.now.utc
+        result = Hive::Agent.new(
           task: task,
           prompt: prompt,
           add_dirs: [ @project_root ],
@@ -158,6 +160,34 @@ module Hive
           expected_output: output_path,
           status_mode: :output_file_exists
         ).run!
+        record_usage(result, profile, "patrol-review", started_at)
+        result
+      end
+
+      def record_usage(result, profile, stage, started_at)
+        usage = result && result[:usage]
+        return unless usage
+
+        Hive::UsageDb.record!(
+          agent: profile_name(profile),
+          model: usage[:model] || result[:model],
+          project_slug: File.basename(@project_root.to_s),
+          task_slug: stage,
+          stage: stage,
+          started_at: started_at,
+          ended_at: Time.now.utc.iso8601,
+          input: usage[:input] || 0,
+          output: usage[:output] || 0,
+          cached: usage[:cached] || 0
+        )
+      rescue StandardError => e
+        warn "[hive] usage record failed: #{e.message}"
+      end
+
+      def profile_name(profile)
+        return profile.name.to_s if profile.respond_to?(:name)
+
+        (@cfg.dig("patrol", "agent") || "claude").to_s
       end
 
       def max_findings

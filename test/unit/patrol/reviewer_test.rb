@@ -3,6 +3,7 @@ require "json"
 require "hive/config"
 require "hive/patrol/reviewer"
 require "hive/patrol/feature"
+require "hive/usage_db"
 
 class HivePatrolReviewerTest < Minitest::Test
   include HiveTestHelper
@@ -20,6 +21,26 @@ class HivePatrolReviewerTest < Minitest::Test
       context_files: [],
       tests: []
     )
+  end
+
+  def with_usage_db
+    old_path = Hive::UsageDb.path
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = File.join(dir, "usage.db")
+      yield
+    ensure
+      Hive::UsageDb.path = old_path
+    end
+  end
+
+  def usage_rows
+    require "sqlite3"
+
+    db = SQLite3::Database.new(Hive::UsageDb.path)
+    db.results_as_hash = true
+    db.execute("SELECT agent, model, project_slug, task_slug, stage, input, output, cached FROM token_usage")
+  ensure
+    db&.close
   end
 
   def test_persists_schema_valid_findings_from_agent_output
@@ -143,6 +164,73 @@ class HivePatrolReviewerTest < Minitest::Test
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new
+    end
+  end
+
+  def test_run_agent_wrapper_records_patrol_review_usage
+    with_tmp_dir do |dir|
+      with_usage_db do
+        cfg = self.cfg
+        cfg["patrol"]["agent"] = "codex"
+        reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg)
+        fake_agent = Object.new
+        def fake_agent.run!
+          {
+            status: :ok,
+            model: "fallback-model",
+            usage: { model: "usage-model", input: 123, output: 45, cached: 6 }
+          }
+        end
+
+        profiles_singleton = class << Hive::AgentProfiles; self; end
+        agent_singleton = class << Hive::Agent; self; end
+        profiles_lookup = Hive::AgentProfiles.method(:lookup)
+        agent_new = Hive::Agent.method(:new)
+        profile = Struct.new(:name).new("codex")
+        profiles_singleton.define_method(:lookup) { |*| profile }
+        agent_singleton.define_method(:new) { |*| fake_agent }
+
+        reviewer.send(:run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+
+        rows = usage_rows
+        assert_equal 1, rows.size
+        row = rows.first
+        assert_equal "codex", row["agent"]
+        assert_equal "usage-model", row["model"]
+        assert_equal File.basename(dir), row["project_slug"]
+        assert_equal "patrol-review", row["task_slug"]
+        assert_equal "patrol-review", row["stage"]
+        assert_equal 123, row["input"]
+        assert_equal 45, row["output"]
+        assert_equal 6, row["cached"]
+      ensure
+        profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+        agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      end
+    end
+  end
+
+  def test_run_agent_wrapper_without_usage_writes_no_usage_row
+    with_tmp_dir do |dir|
+      with_usage_db do
+        reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg)
+        fake_agent = Object.new
+        def fake_agent.run! = { status: :ok }
+
+        profiles_singleton = class << Hive::AgentProfiles; self; end
+        agent_singleton = class << Hive::Agent; self; end
+        profiles_lookup = Hive::AgentProfiles.method(:lookup)
+        agent_new = Hive::Agent.method(:new)
+        profiles_singleton.define_method(:lookup) { |*| Struct.new(:name).new("claude") }
+        agent_singleton.define_method(:new) { |*| fake_agent }
+
+        reviewer.send(:run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+
+        refute File.exist?(Hive::UsageDb.path)
+      ensure
+        profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
+        agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new
+      end
     end
   end
 end

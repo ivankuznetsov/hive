@@ -234,7 +234,9 @@ class HiveBotStatusWatcherTest < Minitest::Test
 
   # A NEWER envelope whose best-effort extraction still throws (e.g. a
   # malformed project entry) must degrade to the actionable restart
-  # message, not an opaque crash.
+  # message, not an opaque crash — AND preserve the underlying exception
+  # (in the message and the log) so a genuine extraction bug, falsely
+  # presenting as a version skew, stays diagnosable.
   def test_fetch_newer_schema_failing_extraction_degrades_to_restart_message
     expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
     payload = envelope([])
@@ -249,6 +251,72 @@ class HiveBotStatusWatcherTest < Minitest::Test
 
       refute result.ok, "a newer payload that fails extraction must surface a failure, not raise"
       assert_match(/restart the hive bot to pick up the new version/i, result.error)
+      assert_match(/underlying error: TypeError:/, result.error,
+                   "the real exception must be preserved in the surfaced message, not swallowed")
+
+      skew_log = logger.events.find { |e| e.fetch(:name) == :poll_schema_skew }
+      refute_nil skew_log, "the underlying extraction error must be logged for recovery"
+      assert_equal "TypeError", skew_log.fetch(:payload).fetch(:error_class)
+      refute_empty Array(skew_log.fetch(:payload)[:backtrace]), "expected backtrace lines for the real defect"
+    end
+  end
+
+  # FINDING 1(b): a NEWER envelope that ALSO fails validate (ok=false) must
+  # surface the REAL ok=false reason, never the skew restart hint. The
+  # ok=false ArgumentError must not be folded into the newer-skew degrade.
+  def test_fetch_newer_schema_with_ok_false_surfaces_real_reason_not_skew_hint
+    expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    payload = {
+      "schema" => "hive-status",
+      "schema_version" => expected + 1,
+      "ok" => false,
+      "message" => "registry unavailable"
+    }
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      logger = CapturingLogger.new
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      refute result.ok
+      assert_match(/envelope ok=false: registry unavailable/, result.error,
+                   "the real ok=false reason must surface even on a newer-schema doc")
+      refute_match(/restart the hive bot to pick up the new version/i, result.error,
+                   "an ok=false envelope must NOT be relabeled as a version skew")
+    end
+  end
+
+  # FINDING 2: a NEWER best-effort SUCCESS must carry a Result#warning so
+  # the supervisor can surface a banner — the user otherwise sees a normal
+  # status with no hint the data may be incomplete.
+  def test_fetch_newer_schema_success_sets_result_warning
+    expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    payload = envelope([ task(slug: "newer-warn") ])
+    payload["schema_version"] = expected + 1
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
+
+      assert result.ok, result.error
+      refute_nil result.warning, "a tolerated forward skew must set Result#warning"
+      assert_match(/newer than this process/, result.warning)
+      assert_match(/restart the hive bot/i, result.warning)
+    end
+  end
+
+  # FINDING 3: the success-path forward-skew advisory fires under the
+  # DISTINCT :poll_schema_skew event, not the overloaded :poll_failure.
+  def test_fetch_newer_schema_logs_distinct_poll_schema_skew_event
+    expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    payload = envelope([ task(slug: "newer-event") ])
+    payload["schema_version"] = expected + 1
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      logger = CapturingLogger.new
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      assert result.ok, result.error
+      assert_equal [ :poll_schema_skew ], logger.events.map { |e| e.fetch(:name) },
+                   "success-path skew must log exactly one :poll_schema_skew event, not :poll_failure"
     end
   end
 

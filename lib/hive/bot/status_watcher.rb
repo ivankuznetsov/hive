@@ -75,8 +75,13 @@ module Hive
         end
       end
 
-      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope) do
-        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil)
+      # `warning` carries a non-fatal advisory (currently: a forward
+      # schema-version skew was tolerated and parsed best-effort). The
+      # supervisor prepends a one-line banner to the rendered `/status`
+      # reply when present. nil on a clean fetch. Mirrors the daemon's
+      # StatusConsumer::Result#warning.
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning) do
+        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil, warning: nil)
           super
         end
       end
@@ -100,6 +105,11 @@ module Hive
         end
 
         doc = JSON.parse(out)
+        # Envelope SHAPE validation runs OUTSIDE the best-effort extraction
+        # rescue below: a missing schema / ok=false is a real failure whose
+        # message must ALWAYS surface, even on a newer-schema doc. Folding
+        # it into the skew degrade would relabel a genuine "ok=false:
+        # <reason>" as a misleading "restart to pick up the new version".
         validate_envelope!(doc)
         skew = schema_skew(doc)
         # An OLDER payload (a stale `hive` on PATH than this process
@@ -111,29 +121,53 @@ module Hive
         # long-running process.
         return failure(older_skew_message(doc)) if skew == :older
 
+        begin
+          rows = extract_rows(doc, now: now)
+          legacy_stage_dirs = extract_legacy_stage_dirs(doc)
+        rescue StandardError => e
+          # ONLY a failure inside best-effort EXTRACTION degrades. On a
+          # newer-schema doc this is the tolerated forward-skew path, but we
+          # PRESERVE the underlying exception (class + message) in the
+          # surfaced error AND log it, so a genuine extraction bug stays
+          # recoverable instead of being masked by the friendly restart
+          # hint. On an exact/equal-version doc there is nothing to
+          # tolerate: re-raise to the outer rescue (raw "#{e.class}: ...").
+          raise unless skew == :newer
+
+          return failure(forward_skew_message(doc, underlying: e), underlying: e)
+        end
+
         warn_forward_skew(doc) if skew == :newer
         Result.new(
           ok: true,
-          rows: extract_rows(doc, now: now),
-          legacy_stage_dirs: extract_legacy_stage_dirs(doc),
+          rows: rows,
+          legacy_stage_dirs: legacy_stage_dirs,
           error: nil,
-          envelope: doc
+          envelope: doc,
+          warning: (skew == :newer ? forward_skew_warning(doc) : nil)
         )
       rescue JSON::ParserError => e
         failure("malformed JSON from hive status: #{e.message}")
       rescue StandardError => e
-        # A newer payload that genuinely failed best-effort extraction
-        # degrades to a clear, actionable restart message rather than an
-        # opaque "#{e.class}: ..." crash line.
-        return failure(forward_skew_message(doc)) if defined?(doc) && doc.is_a?(Hash) && schema_skew(doc) == :newer
-
         failure("#{e.class}: #{e.message}")
       end
 
       private
 
-      def failure(message)
+      # `underlying`, when present, is the exception that aborted
+      # best-effort extraction on a newer-schema doc. We log its class,
+      # message, and a few backtrace lines so the genuine defect stays
+      # diagnosable in the bot log even though the user-facing `error`
+      # leads with the friendly restart hint.
+      def failure(message, underlying: nil)
         @logger&.event(:poll_failure, source: "status", message: message)
+        if underlying
+          @logger&.event(
+            :poll_schema_skew, source: "status",
+            error_class: underlying.class.name, message: underlying.message,
+            backtrace: Array(underlying.backtrace).first(3)
+          )
+        end
         Result.new(ok: false, rows: [], legacy_stage_dirs: [], error: message)
       end
 
@@ -153,36 +187,57 @@ module Hive
       # was built for: :match, :newer (payload from an updated binary), or
       # :older (a stale binary on PATH). Never raises.
       def schema_skew(doc)
-        expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
         got = doc["schema_version"]
-        return :match if got == expected
-        return :newer if got.is_a?(Integer) && got > expected
+        return :match if got == expected_schema_version
+        return :newer if got.is_a?(Integer) && got > expected_schema_version
 
         :older
       end
 
+      # The forward-skew advisory is logged under a DISTINCT event name
+      # (not :poll_failure) so it isn't conflated with real fetch failures
+      # — the success path tolerated a newer schema, it didn't fail.
       def warn_forward_skew(doc)
         @logger&.event(
-          :poll_failure, source: "status",
+          :poll_schema_skew, source: "status",
           message: "#{forward_skew_summary(doc)}; parsing best-effort. " \
                    "Restart the hive bot to pick up the new schema."
         )
       end
 
-      def forward_skew_message(doc)
+      # Non-fatal advisory carried on the success-path Result#warning so the
+      # supervisor can surface a banner on `/status`.
+      def forward_skew_warning(doc)
+        "#{forward_skew_summary(doc)}; parsing best-effort. " \
+          "Restart the hive bot to pick up the new schema."
+      end
+
+      # `underlying` is the exception that aborted best-effort extraction on
+      # a newer-schema doc. We append its class + message so the genuine
+      # defect stays diagnosable in the surfaced error instead of being
+      # masked by the friendly restart hint.
+      def forward_skew_message(doc, underlying:)
         "hive status: #{forward_skew_summary(doc)}; " \
-          "restart the hive bot to pick up the new version"
+          "restart the hive bot to pick up the new version " \
+          "(underlying error: #{underlying.class}: #{underlying.message})"
       end
 
       def forward_skew_summary(doc)
-        expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
-        "envelope schema v#{doc['schema_version']} is newer than this process (v#{expected})"
+        "envelope schema v#{doc['schema_version']} is newer than this process (v#{expected_schema_version})"
       end
 
       def older_skew_message(doc)
-        expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
         "hive status: envelope schema v#{doc['schema_version']} is older than this process " \
-          "(v#{expected}); update/reinstall the hive binary on PATH"
+          "(v#{expected_schema_version}); update/reinstall the hive binary on PATH"
+      end
+
+      # Computed once and reused. Uses the non-raising `[]` form (not
+      # `.fetch`) so it never introduces a fresh KeyError inside a
+      # rescue-reachable skew path if the "hive-status" key were ever
+      # absent — Finding 4 from the #416 review. Mirrors the daemon's
+      # StatusConsumer.
+      def expected_schema_version
+        @expected_schema_version ||= Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
       end
 
       def extract_legacy_stage_dirs(doc)

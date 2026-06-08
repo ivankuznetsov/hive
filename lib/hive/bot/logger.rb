@@ -12,6 +12,7 @@ module Hive
         bot_started
         bot_stopping
         poll_failure
+        poll_schema_skew
         update_received
         update_rejected_unauthorized
         dispatch_result_rejected_unauthorized

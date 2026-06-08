@@ -9,7 +9,7 @@ class HiveBotSupervisorTest < Minitest::Test
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
                    keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
@@ -255,6 +255,40 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.status_tick
 
     assert_equal [ [ legacy ] ], @notification_dispatcher.processed
+  end
+
+  # FINDING 2: a /status whose fetch tolerated a forward schema skew
+  # (Result#warning set) must prepend a plain-text banner before the
+  # rendered queue, so the user knows the data may be incomplete.
+  def test_status_render_prepends_skew_banner_when_fetch_carries_warning
+    @status_watcher.result = StatusResult.new(
+      ok: true, rows: [ row(slug: "newer-task") ], legacy_stage_dirs: [],
+      warning: "envelope schema v4 is newer than this process (v3); parsing best-effort."
+    )
+    result = FakeRouter::Result.new(action: :dispatch_then_reply,
+                                    command_argv: [ "hive", "status", "--json" ])
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    banner = @telegram.messages.first.fetch(:text)
+    assert_match(/newer schema than this bot understands/, banner,
+                 "the first message must be the skew advisory banner")
+    assert_match(/restart the bot/i, banner)
+    # The queue still renders after the banner.
+    assert @telegram.messages.size >= 2, "the rendered status must follow the banner"
+  end
+
+  # A clean fetch (no warning) must NOT prepend any banner.
+  def test_status_render_omits_skew_banner_when_no_warning
+    @status_watcher.result = StatusResult.new(ok: true, rows: [ row(slug: "clean-task") ],
+                                              legacy_stage_dirs: [], warning: nil)
+    result = FakeRouter::Result.new(action: :dispatch_then_reply,
+                                    command_argv: [ "hive", "status", "--json" ])
+
+    @supervisor.send(:execute_result, result, Update.new(chat_id: 42, update_id: 1))
+
+    refute(@telegram.messages.any? { |m| m.fetch(:text).match?(/newer schema than this bot understands/) },
+           "a clean fetch must not show the skew banner")
   end
 
   def test_reply_for_child_renders_status_diagnose_success_envelope

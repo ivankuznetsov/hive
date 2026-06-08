@@ -237,31 +237,7 @@ module Hive
         end
 
         def wrapped(text, width)
-          text = safe(text)
-          return [ "" ] if text.empty?
-
-          text.lines.flat_map { |line| wrap_line(line.chomp, width) }
-        end
-
-        def wrap_line(line, width)
-          return [ "" ] if line.empty?
-          return [ truncate(line, width) ] if width <= 8
-
-          words = line.split(/\s+/)
-          rows = []
-          current = +""
-          words.each do |word|
-            if current.empty?
-              current = word
-            elsif "#{current} #{word}".length <= width
-              current << " " << word
-            else
-              rows << truncate(current, width)
-              current = word
-            end
-          end
-          rows << truncate(current, width) unless current.empty?
-          rows
+          Views::Format.wrap(safe(text), width)
         end
 
         def safe(value)

@@ -26,6 +26,7 @@ module Hive
         tick_begin
         tick_end
         status_failure
+        status_schema_skew
         dispatched
         skipped
         debouncing

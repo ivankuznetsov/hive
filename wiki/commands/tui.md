@@ -132,10 +132,11 @@ in-process whenever the cached mtime
 fingerprint changes; otherwise it reuses the previous `Snapshot` and
 only refreshes `current_seen_at`. The fingerprint watches the global
 project registry (`Hive::Config.global_config_path`), each visible
-row's state file, plus the project's `.hive-state/stages` directory and
-stage children, so ordinary marker edits, newly-created task folders,
-and `hive init`/`forget` registry changes all invalidate the cache
-without reparsing unchanged status data. A time-bounded fallback
+row's state file and `.lock`, plus the project's `.hive-state/stages`
+directory and stage children, so ordinary marker edits, newly-created
+task folders, runner lock acquisition/release, and `hive init`/`forget`
+registry changes all invalidate the cache without reparsing unchanged
+status data. A time-bounded fallback
 (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
 when the fingerprint is unchanged, so liveness-derived fields
 (`live_task_lock`, `claude_pid_alive`) that flip without touching any

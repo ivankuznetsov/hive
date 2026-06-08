@@ -138,7 +138,12 @@ module Hive
         paths = [ registry_config_path ]
         snapshot.projects.each do |project|
           paths.concat(project_watch_paths(project))
-          project.rows.each { |row| paths << row.state_file }
+          project.rows.each do |row|
+            paths << row.state_file
+            # A runner can acquire the task lock before it writes
+            # AGENT_WORKING, so the lock file is a status-affecting path.
+            paths << File.join(row.folder, ".lock") if row.folder
+          end
         end
         paths.compact.uniq.to_h { |path| [ path, safe_mtime(path) ] }
       end

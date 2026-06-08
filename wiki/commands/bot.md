@@ -268,6 +268,19 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 `notification_sent`, `dispatched_command`, `command_completed`,
 `answer_written`, `reconnect_summary`, and `fatal`.
 
+## Forward-tolerant `hive status` schema-version skew
+
+`Hive::Bot::StatusWatcher` (the consumer behind `/status`) does NOT raise
+on a `hive-status` `schema_version` mismatch — that would hard-crash
+`/status` whenever the `hive` gem is bumped under a running bot. A newer
+payload is parsed best-effort (additive-envelope contract) and logs a
+`poll_failure` skew warning; an older payload (stale binary on PATH) or a
+newer payload that genuinely fails to parse returns an actionable
+`failure(...)` result telling the operator to restart the bot or
+update/reinstall the binary. The full classification (`:match` /
+`:newer` / `:older`) and the matching daemon behavior live in
+[[modules/daemon]] §"Forward-tolerant schema-version skew".
+
 ## Autostart
 
 `hive bot install` gives the bot the same reboot-survivable per-user

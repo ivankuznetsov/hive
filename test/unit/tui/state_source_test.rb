@@ -261,6 +261,92 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_refresh_once_reparses_when_task_lock_appears
+    with_seeded_project do |_project, _dir|
+      calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects|
+          calls += 1
+          super(projects)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      first = source.current
+      row = first.rows.first
+      assert_equal "ready_to_brainstorm", row.action_key
+
+      File.write(File.join(row.folder, ".lock"), Hive::Lock.base_payload.to_yaml)
+      source.send(:refresh_once)
+
+      refute_same first, source.current
+      assert_equal 2, calls, "task .lock changes must invalidate the cached snapshot"
+      assert_equal "agent_running", source.current.rows.first.action_key
+      assert_equal true, source.current.rows.first.live_task_lock
+    end
+  end
+
+  def test_refresh_once_reparses_when_task_lock_disappears
+    with_seeded_project do |_project, _dir|
+      calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects|
+          calls += 1
+          super(projects)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      lock_path = File.join(source.current.rows.first.folder, ".lock")
+      File.write(lock_path, Hive::Lock.base_payload.to_yaml)
+      source.send(:refresh_once)
+      locked = source.current
+      assert_equal "agent_running", locked.rows.first.action_key
+
+      File.delete(lock_path)
+      source.send(:refresh_once)
+
+      refute_same locked, source.current
+      assert_equal 3, calls, "task .lock removal must invalidate the cached snapshot"
+      assert_equal "ready_to_brainstorm", source.current.rows.first.action_key
+      assert_equal false, source.current.rows.first.live_task_lock
+    end
+  end
+
+  def test_refresh_once_reparses_when_task_lock_mtime_changes
+    with_seeded_project do |_project, _dir|
+      calls = 0
+      patch = Module.new do
+        define_method(:json_payload) do |projects|
+          calls += 1
+          super(projects)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      row = source.current.rows.first
+      lock_path = File.join(row.folder, ".lock")
+      File.write(lock_path, Hive::Lock.base_payload.to_yaml)
+      source.send(:refresh_once)
+      locked = source.current
+
+      updated_at = Time.now + 5
+      File.utime(updated_at, updated_at, lock_path)
+      source.send(:refresh_once)
+
+      refute_same locked, source.current
+      assert_equal 3, calls, "task .lock mtime changes must invalidate the cached snapshot"
+      assert_equal "agent_running", source.current.rows.first.action_key
+      assert_equal true, source.current.rows.first.live_task_lock
+    end
+  end
+
   def test_safe_mtime_returns_nil_when_mtime_raises_on_existing_path
     # state_source.rb 152: the file may vanish (or error) between the
     # File.exist? check and File.mtime. The rescue must degrade to nil

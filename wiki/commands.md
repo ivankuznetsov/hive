@@ -36,9 +36,11 @@ The wrapper also normalizes command-local help before Thor dispatch:
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
 instead of being treated as partially-valid command invocations.
 It also moves leading JSON class options onto the subcommand before Thor sees
-argv, including truthy `--json=true`, `--json=1`, and `--json=yes` spellings.
-That keeps agent-style calls such as `hive --json=true run` on the same
-structured usage-error path as `hive run --json`.
+argv, including Thor-truthy `--json=true` and `--json=t` spellings. It does
+not normalize `--json=1` or `--json=yes`, matching Thor's boolean parser.
+That keeps agent-style calls such as `hive --json=true run` and
+`hive --json=t run` on the same structured usage-error path as
+`hive run --json`.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not

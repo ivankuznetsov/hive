@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "open3"
 require "rbconfig"
 

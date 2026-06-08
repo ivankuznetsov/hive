@@ -101,6 +101,17 @@ module Hive
 
         doc = JSON.parse(out)
         validate_envelope!(doc)
+        skew = schema_skew(doc)
+        # An OLDER payload (a stale `hive` on PATH than this process
+        # expects) cannot be trusted to carry the fields we read, so we
+        # do not attempt a best-effort parse — surface a clear, actionable
+        # message instead of crashing. A NEWER (or equal) payload is parsed
+        # best-effort: hive-status envelopes are additive by contract, so
+        # an updated binary's output is still readable by an older
+        # long-running process.
+        return failure(older_skew_message(doc)) if skew == :older
+
+        warn_forward_skew(doc) if skew == :newer
         Result.new(
           ok: true,
           rows: extract_rows(doc, now: now),
@@ -111,6 +122,11 @@ module Hive
       rescue JSON::ParserError => e
         failure("malformed JSON from hive status: #{e.message}")
       rescue StandardError => e
+        # A newer payload that genuinely failed best-effort extraction
+        # degrades to a clear, actionable restart message rather than an
+        # opaque "#{e.class}: ..." crash line.
+        return failure(forward_skew_message(doc)) if defined?(doc) && doc.is_a?(Hash) && schema_skew(doc) == :newer
+
         failure("#{e.class}: #{e.message}")
       end
 
@@ -121,16 +137,52 @@ module Hive
         Result.new(ok: false, rows: [], legacy_stage_dirs: [], error: message)
       end
 
+      # Envelope-shape validation (hard errors) ONLY. A missing/wrong
+      # `schema` key or `ok=false` is a malformed/failed envelope and must
+      # still raise. Schema VERSION skew is NOT validated here — it is
+      # handled tolerantly via `schema_skew` so a binary/process version
+      # mismatch never hard-crashes a long-running consumer (bot `/status`).
       def validate_envelope!(doc)
         unless doc.is_a?(Hash) && doc["schema"] == "hive-status"
           raise ArgumentError, "missing schema=hive-status in envelope"
         end
         raise ArgumentError, "envelope ok=false: #{doc['message']}" unless doc["ok"] == true
+      end
 
+      # Classify the envelope's schema_version against what THIS process
+      # was built for: :match, :newer (payload from an updated binary), or
+      # :older (a stale binary on PATH). Never raises.
+      def schema_skew(doc)
         expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
-        return if doc["schema_version"] == expected
+        got = doc["schema_version"]
+        return :match if got == expected
+        return :newer if got.is_a?(Integer) && got > expected
 
-        raise ArgumentError, "schema_version mismatch: got #{doc['schema_version']}, want #{expected}"
+        :older
+      end
+
+      def warn_forward_skew(doc)
+        @logger&.event(
+          :poll_failure, source: "status",
+          message: "#{forward_skew_summary(doc)}; parsing best-effort. " \
+                   "Restart the hive bot to pick up the new schema."
+        )
+      end
+
+      def forward_skew_message(doc)
+        "hive status: #{forward_skew_summary(doc)}; " \
+          "restart the hive bot to pick up the new version"
+      end
+
+      def forward_skew_summary(doc)
+        expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+        "envelope schema v#{doc['schema_version']} is newer than this process (v#{expected})"
+      end
+
+      def older_skew_message(doc)
+        expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+        "hive status: envelope schema v#{doc['schema_version']} is older than this process " \
+          "(v#{expected}); update/reinstall the hive binary on PATH"
       end
 
       def extract_legacy_stage_dirs(doc)

@@ -168,11 +168,13 @@ class HiveBotStatusWatcherTest < Minitest::Test
 
   def test_fetch_rejects_invalid_envelopes
     expected_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    # Envelope-SHAPE errors (missing schema, ok=false) remain hard
+    # failures. Schema-VERSION skew is handled tolerantly and is covered
+    # by the dedicated skew tests below, not here.
     cases = {
       "wrong schema" => [ { "schema" => "other", "ok" => true, "schema_version" => expected_version }, /missing schema/ ],
       "not ok" => [ { "schema" => "hive-status", "ok" => false, "schema_version" => expected_version,
-                       "message" => "registry unavailable" }, /envelope ok=false: registry unavailable/ ],
-      "wrong version" => [ { "schema" => "hive-status", "ok" => true, "schema_version" => -1 }, /schema_version mismatch/ ]
+                       "message" => "registry unavailable" }, /envelope ok=false: registry unavailable/ ]
     }
 
     cases.each do |label, (payload, pattern)|
@@ -184,6 +186,61 @@ class HiveBotStatusWatcherTest < Minitest::Test
         assert_match pattern, result.error, label
         assert_equal :poll_failure, logger.events.first.fetch(:name), label
       end
+    end
+  end
+
+  # ── schema_version skew (forward-tolerant; must never raise) ───────────
+
+  # A NEWER envelope (expected+1) from an updated binary that the
+  # long-running bot hasn't restarted to match. hive-status envelopes are
+  # additive, so the rows still parse — the bot keeps working and only
+  # logs a one-line skew warning. This is the production incident path
+  # (`got 3, want 2`) that previously hard-failed every /status.
+  def test_fetch_tolerates_newer_schema_version_best_effort
+    expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    payload = envelope([ task(slug: "newer-schema") ])
+    payload["schema_version"] = expected + 1
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      logger = CapturingLogger.new
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      assert result.ok, "newer schema must parse best-effort, not fail: #{result.error.inspect}"
+      assert_equal [ "newer-schema" ], result.rows.map(&:slug)
+      skew_event = logger.events.find { |e| e.fetch(:payload)[:message].to_s.match?(/newer than this process/) }
+      refute_nil skew_event, "expected a best-effort skew warning to be logged"
+      assert_match(/restart the hive bot/i, skew_event.fetch(:payload).fetch(:message))
+    end
+  end
+
+  # An OLDER envelope (expected-1): a stale `hive` binary on PATH. We can't
+  # trust its fields, so the bot returns a clear, actionable message
+  # (update/reinstall) rather than crashing.
+  def test_fetch_older_schema_version_returns_actionable_failure
+    expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    payload = envelope([ task(slug: "older-schema") ])
+    payload["schema_version"] = expected - 1
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      logger = CapturingLogger.new
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      refute result.ok, "older schema must not be parsed as trustworthy"
+      assert_match(/older than this process/, result.error)
+      assert_match(/update\/reinstall the hive binary/, result.error)
+      assert_equal :poll_failure, logger.events.first.fetch(:name)
+    end
+  end
+
+  # Exact match keeps the pre-existing happy path: no warning, rows parse.
+  def test_fetch_exact_schema_version_match_has_no_skew_warning
+    with_fake_status(JSON.generate(envelope([ task(slug: "exact") ]))) do |bin|
+      logger = CapturingLogger.new
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      assert result.ok, result.error
+      assert_equal [ "exact" ], result.rows.map(&:slug)
+      assert_empty logger.events, "exact-match fetch must not log any skew warning"
     end
   end
 

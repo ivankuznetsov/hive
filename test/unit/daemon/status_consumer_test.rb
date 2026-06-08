@@ -215,13 +215,57 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
-  def test_schema_version_mismatch_returns_not_ok
-    payload = make_envelope.merge("schema_version" => 99)
+  # ── schema_version skew (forward-tolerant; must never crash a tick) ────
+
+  # A NEWER envelope (expected+1) from an updated `hive` binary that the
+  # long-running daemon hasn't restarted to match. hive-status envelopes
+  # are additive, so rows still parse — the daemon keeps dispatching and
+  # surfaces a non-fatal `warning` the dispatcher logs once per tick.
+  def test_newer_schema_version_parses_best_effort_with_warning
+    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_row(slug: "newer") ]
+    } ]).merge("schema_version" => expected + 1)
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      result = consumer.fetch
+      assert result.ok, "newer schema must parse best-effort: #{result.error.inspect}"
+      assert_equal [ "newer" ], result.rows.map(&:slug)
+      refute_nil result.warning, "expected a best-effort skew warning"
+      assert_match(/newer than this process/, result.warning)
+      assert_match(/restart the hive daemon/i, result.warning)
+    end
+  end
+
+  # An OLDER envelope (expected-1): a stale `hive` binary on PATH. The
+  # daemon refuses to advance on untrustworthy data and surfaces a clear,
+  # actionable message instead of crashing the tick.
+  def test_older_schema_version_returns_actionable_failure
+    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
+    payload = make_envelope.merge("schema_version" => expected - 1)
     with_fake_status(JSON.generate(payload)) do |bin|
       consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
       result = consumer.fetch
       refute result.ok
-      assert_match(/schema_version mismatch/, result.error)
+      assert_match(/older than this process/, result.error)
+      assert_match(/update\/reinstall the hive binary/, result.error)
+    end
+  end
+
+  # Exact match keeps the pre-existing happy path: ok, no warning.
+  def test_exact_schema_version_match_has_no_warning
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_row(slug: "exact") ]
+    } ])
+    with_fake_status(JSON.generate(payload)) do |bin|
+      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      result = consumer.fetch
+      assert result.ok, result.error
+      assert_equal [ "exact" ], result.rows.map(&:slug)
+      assert_nil result.warning, "exact-match fetch must not carry a skew warning"
     end
   end
 

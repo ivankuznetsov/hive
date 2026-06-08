@@ -21,7 +21,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, mtime debounce, and `answers_pending` → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:wait_for_answers` / `:record_baseline` / `:skip`. Source of truth for "should this row fire a child?". |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates schema version; surfaces parse failures as `Result(ok: false)`. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached, and carries marker attrs so recovery code can preserve `REVIEW_WORKING phase/pass` when rewriting markers. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates the envelope SHAPE (missing/wrong `schema`, `ok=false`) as a hard `Result(ok: false)`, but tolerates schema-VERSION skew (see "Forward-tolerant schema-version skew" below) so a binary/process version mismatch never crashes a tick. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached, and carries marker attrs so recovery code can preserve `REVIEW_WORKING phase/pass` when rewriting markers. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; reaps via `Process.wait(-1, WNOHANG)`; parses JSON envelopes from child stdout; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
@@ -505,6 +505,47 @@ Rate-limited to one re-exec per 60s as a defense against pathological
 fingerprint flapping. Operators can disable the behavior entirely via
 `HIVE_DAEMON_NO_AUTO_REEXEC=1` (useful for tests and short-lived
 dev runs).
+
+## Forward-tolerant schema-version skew
+
+`StatusConsumer#validate_envelope!` enforces only the envelope SHAPE
+(`schema == "hive-status"` and `ok == true`) as a hard error. The
+`schema_version` is NOT validated there — it is classified by
+`schema_skew(doc)` into `:match` / `:newer` / `:older` and handled
+tolerantly, because the long-running daemon holds an in-memory
+`SCHEMA_VERSIONS.fetch("hive-status")` that goes stale the moment the
+`hive` gem is updated under it without a restart. The pre-fix code raised
+`ArgumentError, "schema_version mismatch: got N, want M"` on any
+inequality; that same brittleness hard-crashed the Telegram bot's
+`/status` (`got 3, want 2`) after a schema bump until the bot was
+restarted.
+
+Behavior by skew (both `StatusConsumer` and `Hive::Bot::StatusWatcher`):
+
+- **`:newer`** (payload version > process version — an updated binary):
+  parse best-effort. `hive-status` envelopes are additive by contract
+  (see [[commands/status]] and ADR-028 carve-out in [[decisions]]), so a
+  newer payload is still readable. The consumer returns `ok: true` and
+  carries a non-fatal `Result#warning`; the dispatcher logs it once per
+  tick as `:status_schema_skew` and keeps dispatching. If best-effort
+  extraction genuinely throws downstream, it degrades to the actionable
+  failure `hive status: envelope schema vN is newer than this process
+  (vM); restart the hive daemon to pick up the new version` rather than an
+  opaque `#{e.class}: …` line.
+- **`:older`** (payload version < process version — a stale binary on
+  PATH): not parsed as trustworthy. Returns `Result(ok: false)` with
+  `… is older than this process (vM); update/reinstall the hive binary on
+  PATH`.
+- **`:match`**: unchanged happy path; no warning.
+
+The contract: a long-running consumer must NEVER crash a tick (or the
+bot's `/status`) with a raw `ArgumentError` purely because a
+`schema_version` was bumped without a restart. It either keeps working
+(forward-compatible) or returns a clear "restart to pick up vN" message.
+
+`Hive::Bot::Supervisor#diagnose_reply_for_child` consumes the sibling
+`hive-status-diagnose` envelope but only checks `schema == ...` and never
+`schema_version`, so it did NOT share this brittleness and was left as-is.
 
 ## Backlinks
 

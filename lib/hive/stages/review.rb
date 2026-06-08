@@ -360,7 +360,13 @@ module Hive
               limit = reviewers_result == :all_failed_limit
               reason = limit ? "limits_reached" : "all_failed"
               attrs = { phase: :reviewers, reason: reason, pass: pass }
-              attrs[:message] = "all reviewers hit a usage/credit limit" if limit
+              if limit
+                attrs[:message] = "all reviewers hit a usage/credit limit"
+                # Stamp the cooldown so the daemon healer can self-heal once
+                # the usage window has plausibly reset (see AgentLimit). Only
+                # the limit marker gets a retry_after — `all_failed` stays manual.
+                attrs[:retry_after] = Hive::AgentLimit.retry_after
+              end
               Hive::Markers.set(task.state_file, :review_error, attrs)
               return { commit: "reviewers_#{reason}_pass_#{format('%02d', pass)}",
                        status: :review_error }

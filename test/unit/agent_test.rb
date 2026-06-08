@@ -1,9 +1,11 @@
 require "test_helper"
+require "time"
 require "hive/markers"
 require "hive/lock"
 require "hive/config"
 require "hive/task"
 require "hive/agent"
+require "hive/agent_limit"
 
 class AgentTest < Minitest::Test
   include HiveTestHelper
@@ -583,7 +585,11 @@ class AgentTest < Minitest::Test
         final_message: "Error: RESOURCE_EXHAUSTED: quota exceeded"
       }
 
+      # Floor to whole seconds: retry_after is a second-precision iso8601
+      # stamp, so the lower bound must drop sub-second slack on `before`.
+      before = Time.now.utc.floor
       agent.handle_exit(result)
+      after = Time.now.utc
 
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, result[:status]
@@ -591,6 +597,12 @@ class AgentTest < Minitest::Test
       assert_equal :error, marker.name
       assert_equal "limits_reached", marker.attrs["reason"]
       assert_match(/quota exceeded/, marker.attrs["message"])
+
+      retry_after = Time.parse(marker.attrs.fetch("retry_after"))
+      cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
+      assert retry_after >= before + cooldown,
+             "limits_reached marker must stamp a cooldown retry_after"
+      assert retry_after <= after + cooldown
     end
   end
 

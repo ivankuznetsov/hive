@@ -652,7 +652,8 @@ module Hive
 
       Hive::Markers.set(task.state_file, :error,
                         reason: "limits_reached",
-                        message: Hive::AgentLimit.error_message(pane, agent: "claude"))
+                        message: Hive::AgentLimit.error_message(pane, agent: "claude"),
+                        retry_after: Hive::AgentLimit.retry_after)
       Hive::Markers.current(task.state_file)
     end
 

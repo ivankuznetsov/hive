@@ -1,5 +1,7 @@
 require "test_helper"
+require "time"
 require "hive/claude_launcher"
+require "hive/agent_limit"
 require "hive/stages/base"
 require "hive/task"
 
@@ -1030,12 +1032,21 @@ class ClaudeLauncherTest < Minitest::Test
         def capture_pane_tail(bytes:) = tail
       end.new("limited-stage", limit_menu)
 
+      # Floor: retry_after is a second-precision iso8601 stamp.
+      before = Time.now.utc.floor
       with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
         marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
+        after = Time.now.utc
 
         assert_equal :error, marker.name
         assert_equal "limits_reached", marker.attrs.fetch("reason")
         assert_match(/\Alimits reached for claude:/, marker.attrs.fetch("message"))
+
+        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
+        cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
+        assert retry_after >= before + cooldown,
+               "limits_reached marker must stamp a cooldown retry_after"
+        assert retry_after <= after + cooldown
       end
     end
   end

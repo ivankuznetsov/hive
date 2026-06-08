@@ -77,6 +77,10 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 2. **Idempotency conventions** — `Init` exits with code 2 when already initialised; `New` exits with code 1 on slug collision; the `OpenPr` stage idempotent-PR path returns `:complete` without spawning. There's no centralised exit-code policy.
 3. **Two patterns for marker writes** — `Markers.set` (now uses flock + tempfile-rename atomic write) vs the agent writing into the state file via `Edit`/`Write`. The orchestrator now owns the terminal marker after every stage (the reviewer template explicitly does not write `task.md`), so concurrent-write races on the state file should not arise during normal flow. The remaining unprotected case is a user editing the state file in vim/VSCode while AGENT_WORKING — documented as "don't do that" in the README.
 
+## Open enhancements
+
+- **Parse provider reset-time hints for `limits_reached` cooldown** — the healer currently uses a fixed `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` cooldown (default 1h) to self-heal limit-parked tasks (see [[daemon]]). Providers sometimes print a concrete reset hint (e.g. codex's "try again at 4:42 PM"); parsing that wall-clock time could retry sooner/later than the fixed window. Deferred because wall-clock parsing across providers/timezones is brittle and the fixed cooldown is the robust default.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

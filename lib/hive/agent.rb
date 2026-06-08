@@ -324,7 +324,8 @@ module Hive
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(@task.state_file, :error,
                             reason: "limits_reached",
-                            message: limit_message)
+                            message: limit_message,
+                            retry_after: Hive::AgentLimit.retry_after)
         end
         result[:status] = :error
         result[:error_message] = limit_message

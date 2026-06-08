@@ -86,6 +86,19 @@ namespace :test do
     t.warning = false
     t.description = "Run Telegram bot eval harness tests"
   end
+
+  desc "Remove leaked hive test tmp dirs (hive-test*/hive-global*) from the system tmpdir"
+  task :clean_tmp do
+    require "tmpdir"
+    # Only sweep the unmistakably hive-owned prefixes the test helpers
+    # create (`Dir.mktmpdir("hive-test")` / `"hive-global"` and the
+    # `*.origin.git` siblings under them). A crashed test or a sibling
+    # bare repo can outlive its `ensure`, so this is the manual broom.
+    patterns = %w[hive-test* hive-global*]
+    stale = patterns.flat_map { |glob| Dir.glob(File.join(Dir.tmpdir, glob)) }.uniq
+    stale.each { |path| FileUtils.rm_rf(path) }
+    puts "Removed #{stale.size} stale hive test tmp dir(s) from #{Dir.tmpdir}"
+  end
 end
 
 desc "Run real-subprocess CLI/TUI e2e scenarios"

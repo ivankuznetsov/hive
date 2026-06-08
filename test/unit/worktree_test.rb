@@ -92,29 +92,36 @@ class WorktreeTest < Minitest::Test
   # origin_advance_sha] for the test body to assert against.
   def with_origin_ahead_of_local
     with_initialized_project do |dir, root|
+      # `origin_dir` is a sibling of the per-test tmpdir, so
+      # `with_tmp_dir`'s `rm_rf(dir)` never reaches it — clean it up
+      # explicitly or it accumulates as a leaked `*.origin.git` bare repo.
       origin_dir = "#{dir}.origin.git"
-      run!("git", "clone", "--bare", dir, origin_dir)
-      run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
-      run!("git", "-C", dir, "fetch", "origin")
-      # Advance origin: clone the bare into a scratch worktree, add a
-      # commit, push back. This simulates someone else pushing to
-      # origin while local master sits still.
-      scratch = Dir.mktmpdir("origin-pusher")
       begin
-        run!("git", "clone", origin_dir, scratch)
-        # CI runners don't have global git identity; configure
-        # locally so the commit lands without prompting.
-        run!("git", "-C", scratch, "config", "user.email", "test@example.com")
-        run!("git", "-C", scratch, "config", "user.name", "Test")
-        File.write(File.join(scratch, "from-origin.txt"), "advanced\n")
-        run!("git", "-C", scratch, "add", ".")
-        run!("git", "-C", scratch, "commit", "-m", "origin-advance", "--quiet")
-        run!("git", "-C", scratch, "push", "origin", "master:master")
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        run!("git", "-C", dir, "fetch", "origin")
+        # Advance origin: clone the bare into a scratch worktree, add a
+        # commit, push back. This simulates someone else pushing to
+        # origin while local master sits still.
+        scratch = Dir.mktmpdir("origin-pusher")
+        begin
+          run!("git", "clone", origin_dir, scratch)
+          # CI runners don't have global git identity; configure
+          # locally so the commit lands without prompting.
+          run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+          run!("git", "-C", scratch, "config", "user.name", "Test")
+          File.write(File.join(scratch, "from-origin.txt"), "advanced\n")
+          run!("git", "-C", scratch, "add", ".")
+          run!("git", "-C", scratch, "commit", "-m", "origin-advance", "--quiet")
+          run!("git", "-C", scratch, "push", "origin", "master:master")
+        ensure
+          FileUtils.rm_rf(scratch)
+        end
+        origin_sha = `git -C #{origin_dir} rev-parse master`.strip
+        yield(dir, root, origin_dir, origin_sha)
       ensure
-        FileUtils.rm_rf(scratch)
+        FileUtils.rm_rf(origin_dir)
       end
-      origin_sha = `git -C #{origin_dir} rev-parse master`.strip
-      yield(dir, root, origin_dir, origin_sha)
     end
   end
 

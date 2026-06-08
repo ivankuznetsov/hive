@@ -20,13 +20,14 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_returns_patrol_defaults_disabled
+  def test_load_returns_patrol_defaults_from_medium_mode
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
-      assert_equal false, cfg.dig("patrol", "enabled")
-      assert_equal "continuous", cfg.dig("patrol", "trigger")
-      assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal true, cfg.dig("patrol", "enabled")
+      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "claude", cfg.dig("patrol", "agent")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
       assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
@@ -40,6 +41,97 @@ class ConfigTest < Minitest::Test
       assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
       assert_equal %w[codex-ce-code-review],
                    cfg.dig("patrol", "review", "reviewers").map { |entry| entry.fetch("name") }
+    end
+  end
+
+  def test_load_resolves_unset_patrol_mode_to_medium
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          agent: codex
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal true, cfg.dig("patrol", "enabled")
+      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
+      assert_equal "codex", cfg.dig("patrol", "agent")
+      assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
+      assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
+    end
+  end
+
+  def test_load_resolves_patrol_frequency_modes
+    cases = {
+      "ultrapatrol" => [ "timer", 1800, true ],
+      "high" => [ "timer", 7200, true ],
+      "medium" => [ "timer", 14_400, true ],
+      "low" => [ "new_commits", 600, true ],
+      "off" => [ "continuous", 600, false ]
+    }
+
+    cases.each do |mode, (trigger, poll_interval_sec, enabled)|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          patrol:
+            mode: #{mode}
+        YAML
+
+        cfg = Hive::Config.load(dir)
+
+        assert_equal mode, cfg.dig("patrol", "mode")
+        assert_equal trigger, cfg.dig("patrol", "trigger")
+        assert_equal poll_interval_sec, cfg.dig("patrol", "poll_interval_sec")
+        assert_equal enabled, cfg.dig("patrol", "enabled")
+        assert_equal 10, cfg.dig("patrol", "max_findings_per_feature"),
+                     "#{mode} must not change the findings cap"
+        assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle"),
+                     "#{mode} must not change the PR cap"
+        assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
+                     "#{mode} must not change the confidence gate"
+      end
+    end
+  end
+
+  def test_load_keeps_explicit_patrol_knob_over_mode_derived_value
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: medium
+          poll_interval_sec: 600
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal true, cfg.dig("patrol", "enabled")
+      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
+    end
+  end
+
+  def test_load_preserves_legacy_explicit_patrol_granular_knobs_without_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          enabled: false
+          trigger: continuous
+          poll_interval_sec: 600
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal false, cfg.dig("patrol", "enabled")
+      assert_equal "continuous", cfg.dig("patrol", "trigger")
+      assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
     end
   end
 
@@ -58,8 +150,8 @@ class ConfigTest < Minitest::Test
 
       assert_equal true, cfg.dig("patrol", "enabled")
       assert_equal "continuous", cfg.dig("patrol", "trigger")
-      assert_equal 600, cfg.dig("patrol", "poll_interval_sec"),
-                   "sibling patrol defaults must survive deep merge"
+      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec"),
+                   "mode-derived patrol frequency must fill missing sibling keys"
       assert_equal "bundle exec rake test", cfg.dig("patrol", "commands", "test")
       assert_nil cfg.dig("patrol", "commands", "lint")
     end
@@ -82,8 +174,25 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_invalid_patrol_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: bogus
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/patrol\.mode/, err.message)
+      assert_match(/ultrapatrol/, err.message)
+      assert_match(/medium/, err.message)
+      assert_match(/off/, err.message)
+    end
+  end
+
   def test_load_rejects_invalid_patrol_field_shapes
     cases = [
+      "mode: bogus",
       "enabled: maybe",
       "draft_prs: sometimes",
       "review_prs: sometimes",

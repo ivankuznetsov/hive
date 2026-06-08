@@ -77,7 +77,7 @@ module Hive
       # Canonical worktree_root for a task — never derived from
       # agent-written pointer paths. Mirrors the path used at init time.
       def canonical_worktree_root(task, cfg)
-        cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(task.project_root)}.worktrees")
+        cfg["worktree_root"] || Hive::Worktree.default_worktree_root(File.basename(task.project_root))
       end
 
       # First entry into 4-execute: create the feature worktree, run

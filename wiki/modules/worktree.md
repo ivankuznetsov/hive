@@ -32,9 +32,13 @@ Hive::Worktree.validate_pointer_path(path, expected_root) → expanded_path | ra
 If passed explicitly, that's used. Otherwise:
 
 1. `cfg["worktree_root"]` from the project's `.hive-state/config.yml`.
-2. Fallback: `~/Dev/<project_name>.worktrees`.
+2. Fallback: `<base>/<project_name>.worktrees`, computed by `Hive::Worktree.default_worktree_root(project_name)`. The `<base>` is `Hive::Worktree.worktree_base`, which reads `ENV["HIVE_WORKTREE_BASE"]` and defaults to `~/Dev`.
 
 `File.expand_path`-ed so `~` works.
+
+### `HIVE_WORKTREE_BASE` override
+
+`Hive::Worktree.worktree_base` returns `ENV["HIVE_WORKTREE_BASE"] || File.expand_path("~/Dev")`, and every fallback site (`worktree.rb`, `task.rb`, `diagnosis_agent.rb`, `stages/execute.rb`, `stages/review.rb`, `commands/init.rb`) routes the default through `default_worktree_root`. The env override exists so the test suite can point the default base at a tmp sandbox (`test_helper.rb` sets `HIVE_WORKTREE_BASE ||= Dir.mktmpdir("hive-test-wtbase")`); previously the hardcoded `~/Dev/<project>.worktrees` fallback seeded the developer's real `~/Dev` with thousands of `hive-test<...>.worktrees` dirs. When unset, behavior is identical to the old hardcoded `~/Dev` default.
 
 ## `create!(branch_name, default_branch:)`
 

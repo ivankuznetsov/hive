@@ -86,6 +86,31 @@ namespace :test do
     t.warning = false
     t.description = "Run Telegram bot eval harness tests"
   end
+
+  desc "Remove leaked hive test tmp dirs (system tmpdir + legacy ~/Dev/hive-test*.worktrees)"
+  task :clean_tmp do
+    require "tmpdir"
+    # Only sweep the unmistakably hive-owned prefixes the test helpers
+    # create (`Dir.mktmpdir("hive-test")` / `"hive-global"` /
+    # `"hive-test-wtbase"` and the `*.origin.git` siblings under them).
+    # A crashed test or a sibling bare repo can outlive its `ensure`, so
+    # this is the manual broom.
+    #
+    # The `~/Dev/hive-test*.worktrees` glob mops up the legacy real-home
+    # leak: before HIVE_WORKTREE_BASE existed, the default worktree root
+    # fell back to `~/Dev/<project>.worktrees`, and test projects named
+    # `hive-test<...>` seeded thousands of dirs in the developer's real
+    # ~/Dev. The `hive-test` prefix cannot match the production
+    # `~/Dev/hive.worktrees` root, so it stays untouched.
+    globs = [
+      File.join(Dir.tmpdir, "hive-test*"),
+      File.join(Dir.tmpdir, "hive-global*"),
+      File.expand_path("~/Dev/hive-test*.worktrees")
+    ]
+    stale = globs.flat_map { |glob| Dir.glob(glob) }.uniq
+    stale.each { |path| FileUtils.rm_rf(path) }
+    puts "Removed #{stale.size} stale hive test dir(s) (#{Dir.tmpdir} + ~/Dev legacy worktree leak)"
+  end
 end
 
 desc "Run real-subprocess CLI/TUI e2e scenarios"

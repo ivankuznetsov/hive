@@ -21,7 +21,8 @@ module Hive
       return @worktree_root if @worktree_root
 
       cfg = Hive::Config.load(@project_root)
-      template = cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(@project_root)}.worktrees")
+      template = cfg["worktree_root"] ||
+                 self.class.default_worktree_root(File.basename(@project_root))
       File.expand_path(template)
     end
 
@@ -140,16 +141,27 @@ module Hive
       data
     end
 
+    # Base dir under which per-project worktree roots live by default
+    # (`<base>/<project>.worktrees`). Overridable via HIVE_WORKTREE_BASE so
+    # tests (and relocated setups) never seed the developer's real ~/Dev.
+    def self.worktree_base
+      ENV["HIVE_WORKTREE_BASE"] || File.expand_path("~/Dev")
+    end
+
+    def self.default_worktree_root(project_name)
+      File.join(worktree_base, "#{project_name}.worktrees")
+    end
+
     # Resolves the canonical worktree root for a project (per-project
-    # `worktree_root` override, falling back to `~/Dev/<repo>.worktrees`).
-    # Shared by Drop and other callers so the resolution rule has one
-    # home; previously Drop duplicated the formula and would have
-    # silently drifted on any future change here.
+    # `worktree_root` override, falling back to `<HIVE_WORKTREE_BASE or
+    # ~/Dev>/<repo>.worktrees`). Shared by Drop and other callers so the
+    # resolution rule has one home; previously Drop duplicated the formula
+    # and would have silently drifted on any future change here.
     def self.canonical_root(project_root)
       cfg = Hive::Config.load(project_root)
       File.expand_path(
         cfg["worktree_root"] ||
-          File.expand_path("~/Dev/#{File.basename(File.expand_path(project_root))}.worktrees")
+          default_worktree_root(File.basename(File.expand_path(project_root)))
       )
     end
 

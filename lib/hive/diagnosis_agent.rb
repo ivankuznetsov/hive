@@ -249,7 +249,7 @@ module Hive
 
     def worktree_root_for(cfg)
       File.expand_path(
-        cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(@task.project_root)}.worktrees")
+        cfg["worktree_root"] || Hive::Worktree.default_worktree_root(File.basename(@task.project_root))
       )
     end
 

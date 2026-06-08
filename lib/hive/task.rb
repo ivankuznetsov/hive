@@ -1,6 +1,7 @@
 require "yaml"
 require "hive/stages"
 require "hive/task_meta"
+require "hive/worktree"
 
 module Hive
   class Task
@@ -86,7 +87,7 @@ module Hive
 
     def derive_worktree_path
       cfg = Hive::Config.load(@project_root)
-      template = cfg["worktree_root"] || File.expand_path("~/Dev/#{project_name}.worktrees")
+      template = cfg["worktree_root"] || Hive::Worktree.default_worktree_root(project_name)
       File.join(File.expand_path(template), @slug)
     end
 

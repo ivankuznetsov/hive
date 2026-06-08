@@ -661,7 +661,7 @@ module Hive
       # --- helpers ---------------------------------------------------------
 
       def canonical_worktree_root(task, cfg)
-        cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(task.project_root)}.worktrees")
+        cfg["worktree_root"] || Hive::Worktree.default_worktree_root(File.basename(task.project_root))
       end
 
       # Resolve the ref reviewers diff against, preferring an explicit

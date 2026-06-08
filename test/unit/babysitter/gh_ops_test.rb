@@ -80,11 +80,16 @@ class BabysitterGhOpsTest < Minitest::Test
     refute called
   end
 
-  def test_rebase_onto_base_fetches_then_rebases_on_success
+  PUSH_URL = "https://github.com/o/r.git".freeze
+
+  def test_rebase_onto_base_fetches_push_url_then_rebases_on_success
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    url = PUSH_URL
     commands = []
     with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
       commands << cmd
+      next [ "#{url}\n", "", ok ] if cmd[0, 3] == %w[git remote get-url]
+
       [ "ok", "", ok ]
     }) do
       result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
@@ -92,17 +97,55 @@ class BabysitterGhOpsTest < Minitest::Test
       refute result.conflict?
     end
 
-    assert_equal %w[git fetch origin main], commands[0]
-    assert_equal %w[git rebase origin/main], commands[1]
-    assert_equal 2, commands.size, "no abort on a clean rebase"
+    assert_equal %w[git remote get-url --push origin], commands[0]
+    assert_equal [ "git", "fetch", PUSH_URL, "main" ], commands[1], "fetches the resolved push URL, not bare origin"
+    assert_equal %w[git rebase FETCH_HEAD], commands[2]
+    assert_equal 3, commands.size, "no abort on a clean rebase"
   end
 
-  def test_rebase_onto_base_aborts_and_reports_conflict_on_failure
+  def test_rebase_onto_base_falls_back_to_origin_when_push_url_unresolved
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     bad = Hive::Gh::CommandStatus.new(exitstatus: 1)
     commands = []
     with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
       commands << cmd
+      next [ "", "no such remote", bad ] if cmd[0, 3] == %w[git remote get-url]
+
+      [ "ok", "", ok ]
+    }) do
+      result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
+      assert result.success?
+    end
+
+    assert_equal %w[git fetch origin main], commands[1], "falls back to bare origin"
+    assert_equal %w[git rebase FETCH_HEAD], commands[2]
+  end
+
+  def test_rebase_onto_base_falls_back_to_origin_when_push_url_empty
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      next [ "  \n", "", ok ] if cmd[0, 3] == %w[git remote get-url]
+
+      [ "ok", "", ok ]
+    }) do
+      result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
+      assert result.success?
+    end
+
+    assert_equal %w[git fetch origin main], commands[1], "empty push URL falls back to bare origin"
+  end
+
+  def test_rebase_onto_base_aborts_and_reports_conflict_on_failure
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    bad = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    url = PUSH_URL
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      next [ "#{url}\n", "", ok ] if cmd[0, 3] == %w[git remote get-url]
+
       status = cmd[0, 2] == %w[git rebase] && cmd[2] != "--abort" ? bad : ok
       [ "out", "err", status ]
     }) do
@@ -115,10 +158,14 @@ class BabysitterGhOpsTest < Minitest::Test
   end
 
   def test_rebase_onto_base_reports_failure_when_fetch_fails
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     bad = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    url = PUSH_URL
     commands = []
     with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
       commands << cmd
+      next [ "#{url}\n", "", ok ] if cmd[0, 3] == %w[git remote get-url]
+
       [ "out", "fetch boom", bad ]
     }) do
       result = Hive::Babysitter::GhOps.rebase_onto_base("/tmp/wt", "main", cfg: {}, dry_run: false)
@@ -127,7 +174,8 @@ class BabysitterGhOpsTest < Minitest::Test
       assert_equal :failure, result.status
     end
 
-    assert_equal 1, commands.size, "stops after a failed fetch"
+    assert_equal [ "git", "fetch", PUSH_URL, "main" ], commands.last
+    assert_equal 2, commands.size, "stops after a failed fetch (push-url resolve + fetch)"
   end
 
   def test_rebase_onto_base_dry_run_skips_git

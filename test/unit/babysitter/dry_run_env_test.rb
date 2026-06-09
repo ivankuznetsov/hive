@@ -120,6 +120,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"
+      # `--textconv` runs the repo-local `diff.<driver>.textconv` command — an exec seam. The
+      # spelled-out flag must skip, and so must every prefix git accepts as the long option
+      # (`--text`, `--textc`, ...), e.g. `git cat-file --text` / `git grep --textc`.
+      assert_stubbed env, "git", "diff", "--textconv"
+      assert_stubbed env, "git", "cat-file", "--text", "HEAD:README.md"
+      assert_stubbed env, "git", "grep", "--textc", "needle"
       # `git cat-file --filters` is an allowlisted read, but `--filters` runs the repo-local
       # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
       # hardening never covers, so it must skip.

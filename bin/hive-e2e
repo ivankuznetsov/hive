@@ -250,36 +250,38 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
-def normalize_leading_class_options!(argv)
-  return if argv.length < 2
-
-  leading_class_options = []
-  leading_class_options << argv.shift while argv.first == "--json" || argv.first == "--no-json"
-  return if leading_class_options.empty? || argv.empty?
-  return argv.unshift(*leading_class_options) unless %w[clean help list replay run version].include?(argv.first)
-
-  argv.insert(1, *leading_class_options)
-end
-
 # Mirror Thor's boolean grammar for --json so the envelope/prose decision
 # matches what the inner commands actually parse. Thor's truthy set for a
 # boolean option value is the exact-match list `true`, `TRUE`, `t`, `T` (NOT
 # case-insensitive — `True`/`tRuE` are not honored), so we accept bare `--json`
-# plus exactly those spellings. `--json=false`, `--json=0`, `--no-json`, and
+# plus exactly those spellings. Falsey spellings remain non-JSON, and
 # non-boolean spellings such as `--json=1` fall through to Thor's prose path.
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(?:true|TRUE|t|T)\z/) }
+  argv.any? { |arg| truthy_json_option?(arg) }
+end
+
+def truthy_json_option?(arg)
+  arg == "--json" || (arg.is_a?(String) && arg.match?(/\A--json=(?:true|TRUE|t|T)\z/))
+end
+
+def falsey_json_option?(arg)
+  arg == "--no-json" || (arg.is_a?(String) && arg.match?(/\A--json=(?:false|FALSE|f|F)\z/))
 end
 
 def normalize_leading_global_options!(argv)
-  return unless argv.first == "--json"
+  return if argv.length < 2
+
+  leading_class_options = []
+  while truthy_json_option?(argv.first) || falsey_json_option?(argv.first)
+    option = argv.shift
+    leading_class_options << (truthy_json_option?(option) ? "--json" : option)
+  end
+  return if leading_class_options.empty? || argv.empty?
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
-  cmd_idx = argv[1..]&.index { |arg| commands.include?(arg) }
-  return unless cmd_idx
+  return argv.unshift(*leading_class_options) unless commands.include?(argv.first)
 
-  argv.delete_at(0)
-  argv.insert(cmd_idx + 1, "--json")
+  argv.insert(1, *leading_class_options)
 end
 
 begin

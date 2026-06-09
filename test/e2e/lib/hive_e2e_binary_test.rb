@@ -39,6 +39,24 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "hive-e2e-scenarios", payload["schema"]
   end
 
+  def test_leading_truthy_json_value_list_dispatches_to_list
+    %w[--json=true --json=t].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, flag, "list")
+      assert status.success?, "bin/hive-e2e #{flag} list should exit 0, stderr was: #{err}"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-scenarios", payload["schema"]
+    end
+  end
+
+  def test_leading_falsey_json_value_list_dispatches_to_human_list
+    out, err, status = Open3.capture3(hive_e2e, "--json=false", "list")
+    assert status.success?, "bin/hive-e2e --json=false list should exit 0, stderr was: #{err}"
+    assert_empty err
+    assert_match(/^full_pipeline_happy_path/, out)
+    refute_includes out, "\"schema\""
+  end
+
   def test_clean_json_emits_deleted_and_kept_counts
     # Redirect the runs dir to a temp location so the contract test cannot
     # delete real forensic artifacts under test/e2e/runs/. Without this the

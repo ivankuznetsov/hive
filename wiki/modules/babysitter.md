@@ -21,7 +21,7 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::ContextBuilder` | `lib/hive/babysitter/context_builder.rb` | Builds prompt-ready status rollup, failing-job logs, and diff stat. |
 | `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from a force-refreshed internal PR-head ref, so rebased or force-pushed PRs do not wedge the babysitter cache. |
 | `Hive::Babysitter::GhOps` | `lib/hive/babysitter/gh_ops.rb` | Hive-driven GitHub/git side effects: `force_push_with_lease(worktree, branch, cfg:, dry_run:, expected_oid: nil)` (explicit `--force-with-lease=<branch>:<oid>` when `expected_oid` is given — robust without a local remote-tracking ref — else the bare `--force-with-lease`), `rebase_onto_base` (fetch base over the remote's **push URL** + rebase onto `FETCH_HEAD`, abort-on-conflict, returns a `RebaseResult` of `:success`/`:conflict`/`:failure`), label, comment, rerun. Honors dry-run. |
-| `Hive::Babysitter::DryRunEnv` | `lib/hive/babysitter/dry_run_env.rb` + `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` | PATH overlay for agent-side dry-run `git` / `gh` stubs. |
+| `Hive::Babysitter::DryRunEnv` | `lib/hive/babysitter/dry_run_env.rb` + `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` | PATH overlay for agent-side dry-run `git` / `gh` stubs; allowed git reads exec with hermetic user/system/local config controls. |
 | `Hive::Babysitter::Events` | `lib/hive/babysitter/events.rb` | Append-only per-project JSONL events under `.hive-state/babysitter/events.jsonl`. |
 | `Hive::Babysitter::StatusWriter` | `lib/hive/babysitter/status_writer.rb` | Human-readable loop summary appended to `.hive-state/babysitter/status.md`. |
 

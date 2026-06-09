@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-08
+updated: 2026-06-09
 tags: [commands, api]
 ---
 
@@ -35,6 +35,12 @@ The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
 instead of being treated as partially-valid command invocations.
+Wrapper-level JSON booleans are normalized with the same exact grammar Thor
+uses for boolean options. Leading `--json`, `--json=true`/`TRUE`/`t`/`T`, and
+false forms such as `--no-json`, `--skip-json`, or `--json=false` move behind
+the command before dispatch; unsupported assignments such as `--json=1` or
+`--json=yes` fail as usage errors before the assigned value can become a
+command argument or task target.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
@@ -74,11 +80,13 @@ CLI.
 `bin/hive-e2e` is the opt-in outer test harness for scenario-driven,
 subprocess-level verification. It is documented in [[e2e]] rather than treated
 as an end-user workflow command. It mirrors the main wrapper's entrypoint
-conventions for top-level `--version` and command-local help, so
-`bin/hive-e2e run --filter tui --help` prints the `run` usage instead of
-selecting scenarios or running preflight checks.
-Its successful `--json` surfaces are single-document stdout contracts:
-`list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
+conventions for top-level `--version`, command-local help, and wrapper-level
+JSON boolean grammar, so `bin/hive-e2e run --filter tui --help` prints the
+`run` usage instead of selecting scenarios or running preflight checks, while
+`bin/hive-e2e --json=true list` dispatches to `list` and unsupported
+`--json=<value>` assignments fail before the default `run` pattern can consume
+the value. Its successful `--json` surfaces are single-document stdout
+contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 `hive-e2e-clean`.
 
 ## Backlinks

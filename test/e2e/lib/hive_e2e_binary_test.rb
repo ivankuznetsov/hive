@@ -39,6 +39,14 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "hive-e2e-scenarios", payload["schema"]
   end
 
+  def test_leading_json_true_list_dispatches_to_list
+    out, err, status = Open3.capture3(hive_e2e, "--json=true", "list")
+    assert status.success?, "bin/hive-e2e --json=true list should exit 0, stderr was: #{err}"
+
+    assert_includes out, '"schema": "hive-e2e-scenarios"'
+    refute_includes out, '"error_kind": "no_scenarios"'
+  end
+
   def test_clean_json_emits_deleted_and_kept_counts
     # Redirect the runs dir to a temp location so the contract test cannot
     # delete real forensic artifacts under test/e2e/runs/. Without this the
@@ -170,6 +178,18 @@ class E2EBinaryTest < Minitest::Test
     payload = JSON.parse(out)
     assert_equal "no_scenarios", payload["error_kind"]
     assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  end
+
+  def test_leading_unsupported_json_assignments_are_rejected_before_default_run
+    %w[--json=1 --json=yes].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, flag, "list")
+      value = flag.split("=", 2).last
+
+      assert_equal 64, status.exitstatus, "#{flag}: malformed JSON flag should be a usage error"
+      assert_empty out, "#{flag}: unsupported JSON assignments must not request JSON mode"
+      assert_match(/invalid boolean value for --json/, err)
+      refute_match(/no scenarios match #{Regexp.escape(value)}/, err)
+    end
   end
 
   def test_run_no_match_emits_json_error_when_requested

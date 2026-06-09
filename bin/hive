@@ -11,12 +11,15 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   exit 0
 end
 
+JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
+JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
+JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
 def normalize_leading_json_options!(argv)
-  json_options = %w[--json --no-json --skip-json]
   leading = []
-  leading << argv.shift while json_options.include?(argv.first)
+  leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
 
   cmd_idx = argv.index { |a| !a.start_with?("-") }
@@ -41,11 +44,15 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
-normalize_leading_json_options!(ARGV)
-rewrite_help_flag!(ARGV)
-
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(true|1|yes)\z/i) }
+  argv.any? { |arg| JSON_TRUE_OPTIONS.include?(arg) }
+end
+
+def reject_unsupported_json_assignments!(argv)
+  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  return unless arg
+
+  raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
 def json_usage_error_contract(argv)
@@ -77,6 +84,9 @@ rescue Errno::EPIPE, JSON::GeneratorError
 end
 
 begin
+  reject_unsupported_json_assignments!(ARGV)
+  normalize_leading_json_options!(ARGV)
+  rewrite_help_flag!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)

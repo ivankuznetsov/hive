@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-09
 tags: [cli, api]
 ---
 
@@ -20,6 +20,12 @@ leading dash-prefixed arguments that appear before the subcommand, then drops
 the command-local arguments after the subcommand so calls such as
 `hive approve --from 2-brainstorm --help` print the `approve` usage text
 instead of validating `--from` or consuming `--help` as a positional target.
+Leading wrapper-level JSON options are normalized before dispatch for the same
+reason. Accepted boolean forms match Thor's exact grammar: bare `--json`, exact
+truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
+(`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
+assignments such as `--json=1` or `--json=yes` exit with usage before their
+values can be treated as a command argument or task target.
 
 `bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
 
@@ -70,6 +76,7 @@ instead of validating `--from` or consuming `--help` as a positional target.
 - `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v1`; `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
+- `bin/hive` normalizes leading Thor-style JSON boolean forms such as `--json=true status` or `--no-json status` to command-local options and rejects unsupported `--json=<value>` assignments before Thor can leave the value behind as a positional.
 
 ## Exit-code contract (`Hive::ExitCodes`)
 

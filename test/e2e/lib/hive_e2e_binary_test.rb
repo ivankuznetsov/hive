@@ -8,13 +8,19 @@ class E2EBinaryTest < Minitest::Test
     File.join(Hive::E2E::Paths.repo_root, "bin", "hive-e2e")
   end
 
+  def parse_single_json_document(out)
+    JSON.parse(out)
+  rescue JSON::ParserError => e
+    flunk "expected exactly one parseable JSON document on stdout: #{e.message}"
+  end
+
   def test_list_json_emits_parseable_envelope_with_schema_version_1
     out, err, status = Open3.capture3(hive_e2e, "list", "--json")
     assert status.success?, "bin/hive-e2e list --json should exit 0, stderr was: #{err}"
     assert_equal 1, out.scan(/^\{/).count,
                  "bin/hive-e2e list --json should emit exactly one JSON document"
 
-    payload = JSON.parse(out)
+    payload = parse_single_json_document(out)
     assert_equal "hive-e2e-scenarios", payload["schema"]
     assert_equal 1, payload["schema_version"]
     assert_kind_of Array, payload["scenarios"], "envelope should carry a scenarios array"
@@ -47,7 +53,7 @@ class E2EBinaryTest < Minitest::Test
       assert_equal 1, out.scan(/^\{/).count,
                    "bin/hive-e2e clean --json should emit exactly one JSON document"
 
-      payload = JSON.parse(out)
+      payload = parse_single_json_document(out)
       assert_equal "hive-e2e-clean", payload["schema"]
       assert_equal 1, payload["schema_version"]
       assert_kind_of Integer, payload["deleted"]

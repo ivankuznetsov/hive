@@ -1287,6 +1287,11 @@ module Hive
         child.log_path ? "#{text}; see #{child.log_path}" : text
       end
 
+      # Success is gated on the process exit code alone. The hive-status-
+      # diagnose envelope's `ok` field is consulted earlier, in
+      # diagnose_reply_for_child, which short-circuits this path for that
+      # schema. Other verbs do not emit a uniform `ok` envelope, so an exit-0
+      # process is treated as success here. See PR #435 review (OPTIONAL).
       def child_completion_text(child)
         if child.exit_code == Hive::ExitCodes::WRONG_STAGE
           "Already advanced by another device"

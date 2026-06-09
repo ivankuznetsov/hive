@@ -1215,6 +1215,25 @@ module Hive
         @logger.event(:fatal,
                       message: "promote_dispatch_sequence raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
+        # The next sequence step was NOT enqueued, so the .sequence sidecar is
+        # orphaned on disk. Discard it (best-effort) so a later sweep cannot
+        # resurrect a half-promoted sequence, and surface a real failure to the
+        # user. Return a TRUTHY sentinel so the caller suppresses the FALSE
+        # "completed" success notice — a raise here means the run did NOT fully
+        # succeed. See PR #435 review.
+        discard_sequence_after_failure(entry)
+        notify_dispatch_failure(entry, meta, now: now, reason: "#{e.class}: #{e.message}")
+        :promotion_failed
+      end
+
+      def discard_sequence_after_failure(entry)
+        Hive::Daemon::DispatchRequestQueue.discard_sequence(
+          entry.request_id, state_home: dispatch_request_state_home
+        )
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "discard_sequence_after_failure raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
       end
 
       # C3: sweep claim files from a prior daemon process. Owner-still-
@@ -1327,6 +1346,33 @@ module Hive
       rescue StandardError => e
         @logger.event(:fatal,
                       message: "notify_dispatch_result raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+      end
+
+      # Surface a sequence-promotion failure back to the originating chat.
+      # The completed step itself exited 0, but the NEXT step was never
+      # enqueued, so we must NOT report success. We write a result notice with
+      # a synthetic non-zero exit code so the bot renders its failure message
+      # (see Hive::Bot::Supervisor#dispatch_result_text) instead of staying
+      # silent. See PR #435 review.
+      def notify_dispatch_failure(entry, meta, now:, reason:)
+        chat_id = meta && meta[:chat_id]
+        return if chat_id.nil?
+
+        Hive::Daemon::DispatchResultQueue.write!(
+          chat_id: chat_id, update_id: meta[:update_id],
+          project: entry.project, slug: entry.slug,
+          request_id: entry.request_id,
+          exit_code: Hive::ExitCodes::SOFTWARE,
+          command: entry.command, now: now,
+          state_home: dispatch_result_state_home
+        )
+        @logger.event(:dispatch_sequence_promotion_failed,
+                      request_id: entry.request_id, project: entry.project,
+                      slug: entry.slug, chat_id: chat_id, reason: reason)
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "notify_dispatch_failure raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
       end
 

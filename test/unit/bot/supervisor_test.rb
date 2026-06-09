@@ -221,6 +221,12 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
+  DispatchResultNotice = Struct.new(:command, :project, :slug, :exit_code, keyword_init: true)
+
+  def dispatch_result_notice(command:, project: "hive", slug: nil, exit_code: 0)
+    DispatchResultNotice.new(command: command, project: project, slug: slug, exit_code: exit_code)
+  end
+
   def legacy_stage_dirs(project: "hive", project_path: "/tmp/hive")
     Hive::Bot::StatusWatcher::LegacyStageDirs.new(
       project: project,
@@ -1316,6 +1322,92 @@ class HiveBotSupervisorTest < Minitest::Test
                  @supervisor.send(:child_completion_text,
                                   child_exit(exit_code: 0, slug: "pr-slug",
                                              command_argv: [ "hive", "open-pr", "pr-slug", "--json" ]))
+  end
+
+  def test_command_success_text_per_verb_messages
+    cases = {
+      "reject-finding" => "Rejected findings for hive/v-slug.",
+      "archive" => "Archived hive/v-slug.",
+      "brainstorm" => "Brainstorm completed for hive/v-slug.",
+      "develop" => "Development completed for hive/v-slug.",
+      "finalize" => "Finalized hive/v-slug.",
+      "markers" => "Recovery step completed for hive/v-slug.",
+      "artifacts" => "Artifacts completed for hive/v-slug.",
+      "plan" => "Plan completed for hive/v-slug.",
+      "review" => "Review completed for hive/v-slug."
+    }
+    cases.each do |verb, expected|
+      text = @supervisor.send(
+        :command_success_text,
+        command_argv: [ "hive", verb, "v-slug", "--json" ], project: "hive", slug: "v-slug"
+      )
+      assert_equal expected, text, "verb #{verb.inspect} must render its human confirmation"
+    end
+  end
+
+  def test_command_success_text_falls_back_to_title_cased_verb_for_unknown_verb
+    text = @supervisor.send(
+      :command_success_text,
+      command_argv: [ "hive", "rebase-onto", "x-slug", "--json" ], project: "hive", slug: "x-slug"
+    )
+
+    assert_equal "Rebase Onto completed for hive/x-slug.", text,
+                 "an unknown verb falls back to a Title Cased label"
+  end
+
+  def test_command_success_text_uses_command_label_when_verb_has_no_word_chars
+    text = @supervisor.send(
+      :command_success_text,
+      command_argv: [ "hive", "--", "y-slug", "--json" ], project: "hive", slug: "y-slug"
+    )
+
+    assert_equal "Command completed for hive/y-slug.", text,
+                 "a verb that splits to no words must fall back to the literal 'Command' label"
+  end
+
+  def test_inferred_success_slug_resolves_status_diagnose_target
+    text = @supervisor.send(
+      :command_success_text,
+      command_argv: [ "hive", "status", "--diagnose", "diag-slug", "--json" ],
+      project: "hive", slug: ""
+    )
+
+    assert_equal "Status check completed for hive/diag-slug.", text,
+                 "a blank slug on a status --diagnose run must be inferred from the argv that follows --diagnose"
+  end
+
+  def test_inferred_success_slug_resolves_markers_target_from_argv3
+    text = @supervisor.send(
+      :command_success_text,
+      command_argv: [ "hive", "markers", "clear", "mark-slug", "--json" ],
+      project: "hive", slug: "unknown"
+    )
+
+    assert_equal "Recovery step completed for hive/mark-slug.", text,
+                 "a 'markers' run carries its slug at argv[3] (after the sub-action)"
+  end
+
+  def test_inferred_success_slug_resolves_generic_target_from_argv2
+    text = @supervisor.send(
+      :command_success_text,
+      command_argv: [ "hive", "develop", "dev-slug", "--json" ],
+      project: "hive", slug: "unknown"
+    )
+
+    assert_equal "Development completed for hive/dev-slug.", text,
+                 "a generic verb carries its slug at argv[2]"
+  end
+
+  def test_dispatch_command_argv_falls_back_to_plain_split_on_malformed_quote
+    notice = dispatch_result_notice(command: 'hive run "unterminated')
+
+    argv = @supervisor.send(:dispatch_command_argv, notice)
+    assert_equal [ "hive", "run", "\"unterminated" ], argv,
+                 "a malformed quote must fall back to a plain split, not raise"
+
+    text = @supervisor.send(:dispatch_success_text, notice)
+    assert_equal "Run completed for hive/\"unterminated.", text,
+                 "a malformed command must still produce a confirmation via the plain-split fallback"
   end
 
   def test_send_reconnect_summary_skips_empty_update_list

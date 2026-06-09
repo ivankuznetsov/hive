@@ -1975,7 +1975,7 @@ end
       started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQERR"
     )
 
-    with_replaced_singleton_method(
+    result = with_replaced_singleton_method(
       Hive::Daemon::DispatchRequestQueue, :promote_sequence, ->(*, **_kwargs) { raise "promote failed" }
     ) do
       dispatcher.send(:promote_dispatch_sequence, entry, nil, now: T0)
@@ -1984,6 +1984,87 @@ end
     assert(logger.events.any? { |(name, attrs)|
       name == :fatal && attrs[:message].include?("promote_dispatch_sequence raised")
     })
+    assert_equal :promotion_failed, result,
+                 "a raised promotion must return a truthy sentinel so the caller suppresses the false success notice"
+  end
+
+  def test_discard_sequence_after_failure_swallows_errors
+    dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+    entry = ChildExit.new(
+      pid: 561, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+      command: "hive markers clear s1", state_file_path: nil,
+      started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQDISC"
+    )
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchRequestQueue, :discard_sequence, ->(*, **_kwargs) { raise "rm failed" }
+    ) do
+      dispatcher.send(:discard_sequence_after_failure, entry)
+    end
+
+    assert(logger.events.any? { |(name, attrs)|
+      name == :fatal && attrs[:message].include?("discard_sequence_after_failure raised")
+    })
+  end
+
+  def test_notify_dispatch_failure_swallows_write_errors
+    dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+    entry = ChildExit.new(
+      pid: 562, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+      command: "hive markers clear s1", state_file_path: nil,
+      started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQNOTIFY"
+    )
+
+    with_replaced_singleton_method(
+      Hive::Daemon::DispatchResultQueue, :write!, ->(*, **_kwargs) { raise "write failed" }
+    ) do
+      dispatcher.send(:notify_dispatch_failure, entry, { chat_id: 42 }, now: T0, reason: "boom")
+    end
+
+    assert(logger.events.any? { |(name, attrs)|
+      name == :fatal && attrs[:message].include?("notify_dispatch_failure raised")
+    })
+  end
+
+  def test_reap_suppresses_success_and_discards_sequence_when_promotion_raises
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
+      )
+      write_request_file(
+        state_home,
+        slug: "s1",
+        request_id: "SEQRAISE",
+        argv: [ "hive", "markers", "clear", "s1", "--json" ]
+      )
+      Q.write_sequence!(
+        "SEQRAISE",
+        remaining_argvs: [ [ "hive", "review", "s1", "--from", "6-review", "--json" ] ],
+        state_home: state_home
+      )
+      exited = ChildExit.new(
+        pid: 560, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+        command: "hive markers clear s1 --json", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "SEQRAISE"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      with_replaced_singleton_method(
+        Hive::Daemon::DispatchRequestQueue, :promote_sequence, ->(*, **_kwargs) { raise "disk error" }
+      ) do
+        dispatcher.send(:reap_completed, now: T0 + 1)
+      end
+
+      assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "SEQRAISE*")),
+                   "the orphaned sequence sidecar must be discarded when promotion raises"
+
+      notices = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+      assert_equal 1, notices.size,
+                   "a raised promotion must surface a failure notice, not a false success and not silence"
+      refute_equal 0, notices.first.exit_code,
+                   "the surfaced notice must carry a non-zero exit code so the bot renders a failure, not a success"
+    end
   end
 
   # #4: a signal-killed child (R-02 timeout) has a nil exit_code; the reap

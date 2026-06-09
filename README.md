@@ -4,6 +4,8 @@
 
 # Hive
 
+**Website &amp; docs: [hivecli.sh](https://hivecli.sh)** — quickstart, concepts, the full command reference, and an [`llms.txt`](https://hivecli.sh/llms.txt) for agents.
+
 Community: [join the Hive Discord](https://discord.gg/Qg5E7rMt) for questions,
 feedback, and release discussions.
 
@@ -212,6 +214,7 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 
 ## Documentation
 
+- **[hivecli.sh](https://hivecli.sh)** — The public website: an outcome-first overview plus curated docs (getting started, concepts, configuration, the user-facing command reference, and operating). Agent-friendly too: every page is available as raw markdown and there's an [`llms.txt`](https://hivecli.sh/llms.txt) index. Start here if you're new.
 - **[install.md](install.md)** — The canonical agent-installer prompt: OS/arch detection, channel selection (brew / yay / install.sh), Apache Hive collision handling, daemon autostart setup, `hive init` follow-up, and optional skills package wiring. Paste this into your agent CLI when you want it to install or upgrade Hive for you.
 - **[docs/concepts.md](docs/concepts.md)** — The conceptual deep-dive: folder-as-agent, the nine stages in detail, the marker protocol that lets stages negotiate handoff, and what compound engineering looks like in practice. Read this when you want to understand *why* Hive is shaped the way it is, or before extending a stage and needing to know what the artefact contract is.
 - **[docs/getting-started.md](docs/getting-started.md)** — A CLI-first walkthrough against a real project, from prerequisites through capturing an idea, running brainstorm, and promoting to plan. Read this when you want to drive stages manually or script the `hive init` → `hive new` → `hive brainstorm` shape.

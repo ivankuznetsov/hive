@@ -1810,8 +1810,8 @@ end
     end
   end
 
-  # ADV-1: a non-zero, request-driven completion writes a failure notice
-  # carrying the originating chat_id for the bot to relay.
+  # ADV-1: a request-driven completion writes a result notice carrying
+  # the originating chat_id for the bot to relay.
   def test_reap_writes_dispatch_result_notice_on_request_failure
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
@@ -1836,10 +1836,11 @@ end
     end
   end
 
-  def test_reap_writes_no_notice_on_zero_exit
+  def test_reap_writes_dispatch_result_notice_on_request_success
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
-        rows: [], dispatch_request_state_home: state_home
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
       )
       write_request_file(state_home, slug: "s1", request_id: "OK1")
       exited = ChildExit.new(
@@ -1850,15 +1851,18 @@ end
       sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
 
       dispatcher.send(:reap_completed, now: T0 + 1)
-      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home),
-                   "a clean exit must not write a failure notice"
+      notices = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+      assert_equal 1, notices.size
+      assert_equal 42, notices.first.chat_id, "chat_id is recovered from the request file"
+      assert_equal 0, notices.first.exit_code
     end
   end
 
   def test_reap_promotes_sequence_only_after_success
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
-        rows: [], dispatch_request_state_home: state_home
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
       )
       write_request_file(
         state_home,
@@ -1885,6 +1889,8 @@ end
       assert_equal [ "hive", "review", "s1", "--from", "6-review", "--json" ],
                    pending.first.argv
       refute_equal "SEQ1", pending.first.request_id
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home),
+                   "an intermediate sequence step must not notify until the promoted command finishes"
       assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "SEQ1*")),
                    "the consumed sequence sidecar must be removed"
     end
@@ -1893,7 +1899,8 @@ end
   def test_reap_discards_sequence_after_failure
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
-        rows: [], dispatch_request_state_home: state_home
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
       )
       write_request_file(
         state_home,
@@ -1917,6 +1924,8 @@ end
 
       assert_empty Q.pending(state_home: state_home),
                    "a retry must not be enqueued when the marker clear command failed"
+      assert_equal 1, Hive::Daemon::DispatchResultQueue.pending(state_home: state_home).size,
+                   "a failed sequence step must still notify the originating chat"
       assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "SEQF*")),
                    "the failed sequence sidecar must be discarded"
     end
@@ -2115,7 +2124,7 @@ end
     assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("enforce_child_timeouts") })
   end
 
-  def test_notify_dispatch_failure_swallows_write_errors
+  def test_notify_dispatch_result_swallows_write_errors
     dispatcher, _sup, _ctrl, logger = make_dispatcher
     entry = ChildExit.new(
       pid: 1, exit_code: 4, project: "p1", slug: "s1", stage: nil,
@@ -2125,16 +2134,16 @@ end
     with_replaced_singleton_method(
       Hive::Daemon::DispatchResultQueue, :write!, ->(**_kw) { raise "disk full" }
     ) do
-      dispatcher.send(:notify_dispatch_failure, entry, { chat_id: 42 }, now: T0)
+      dispatcher.send(:notify_dispatch_result, entry, { chat_id: 42 }, now: T0)
     end
-    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("notify_dispatch_failure") })
+    assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("notify_dispatch_result") })
   end
 
-  # #251: failure notices go to the dedicated dispatch_result_state_home,
+  # #251: result notices go to the dedicated dispatch_result_state_home,
   # not the (separately injectable) request home — so a test sandboxing
   # only the request queue can't silently write results where the bot,
   # reading the real result home, never sees them.
-  def test_notify_dispatch_failure_writes_to_dispatch_result_state_home
+  def test_notify_dispatch_result_writes_to_dispatch_result_state_home
     Dir.mktmpdir("hive-result-home") do |result_home|
       Dir.mktmpdir("hive-request-home") do |request_home|
         dispatcher, = make_dispatcher(
@@ -2146,10 +2155,10 @@ end
           command: "hive review s1", state_file_path: nil, started_at: T0,
           finished_at: T0, json_envelope: nil, request_id: "R1"
         )
-        dispatcher.send(:notify_dispatch_failure, entry, { chat_id: 42 }, now: T0)
+        dispatcher.send(:notify_dispatch_result, entry, { chat_id: 42 }, now: T0)
 
         assert_equal 1, Dir.glob(File.join(result_home, "dispatch_results", "*.json")).length,
-                     "the failure notice must land in the dispatch_result_state_home"
+                     "the result notice must land in the dispatch_result_state_home"
         assert_empty Dir.glob(File.join(request_home, "dispatch_results", "*.json")),
                      "no notice may leak into the dispatch_request_state_home"
       end
@@ -2419,7 +2428,8 @@ end
   def test_dispatch_request_completed_logs_on_child_reap
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
-        rows: [], dispatch_request_state_home: state_home
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
       )
       write_request_file(state_home, slug: "s1", request_id: "REQ-X")
       stub_find_project!(dispatcher, "p1")
@@ -2442,6 +2452,7 @@ end
         completed = logger.events.find { |(n, _)| n == :dispatch_request_completed }
         refute_nil completed
         assert_equal "REQ-X", completed[1][:request_id]
+        assert_equal 1, Hive::Daemon::DispatchResultQueue.pending(state_home: state_home).size
         # The file MUST have been unlinked.
         files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
         assert_empty files

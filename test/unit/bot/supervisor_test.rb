@@ -204,12 +204,13 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def child_exit(exit_code: 0, envelope: nil, log_path: "/tmp/hive-bot.log", pid: 123,
                  project: "hive",
+                 slug: "red-task-260518-aaaa",
                  command_argv: [ "hive", "status", "--diagnose", "red-task-260518-aaaa", "--json" ])
     ChildExit.new(
       pid: pid,
       exit_code: exit_code,
       project: project,
-      slug: "red-task-260518-aaaa",
+      slug: slug,
       command_argv: command_argv,
       chat_id: 42,
       update_id: 99,
@@ -327,6 +328,20 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @telegram.messages.first.fetch(:text)
     assert_includes text, "Diagnosis failed (ambiguous_slug): slug matches multiple stages"
     assert_includes text, "/tmp/hive-bot.log"
+  end
+
+  def test_reply_for_child_does_not_show_exit_zero_for_empty_diagnose_error
+    envelope = {
+      "schema" => "hive-status-diagnose",
+      "ok" => false,
+      "exit_code" => 0
+    }
+
+    @supervisor.send(:reply_for_child, child_exit(exit_code: 0, envelope: envelope))
+
+    text = @telegram.messages.first.fetch(:text)
+    assert_includes text, "Status check completed"
+    refute_includes text, "exit 0"
   end
 
   def test_reply_for_child_renders_empty_success_diagnostic_fallback
@@ -1078,12 +1093,10 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.reap_children
 
-    # exit_code 0 yields nil from child_completion_text → no Telegram ack.
-    # The contract under test is that reap_children iterates the batch and
-    # calls reply_for_child without raising; @telegram.messages stays empty
-    # because the clean-exit path is silent by design.
-    assert_empty @telegram.messages,
-                 "exit_code 0 must not produce a Telegram ack (child_completion_text returns nil)"
+    message = @telegram.messages.last
+    assert_equal 42, message.fetch(:chat_id)
+    assert_includes message.fetch(:text), "Status check completed"
+    refute_includes message.fetch(:text), "exit 0"
   end
 
   def test_reap_children_delivers_idea_capture_ack_through_the_full_reaper_path
@@ -1219,8 +1232,9 @@ class HiveBotSupervisorTest < Minitest::Test
                  @supervisor.send(:child_completion_text, child_exit(exit_code: Hive::ExitCodes::WRONG_STAGE))
     assert_equal "Try again - another run holds the lock",
                  @supervisor.send(:child_completion_text, child_exit(exit_code: Hive::ExitCodes::TEMPFAIL))
-    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0)),
-               "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
+    success = @supervisor.send(:child_completion_text, child_exit(exit_code: 0))
+    assert_includes success, "Status check completed"
+    refute_includes success, "exit 0"
     assert_includes @supervisor.send(:child_completion_text, child_exit(exit_code: 17)), "Command failed with exit 17"
   end
 
@@ -1271,18 +1285,37 @@ class HiveBotSupervisorTest < Minitest::Test
                  "with no project from child or argv, the ack drops the ' in <project>' suffix"
   end
 
-  def test_child_completion_text_stays_silent_for_short_argv
-    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0, command_argv: [ "hive" ])),
-               "a 1-element argv has no verb at argv[1], so exit-0 stays silent"
-    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0, command_argv: [])),
-               "an empty argv has no verb, so exit-0 stays silent"
+  def test_child_completion_text_confirms_short_argv_success
+    assert_equal "Done.",
+                 @supervisor.send(:child_completion_text, child_exit(exit_code: 0, command_argv: [ "hive" ]))
+    assert_equal "Done.",
+                 @supervisor.send(:child_completion_text, child_exit(exit_code: 0, command_argv: []))
   end
 
-  def test_child_completion_text_stays_silent_for_non_new_success
-    assert_nil @supervisor.send(
+  def test_child_completion_text_confirms_non_new_success
+    text = @supervisor.send(
       :child_completion_text,
-      child_exit(exit_code: 0, command_argv: [ "hive", "run", "some-slug", "--json" ])
-    ), "exit-0 commands other than `hive new` must stay silent (signal shows in the next status row)"
+      child_exit(exit_code: 0, slug: "some-slug", command_argv: [ "hive", "run", "some-slug", "--json" ])
+    )
+
+    assert_equal "Run completed for hive/some-slug.", text
+    refute_includes text, "exit 0"
+  end
+
+  def test_child_completion_text_uses_human_messages_for_common_successes
+    assert_equal "Approved hive/approve-slug. Hive will continue.",
+                 @supervisor.send(:child_completion_text,
+                                  child_exit(exit_code: 0, slug: "approve-slug",
+                                             command_argv: [ "hive", "approve", "approve-slug", "--json" ]))
+    assert_equal "Accepted findings for hive/finding-slug.",
+                 @supervisor.send(:child_completion_text,
+                                  child_exit(exit_code: 0, slug: "finding-slug",
+                                             command_argv: [ "hive", "accept-finding", "finding-slug",
+                                                             "--all", "--json" ]))
+    assert_equal "PR step completed for hive/pr-slug.",
+                 @supervisor.send(:child_completion_text,
+                                  child_exit(exit_code: 0, slug: "pr-slug",
+                                             command_argv: [ "hive", "open-pr", "pr-slug", "--json" ]))
   end
 
   def test_send_reconnect_summary_skips_empty_update_list
@@ -1776,7 +1809,7 @@ class HiveBotSupervisorTest < Minitest::Test
                  "dry_run must not call reset_task even when alert_reset is present"
   end
 
-  # ── ADV-1: drain daemon failure notices to Telegram ───────────────────
+  # ── ADV-1: drain daemon dispatch-result notices to Telegram ───────────
 
   def test_drain_dispatch_results_relays_failure_to_chat_and_removes
     Dir.mktmpdir("hive-dispatch-result") do |home|
@@ -1789,11 +1822,32 @@ class HiveBotSupervisorTest < Minitest::Test
 
       @supervisor.send(:drain_dispatch_results)
 
-      assert_equal 1, @telegram.messages.size, "failure notice must reach the originating chat"
+      assert_equal 1, @telegram.messages.size, "failure result must reach the originating chat"
       msg = @telegram.messages.first
       assert_equal 42, msg[:chat_id]
       assert_includes msg[:text], "stuck-task"
       assert_includes msg[:text], "exit 4"
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
+                   "a relayed notice must be removed so it isn't sent twice"
+    end
+  end
+
+  def test_drain_dispatch_results_relays_success_to_chat_and_removes
+    Dir.mktmpdir("hive-dispatch-result") do |home|
+      @supervisor.instance_variable_set(:@dispatch_result_state_home, home)
+      Hive::Daemon::DispatchResultQueue.write!(
+        chat_id: 42, update_id: 7, project: "hive", slug: "done-task",
+        request_id: "rq000002", exit_code: 0,
+        command: "hive run done-task --json", state_home: home
+      )
+
+      @supervisor.send(:drain_dispatch_results)
+
+      assert_equal 1, @telegram.messages.size, "success notice must reach the originating chat"
+      msg = @telegram.messages.first
+      assert_equal 42, msg[:chat_id]
+      assert_equal "Run completed for hive/done-task.", msg[:text]
+      refute_includes msg[:text], "exit 0"
       assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: home),
                    "a relayed notice must be removed so it isn't sent twice"
     end
@@ -2115,8 +2169,8 @@ class HiveBotSupervisorTest < Minitest::Test
     ok = @supervisor.send(:wait_for_child_success, 456, deadline: Time.now + 1)
 
     assert_equal true, ok
-    assert_empty @telegram.messages,
-                 "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
+    assert_includes @telegram.messages.last.fetch(:text), "Status check completed"
+    refute_includes @telegram.messages.last.fetch(:text), "exit 0"
   end
 
   def test_wait_for_child_success_times_out_without_completed_child
@@ -2408,8 +2462,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal true, ok
     assert_equal [ 0.1 ], sleeps
-    assert_empty @telegram.messages,
-                 "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
+    assert_includes @telegram.messages.last.fetch(:text), "Status check completed"
+    refute_includes @telegram.messages.last.fetch(:text), "exit 0"
   end
 
   def test_execute_answer_write_reports_lock_busy

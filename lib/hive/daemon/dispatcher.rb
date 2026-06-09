@@ -148,7 +148,7 @@ module Hive
         # dispatch-result queues. Production passes nil so both resolve
         # `Hive::Paths.state_home`; unit tests inject a sandbox. The result
         # home is separately injectable so a test sandboxing the request
-        # queue doesn't silently write failure notices where the bot (which
+        # queue doesn't silently write result notices where the bot (which
         # resolves the result home independently) never reads them (#251).
         @dispatch_request_state_home = dispatch_request_state_home
         @dispatch_result_state_home = dispatch_result_state_home
@@ -527,11 +527,11 @@ module Hive
           # PR #241 ce-code-review. Just check the value.
           if entry.request_id
             # ADV-1: read routing metadata BEFORE remove() unlinks the file,
-            # so a non-zero exit can be surfaced back to the originating chat.
+            # so the completion can be surfaced back to the originating chat.
             meta = Hive::Daemon::DispatchRequestQueue.metadata(
               entry.request_id, state_home: dispatch_request_state_home
             )
-            promote_dispatch_sequence(entry, meta, now: now) if entry.exit_code == 0
+            continuation = promote_dispatch_sequence(entry, meta, now: now) if entry.exit_code == 0
             Hive::Daemon::DispatchRequestQueue.discard_sequence(
               entry.request_id, state_home: dispatch_request_state_home
             ) unless entry.exit_code == 0
@@ -545,7 +545,7 @@ module Hive
                           elapsed_sec: (now - entry.started_at).to_i,
                           envelope_marker: entry.json_envelope&.dig("marker"),
                           envelope_ok: entry.json_envelope&.dig("ok"))
-            notify_dispatch_failure(entry, meta, now: now) unless entry.exit_code == 0
+            notify_dispatch_result(entry, meta, now: now) unless continuation
           end
           @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
           if entry.exit_code == Hive::ExitCodes::CONFIG
@@ -1305,12 +1305,12 @@ module Hive
                       keeping_previous: true)
       end
 
-      # ADV-1: write a failure-notice file the bot will drain + relay to
+      # ADV-1: write a completion-notice file the bot will drain + relay to
       # the originating Telegram chat. No-op when the completed run did
       # not carry a chat_id (auto-advance runs, or metadata already gone)
       # — there's no one to reply to. Best-effort: a write failure must
       # never crash a tick, so it's logged and swallowed.
-      def notify_dispatch_failure(entry, meta, now:)
+      def notify_dispatch_result(entry, meta, now:)
         chat_id = meta && meta[:chat_id]
         return if chat_id.nil?
 
@@ -1326,7 +1326,7 @@ module Hive
                       slug: entry.slug, exit_code: entry.exit_code, chat_id: chat_id)
       rescue StandardError => e
         @logger.event(:fatal,
-                      message: "notify_dispatch_failure raised: #{e.class}: #{e.message}",
+                      message: "notify_dispatch_result raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
       end
 

@@ -1,6 +1,7 @@
 require "json"
 require "fileutils"
 require "securerandom"
+require "shellwords"
 require "stringio"
 require "time"
 require "hive"
@@ -52,7 +53,7 @@ module Hive
                      idea_draft_store: nil, transcriber: nil, transcriber_factory: nil)
         @config = config
         @dry_run = dry_run
-        # ADV-1: where the daemon drops dispatch-result failure notices.
+        # ADV-1: where the daemon drops dispatch-result notices.
         # Tests inject a sandbox; production resolves Hive::Paths.state_home.
         @dispatch_result_state_home = dispatch_result_state_home
         # Shared update-check state (written by the daemon). The bot owns the
@@ -279,16 +280,16 @@ module Hive
         end
       end
 
-      # Max individual failure messages relayed per drain. A larger
-      # backlog (e.g. the bot was down while many runs failed) is
+      # Max individual dispatch-result messages relayed per drain. A larger
+      # backlog (e.g. the bot was down while many runs completed) is
       # collapsed into one summary line so a reconnect can't flood the
       # chat or trip Telegram's per-chat rate limit (ADV-1 / #6).
       DISPATCH_RESULT_SEND_CAP = 10
 
-      # ADV-1: drain the daemon's failure-notice channel and relay each
+      # ADV-1: drain the daemon's dispatch-result channel and relay each
       # notice to the chat that initiated the run. The daemon is the
       # single dispatcher and has no Telegram handle, so this is the only
-      # surface that turns a non-zero daemon-spawned exit into
+      # surface that turns daemon-spawned request completion into
       # operator-visible feedback (beyond the marker-driven status alert).
       #
       # Reliability contract:
@@ -297,7 +298,7 @@ module Hive
       #     notice stays on disk to retry on the next reaper tick (#1) —
       #     never a silent drop.
       #   - Stale notices (older than EXPIRY_SEC) are removed WITHOUT
-      #     sending: an hour-old "failed" ping is noise, and this bounds
+      #     sending: an hour-old completion ping is noise, and this bounds
       #     directory growth alongside the daemon's prune (#6).
       #   - Malformed notices are removed quietly so they can't wedge the
       #     drain.
@@ -332,7 +333,7 @@ module Hive
         end
 
         fresh.first(DISPATCH_RESULT_SEND_CAP).each do |notice|
-          sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_failure_text(notice))
+          sent = safe_send_message(chat_id: notice.chat_id, text: dispatch_result_text(notice))
           remove_dispatch_result(notice) if sent
         end
 
@@ -346,9 +347,10 @@ module Hive
         return if overflow.empty?
 
         overflow.group_by(&:chat_id).each do |chat_id, group|
+          noun = group.all? { |notice| dispatch_failure_notice?(notice) } ? "dispatch failures" : "dispatch results"
           sent = safe_send_message(
             chat_id: chat_id,
-            text: "⚠️ +#{group.size} more dispatch failures suppressed (see daemon.log)."
+            text: "⚠️ +#{group.size} more #{noun} suppressed (see daemon.log)."
           )
           group.each { |notice| remove_dispatch_result(notice) } if sent
         end
@@ -360,14 +362,34 @@ module Hive
         )
       end
 
-      def dispatch_failure_text(notice)
-        verb = Array(notice.command.to_s.split).fetch(1, "run")
+      def dispatch_result_text(notice)
+        return dispatch_success_text(notice) unless dispatch_failure_notice?(notice)
+
+        verb = dispatch_command_argv(notice).fetch(1, "run")
         # A timeout/signal-killed child has a nil exit_code (Process::Status
         # #exitstatus is nil when terminated by a signal) — render it as a
         # kill rather than "exit ".
         status = notice.exit_code.nil? ? "killed (signal/timeout)" : "exit #{notice.exit_code}"
         "⚠️ #{notice.slug}: `hive #{verb}` failed (#{status}). " \
           "Check the task or retry — open it on a laptop if it keeps failing."
+      end
+
+      def dispatch_failure_notice?(notice)
+        !zero_exit_code?(notice.exit_code)
+      end
+
+      def dispatch_success_text(notice)
+        command_success_text(
+          command_argv: dispatch_command_argv(notice),
+          project: notice.project,
+          slug: notice.slug
+        )
+      end
+
+      def dispatch_command_argv(notice)
+        Shellwords.split(notice.command.to_s)
+      rescue ArgumentError
+        notice.command.to_s.split
       end
 
       def dispatch_result_state_home
@@ -1257,6 +1279,8 @@ module Hive
         kind = envelope["error_kind"].to_s.strip
         message = envelope["message"].to_s.strip
         exit_code = envelope["exit_code"] || child.exit_code
+        return nil if zero_exit_code?(exit_code) && message.empty?
+
         prefix = "Diagnosis failed"
         prefix += " (#{kind})" unless kind.empty?
         text = "#{prefix}: #{message.empty? ? "exit #{exit_code}" : message}"
@@ -1269,17 +1293,18 @@ module Hive
         elsif child.exit_code == Hive::ExitCodes::TEMPFAIL
           "Try again - another run holds the lock"
         elsif child.exit_code == 0
-          # Clean success — no message for most commands. Operators see the
-          # signal via the next status row (or its absence). The lone
-          # exception is `hive new`: idea capture is fire-and-forget with no
-          # status row the operator is watching, so silence made a successful
-          # capture look like a dead button — and because the picker token is
-          # consumed on tap, a confused re-tap then reported "idea picker
-          # expired". Acknowledge it so the operator knows the idea landed.
-          new_capture_text(child)
+          child_success_text(child)
         else
           "Command failed with exit #{child.exit_code || 'unknown'}; see #{child.log_path}"
         end
+      end
+
+      def child_success_text(child)
+        new_capture_text(child) || command_success_text(
+          command_argv: child.command_argv,
+          project: child.project,
+          slug: child.slug
+        )
       end
 
       # argv[0] is rewritten to the resolved hive binary by
@@ -1291,6 +1316,75 @@ module Hive
         project = child.project || argv[2]
         suffix = project ? " in #{project}" : ""
         "Captured your idea#{suffix}. It's in the inbox — move it to 2-brainstorm to start."
+      end
+
+      def command_success_text(command_argv:, project:, slug:)
+        argv = Array(command_argv)
+        verb = argv[1].to_s.strip
+        return "Done." if verb.empty?
+
+        target = command_success_target(project: project, slug: slug, verb: verb, argv: argv)
+        case verb
+        when "approve"
+          target.empty? ? "Approved." : "Approved #{target}. Hive will continue."
+        when "accept-finding"
+          target.empty? ? "Accepted findings." : "Accepted findings for #{target}."
+        when "reject-finding"
+          target.empty? ? "Rejected findings." : "Rejected findings for #{target}."
+        when "archive"
+          target.empty? ? "Archived." : "Archived #{target}."
+        when "brainstorm"
+          target.empty? ? "Brainstorm completed." : "Brainstorm completed for #{target}."
+        when "develop"
+          target.empty? ? "Development completed." : "Development completed for #{target}."
+        when "finalize"
+          target.empty? ? "Finalized." : "Finalized #{target}."
+        when "markers"
+          target.empty? ? "Recovery step completed." : "Recovery step completed for #{target}."
+        when "open-pr"
+          target.empty? ? "PR step completed." : "PR step completed for #{target}."
+        when "artifacts"
+          target.empty? ? "Artifacts completed." : "Artifacts completed for #{target}."
+        when "plan"
+          target.empty? ? "Plan completed." : "Plan completed for #{target}."
+        when "review"
+          target.empty? ? "Review completed." : "Review completed for #{target}."
+        when "status"
+          target.empty? ? "Status check completed." : "Status check completed for #{target}."
+        when "run"
+          target.empty? ? "Run completed." : "Run completed for #{target}."
+        else
+          label = verb.split("-").reject(&:empty?).map(&:capitalize).join(" ")
+          label = "Command" if label.empty?
+          target.empty? ? "#{label} completed." : "#{label} completed for #{target}."
+        end
+      end
+
+      def command_success_target(project:, slug:, verb:, argv:)
+        project = project.to_s.strip
+        slug = slug.to_s.strip
+        slug = inferred_success_slug(verb, argv) if slug.empty? || slug == "unknown"
+
+        parts = []
+        parts << project unless project.empty?
+        parts << slug unless slug.empty? || slug == project
+        parts.join("/")
+      end
+
+      def inferred_success_slug(verb, argv)
+        case verb
+        when "status"
+          idx = argv.index("--diagnose")
+          idx ? argv[idx + 1].to_s : ""
+        when "markers"
+          argv[3].to_s
+        else
+          argv[2].to_s
+        end
+      end
+
+      def zero_exit_code?(exit_code)
+        exit_code == 0 || exit_code.to_s == "0"
       end
 
       QUEUE_DISPLAY_CAP = 10

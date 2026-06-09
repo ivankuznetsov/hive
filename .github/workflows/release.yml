@@ -137,9 +137,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
         run: |
+          # Release notes = the matching `## X.Y.Z` CHANGELOG section, so the
+          # GitHub Release shows the real changelog (not a bare "Hive vX.Y.Z").
+          # Fall back to the version line if no matching section exists.
+          version="${REF_NAME#v}"
+          notes_file="$(mktemp)"
+          awk -v ver="$version" '
+            $0 == "## " ver { found = 1; next }
+            /^## / { found = 0 }
+            found
+          ' CHANGELOG.md | sed '/^[[:space:]]*$/d' > "$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            printf 'Hive %s\n' "$REF_NAME" > "$notes_file"
+          fi
           gh release create "$REF_NAME" dist/* \
             --title "$REF_NAME" \
-            --notes "Hive $REF_NAME" \
+            --notes-file "$notes_file" \
             --verify-tag
       - name: Announce release on Discord
         if: ${{ env.DISCORD_RELEASE_WEBHOOK != '' }}

@@ -4,28 +4,57 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.2.0
 
-- Added a `patrol.mode` dial (`ultrapatrol`/`high`/`medium`/`low`/`off`) that scales scan run-frequency from a single knob, with an `hive init` prompt to choose one; patrol is opt-in (a project with no patrol config stays disabled) and `medium` is only the init-prompt default.
-- Added patrol token-spend visibility: patrol reviewer/fixer runs record usage, surfaced as a cross-cutting `patrol` row in the TUI token-stats view.
-- Changed patrol scan concurrency to be per-project, so different projects patrol in parallel (one scan per project) instead of serializing through a global cap.
-- Added patrol→review handoff (opened PRs flow into `6-review`), a `continuous` scheduler trigger, `draft_prs: false` by default (opens ready PRs), and a narrower scoped reviewer set for patrol PRs.
-- Added babysitter auto-rebase: green-but-behind PRs are rebased onto their base and force-pushed (to the PR head branch, fetching the base over the push URL so it works headless), keeping them mergeable; default-on via `babysitter.auto_rebase`, conflicts and drafts left untouched.
-- Added Telegram bot idea capture with photo/document attachments and voice-note transcription (transcript confirm/discard/edit, fallback audio retention on failure, configurable attachment/transcription limits).
-- Changed the Telegram bot to retire the Codex draft-assist (Path-A) feature; brainstorm answering is now deterministic and bot logs move to `hive-bot-log.v2`.
-- Added daemon self-healing and scheduling: self-heal missing task display names on tick; auto-retry `limits_reached` tasks after a cooldown (bounded retry budget); a separate per-project patrol-scan budget; later-pipeline-stage-first dispatch; and a low-CPU fast-tick that cuts inter-stage latency.
-- Added human-readable task ids and display names alongside slugs, plus an Archive view that hides old archived tasks.
-- Added the experimental `hive babysit` PR repair daemon and `hive patrol` repository patrol (also surfaced through the OpenClaw skill bundle and guided setup).
-- Added daemon/bot queue inspection and operator feedback: `hive daemon queue`, dispatch-result notices to the Telegram bot, at-most-once request claims, and bounded result pruning.
-- Fixed the bot and daemon to tolerate a `hive-status` `schema_version` skew instead of crashing — a newer envelope parses best-effort and `/status` surfaces a "restart to pick up the new schema" banner; real errors are never masked behind the skew degrade.
-- Fixed daemon recovery: auto-retry finalize unpushed commits, retry late-stage agent-loss errors, heal orphaned `REVIEW_WORKING` markers after a signal kill, review-lock recovery + task-metadata migration, and a registered version-drift log event.
-- Fixed review/agent handling: treat partial reviewer failures as recoverable, tmux reviewer resilience with room for 1–2h reviewers, and classify usage/credit-limit exhaustion distinctly as `limits_reached`.
-- Fixed babysitter behavior: prioritize dirty-PR recovery, detect stale runtime, skip draft PRs, default-deny dry-run stubs, and fix detached restart.
-- Fixed TUI issues: dispatch terminal-resize events and the vertical-resize viewport, preserve the selected slug across snapshot polls, and fix slow startup.
-- Fixed the bot: thread-safe `ConversationStore` + observability, suppress "questions waiting" pushes while an operator is answering, and suppress daemon-auto-approved `3-plan` pauses.
-- Fixed a large batch of patrol/eval/dry-run hardening defects: dry-run `git`/`gh` stubs no longer permit mutating, remote, pager/browser, implicit-POST, or GET-with-payload commands; `hive-eval` is confined to safe scenario basenames (no path traversal), rejects bad CLI usage, and stops leaking parser exceptions; `--json` / `--json=true` usage errors keep the JSON contract and the documented exit code; TUI subprocess/log artifact caps are enforced; and Asciinema v3 casts honor the requested terminal size.
-- Fixed brainstorm tmux runs so vanished sessions and unreadable panes fail fast with explicit markers instead of hanging.
-- Fixed install/packaging: packaged dry-run stubs ship in the gem, the bash installer's `hv` wrapper delegates through the working Hive wrapper, `hv` no longer execs Apache Hive (or another non-Hive CLI) from fallback paths and honors `HIVE_BIN_OVERRIDE` with a portable `canonical_path` fallback (macOS).
-- Fixed dispatch-request/result-queue edge cases (claim sidecars, stale-claim recovery, timeout/killed-child reporting, queue CLI JSON errors, spawn-failure claim release, backlog expiry/capping) and raised the Faraday floor to the audited security advisory.
-- Updated tooling and docs: stop leaking `*.origin.git` / `~/Dev/<project>.worktrees` test temp dirs (add `rake test:clean_tmp` + a `HIVE_WORKTREE_BASE` override), extract `QueueCommand`, compile the changelog from `wiki/log.d` fragments, add the Discord community link, and refresh wiki/install/release docs for the current bot/babysitter/patrol/install surfaces.
+A big release: smarter and cheaper autonomous **patrol**, a new PR-repair **babysitter**, a richer **Telegram bot**, and a much more resilient **daemon** — plus a wave of reliability/tmux and safety fixes.
+
+### Patrol — smarter, cheaper, and opt-in
+
+- **One `patrol.mode` dial** (`ultrapatrol` / `high` / `medium` / `low` / `off`) sets how aggressively patrol scans, instead of hand-tuning several knobs; `hive init` now prompts for it.
+- **Opt-in by default** — a project with no patrol config stays disabled. Patrol only runs where you explicitly turn it on.
+- **Per-project, parallel scans** — projects patrol independently (one scan at a time each) instead of competing for a single global slot.
+- **Token spend is visible** — a `patrol` row in the TUI token-stats view shows how much patrol is costing.
+- Patrol opens **ready (non-draft) PRs** and hands them straight into the review flow; added a `continuous` scheduler trigger.
+
+### Babysitter — keeps open PRs green and mergeable
+
+- New experimental **`hive babysit`** daemon: watches open PRs, runs bounded agent repair attempts in isolated worktrees, and hands off to a human when it can't fix one.
+- **Auto-rebases green-but-behind PRs** onto their base and force-pushes, so they don't get stuck behind a moving `main` (conflicts and drafts are left alone).
+- Prioritizes dirty/at-risk PRs, skips drafts, and recovers cleanly from restarts.
+
+### Telegram bot
+
+- Capture ideas with **photo/document attachments** and **voice notes** (auto-transcribed, with confirm / edit / discard).
+- **Deterministic brainstorm answering** — the old Codex "draft-assist" path was retired.
+- Thread-safe conversation handling, and no more noisy "questions waiting" pings while you're mid-answer.
+
+### Daemon — more resilient automation
+
+- **Self-heals** tasks whose display name never generated, and **auto-retries tasks parked on a provider usage limit** once the limit resets (cooldown + bounded retries) instead of leaving them stuck.
+- **Tolerates a `hive-status` schema bump** between the long-running process and the updated CLI instead of crashing `/status` — and surfaces a clear "restart to pick up the new version" hint.
+- Faster pipeline (lower inter-stage latency), plus recovery for finalize push failures and agent-loss errors.
+- Queue inspection and operator feedback: `hive daemon queue`, dispatch-result notices back to the Telegram bot, at-most-once request claims, and bounded result pruning.
+- Added human-readable task ids/display names alongside slugs, and an Archive view that hides old archived tasks.
+
+### Reliability & tmux hardening
+
+- Brainstorm and review runs now **fail fast with a clear marker when a tmux session vanishes or a pane is unreadable**, instead of hanging.
+- Reviewer tmux resilience, with room for long (1–2h) reviews.
+- Heals orphaned `REVIEW_WORKING` markers left by a signal/kill so review can retry.
+
+### Safety & CLI hardening
+
+- Patrol/eval **dry-run is locked down**: the `git`/`gh` stubs refuse mutating, remote, browser/pager, and implicit-write commands; `hive-eval` is confined to safe scenario names and rejects bad CLI usage.
+- `--json` (and `--json=true`) usage errors always emit the JSON envelope with the documented exit code.
+- TUI subprocess/log artifact caps enforced; Asciinema v3 casts honor the requested terminal size.
+
+### Install & packaging
+
+- The gem now ships its dry-run stubs; the bash installer's `hv` wrapper works correctly; `hv` no longer accidentally launches Apache Hive from a fallback path (with a portable macOS path fallback).
+
+### Other fixes & internals
+
+- **TUI**: terminal-resize handling, cursor preserved across refreshes, faster startup.
+- Dispatch/result-queue edge cases hardened; raised the Faraday dependency to the patched security version.
+- **Docs/tests**: changelog compiled from fragments, Discord community link, test tmpdir-leak cleanup (`rake test:clean_tmp` + a `HIVE_WORKTREE_BASE` override), `QueueCommand` extraction, and refreshed install/release/wiki docs.
 
 ## 0.1.11
 

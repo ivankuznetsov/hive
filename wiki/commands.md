@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-07
+updated: 2026-06-08
 tags: [commands, api]
 ---
 
@@ -77,6 +77,9 @@ as an end-user workflow command. It mirrors the main wrapper's entrypoint
 conventions for top-level `--version` and command-local help, so
 `bin/hive-e2e run --filter tui --help` prints the `run` usage instead of
 selecting scenarios or running preflight checks.
+Its successful `--json` surfaces are single-document stdout contracts:
+`list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
+`hive-e2e-clean`.
 
 ## Backlinks
 

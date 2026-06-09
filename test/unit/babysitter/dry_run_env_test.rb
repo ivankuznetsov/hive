@@ -337,6 +337,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_disables_optional_locks_before_read_only_passthrough
+    with_tmp_dir do |dir|
+      # `git status` (and other reads) otherwise take the optional index/refs locks and
+      # rewrite `.git/index` to refresh stat data; the stub sets GIT_OPTIONAL_LOCKS=0 to keep
+      # a dry-run read side-effect-free. Record the env the real binary actually receives so
+      # deleting that guard (stub: `ENV["GIT_OPTIONAL_LOCKS"] = "0"`) turns this test red.
+      real_git = recording_env_binary(dir, "real-git", %w[GIT_OPTIONAL_LOCKS])
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => real_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
+
+      assert status.success?, err
+      assert_equal "GIT_OPTIONAL_LOCKS=0\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
   def test_git_stub_ignores_user_config_sources_before_read_only_passthrough
     with_tmp_git_repo do |dir|
       home = File.join(dir, "home")

@@ -4,13 +4,28 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.2.0
 
-- Added Telegram bot idea capture with photo/document attachments and voice-note transcription, including transcript confirm/discard/edit, fallback audio retention on transcription failure, and configurable attachment/transcription limits.
-- Fixed bot `needs_input` notifications so proactive "questions waiting" pushes are suppressed while an operator is actively answering the same task.
+- Added a `patrol.mode` dial (`ultrapatrol`/`high`/`medium`/`low`/`off`) that scales scan run-frequency from a single knob, with an `hive init` prompt to choose one; patrol is opt-in (a project with no patrol config stays disabled) and `medium` is only the init-prompt default.
+- Added patrol token-spend visibility: patrol reviewer/fixer runs record usage, surfaced as a cross-cutting `patrol` row in the TUI token-stats view.
+- Changed patrol scan concurrency to be per-project, so different projects patrol in parallel (one scan per project) instead of serializing through a global cap.
+- Added patrol→review handoff (opened PRs flow into `6-review`), a `continuous` scheduler trigger, `draft_prs: false` by default (opens ready PRs), and a narrower scoped reviewer set for patrol PRs.
+- Added babysitter auto-rebase: green-but-behind PRs are rebased onto their base and force-pushed (to the PR head branch, fetching the base over the push URL so it works headless), keeping them mergeable; default-on via `babysitter.auto_rebase`, conflicts and drafts left untouched.
+- Added Telegram bot idea capture with photo/document attachments and voice-note transcription (transcript confirm/discard/edit, fallback audio retention on failure, configurable attachment/transcription limits).
+- Changed the Telegram bot to retire the Codex draft-assist (Path-A) feature; brainstorm answering is now deterministic and bot logs move to `hive-bot-log.v2`.
+- Added daemon self-healing and scheduling: self-heal missing task display names on tick; auto-retry `limits_reached` tasks after a cooldown (bounded retry budget); a separate per-project patrol-scan budget; later-pipeline-stage-first dispatch; and a low-CPU fast-tick that cuts inter-stage latency.
+- Added human-readable task ids and display names alongside slugs, plus an Archive view that hides old archived tasks.
+- Added the experimental `hive babysit` PR repair daemon and `hive patrol` repository patrol (also surfaced through the OpenClaw skill bundle and guided setup).
+- Added daemon/bot queue inspection and operator feedback: `hive daemon queue`, dispatch-result notices to the Telegram bot, at-most-once request claims, and bounded result pruning.
+- Fixed the bot and daemon to tolerate a `hive-status` `schema_version` skew instead of crashing — a newer envelope parses best-effort and `/status` surfaces a "restart to pick up the new schema" banner; real errors are never masked behind the skew degrade.
+- Fixed daemon recovery: auto-retry finalize unpushed commits, retry late-stage agent-loss errors, heal orphaned `REVIEW_WORKING` markers after a signal kill, review-lock recovery + task-metadata migration, and a registered version-drift log event.
+- Fixed review/agent handling: treat partial reviewer failures as recoverable, tmux reviewer resilience with room for 1–2h reviewers, and classify usage/credit-limit exhaustion distinctly as `limits_reached`.
+- Fixed babysitter behavior: prioritize dirty-PR recovery, detect stale runtime, skip draft PRs, default-deny dry-run stubs, and fix detached restart.
+- Fixed TUI issues: dispatch terminal-resize events and the vertical-resize viewport, preserve the selected slug across snapshot polls, and fix slow startup.
+- Fixed the bot: thread-safe `ConversationStore` + observability, suppress "questions waiting" pushes while an operator is answering, and suppress daemon-auto-approved `3-plan` pauses.
+- Fixed a large batch of patrol/eval/dry-run hardening defects: dry-run `git`/`gh` stubs no longer permit mutating, remote, pager/browser, implicit-POST, or GET-with-payload commands; `hive-eval` is confined to safe scenario basenames (no path traversal), rejects bad CLI usage, and stops leaking parser exceptions; `--json` / `--json=true` usage errors keep the JSON contract and the documented exit code; TUI subprocess/log artifact caps are enforced; and Asciinema v3 casts honor the requested terminal size.
 - Fixed brainstorm tmux runs so vanished sessions and unreadable panes fail fast with explicit markers instead of hanging.
-- Fixed patrol and babysitter dry-run guardrails: draft PRs are skipped, mutating `git` / `gh` calls are default-denied, implicit `gh api` POST payloads are blocked, and destructive PR commands are covered by regression tests.
-- Fixed install and shim packaging issues: packaged dry-run stubs are included in the gem, the bash installer's `hv` wrapper delegates through the working Hive wrapper, and `bin/hv` no longer falls through to Apache Hive fallback paths.
-- Added focused regression coverage across bot attachment flows, tmux session loss, patrol dry-run stubs, gem packaging contents, installer wrappers, and `hv` fallback behavior.
-- Updated wiki and install/release documentation for the current bot, babysitter, patrol, and install-channel behavior.
+- Fixed install/packaging: packaged dry-run stubs ship in the gem, the bash installer's `hv` wrapper delegates through the working Hive wrapper, `hv` no longer execs Apache Hive (or another non-Hive CLI) from fallback paths and honors `HIVE_BIN_OVERRIDE` with a portable `canonical_path` fallback (macOS).
+- Fixed dispatch-request/result-queue edge cases (claim sidecars, stale-claim recovery, timeout/killed-child reporting, queue CLI JSON errors, spawn-failure claim release, backlog expiry/capping) and raised the Faraday floor to the audited security advisory.
+- Updated tooling and docs: stop leaking `*.origin.git` / `~/Dev/<project>.worktrees` test temp dirs (add `rake test:clean_tmp` + a `HIVE_WORKTREE_BASE` override), extract `QueueCommand`, compile the changelog from `wiki/log.d` fragments, add the Discord community link, and refresh wiki/install/release docs for the current bot/babysitter/patrol/install surfaces.
 
 ## 0.1.11
 

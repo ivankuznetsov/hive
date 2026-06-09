@@ -16,7 +16,7 @@ end
 def normalize_leading_json_options!(argv)
   json_options = %w[--json --no-json --skip-json]
   leading = []
-  leading << argv.shift while json_options.include?(argv.first)
+  leading << argv.shift while json_options.include?(argv.first) || argv.first&.match?(/\A--json=(?:true|TRUE|t|T)\z/)
   return if leading.empty?
 
   cmd_idx = argv.index { |a| !a.start_with?("-") }
@@ -45,7 +45,7 @@ normalize_leading_json_options!(ARGV)
 rewrite_help_flag!(ARGV)
 
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(true|1|yes)\z/i) }
+  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(?:true|TRUE|t|T)\z/) }
 end
 
 def json_usage_error_contract(argv)

@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "open3"
 require "rbconfig"
 
@@ -22,12 +23,14 @@ class CliVersionTest < Minitest::Test
     refute_includes err, "No value provided for required arguments"
   end
 
-  def test_bin_hive_accepts_json_before_status_command
+  def test_bin_hive_accepts_leading_truthy_json_before_status_command
     with_tmp_global_config do
-      leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json", "status"))
-      trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json"))
+      %w[--json --json=true --json=t].each do |flag|
+        leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", flag, "status"))
+        trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", flag))
 
-      assert_equal without_generated_at(trailing), without_generated_at(leading)
+        assert_equal without_generated_at(trailing), without_generated_at(leading), flag
+      end
     end
   end
 

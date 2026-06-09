@@ -272,14 +272,15 @@ def json_requested?(argv)
 end
 
 def normalize_leading_global_options!(argv)
-  return unless argv.first == "--json"
+  leading_json = argv.first
+  return unless leading_json && json_requested?([ leading_json ])
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
   cmd_idx = argv[1..]&.index { |arg| commands.include?(arg) }
   return unless cmd_idx
 
   argv.delete_at(0)
-  argv.insert(cmd_idx + 1, "--json")
+  argv.insert(cmd_idx + 1, leading_json)
 end
 
 begin

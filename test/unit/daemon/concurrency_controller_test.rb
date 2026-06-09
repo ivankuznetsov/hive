@@ -76,6 +76,21 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "p2", now: T0)
   end
 
+  # nil is NOT a wildcard for patrol scans (unlike can_dispatch?'s
+  # project-nil="count everything" semantics): a project-less scan must not
+  # count against a named project's cap, and vice versa.
+  def test_patrol_scan_nil_project_is_not_a_wildcard
+    c = make(patrol_scans: 1)
+    dispatch(c, 100, nil, "patrol-scan", kind: :patrol_scan)
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "p1", now: T0),
+                 "a nil-project scan must not cap a named project"
+
+    c2 = make(patrol_scans: 1)
+    dispatch(c2, 200, "p1", "patrol-scan", kind: :patrol_scan)
+    assert_equal :ok, c2.can_dispatch_patrol_scan?(project: nil, now: T0),
+                 "a named scan must not cap a nil-project query"
+  end
+
   def test_running_tasks_do_not_block_a_patrol_scan
     c = make(global: 2, patrol_scans: 1)
     dispatch(c, 100, "p1", "s1")

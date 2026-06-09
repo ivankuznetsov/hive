@@ -111,6 +111,25 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # A quoted `mode: "off"` arrives as the literal string "off" (not the
+  # YAML boolean false the bareword form produces), so it exercises the
+  # PATROL_MODES path directly rather than the `mode == false` coercion.
+  def test_load_disables_patrol_on_quoted_off_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: "off"
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "off", cfg.dig("patrol", "mode")
+      assert_equal false, cfg.dig("patrol", "enabled"),
+                   "quoted mode: \"off\" must disable patrol"
+    end
+  end
+
   # A config with no `mode` but an explicit `enabled: true` stays enabled:
   # the explicit knob is preserved through merge_defaults even though no
   # mode knobs are injected.

@@ -537,7 +537,33 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher, sup, ctrl, logger, _mw, patrol = make_dispatcher(
       rows: [], with_patrol_scheduler: true
     )
-    # Fill the patrol-scan budget (default 1) with a running scan.
+    # Fill the PER-PROJECT patrol-scan budget (default 1) for p1 with a
+    # running scan, then attempt a SECOND scan for the SAME project.
+    ctrl.record_dispatch(pid: 999, project: "p1", slug: "patrol-running", stage: "patrol",
+                         command: "hive patrol p1 --json", started_at: T0,
+                         state_file_mtime: nil, kind: :patrol_scan)
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    blocked = logger.events.find { |(name, attrs)| name == :blocked && attrs[:action] == "patrol" }
+    refute_nil blocked
+    assert_equal "patrol_scan_cap", blocked[1][:reason]
+    assert_includes patrol.cancelled, "p1",
+                    "a budget-gated patrol must release its pending marker so it retries when the scan budget frees"
+  end
+
+  # Per-project patrol-scan cap: a running scan for one project must NOT
+  # block a scan for a DIFFERENT project — projects patrol in parallel.
+  def test_patrol_scan_for_other_project_not_blocked_by_running_scan
+    dispatcher, sup, ctrl, _logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
     ctrl.record_dispatch(pid: 999, project: "p1", slug: "patrol-running", stage: "patrol",
                          command: "hive patrol p1 --json", started_at: T0,
                          state_file_mtime: nil, kind: :patrol_scan)
@@ -549,12 +575,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    assert_equal 0, sup.spawned.size
-    blocked = logger.events.find { |(name, attrs)| name == :blocked && attrs[:action] == "patrol" }
-    refute_nil blocked
-    assert_equal "patrol_scan_cap", blocked[1][:reason]
-    assert_includes patrol.cancelled, "p2",
-                    "a budget-gated patrol must release its pending marker so it retries when the scan budget frees"
+    assert_equal 1, sup.spawned.size,
+                 "a different project's scan must dispatch while p1's scan runs"
+    assert_equal "hive patrol p2 --json", sup.spawned.first[:command]
   end
 
   def test_patrol_dispatch_skips_legacy_layout_project

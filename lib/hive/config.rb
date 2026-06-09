@@ -542,7 +542,15 @@ module Hive
       patrol = data["patrol"]
       return unless patrol.is_a?(Hash)
 
-      mode = nested_key?(data, "patrol", "mode") ? patrol["mode"] : DEFAULT_PATROL_MODE
+      # Patrol is OPT-IN: only derive/inject mode knobs when `mode` is
+      # EXPLICITLY present in the raw config. An unset mode must fall
+      # through to DEFAULTS["patrol"] (`enabled: false`) — `medium` is the
+      # `hive init` PROMPT default (which writes an explicit `mode:`), never
+      # a config-resolution default. Returning here keeps a config with no
+      # `mode` from silently inheriting `medium`'s `enabled: true` knob.
+      return unless nested_key?(data, "patrol", "mode")
+
+      mode = patrol["mode"]
       mode = "off" if mode == false
       return unless PATROL_MODES.include?(mode)
 

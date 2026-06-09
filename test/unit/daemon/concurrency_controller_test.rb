@@ -56,6 +56,41 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
   end
 
+  # max_concurrent_patrol_scans is a PER-PROJECT cap: a running scan for one
+  # project must NOT block a scan for a DIFFERENT project, so projects patrol
+  # in parallel rather than being serialized/starved by a global count.
+  def test_patrol_scan_cap_is_per_project
+    c = make(patrol_scans: 1)
+    dispatch(c, 100, "p1", "patrol-scan", kind: :patrol_scan)
+
+    # A different project is still allowed despite p1's running scan.
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "p2", now: T0),
+                 "different projects must patrol in parallel"
+
+    # A SECOND scan for the SAME project hits the per-project cap.
+    assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "p1", now: T0),
+                 "second scan for the same project must hit the per-project cap"
+
+    # Once p2's scan is also running, p2 likewise hits its own per-project cap.
+    dispatch(c, 101, "p2", "patrol-scan", kind: :patrol_scan)
+    assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "p2", now: T0)
+  end
+
+  # nil is NOT a wildcard for patrol scans (unlike can_dispatch?'s
+  # project-nil="count everything" semantics): a project-less scan must not
+  # count against a named project's cap, and vice versa.
+  def test_patrol_scan_nil_project_is_not_a_wildcard
+    c = make(patrol_scans: 1)
+    dispatch(c, 100, nil, "patrol-scan", kind: :patrol_scan)
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "p1", now: T0),
+                 "a nil-project scan must not cap a named project"
+
+    c2 = make(patrol_scans: 1)
+    dispatch(c2, 200, "p1", "patrol-scan", kind: :patrol_scan)
+    assert_equal :ok, c2.can_dispatch_patrol_scan?(project: nil, now: T0),
+                 "a named scan must not cap a nil-project query"
+  end
+
   def test_running_tasks_do_not_block_a_patrol_scan
     c = make(global: 2, patrol_scans: 1)
     dispatch(c, 100, "p1", "s1")

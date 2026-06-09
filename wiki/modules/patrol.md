@@ -44,13 +44,15 @@ The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/w
 
 ## Daemon triggers
 
-Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into `enabled`, `trigger`, and `poll_interval_sec` before the daemon sees the project config. `ultrapatrol`, `high`, and `medium` dispatch on a timer every 30 minutes, 2 hours, and 4 hours respectively; `low` uses `trigger: new_commits` and keeps the cheap 600-second SHA-check cadence; `off` resolves to `enabled: false`. The mode never changes finding/PR caps or the confidence gate.
+Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol section that omits `mode:`) resolves to `enabled: false` — [[modules/config]] only derives mode knobs when `mode:` is **explicitly present** in the raw config. `medium` is the default offered by the `hive init` *prompt* (which writes an explicit `mode: "medium"` into the rendered template), never a config-resolution default, so legacy projects without a patrol block are never silently enabled.
+
+Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into `enabled`, `trigger`, and `poll_interval_sec` before the daemon sees the project config. An explicit `ultrapatrol`, `high`, or `medium` dispatches on a timer every 30 minutes, 2 hours, and 4 hours respectively (all set `enabled: true`); `low` uses `trigger: new_commits` and keeps the cheap 600-second SHA-check cadence; `off` resolves to `enabled: false`. The mode never changes finding/PR caps or the confidence gate. Explicit granular knobs (e.g. `enabled: true` or `poll_interval_sec:`) always win over a set mode and survive the deep-merge even when no `mode:` is set.
 
 `Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges while still recording the current `last_scanned_sha` after each successful scan. `new_commits` dispatches only when the default branch SHA changes. `timer` dispatches solely from `last_run_at` age.
 
 ## Safety invariants
 
-- Patrol is opt-in at the scheduler gate: `patrol.mode: off` or `patrol.enabled: false` prevents daemon dispatch, and the daemon still requires `daemon.enabled`.
+- Patrol is opt-in at the scheduler gate AND at config resolution: a missing patrol section, a missing `mode:`, `patrol.mode: off`, or `patrol.enabled: false` all leave patrol disabled and prevent daemon dispatch, and the daemon still requires `daemon.enabled`.
 - Findings surface as PRs, and opened PRs enter `6-review` by default; patrol still never writes `1-inbox/` intake tasks.
 - PR creation is gated on validation passing and on the secret scanner.
 - Each finding fingerprint maps to at most one active or merged PR.

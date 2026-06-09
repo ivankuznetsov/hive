@@ -120,6 +120,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"
+      # `git cat-file --filters` is an allowlisted read, but `--filters` runs the repo-local
+      # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
+      # hardening never covers, so it must skip.
+      assert_stubbed env, "git", "cat-file", "--filters", "HEAD:README.md"
       # The read/write boundary for ls-files: `-o` / `--others` is a read (allowed below), but
       # the file-writing `--output` long form must still skip — narrowing the guard must not
       # re-allow the write form.

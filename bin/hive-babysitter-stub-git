@@ -85,6 +85,10 @@ def unsafe_read_option?(subcommand, arg)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
   return true if arg == "--textconv"
+  # `git cat-file --filters` applies smudge filters, running the repo-local
+  # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
+  # hardening never sees, since cat-file stays a plain allowlisted passthrough.
+  return true if arg == "--filters"
 
   # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
   # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the

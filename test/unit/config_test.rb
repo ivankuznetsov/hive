@@ -20,14 +20,20 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_returns_patrol_defaults_from_medium_mode
+  # Patrol is OPT-IN: a project with NO config file (and thus no patrol
+  # section) must resolve to disabled. `medium` is the `mode` carried by
+  # DEFAULTS for validation, but its `enabled: true` knob is NOT injected
+  # because no explicit `mode:` was written — `enabled` falls through to
+  # DEFAULTS["patrol"]["enabled"] = false.
+  def test_load_leaves_patrol_disabled_when_no_config
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
       assert_equal "medium", cfg.dig("patrol", "mode")
-      assert_equal true, cfg.dig("patrol", "enabled")
-      assert_equal "timer", cfg.dig("patrol", "trigger")
-      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
+      assert_equal false, cfg.dig("patrol", "enabled"),
+                   "patrol must be opt-in: no config section means disabled"
+      assert_equal "continuous", cfg.dig("patrol", "trigger")
+      assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "claude", cfg.dig("patrol", "agent")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
       assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
@@ -44,7 +50,9 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_resolves_unset_patrol_mode_to_medium
+  # An unset `mode` must NOT inject medium's knobs (opt-in). A patrol
+  # section that only overrides `agent` (no `mode:`) stays disabled.
+  def test_load_leaves_patrol_disabled_when_mode_unset
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
@@ -55,13 +63,90 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal "medium", cfg.dig("patrol", "mode")
-      assert_equal true, cfg.dig("patrol", "enabled")
-      assert_equal "timer", cfg.dig("patrol", "trigger")
-      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
+      assert_equal false, cfg.dig("patrol", "enabled"),
+                   "unset mode must not inject medium's enabled: true knob"
+      assert_equal "continuous", cfg.dig("patrol", "trigger")
+      assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "codex", cfg.dig("patrol", "agent")
       assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
+    end
+  end
+
+  # Explicit `mode: medium` (what `hive init` writes) DOES enable patrol
+  # and derive the timer/14400 frequency knobs — unchanged behavior.
+  def test_load_enables_patrol_on_explicit_medium_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: medium
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal true, cfg.dig("patrol", "enabled"),
+                   "explicit mode: medium must enable patrol"
+      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
+    end
+  end
+
+  # Explicit `mode: off` disables patrol.
+  def test_load_disables_patrol_on_explicit_off_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: off
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "off", cfg.dig("patrol", "mode")
+      assert_equal false, cfg.dig("patrol", "enabled"),
+                   "explicit mode: off must disable patrol"
+    end
+  end
+
+  # A config with no `mode` but an explicit `enabled: true` stays enabled:
+  # the explicit knob is preserved through merge_defaults even though no
+  # mode knobs are injected.
+  def test_load_keeps_explicit_enabled_true_without_mode
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          enabled: true
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal true, cfg.dig("patrol", "enabled"),
+                   "explicit enabled: true must survive even without a mode"
+    end
+  end
+
+  # The `hive init`-rendered template writes an explicit `mode: "medium"`,
+  # so an init'd project round-trips to enabled medium patrol.
+  def test_load_init_rendered_template_round_trips_to_enabled_medium
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: "medium"
+          min_confidence_to_fix: medium
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "medium", cfg.dig("patrol", "mode")
+      assert_equal true, cfg.dig("patrol", "enabled")
+      assert_equal "timer", cfg.dig("patrol", "trigger")
+      assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
     end
   end
 
@@ -140,6 +225,7 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         patrol:
+          mode: medium
           enabled: true
           trigger: continuous
           commands:

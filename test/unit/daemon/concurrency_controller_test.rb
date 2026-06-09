@@ -56,6 +56,26 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
   end
 
+  # max_concurrent_patrol_scans is a PER-PROJECT cap: a running scan for one
+  # project must NOT block a scan for a DIFFERENT project, so projects patrol
+  # in parallel rather than being serialized/starved by a global count.
+  def test_patrol_scan_cap_is_per_project
+    c = make(patrol_scans: 1)
+    dispatch(c, 100, "p1", "patrol-scan", kind: :patrol_scan)
+
+    # A different project is still allowed despite p1's running scan.
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "p2", now: T0),
+                 "different projects must patrol in parallel"
+
+    # A SECOND scan for the SAME project hits the per-project cap.
+    assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "p1", now: T0),
+                 "second scan for the same project must hit the per-project cap"
+
+    # Once p2's scan is also running, p2 likewise hits its own per-project cap.
+    dispatch(c, 101, "p2", "patrol-scan", kind: :patrol_scan)
+    assert_equal :patrol_scan_cap, c.can_dispatch_patrol_scan?(project: "p2", now: T0)
+  end
+
   def test_running_tasks_do_not_block_a_patrol_scan
     c = make(global: 2, patrol_scans: 1)
     dispatch(c, 100, "p1", "s1")

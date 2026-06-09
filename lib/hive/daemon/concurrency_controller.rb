@@ -108,11 +108,15 @@ module Hive
 
       # Gate for a patrol SCAN dispatch. Scans have their own concurrency
       # budget so they never compete with task dispatch for the global cap.
+      # `max_concurrent_patrol_scans` is a PER-PROJECT cap: count only the
+      # given project's running scans so different projects patrol in
+      # parallel (a global count would serialize/starve projects when the
+      # cap is 1).
       #   :ok | :project_dropped | :patrol_scan_cap
       def can_dispatch_patrol_scan?(project:, now: Time.now)
         return :project_dropped if @dropped_projects.include?(project)
 
-        scan_count = @running.count { |_pid, entry| entry[:kind] == :patrol_scan }
+        scan_count = @running.count { |_pid, entry| entry[:kind] == :patrol_scan && entry[:project] == project }
         return :patrol_scan_cap if scan_count >= @max_concurrent_patrol_scans
 
         :ok

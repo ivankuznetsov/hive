@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/
 created: 2026-05-26
-updated: 2026-06-08
+updated: 2026-06-09
 tags: [babysitter, module, daemon, github, agents]
 ---
 

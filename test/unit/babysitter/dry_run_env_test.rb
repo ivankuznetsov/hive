@@ -100,6 +100,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "grep", "-Otouch /tmp/hive-pager-short-pwn", "needle"
       assert_stubbed env, "git", "grep", "-nOtouch /tmp/hive-pager-cluster-pwn", "needle"
       assert_stubbed env, "git", "grep", "-O", "touch /tmp/hive-pager-sep-pwn", "needle"
+      # git resolves any unambiguous long-option prefix, so abbreviated spellings of
+      # `--open-files-in-pager` (down to the shortest unique `--op`) still launch the pager
+      # and must be rejected, with or without a glued `=<cmd>`.
+      assert_stubbed env, "git", "grep", "--open=touch /tmp/hive-pager-abbrev-pwn", "needle"
+      assert_stubbed env, "git", "grep", "--open-files=touch /tmp/hive-pager-abbrev2-pwn", "needle"
+      assert_stubbed env, "git", "grep", "--op=touch /tmp/hive-pager-abbrev3-pwn", "needle"
       # Same-class arbitrary-exec config keys are rejected by the allowlist (reject all
       # global config overrides), not by a denylist that has to enumerate each one.
       assert_stubbed env, "git", "-c", "diff.x.textconv=touch /tmp/hive-textconv-pwn", "diff"
@@ -171,6 +177,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # output-file guard is scoped past grep so it stays allowed.
       assert_passes env, "git", "grep", "-o", "needle"
       assert_passes env, "git", "grep", "--only-matching", "needle"
+      # A value-taking short option consumes the rest of its cluster as the operand, so an
+      # uppercase `O` inside that value (here the pattern `TODO`) is not the `-O` pager flag.
+      # These read-only searches must reach real git, not be skipped as a false positive.
+      assert_passes env, "git", "grep", "-eTODO", "--", "."
+      assert_passes env, "git", "grep", "-fNEEDLEFILE.txt"
       # `git ls-files -o` / `--others` lists untracked files — a read; the output-file guard
       # must not over-block it.
       assert_passes env, "git", "ls-files", "-o"

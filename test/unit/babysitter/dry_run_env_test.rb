@@ -98,6 +98,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # separate forms run an attacker-controlled pager command and must be rejected. (On
       # diff/log/show `-O` is the read-only `--output-ordering` — see the passthrough cases.)
       assert_stubbed env, "git", "grep", "-Otouch /tmp/hive-pager-short-pwn", "needle"
+      assert_stubbed env, "git", "grep", "-nOtouch /tmp/hive-pager-cluster-pwn", "needle"
       assert_stubbed env, "git", "grep", "-O", "touch /tmp/hive-pager-sep-pwn", "needle"
       # Same-class arbitrary-exec config keys are rejected by the allowlist (reject all
       # global config overrides), not by a denylist that has to enumerate each one.

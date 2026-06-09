@@ -71,13 +71,15 @@ def unsafe_read_option?(subcommand, arg)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
 
-  # `--open-files-in-pager` / `-O` (its short form, including glued `-O<cmd>`) runs an
-  # arbitrary pager command, but only on `git grep` — that is the precise RCE seam this guard
-  # exists to close. On `diff` / `log` / `show`, `-O<orderfile>` is `--output-ordering`, which
-  # only reads an orderfile, so the pager block must be scoped to grep or it over-skips reads.
-  # `git grep -o` / `--only-matching` is a read-only match filter (grep has no `--output`).
+  # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
+  # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the
+  # precise RCE seam this guard exists to close. On `diff` / `log` / `show`,
+  # `-O<orderfile>` is `--output-ordering`, which only reads an orderfile, so the pager
+  # block must be scoped to grep or it over-skips reads. `git grep -o` / `--only-matching`
+  # is a read-only match filter (grep has no `--output`).
   if subcommand == "grep"
-    return arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=", "-O")
+    return arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=") ||
+           (arg.start_with?("-") && !arg.start_with?("--") && arg.include?("O"))
   end
 
   # `git ls-files -o` / `--others` lists untracked files — a read, not a write. ls-files has

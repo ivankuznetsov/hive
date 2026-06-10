@@ -62,7 +62,7 @@ module Hive
 
         hive: using defaults — planning=claude, claude_mode=tmux,
         claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
-        patrol_reviewers=codex, triage=courageous, limits=defaults,
+        patrol_reviewers=codex-native-review, triage=courageous, limits=defaults,
         daemon=enabled, babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single

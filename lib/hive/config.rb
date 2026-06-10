@@ -345,15 +345,22 @@ module Hive
         "review" => {
           "max_context_files" => 24,
           "max_owned_files" => 12,
+          # Patrol PRs flow into 6-review the same as human PRs, but patrol
+          # opens many PRs per cycle — running the multi-persona
+          # ce-code-review fan-out (6–18 subagents) on each is expensive.
+          # The patrol default is therefore the single-pass native
+          # `codex review` adapter (kind: codex_review): one tuned,
+          # read-only review whose stdout is captured into the GFM-checkbox
+          # findings file, leaving the triage/fix loop unchanged. Human PRs
+          # keep the richer review.reviewers set. Override per project via
+          # patrol.review.reviewers in <hive-state>/config.yml.
           "reviewers" => [
             {
-              "name" => "codex-ce-code-review",
-              "kind" => "agent",
+              "name" => "codex-native-review",
+              "kind" => "codex_review",
               "agent" => "codex",
-              "skill" => "ce-code-review",
-              "output_basename" => "codex-ce-code-review",
-              "prompt_template" => "reviewer_codex_ce_code_review.md.erb",
-              "budget_usd" => 50,
+              "output_basename" => "codex-native-review",
+              "prompt_template" => "reviewer_codex_native_review.md.erb",
               "timeout_sec" => 5400
             }
           ]
@@ -452,6 +459,11 @@ module Hive
     CLAUDE_MODES = %w[headless tmux].freeze
     CLAUDE_PERMISSION_MODES = %w[acceptEdits auto bypassPermissions default dontAsk plan].freeze
     AUTO_COMMIT_SIGN_POLICIES = %w[inherit bypass fail].freeze
+    # Accepted reviewer `kind` values in config. "agent" (default) and
+    # "codex_review" are dispatchable adapters; "linter" is accepted at
+    # config-load time but rejected at dispatch with a pointer to
+    # review.ci.command (Hive::Reviewers.dispatch).
+    REVIEWER_KINDS = %w[agent codex_review linter].freeze
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
 
@@ -1284,11 +1296,34 @@ module Hive
                 "#{label}[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
         end
 
+        # Reviewer kind discriminator. Optional; defaults to "agent".
+        # "codex_review" selects the native-`codex review` adapter, which
+        # captures `codex review` stdout instead of spawning a CE skill —
+        # so it needs no `skill` field. "linter" is rejected at dispatch
+        # time (Hive::Reviewers.dispatch) with a pointer to review.ci.command;
+        # we accept it here so that the more actionable dispatch-time error
+        # is the one the user sees.
+        kind = entry["kind"]
+        unless kind.nil? || REVIEWER_KINDS.include?(kind)
+          raise ConfigError,
+                "#{label}[#{idx}].kind in #{describe_source(source_path)} must be one of " \
+                "#{REVIEWER_KINDS.inspect}; got #{kind.inspect}"
+        end
+
         # Required fields: presence + non-empty. Missing or blank values
         # would otherwise NoMethodError or yield broken filenames mid-spawn
         # (closes ce-code-review AC-6). Mirrors the framing used by the
-        # output_basename / agent checks below.
-        %w[name skill prompt_template].each do |field|
+        # output_basename / agent checks below. `skill` is required only
+        # for skill-driven adapters; the codex_review adapter runs codex's
+        # built-in review and takes no CE skill, so it is exempt. The
+        # codex_review adapter DOES require `agent` (it resolves the codex
+        # binary via Hive::AgentProfiles.lookup(spec.fetch("agent")) — see
+        # lib/hive/reviewers/codex_review.rb), so require it here to fail at
+        # load instead of crashing mid-dispatch with a KeyError. (The generic
+        # validate_agent_name! below returns early on nil, so without this
+        # entry a codex_review spec missing `agent` would pass load.)
+        required = kind == "codex_review" ? %w[name agent prompt_template] : %w[name skill prompt_template]
+        required.each do |field|
           value = entry[field]
           missing = value.nil? || (value.is_a?(String) && value.strip.empty?)
           next unless missing

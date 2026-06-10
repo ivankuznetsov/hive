@@ -1,18 +1,28 @@
 require "hive/reviewers/base"
 require "hive/reviewers/synthetic_task"
 require "hive/reviewers/agent"
+require "hive/reviewers/codex_review"
 
 module Hive
   # Reviewer adapters for the 6-review stage.
   #
-  # v1 supports a single reviewer kind: agent-based reviewers that spawn
-  # an LLM CLI (claude / codex / pi) with a rendered prompt invoking a
-  # CE skill on the worktree's diff. Tool-specific linters (rubocop,
-  # brakeman, etc.) are NOT a hive concept — they belong in the
-  # project's CI command, which the 6-review runner invokes via U7's
-  # CI-fix loop (`review.ci.command`). Hardcoding linter knowledge in
-  # hive would couple the orchestrator to one ecosystem (Ruby/Rails);
-  # the per-project `bin/ci` pattern keeps hive ecosystem-agnostic.
+  # Two reviewer kinds ship today:
+  #
+  # - "agent" (default): spawns an LLM CLI (claude / codex / pi) with a
+  #   rendered prompt invoking a CE skill on the worktree's diff; the
+  #   agent writes the findings file itself (Hive::Reviewers::Agent).
+  # - "codex_review": runs codex's native, single-pass `codex review`
+  #   subcommand and captures its stdout into the findings file
+  #   (Hive::Reviewers::CodexReview). This is the patrol-default reviewer —
+  #   one cheap tuned pass instead of the multi-persona ce-code-review
+  #   fan-out — and needs no CE `skill`.
+  #
+  # Tool-specific linters (rubocop, brakeman, etc.) are NOT a hive
+  # concept — they belong in the project's CI command, which the 6-review
+  # runner invokes via U7's CI-fix loop (`review.ci.command`). Hardcoding
+  # linter knowledge in hive would couple the orchestrator to one
+  # ecosystem (Ruby/Rails); the per-project `bin/ci` pattern keeps hive
+  # ecosystem-agnostic.
   module Reviewers
     # Default attempt budget for a reviewer adapter (Hive::Reviewers::Agent).
     # A reviewer spec can override via the optional `max_attempts` field;
@@ -29,10 +39,11 @@ module Hive
     end
 
     # Build a reviewer adapter from a config spec + per-spawn context.
-    # The `kind` field is optional and defaults to "agent" (the only
-    # supported kind in v1). If a config explicitly sets `kind: linter`,
-    # raise a helpful error pointing the user at `review.ci.command`
-    # rather than silently ignoring the request.
+    # The `kind` field is optional and defaults to "agent". A
+    # `kind: codex_review` spec selects the native-`codex review` adapter.
+    # If a config explicitly sets `kind: linter`, raise a helpful error
+    # pointing the user at `review.ci.command` rather than silently
+    # ignoring the request.
     #
     # `cfg:` (optional, default nil) flows the merged project config to
     # the adapter so `agents.<name>.<key>` overrides reach the
@@ -43,6 +54,8 @@ module Hive
       case kind
       when "agent"
         Agent.new(spec, ctx, cfg: cfg)
+      when "codex_review"
+        CodexReview.new(spec, ctx, cfg: cfg)
       when "linter"
         raise UnknownKindError, <<~MSG.strip
           reviewer kind "linter" is not supported in v1.
@@ -55,7 +68,7 @@ module Hive
         MSG
       else
         raise UnknownKindError,
-              "unknown reviewer kind: #{kind.inspect} (expected 'agent')"
+              "unknown reviewer kind: #{kind.inspect} (expected 'agent' or 'codex_review')"
       end
     end
   end

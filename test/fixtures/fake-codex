@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Minimal fake codex CLI for CodexReview reviewer tests. Handles two
+# subcommands:
+#
+#   --version        prints a parseable version line (default 0.139.0;
+#                    override with HIVE_FAKE_CODEX_VERSION, e.g. "0.1.0"
+#                    to simulate a too-old binary below min_version).
+#
+#   review [...]     logs argv to HIVE_FAKE_CODEX_ARGV_LOG (if set), then
+#                    prints HIVE_FAKE_CODEX_STDOUT (default: a valid
+#                    GFM-checkbox findings block) and exits with
+#                    HIVE_FAKE_CODEX_EXIT (default 0). HIVE_FAKE_CODEX_HANG
+#                    sleeps that many seconds first (timeout tests).
+#
+#                    HIVE_FAKE_CODEX_BIG_MIB, when set, emits valid findings
+#                    headers first, then floods stdout with that many MiB of
+#                    filler so the total combined output exceeds the
+#                    reviewer's MAX_OUTPUT_BYTES retain cap. Used to prove the
+#                    reader fully drains the pipe (no write() deadlock) instead
+#                    of stopping at the cap and wedging the child.
+set -u
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli %s\n' "${HIVE_FAKE_CODEX_VERSION:-0.139.0}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "review" ]]; then
+  if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
+    {
+      echo "---"
+      echo "cwd=$(pwd)"
+      for a in "$@"; do
+        printf 'arg=%s\n' "$a"
+      done
+    } >> "${HIVE_FAKE_CODEX_ARGV_LOG}"
+  fi
+
+  if [[ -n "${HIVE_FAKE_CODEX_HANG:-}" ]]; then
+    sleep "${HIVE_FAKE_CODEX_HANG}"
+  fi
+
+  if [[ -n "${HIVE_FAKE_CODEX_BIG_MIB:-}" ]]; then
+    # Valid findings headers up front (inside the retained cap), then a
+    # flood of filler that pushes the total past MAX_OUTPUT_BYTES. If the
+    # reader stopped reading at the cap, this write() would block forever.
+    printf 'OpenAI Codex v0.139.0\n## High\n- [ ] big: overflow case\n## Medium\nNo findings.\n## Nit\nNo findings.\n'
+    # Emit HIVE_FAKE_CODEX_BIG_MIB chunks of ~1 MiB each.
+    chunk="$(head -c 1048576 /dev/zero | tr '\0' 'x')"
+    i=0
+    while [[ "$i" -lt "${HIVE_FAKE_CODEX_BIG_MIB}" ]]; do
+      printf '%s\n' "$chunk"
+      i=$((i + 1))
+    done
+    exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+  fi
+
+  default_out='OpenAI Codex v0.139.0
+--------
+user
+changes against main
+codex
+## High
+- [ ] uses subtraction instead of addition: breaks add()
+## Medium
+No findings.
+## Nit
+No findings.'
+
+  printf '%s\n' "${HIVE_FAKE_CODEX_STDOUT-$default_out}"
+  exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+fi
+
+echo "fake-codex: unsupported argv: $*" >&2
+exit 99

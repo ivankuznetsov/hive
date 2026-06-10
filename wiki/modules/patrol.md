@@ -3,8 +3,8 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-06-08
-tags: [module, patrol, review, worktree, pr]
+updated: 2026-06-10
+tags: [module, patrol, review, worktree, pr, codex]
 ---
 
 **TLDR**: `Hive::Patrol::*` is the repository-patrol engine behind [[commands/patrol]]. It keeps clawpatch-style work units and audit state as plain JSON under `.hive-state/patrol/`, delegates review/fix reasoning to configured Hive agent profiles, records patrol review/fix token usage in `Hive::UsageDb`, validates fixes in isolated worktrees, opens PRs, and by default hands opened PRs into the normal `6-review` flow through `Hive::Patrol::ReviewHandoff`.
@@ -41,6 +41,10 @@ Patrol state is deliberately inspectable and removable:
 ```
 
 The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
+
+## Patrol PR reviewer (cheap by default)
+
+Patrol PRs flow into `6-review` and are reviewed by `patrol.review.reviewers` (a separate set from human PRs' `review.reviewers`) — see [[stages/review]] `run_reviewers` → `patrol_task?` routing. Because patrol opens many PRs per cycle, the **DEFAULT patrol reviewer is the native single-pass `codex review`** adapter (`kind: codex_review`, `name: codex-native-review`), not the multi-persona `ce-code-review` fan-out (6–18 subagents). It runs one tuned, read-only `codex review` and captures stdout into the GFM-checkbox findings file the triage/fix loop already consumes, so the loop is unchanged. See [[modules/reviewers]] `Reviewers::CodexReview` for argv/format details. Operators can override `patrol.review.reviewers` per project to add the ce-code-review fan-out or Claude.
 
 ## Daemon triggers
 

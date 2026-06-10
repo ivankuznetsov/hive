@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-08
+updated: 2026-06-09
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -332,7 +332,7 @@ so `reap_completed` can unlink the file and log the lifecycle:
 :dispatch_request_rejected   reason=invalid_argv|unknown_project|…
 :dispatch_request_expired    created_at=…
 :dispatch_request_recovered  reason=owner_gone|claim_expired|malformed_claim  (startup claim sweep, C3)
-:dispatch_result_written     exit_code=… chat_id=…  (non-zero exit → bot relay, ADV-1)
+:dispatch_result_written     exit_code=… chat_id=…  (bot-originated completion → bot relay, ADV-1)
 ```
 
 Lifecycle gates inside `process_dispatch_requests`:
@@ -467,19 +467,26 @@ next request with the original Telegram routing metadata; on non-zero or
 nil exit it discards the sidecar. This keeps retries from running when
 the marker-clear command failed.
 
-### Failure feedback to Telegram (ADV-1)
+### Completion feedback to Telegram (ADV-1)
 
 Because the daemon (not the bot) now spawns request-driven children and
-has no Telegram handle, a non-zero exit of a bot-initiated run used to
-be silent for the operator who tapped the button. On a non-zero,
-request-driven completion — **including a nil exit_code, i.e. a child
-killed by an R-02 timeout signal** — `reap_completed` reads the
+has no Telegram handle, the operator who tapped a button needs a
+reverse-direction reply path for both failures and successful
+completion. On request-driven completion, `reap_completed` reads the
 request's `chat_id`/`update_id` (from the still-present claimed file,
-before unlink) and writes a notice via `Hive::Daemon::DispatchResultQueue`
-into `<state_home>/dispatch_results/*.json` (logged `:dispatch_result_written`).
+before unlink) and writes a notice via
+`Hive::Daemon::DispatchResultQueue` into
+`<state_home>/dispatch_results/*.json` (logged
+`:dispatch_result_written`). Successful intermediate sequence steps are
+the exception: when `exit_code == 0` promotes another queued command
+from the hidden sequence sidecar, the daemon suppresses the result
+notice for that step so Telegram does not show a marker-clear success
+before the actual retry completes.
+
 The bot drains that directory each `reaper_loop` iteration
-(`Supervisor#drain_dispatch_results`) and relays a `⚠️ <slug>: hive <verb>
-failed (exit N | killed)` message to the originating chat. This is the
+(`Supervisor#drain_dispatch_results`) and relays either a positive
+command-specific confirmation for exit 0 or a `⚠️ <slug>: hive <verb>
+failed (exit N | killed)` message for non-zero/nil exits. This is the
 reverse-direction sibling of the dispatch-request queue; schema
 `hive-dispatch-result` v1. The schema machine-checks `chat_id` as
 **non-zero** (`not: {const: 0}`), not merely a positive integer (#258):
@@ -491,7 +498,7 @@ Reliability contract on the consumer side: a notice is removed **only
 after the relay is confirmed sent** — if Telegram is down it stays on
 disk to retry next tick (never a silent drop). Notices older than
 `DispatchResultQueue::EXPIRY_SEC` (1h) are dropped without relaying
-(no stale-failure spam), and the daemon prunes them each tick
+(no stale-completion spam), and the daemon prunes them each tick
 (`prune_dispatch_results`) so a down bot can't grow the dir without
 bound. A reconnect backlog larger than `DISPATCH_RESULT_SEND_CAP`
 relays the cap individually and collapses the tail into one

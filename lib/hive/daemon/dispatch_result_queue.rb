@@ -11,12 +11,10 @@ module Hive
     # runs the OPPOSITE direction of `DispatchRequestQueue`. After the
     # single-dispatcher refactor the daemon (not the bot) spawns
     # `hive run`-class children, and the daemon has no Telegram handle —
-    # so a bot-initiated run that exits non-zero (a failed Autofix, a
-    # failed retry verb) used to fail silently for the operator who
-    # tapped the button. The daemon writes one notice file here per
-    # non-zero, bot-originated completion; the bot drains the directory
-    # in its reaper loop and replies to the originating chat, then
-    # unlinks the file.
+    # so bot-initiated queued work needs an out-of-band reply path. The
+    # daemon writes one notice file here per bot-originated completion;
+    # the bot drains the directory in its reaper loop and replies to the
+    # originating chat, then unlinks the file.
     #
     # Symmetry with `DispatchRequestQueue`: one JSON file per notice
     # under `<state_home>/dispatch_results/`, atomic-write-then-rename so
@@ -46,9 +44,9 @@ module Hive
       DIRNAME = "dispatch_results".freeze
 
       # Age after which a notice is considered stale: not worth relaying
-      # (the operator does not need a "failed" ping for a run that ended
-      # an hour ago) and a candidate for pruning. Bounds directory growth
-      # when the bot is down for an extended period. 1h.
+      # (the operator does not need an hour-old completion ping) and a
+      # candidate for pruning. Bounds directory growth when the bot is
+      # down for an extended period. 1h.
       EXPIRY_SEC = 3600
 
       Result = Struct.new(

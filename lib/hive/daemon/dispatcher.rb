@@ -16,6 +16,7 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
 require "hive/daemon/patrol_scheduler"
+require "hive/daemon/pr_merge_watcher"
 require "hive/lock"
 require "hive/paths"
 require "hive/update_check"
@@ -670,6 +671,10 @@ module Hive
       def handle_row(row, now:)
         return unless project_enabled?(row.project)
         return if @legacy_layout_projects.key?(row.project)
+        if merged_pr_recoverable_finalize_error?(row)
+          enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
+          return
+        end
 
         decision = Policy.decide(
           action: row.action,
@@ -935,7 +940,8 @@ module Hive
             task_folder: File.join(
               Hive::Config.find_project(project)["hive_state_path"],
               "stages", archive_dispatch[:stage], slug
-            )
+            ),
+            error_reason: archive_dispatch[:error_reason]
           ) if Hive::Config.find_project(project)
           @logger.event(:blocked, project: project, slug: slug,
                                   stage: archive_dispatch[:stage],
@@ -1441,13 +1447,24 @@ module Hive
         pid
       end
 
-      def enqueue_merge_watch(row)
+      def enqueue_merge_watch(row, error_reason: nil)
         return unless @merge_watcher
 
         @merge_watcher.enqueue(project: row.project, slug: row.slug,
-                               task_folder: row.folder)
+                               task_folder: row.folder,
+                               error_reason: error_reason)
         @logger.event(:merge_watcher_enqueued, project: row.project, slug: row.slug,
-                                               folder: row.folder)
+                                               folder: row.folder,
+                                               error_reason: error_reason)
+      end
+
+      def merged_pr_recoverable_finalize_error?(row)
+        return false unless row.stage.to_s == Hive::Daemon::PrMergeWatcher::ARCHIVE_FROM_STAGE
+        return false unless row.marker.to_s == "error"
+        return false unless row.action.to_s == "error"
+
+        reason = row.marker_attrs.to_h["reason"].to_s
+        Hive::Daemon::PrMergeWatcher::MERGED_PR_RECOVERABLE_ERROR_REASONS.include?(reason)
       end
 
       def reset_active_agent_snapshot

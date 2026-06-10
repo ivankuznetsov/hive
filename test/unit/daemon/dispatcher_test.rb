@@ -102,8 +102,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @next_dropped = []
     end
 
-    def enqueue(project:, slug:, task_folder:)
-      @enqueued << { project: project, slug: slug, task_folder: task_folder }
+    def enqueue(project:, slug:, task_folder:, error_reason: nil)
+      @enqueued << { project: project, slug: slug, task_folder: task_folder, error_reason: error_reason }
     end
 
     def tick(now:)
@@ -206,7 +206,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
-          state_file: nil, folder: nil)
+          state_file: nil, folder: nil, marker_attrs: {})
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
@@ -214,7 +214,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
       suggested_command: command, claude_pid_alive: claude_pid_alive,
-      live_task_lock: live_task_lock
+      live_task_lock: live_task_lock, marker_attrs: marker_attrs
     )
   end
 
@@ -363,6 +363,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
     assert_equal 1, mw.enqueued.size
     assert_equal "s1", mw.enqueued.first[:slug]
+  end
+
+  def test_finalize_recoverable_error_routes_to_merge_watcher
+    rows = [
+      row(stage: "8-finalize", marker: "error",
+          marker_attrs: { "reason" => "git_status_failed" },
+          action: "error", command: nil)
+    ]
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    assert_equal 1, mw.enqueued.size
+    assert_equal "git_status_failed", mw.enqueued.first[:error_reason]
+    event = logger.events.find { |name, attrs| name == :merge_watcher_enqueued && attrs[:slug] == "s1" }
+    assert event, "expected merge_watcher_enqueued event, got #{logger.events.inspect}"
+    assert_equal "git_status_failed", event[1][:error_reason]
   end
 
   def test_merged_pr_archive_dispatches_through_supervisor

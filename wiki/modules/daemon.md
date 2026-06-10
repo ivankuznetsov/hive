@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-09
+updated: 2026-06-10
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -28,7 +28,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus late-stage `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun through the normal daemon flow. `limits_reached` markers (reviewers `REVIEW_ERROR` or single-agent `ERROR`, any stage) self-heal on a cooldown: the writer stamps `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`) and the healer clears them only once `now >= retry_after`, bounded by the same retry budget; cooldown-wait ticks do not burn budget, and a missing/unparseable stamp stays manual. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). Re-spawns fire-and-forget `hive generate-name <folder>` for any row whose `Hive::TaskMeta` `display_name` is nil/blank, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses `kill(0)` liveness plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
-| `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
+| `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete` and for a narrow set of finalize `ERROR` rows whose PR can still be retired after merge (`git_status_failed`, `claude_launch_failed`). On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by external callers (today: the Telegram bot via `Hive::Bot::DispatchRequestWriter`) and consumed by the dispatcher's tick loop. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: the bot writes, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
@@ -59,15 +59,21 @@ change triggers a full `tick` immediately; otherwise
 `daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
 cadence for changes the cheap probe cannot see.
 
-Each full tick runs in order: reap completed children → fetch status →
-heal stale agent markers → backfill missing display names → **process
-dispatch requests** → handle PR-merge watcher → per-row dispatch →
-prune baselines → refresh cheap-probe mtime fingerprints.
-Dispatch requests come BEFORE the
-row-scan so a slug whose request just dispatched this tick is
-already in-flight in the controller and the row scan's per-slug
-in-flight gate (`controller.running_task?`) keeps the same tick
-from double-spawning.
+Each full tick runs in order: reap completed children -> fetch status ->
+heal stale agent markers -> backfill missing display names -> tick the
+PR-merge watcher -> **process dispatch requests** -> patrol dispatches ->
+per-row dispatch -> prune baselines -> refresh cheap-probe mtime
+fingerprints. During per-row dispatch, whitelisted `8-finalize` `ERROR`
+rows (`git_status_failed`, `claude_launch_failed`) are enqueued into the
+merge watcher before the generic policy table skips `error` rows. Because
+the watcher tick already ran earlier in the same full tick, a newly
+enqueued row is polled on a later tick; the watcher emits an archive
+command with `--recover-merged-error-reason` only after GitHub reports the
+PR as `MERGED`.
+Dispatch requests come BEFORE the row-scan so a slug whose request just
+dispatched this tick is already in-flight in the controller and the row
+scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
+tick from double-spawning.
 
 `Hive::Daemon::Policy` and `Hive::Daemon::ConcurrencyController` have no
 I/O at all — fully unit-testable without forking. The other modules
@@ -151,7 +157,13 @@ stage does not move and no workflow verb fires from either path.
    commit, and push (in that order). Manual-only errors such as
    `reason=ensure_clean_on_exit_failed` and repository-state failures such as
    `reason=git_status_failed` are left red because they need operator
-   inspection. Auto-clears are bounded per
+   inspection while the PR is still open. If GitHub later reports the
+   task's PR as `MERGED`, `PrMergeWatcher` may archive a whitelisted
+   finalize error by dispatching `hive archive` with
+   `--recover-merged-error-reason <reason>`; the archive command accepts
+   only a matching current `ERROR reason=<reason>` marker after confirming
+   the `pr.md` URL still reports `MERGED`, so the stale local worktree does
+   not have to be healthy merely to retire an already merged PR. Auto-clears are bounded per
    daemon process by failure signature (default 3 clears); repeated identical
    failures stay red after the budget is exhausted so a persistent
    infrastructure break cannot churn forever. The budget is in-memory only: a

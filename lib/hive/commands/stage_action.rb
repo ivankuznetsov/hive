@@ -1,6 +1,7 @@
 require "json"
 require "hive/commands/approve"
 require "hive/commands/run"
+require "hive/gh"
 require "hive/markers"
 require "hive/stages"
 require "hive/task_resolver"
@@ -26,12 +27,14 @@ module Hive
     # In `--json` mode the inner Approve and Run are quieted and a single
     # `hive-stage-action` envelope is emitted at the end.
     class StageAction
-      def initialize(verb, target, project: nil, from: nil, json: false)
+      def initialize(verb, target, project: nil, from: nil, json: false,
+                     recover_merged_error_reason: nil)
         @verb = verb
         @target = target
         @project_filter = project
         @from = from
         @json = json
+        @recover_merged_error_reason = recover_merged_error_reason
       end
 
       def call
@@ -114,6 +117,7 @@ module Hive
 
         marker = Hive::Markers.current(task.state_file)
         return if terminal_marker?(marker)
+        return if archive_merged_error_recovery_marker?(task, marker, config)
 
         next_command = "hive #{@verb} #{task.slug} --from #{stage_dir(task)}"
         raise Hive::WrongStage.new(
@@ -133,6 +137,22 @@ module Hive
         Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
       end
 
+      def archive_merged_error_recovery_marker?(task, marker, config)
+        return false unless @verb == "archive"
+        return false unless stage_dir(task) == config.fetch(:source)
+        return false unless marker.name == :error
+
+        reason = @recover_merged_error_reason.to_s
+        return false if reason.empty?
+
+        return false unless marker.attrs.to_h.fetch("reason", nil).to_s == reason
+
+        pr_url = Hive::Gh.pr_frontmatter(task.state_file)["pr_url"].to_s
+        return false if pr_url.empty?
+
+        Hive::Gh.pr_state(pr_url) == "MERGED"
+      end
+
       # Inner Approve and Run are silent when the verb is in --json mode;
       # StageAction owns the unified envelope. In text mode they emit
       # their own prose because that output is intended for humans.
@@ -142,7 +162,11 @@ module Hive
           to: target_stage,
           from: current_stage,
           project: @project_filter,
-          force: config[:force_source],
+          force: config[:force_source] || archive_merged_error_recovery_marker?(
+            task,
+            Hive::Markers.current(task.state_file),
+            config
+          ),
           json: false,
           quiet: @json
         ).call

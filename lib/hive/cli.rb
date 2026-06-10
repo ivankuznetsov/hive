@@ -391,6 +391,8 @@ module Hive
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :recover_merged_error_reason, type: :string,
+                                          desc: "internal: archive a merged PR despite this finalize ERROR reason"
     def archive(target = nil)
       if target.nil?
         if options[:from]
@@ -1060,12 +1062,18 @@ module Hive
     no_commands do
       def run_stage_action(verb, target)
         require "hive/commands/stage_action"
-        Hive::Commands::StageAction.new(
-          verb,
-          target,
+        kwargs = {
           project: options[:project],
           from: options[:from],
           json: options[:json]
+        }
+        reason = options[:recover_merged_error_reason]
+        kwargs[:recover_merged_error_reason] = reason unless reason.nil?
+
+        Hive::Commands::StageAction.new(
+          verb,
+          target,
+          **kwargs
         ).call
       end
     end

@@ -27,6 +27,10 @@ module Hive
       ARCHIVE_FROM_STAGE = Hive::Workflows::VERBS.fetch("archive").fetch(:source).freeze
       ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from #{ARCHIVE_FROM_STAGE} " \
                               "--project %<project>s --json".freeze
+      MERGED_PR_RECOVERABLE_ERROR_REASONS = %w[
+        git_status_failed
+        claude_launch_failed
+      ].freeze
 
       # Backoff schedule for consecutive `gh` failures (network /
       # auth / rate limit). After exhaustion, the watcher drops the
@@ -52,9 +56,11 @@ module Hive
       # Cleared and repopulated on each tick.
       attr_reader :last_tick_dropped
 
-      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: ARCHIVE_FROM_STAGE)
+      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: ARCHIVE_FROM_STAGE,
+                  error_reason: nil)
         key = [ project, slug ]
         return if @pending.key?(key) # idempotent
+        error_reason = normalize_error_reason(error_reason)
 
         pr_url = read_pr_url(task_folder)
         return if pr_url.nil? || pr_url.empty?
@@ -68,7 +74,8 @@ module Hive
           enqueued_at: Time.now,
           hive_state_path: hive_state_path,
           stage: stage,
-          task_folder: task_folder
+          task_folder: task_folder,
+          error_reason: error_reason
         }
       end
 
@@ -133,9 +140,11 @@ module Hive
             project, slug = key
             archives << {
               project: project, slug: slug, stage: entry[:stage],
-              command: format(ARCHIVE_VERB_TEMPLATE, slug: slug, project: project),
+              command: archive_command(slug: slug, project: project,
+                                       error_reason: entry[:error_reason]),
               state_file_mtime: nil,
-              hive_state_path: entry[:hive_state_path]
+              hive_state_path: entry[:hive_state_path],
+              error_reason: entry[:error_reason]
             }
             keys_to_drop << key
           when "CLOSED"
@@ -185,6 +194,21 @@ module Hive
           return frontmatter["pr_url"] if frontmatter.is_a?(Hash) && frontmatter["pr_url"]
         end
         nil
+      end
+
+      def normalize_error_reason(reason)
+        reason = reason.to_s
+        return nil if reason.empty?
+        return reason if MERGED_PR_RECOVERABLE_ERROR_REASONS.include?(reason)
+
+        nil
+      end
+
+      def archive_command(slug:, project:, error_reason: nil)
+        command = format(ARCHIVE_VERB_TEMPLATE, slug: slug, project: project)
+        return command unless error_reason
+
+        "#{command} --recover-merged-error-reason #{error_reason}"
       end
 
       # Returns [state, error]. state is one of "OPEN" / "MERGED" /

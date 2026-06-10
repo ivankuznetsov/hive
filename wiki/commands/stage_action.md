@@ -1,13 +1,13 @@
 ---
 title: Workflow verbs
 type: command
-source: lib/hive/commands/stage_action.rb, lib/hive/workflows.rb
+source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-06-05
+updated: 2026-06-08
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
-**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode that delegates to [[commands/status]] archive mode instead of `StageAction`.
+**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode that delegates to [[commands/status]] archive mode instead of `StageAction`; a daemon-only archive recovery flag can retire two whitelisted `8-finalize` error markers after GitHub reports the PR as merged.
 
 ## Usage
 
@@ -30,6 +30,8 @@ hive plan <slug> --json                   # machine-readable hive-stage-action e
 
 No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.nil?`, it constructs `Hive::Commands::Status.new(json: options[:json], archive: true)` and returns before `StageAction` is involved. Only `hive archive <target>` uses the promote-or-run workflow semantics below.
 
+`hive archive TARGET --recover-merged-error-reason REASON` is internal daemon plumbing, not an operator workflow. `Hive::Daemon::PrMergeWatcher` appends it only after polling `gh pr view --json state` and seeing `MERGED` for a task that is still at `8-finalize` with one of the whitelisted stale-local-error reasons. `StageAction` re-checks the current marker and GitHub state before accepting it.
+
 ## Steps performed (`Hive::Commands::StageAction#call`)
 
 1. Resolve TARGET via `Hive::TaskResolver` (path or slug). When `--from` is set, the resolver narrows to that stage.
@@ -37,7 +39,7 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 3. **Archive idempotency check**: if the verb is `archive` AND the task is already at `9-done` with `:complete` marker, emit a `noop` payload and return.
 4. **At-target branch**: if the task is already at the verb's target stage, just run the stage's agent via `Hive::Commands::Run`. Phase: `ran`.
 5. **Wrong-stage guard**: if the task is at neither source nor target, raise `WrongStage` with the verb's expected source/target.
-6. **Marker validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `StageAction::ADVANCE_VERBS_TO_TERMINAL_MARKERS`). The `brainstorm` verb has `force_source: true` and skips this check.
+6. **Marker validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `Hive::Markers::TERMINAL_MARKER_NAMES`). The `brainstorm` verb has `force_source: true` and skips this check. `archive` has one additional internal exception: a matching `--recover-merged-error-reason` accepts an `8-finalize` `ERROR` marker only when the current `reason=` equals the flag, `pr.md` contains a `pr_url`, and `Hive::Gh.pr_state(pr_url)` returns `MERGED`.
 7. **Promote**: call `Hive::Commands::Approve` with `to: target_stage`, `from: current_stage`, and `quiet: @json` so the inner Approve doesn't double-emit.
 8. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
 9. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).
@@ -101,6 +103,12 @@ External consumers can validate against `schemas/hive-stage-action.v1.json`; res
 Agents driving the pipeline always pass `--from <expected-current-stage>` so a retry after a network blip surfaces the actual state instead of silently double-advancing.
 
 For `archive` specifically: a second invocation against an already-archived task is a clean no-op (phase: `noop`, exit 0, `next_action.key: archived`) instead of re-running the Done agent.
+
+## Merged-Error Archive Recovery
+
+This path exists for an already-merged PR whose local finalize worktree is no longer healthy enough to rerun finalize. The daemon can enqueue it for `git_status_failed` or `claude_launch_failed` finalize errors after `PrMergeWatcher` observes the PR as `MERGED`.
+
+The archive command still refuses the advance when any guard differs from the observed row: the task must still be in `8-finalize`, the marker must still be `ERROR`, the marker's `reason=` must exactly match the internal flag, `pr.md` must still carry a URL, and a fresh `gh pr view <url> --json state` call must still return `MERGED`. If any guard fails, `StageAction` falls back to the normal wrong-stage/non-terminal-marker error path.
 
 ## Exit codes
 

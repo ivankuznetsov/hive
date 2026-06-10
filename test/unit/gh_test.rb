@@ -216,6 +216,23 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_pr_state_raises_on_gh_pr_view_failure
+    status = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "", "auth required", status ] }) do
+      err = assert_raises(Hive::GhError) { Hive::Gh.pr_state("https://example.com/pr/42") }
+      assert_match(/gh pr view https:\/\/example\.com\/pr\/42.*failed/, err.message)
+      assert_match(/auth required/, err.message)
+    end
+  end
+
+  def test_pr_state_raises_on_unparseable_json
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "not-json", "", status ] }) do
+      err = assert_raises(Hive::GhError) { Hive::Gh.pr_state("https://example.com/pr/42") }
+      assert_match(/unparseable JSON/, err.message)
+    end
+  end
+
   # --- push_branch returns PushResult, push_branch! hard-fails ---------
 
   def test_push_branch_returns_push_result_on_failure

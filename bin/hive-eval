@@ -38,7 +38,7 @@ unless remaining.empty?
   exit 64
 end
 
-def scenario_path(root, value)
+def scenario_path(scenario_root, value)
   return nil if value.nil?
   if value.include?("/") || value.include?("\\")
     raise ArgumentError, "scenario must be a basename under test/eval/scenarios"
@@ -47,8 +47,13 @@ def scenario_path(root, value)
   raise ArgumentError, "scenario basename must not contain path separators: #{value}" if value.match?(%r{[\\/]})
 
   basename = value.sub(/_test\z/, "")
-  File.join(root, "test", "eval", "scenarios", "#{basename}_test.rb")
+  File.join(scenario_root, "#{basename}_test.rb")
 end
+
+scenario_root = File.expand_path(
+  ENV.fetch("HIVE_EVAL_SCENARIO_ROOT", File.join(root, "test", "eval", "scenarios")),
+  root
+)
 
 env = {
   "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
@@ -58,7 +63,7 @@ env = {
 env["HIVE_EVAL_NO_JUDGE"] = "1" if options[:no_judge]
 
 begin
-  path = scenario_path(root, options[:scenario])
+  path = scenario_path(scenario_root, options[:scenario])
 rescue ArgumentError => e
   warn "hive-eval: #{e.message}"
   exit 64

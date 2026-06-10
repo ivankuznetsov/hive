@@ -77,6 +77,7 @@ module Hive
       # lives on `Hive::Markers::KILL_CLASS_EXIT_CODES` so KeyMap's
       # Enter-routing predicate and this auto-healer never drift.
       KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
+      HELP_WHEEL_SCROLL_LINES = 3
       # Sized for ~32 lines of recent agent output — bounds render-time memory on large logs.
       INFO_PANEL_EXECUTE_TAIL_BYTES = 4 * 1024
       # Lowercase snapshot-row marker keys → uppercase CLI marker names
@@ -266,6 +267,8 @@ module Hive
           translate_key(message)
         when Bubbletea::WindowSizeMessage
           Hive::Tui::Messages::WindowSized.new(cols: message.width, rows: message.height)
+        when Bubbletea::MouseMessage
+          translate_mouse(message)
         when Hive::Tui::Messages::RawTextInput
           translate_raw_text_input(message)
         else
@@ -312,6 +315,20 @@ module Hive
           return Hive::Tui::Messages::NOOP if text.empty?
 
           Hive::Tui::Messages::FilterTextInserted.new(text: text)
+        else
+          Hive::Tui::Messages::NOOP
+        end
+      end
+
+      def translate_mouse(message)
+        return Hive::Tui::Messages::NOOP unless @hive_model.mode == :help
+        return Hive::Tui::Messages::NOOP unless message.wheel?
+
+        case message.button
+        when Bubbletea::MouseMessage::BUTTON_WHEEL_UP
+          Hive::Tui::Messages::HelpScroll.new(direction: :up, amount: HELP_WHEEL_SCROLL_LINES)
+        when Bubbletea::MouseMessage::BUTTON_WHEEL_DOWN
+          Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: HELP_WHEEL_SCROLL_LINES)
         else
           Hive::Tui::Messages::NOOP
         end

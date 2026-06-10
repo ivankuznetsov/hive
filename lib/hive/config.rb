@@ -1663,9 +1663,11 @@ module Hive
     PATROL_TRIGGERS = %w[new_commits timer continuous].freeze
     PATROL_MODES = %w[ultrapatrol high medium low off].freeze
     # Default offered by the `hive init` prompt (what a new project opts into
-    # when it accepts the suggestion). `low` patrols on new commits rather than
-    # on a timer, which keeps token spend modest; users can dial up explicitly.
-    DEFAULT_PATROL_MODE = "low".freeze
+    # when it accepts the suggestion). `medium` patrols on a 4h timer. `low`
+    # would patrol on every new commit, which is costlier on busy repos, so
+    # `medium`'s steady cadence is the better default; users can dial up or
+    # down explicitly.
+    DEFAULT_PATROL_MODE = "medium".freeze
     PATROL_MODE_KNOBS = {
       "ultrapatrol" => {
         "trigger" => "timer",

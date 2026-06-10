@@ -100,8 +100,14 @@ module Hive
         { ok: true, question_n: question.n }
       end
 
-      def new_idea(project:, text:)
-        Hive::Commands::New.new(project, text).call
+      # `call!` (not `call`): the CLI wrapper rescues typed errors and
+      # `exit 1`, which inside a web worker surfaces as an opaque blank 500.
+      # call! raises the typed Hive::Error subclasses the web tier already
+      # maps to a readable error page. `attachments` is the same
+      # [[src_path, dest_name], ...] contract the TUI uses — files land in
+      # the task's assets/ dir next to the [imageN] placeholders in `text`.
+      def new_idea(project:, text:, attachments: [])
+        Hive::Commands::New.new(project, text, attachments: attachments).call!
       end
 
       private

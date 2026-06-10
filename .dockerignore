@@ -22,3 +22,10 @@ vendor/bundle
 *.key
 data/
 hivebox-data/
+
+# Rails web app junk — never in the image
+web/log/
+web/tmp/
+web/storage/
+web/node_modules/
+web/test/

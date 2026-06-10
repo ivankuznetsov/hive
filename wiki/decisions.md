@@ -9,6 +9,35 @@ tags: [decisions, adr]
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's paste-the-code agent OAuth relay instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in (no callback URL, no client secret).
 
+## ADR-037: Hivebox web tier is a vanilla Rails 8 + Turbo app, replacing the Sinatra tier
+
+**Status:** Active (replaced the Sinatra/Puma tier before PR #300 merged, 2026-06-10).
+
+**Context:** The first web tier was Sinatra + hand-rolled SSE + hand-written
+DOM-reconciliation JS. It worked, but live updates needed a bespoke
+SSE limiter/heartbeat stack, the UI read as utilitarian, and every new
+surface meant more custom JS — against the owner's "native Turbo over JS"
+rule.
+
+**Decision:** The web UI is a vanilla `rails new` app (importmap, Turbo,
+Stimulus, propshaft, sqlite solid stack) in `web/`, with the gem's
+transport-agnostic classes (`GithubAuth`, `StatusFeed`, `Dispatcher`,
+`AgentsAuth`, Telegram validators, `SessionSecret`) as its only bridge to
+the pipeline. Live status flows over Turbo Streams broadcast from a
+`StatusFeed` subscriber; the only timers in JS are a frame poller (Turbo has
+no native timed refresh) and the composer's paste/upload handler. `hive web`
+execs `bin/rails server` from the app dir; the gem does not package the app
+(Docker image or source checkout only). The UI design language follows
+claude.com: warm ivory/charcoal surfaces, terracotta accent, serif display
+headings, hairline borders, calm dark mode.
+
+**Consequences:** SSE limiter, custom reconciliation JS, and the Sinatra
+route/view tree are gone (−sinatra, −rack-protection, −puma gem deps). The
+image gains a second bundle + asset precompile. Browser-level coverage moved
+to Capybara + Playwright system tests with a dev/test-only login seam.
+Authorization, device flow, and the no-new-pipeline-logic constraint are
+unchanged (ADR-036 still applies).
+
 ## ADR-036: Hivebox operator sign-in uses GitHub OAuth device flow, not the callback web flow
 
 **Status:** Active (replaced the authorization-code web flow before PR #300 merged, 2026-06-10).

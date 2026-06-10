@@ -35,12 +35,6 @@ Gem::Specification.new do |spec|
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "lib/**/*.rb",
-    # hivebox web UI assets: ERB view templates and static CSS/JS. Without
-    # these the installed gem ships no templates and `hive web` 500s on every
-    # rendered page (the source tree masks it — views resolve relative to
-    # __dir__ at dev time).
-    "lib/hive/web/views/*.erb",
-    "public/**/*",
     "templates/**/*",
     "schemas/**/*.json",
     "examples/systemd/*",
@@ -65,9 +59,6 @@ Gem::Specification.new do |spec|
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
   spec.add_dependency "lipgloss", "~> 0.2.2"
-  spec.add_dependency "puma", "~> 7.2", ">= 7.2.1"
-  spec.add_dependency "rack-protection", "~> 4.1"
-  spec.add_dependency "sinatra", "~> 4.1"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"

@@ -1,0 +1,65 @@
+<% content_for(:title, "hivebox — repos") %>
+<h1>Repos</h1>
+
+<h2>Registered</h2>
+<% if @projects.empty? %>
+  <div class="empty-state">
+    <p>No repositories registered yet.</p>
+    <p class="hint">Pick one of your GitHub repositories below, or clone by URL.</p>
+  </div>
+<% else %>
+  <div class="repo-list">
+    <% @projects.each do |project| %>
+      <article class="repo-row">
+        <div>
+          <span class="repo-name"><%= project["name"] %></span>
+          <span class="repo-desc"><%= project["path"] %></span>
+        </div>
+        <span class="tag tag-registered">registered</span>
+      </article>
+    <% end %>
+  </div>
+<% end %>
+
+<h2>Clone by URL</h2>
+<%= form_with url: create_repo_path, class: "repo-form" do |f| %>
+  <%= f.text_field :url, placeholder: "https://github.com/org/repo or org/repo",
+        required: true, aria: { label: "Repository URL" } %>
+  <%= f.text_field :name, placeholder: "Name (optional)", aria: { label: "Local name" } %>
+  <%= f.submit "Clone and init", data: { turbo_submits_with: "Cloning…" } %>
+<% end %>
+
+<h2>Your GitHub repositories</h2>
+<% if @github_error %>
+  <div class="flash flash-alert"><%= @github_error %></div>
+<% elsif @github_repos.nil? %>
+  <p class="muted">Sign in again to grant repository access.</p>
+<% elsif @github_repos.empty? %>
+  <div class="empty-state"><p>No repositories on this GitHub account.</p></div>
+<% else %>
+  <div class="repo-list">
+    <% @github_repos.each do |repo| %>
+      <article class="repo-row">
+        <div>
+          <span class="repo-name"><%= repo["full_name"] %></span>
+          <% if repo["description"].present? %>
+            <span class="repo-desc"><%= repo["description"] %></span>
+          <% end %>
+          <span class="repo-tags">
+            <% if repo["private"] %><span class="tag tag-private">private</span><% end %>
+            <% if repo["language"].present? %><span class="tag"><%= repo["language"] %></span><% end %>
+            <% if repo["pushed_at"].present? %>
+              <span>pushed <%= relative_age(Time.now - Time.iso8601(repo["pushed_at"])) %></span>
+            <% end %>
+          </span>
+        </div>
+        <% if repo["registered"] %>
+          <span class="tag tag-registered">registered</span>
+        <% else %>
+          <%= button_to "Add to hive", create_repo_path, params: { url: repo["full_name"] },
+                class: "btn-secondary btn-sm", data: { turbo_submits_with: "Cloning…" } %>
+        <% end %>
+      </article>
+    <% end %>
+  </div>
+<% end %>

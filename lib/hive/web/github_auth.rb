@@ -46,10 +46,12 @@ module Hive
 
       # Begin a device authorization. Returns the GitHub payload Hash:
       # "device_code", "user_code", "verification_uri", "expires_in" (sec),
-      # "interval" (minimum seconds between polls).
-      def start_device_flow
+      # "interval" (minimum seconds between polls). The default scope only
+      # identifies the operator; the Rails web app passes "repo" so the
+      # granted token can also list/clone the operator's repositories.
+      def start_device_flow(scope: "read:user")
         body = post_form(DEVICE_CODE_URL, "GitHub device authorization",
-                         client_id: client_id, scope: "read:user")
+                         client_id: client_id, scope: scope)
         raise Hive::Error, "GitHub device authorization failed: #{body["error_description"] || body["error"]}" if body["error"]
 
         %w[device_code user_code verification_uri expires_in interval].each do |key|
@@ -59,13 +61,16 @@ module Hive
       end
 
       # Poll the token endpoint once for the device grant. Returns:
-      #   { state: :ok, login: "alice" }       — authorized; login resolved
+      #   { state: :ok, login: "alice", token: "gho_..." } — authorized
       #   { state: :pending }                  — operator hasn't approved yet
       #   { state: :slow_down, interval: 10 }  — back off to the new interval
       #   { state: :denied }                   — operator cancelled the grant
       #   { state: :expired }                  — device code expired; restart
       # Anything else raises Hive::Error. GitHub reports all of these as HTTP
-      # 200 with an `error` field, not via status codes.
+      # 200 with an `error` field, not via status codes. The granted token is
+      # returned so callers that asked for a broader scope (the Rails web
+      # app's repo listing) can keep it; callers that only gate on identity
+      # may ignore it.
       def poll_device_flow(device_code)
         body = post_form(TOKEN_URL, "GitHub device grant poll",
                          client_id: client_id, device_code: device_code, grant_type: GRANT_TYPE)
@@ -74,7 +79,7 @@ module Hive
           token = body["access_token"]
           raise Hive::Error, "GitHub device grant returned no access_token" if token.to_s.empty?
 
-          { state: :ok, login: login_for_token(token) }
+          { state: :ok, login: login_for_token(token), token: token }
         when "authorization_pending" then { state: :pending }
         when "slow_down" then { state: :slow_down, interval: body.fetch("interval", 5).to_i }
         when "access_denied" then { state: :denied }

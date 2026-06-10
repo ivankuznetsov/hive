@@ -1,0 +1,10 @@
+<%= turbo_frame_tag "task-log" do %>
+  <div class="log-pane">
+    <% if log %>
+      <pre data-log-tail><%= log["tail"] %></pre>
+      <p class="faint"><%= File.basename(log["path"]) %></p>
+    <% else %>
+      <p class="muted">No log yet for this task.</p>
+    <% end %>
+  </div>
+<% end %>

@@ -1,0 +1,12 @@
+<% content_for(:title, "hivebox — #{heading.downcase}") %>
+<div class="card auth-card">
+  <h1><%= heading %></h1>
+  <p><%= message %></p>
+  <p>
+    <% if current_login %>
+      <%= link_to "Back to status", root_path %>
+    <% else %>
+      <%= link_to "Back to sign-in", login_path %>
+    <% end %>
+  </p>
+</div>

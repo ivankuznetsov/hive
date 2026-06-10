@@ -1,0 +1,13 @@
+<% content_for(:title, "hivebox — diff #{@row["slug"]}") %>
+<div class="task-header">
+  <h1>Diff</h1>
+  <%= stage_badge(@row["stage"]) %>
+</div>
+<p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
+<p><%= link_to "← Back to task", task_path(@project["name"], @row["slug"]) %></p>
+
+<% if @diff.strip.empty? %>
+  <div class="empty-state"><p>The worktree has no uncommitted changes.</p></div>
+<% else %>
+  <pre><%= @diff %></pre>
+<% end %>

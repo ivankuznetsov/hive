@@ -23,4 +23,7 @@ Terminate TLS at a reverse proxy or tunnel such as Caddy, Cloudflare Tunnel, or
 Tailscale. hivebox serves plain HTTP inside the container.
 
 `docker exec` plus `tmux` remains available for emergency shell access, but the
-supported operator surface is the authenticated web UI.
+supported operator surface is the authenticated web UI — a Rails 8 + Turbo
+app served by `hive web` inside the container (live status over Turbo
+Streams, image-attaching idea composer, your GitHub repo list one click from
+registration).

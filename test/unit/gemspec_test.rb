@@ -18,19 +18,15 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "bin/hv"
   end
 
-  # Regression: the installed gem must ship the hivebox web UI assets. The
-  # source tree masks their absence (views/public resolve relative to __dir__
-  # at dev time), but a packaged gem without them makes `hive web` 500 on
-  # every rendered page.
-  def test_gem_package_includes_web_view_and_public_assets
+  # The web tier is a Rails app under web/, supported only in the Docker
+  # image or a source checkout — the gem must stay a lean CLI and not
+  # package the app or its old Sinatra-era assets.
+  def test_gem_package_excludes_the_rails_web_app
     spec = Gem::Specification.load(GEMSPEC_PATH)
 
-    assert_includes spec.files, "lib/hive/web/views/login.erb",
-                    "web ERB view templates must be packaged"
-    assert_includes spec.files, "lib/hive/web/views/layout.erb"
-    assert_includes spec.files, "public/css/app.css",
-                    "web static CSS must be packaged"
-    assert_includes spec.files, "public/js/sse.js",
-                    "web static JS must be packaged"
+    refute spec.files.any? { |f| f.start_with?("web/") },
+           "the Rails app must not ship inside the gem"
+    refute spec.files.any? { |f| f.start_with?("public/") },
+           "no Sinatra-era static assets should be packaged"
   end
 end

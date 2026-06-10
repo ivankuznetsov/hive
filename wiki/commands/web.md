@@ -1,153 +1,96 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, lib/hive/web/, hive.gemspec, public/, packaging/docker/
+source: lib/hive/commands/web.rb, web/, packaging/docker/
 created: 2026-06-04
 updated: 2026-06-10
-tags: [command, web, hivebox]
+tags: [command, web, hivebox, rails, turbo]
 ---
 
-**TLDR**: `hive web` starts the hivebox Sinatra/Puma web UI. The UI is an
-authenticated browser surface over existing Hive primitives: status reads call
-`Hive::Commands::Status#json_payload`, workflow dispatch writes daemon queue
-requests, gate approval calls `Hive::Commands::Approve`, and setup flows write
-the same global config and credential files used by the CLI, daemon, bot, and
-agent profiles.
+**TLDR**: `hive web` boots the hivebox web UI — a vanilla **Rails 8** app
+(importmap, Turbo, Stimulus, propshaft, solid_cable) living in `web/` at the
+repo root, shipped in the Docker image at `/app/web`. The web tier adds no
+pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
+`Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
+in-process, stage runs go through the daemon dispatch queue
+(`Hive::Web::Dispatcher`), and setup flows reuse `Hive::Web::GithubAuth`,
+`AgentsAuth`, and the Telegram validators from the gem.
 
 ## CLI
 
-`lib/hive/cli.rb` registers `hive web` with two options:
-
-| Option | Effect |
-|--------|--------|
-| `--bind` | Overrides `web.bind` for this server run. |
-| `--port` | Overrides `web.port` for this server run. |
-
-`Hive::Commands::Web#call` loads `Hive::Config.load_global_web`, requires Puma,
-mounts `Hive::Web::App`, adds one TCP listener, prints the listening URL, and
-joins the Puma server thread. It is a foreground server command. Puma runs with
-`MAX_THREADS = 32`; the SSE stream cap is `MAX_SSE_STREAMS = 24`, leaving eight
-threads for auth/action/diff requests even when dashboards and log tails are
-open. A `0.0.0.0` bind without an `https://` `web.origin` emits a startup
-warning because Rack::Protection host authorization is disabled for the box and
-a trusted reverse proxy or tunnel must validate Host.
-
-## Surface
-
-- `/` renders the live status grid from the same status JSON consumed by
-  [[commands/tui]].
-- `/events` streams changed status snapshots as named `status` server-sent
-  events. All subscribers share one background `StatusFeed` poller, unchanged
-  snapshots become keep-alives, and `SseLimiter` returns a plain 503 before the
-  response switches to `text/event-stream` when the stream cap is full.
-- `/tasks/:project/:slug` shows task artifacts and forms for approve, dispatch,
-  and intervention notes.
-- `/tasks/:project/:slug/diff` validates the slug, shells out to array-form
-  `git -C <worktree> diff --` for the task's configured worktree root, and
-  returns 422 instead of rendering stderr as a diff when git fails.
-- `/tasks/:project/:slug/logs` validates the slug, tails the newest task log
-  under `<hive_state_path>/logs/<slug>/` as named `log` SSE events, releases its
-  stream slot on client disconnect or bounded idle timeout, and uses the same
-  stream cap as `/events`.
-- `POST /tasks/:project/:slug/approve` and `/reject` call
-  `Hive::Commands::Approve`; `POST /tasks/:project/:slug/dispatch` writes a
-  daemon dispatch request using the same queue writer as [[modules/bot]].
-- `POST /tasks/:project/:slug/intervene` writes the operator message into the
-  next unanswered slot of `brainstorm.md` via the same
-  `Hive::Bot::BrainstormAnswerWriter` path used by Telegram answers; it is only
-  valid while the task has a brainstorm file with an unanswered question.
-- `POST /ideas` calls `Hive::Commands::New`.
-- `/agents` orchestrates Claude/Codex login in a PTY and writes Pi auth JSON.
-- `/repos` lists registered projects. `POST /repos` accepts github.com
-  HTTPS/SSH URLs or `owner/repo` shorthand, clones through `gh repo clone` into
-  `HIVEBOX_REPOS_DIR` (default `/data/repos`) when the target does not exist,
-  and otherwise re-runs `hive init` in the existing checkout.
-- `POST /repos/:name/delete` unregisters a repo through `Hive::Commands::Forget`.
-- `/telegram` validates the bot token with Telegram `getMe` before writing the
-  global bot config and `.env` token consumed by [[commands/bot]]. The
-  `/telegram/test` POST sends a real test message to configured chats, and a
-  successful save SIGHUPs the container supervisor via `HIVEBOX_SUPERVISOR_PID`
-  so the bot can start without recreating the container.
+`hive web [--bind] [--port]` (defaults from the `web:` config block). The
+command locates the Rails app (`HIVEBOX_WEB_APP_DIR` override, else `web/`
+next to `lib/`), exports `SECRET_KEY_BASE` (derived from the same persisted
+`Hive::Web::SessionSecret` file as before — sessions survive container
+recreation), `HIVEBOX_ORIGIN` (Action Cable origin check), and
+`HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
+`Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
+`bin/rails db:prepare`, then execs `bin/rails server`. Outside the container
+or a source checkout the command exits 1 with guidance — the gem itself does
+not package the Rails app (`test/unit/gemspec_test.rb` pins that).
 
 ## Auth
 
-Every route except `/health`, `/login`, `/logout`, and the `/auth/github*`
-sign-in routes is behind the GitHub owner gate. The session secret comes from
-`HIVEBOX_SESSION_SECRET` or a generated file under `Hive::Paths.state_home` so
-container restarts preserve sessions; cookies are `HttpOnly`, `SameSite=Lax`,
-and `Secure` when `web.origin` is HTTPS. POST/PUT/DELETE routes require the
-session CSRF token emitted by `csrf_tag`.
+GitHub **device flow** (RFC 8628, see [[decisions]] ADR-036), owner-only.
+`POST /auth/github` starts the flow with scope `repo`; the wait page polls at
+GitHub's interval (one poll per render, `slow_down`-aware). On grant the app
+keeps the login AND the token in the encrypted Rails session — the token
+powers the Repos page's listing of the operator's GitHub repositories and
+authenticates `gh repo clone` (passed as `GH_TOKEN`, never persisted).
+Non-owner logins, denied grants, and expired codes render 403 pages. A
+dev/test-only `/dev_login` seam (route drawn only when `Rails.env.local?`,
+double-checked in the action) is how Capybara signs in without driving real
+GitHub.
 
-GitHub auth is owner-only and uses the OAuth **device flow** (RFC 8628): no
-callback URL and no client secret exist, so the gate works identically on
-localhost and behind any tunnel/proxy with zero per-deployment OAuth-app
-configuration. `POST /auth/github` (a CSRF-protected form on `/login`) calls
-`Hive::Web::GithubAuth#start_device_flow` and stores the device session in the
-signed cookie; `GET /auth/github/wait` shows the user code (entered at
-github.com/login/device), meta-refreshes every poll interval, and performs at
-most one GitHub poll per render — gated by `next_poll_at` and honoring
-`slow_down`. On a granted poll the app resolves the login via
-`https://api.github.com/user`, admits only the configured `web.github.owner`
-case-insensitively, and renews the session at the auth boundary. Denied
-grants, expired device codes, and non-owner logins surface as 403 pages;
-GitHub transport failures map to `Hive::Error` (friendly 422), not a blank
-500. `web.github.client_id` defaults to the shared hivebox OAuth app — public
-by design; operators may override it with their own device-flow-enabled app.
+## Surfaces
 
-## Agent Auth Relay
+- **Status grid (`/`)** — composer (new idea with image attach: clipboard
+  paste AND upload button; images become `[imageN]` placeholders and land in
+  the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
+  task rows with stage badges and liveness dots. Live-updates over **Turbo
+  Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`,
+  strips volatile fields (`age_seconds`), and broadcasts a replace of the
+  `projects` frame over solid_cable. No polling JS, no SSE.
+- **Task page** — artifacts (idea/brainstorm/plan/…), Approve /
+  Run stage / Diff / Reject / Force approve (ghost-styled, confirm-gated),
+  intervene box (BrainstormAnswerWriter), log tail in a turbo-frame refreshed
+  by a small Stimulus poll controller.
+- **Repos** — registered projects, clone-by-URL (same allowlist as before:
+  github.com https/ssh or `owner/repo`, leading-dash guard), and the
+  operator's GitHub repository list (device-flow token; degrades to an inline
+  notice when GitHub is unreachable or the grant was revoked).
+- **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
+  meta-refresh; pi token form.
+- **Telegram** — getMe-validated token save, allowlist, supervisor SIGHUP,
+  round-trip test message.
 
-The Claude and Codex login flows run the actual provider CLI in a PTY:
+Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
+404) — never a blank 500. CSRF is Rails-default (per-form tokens); every
+route except `/health`, `/login`, `/auth/github*`, and `/up` is behind the
+owner gate.
 
-| Agent | Command |
-|-------|---------|
-| Claude | `claude setup-token` |
-| Codex | `codex login` |
-| Pi | direct JSON write to `~/.pi/agent/auth.json` |
+## Tests
 
-Hivebox captures the first `http(s)://` URL from PTY output, asks the operator to
-open the provider URL directly, and writes the pasted code or callback URL back
-to the waiting PTY. It does not proxy provider login pages. Login sessions are
-bounded by a four-session concurrency cap, a watchdog timeout, and process-group
-termination; `complete` waits briefly for success or a clear rejected-code
-signal instead of silently redirecting. The design note is
-`docs/notes/hivebox-agent-oauth-relay.md`; see [[decisions]] ADR-035.
+`web/test/integration/` drives the real GithubAuth through the device-flow
+routes via the `http:` DI seam (no API stubbing), and the real
+`Commands::New`/`Approve` against a sandboxed `HIVE_HOME` (the suite NEVER
+touches the developer's real config — `test_helper.rb` sets the sandbox
+before the app loads). `web/test/system/` runs Capybara +
+**capybara-playwright-driver**: login gate, composer image attach (upload
+button for real; clipboard paste via a synthetic DataTransfer event — the
+sanctioned JS exception), Turbo Stream live row arrival without reload, and
+both approve paths (typed refusal page + confirmed force). CI runs both in
+the `web` job (`.github/workflows/ci.yml`) plus the web app's own rubocop.
 
 ## Docker
 
-`packaging/docker/` builds the hivebox image from `ruby:3.4-slim`. The image
-installs OS tools needed by the box (`git`, `gh`, `tmux`, `nodejs`, `npm`,
-`tini`, and build/runtime helpers), copies the repository into `/app`, runs
-Bundler without development/test groups, builds the `hive-cli` gem, installs it,
-and installs the Claude, Codex, and Pi CLIs globally through npm. The npm
-install is fail-closed: a build missing those agent binaries fails instead of
-shipping a box whose `/agents` login flows cannot start the expected CLIs.
-
-`hive.gemspec` includes both `lib/hive/web/views/*.erb` and `public/**/*` in
-the runtime gem payload. This matters for installed `hive web` and for the
-Docker build, which runs from the built gem: the source tree can render views
-from `__dir__`, but an installed gem without those ERB templates and CSS/JS
-assets would render `/login` and other pages as server errors.
-
-The Docker entrypoint is `/usr/bin/tini -- hivebox-entrypoint`. The entrypoint
-ensures `/data/home`, `/data/repos`, `/data/config`, `/data/state`,
-`/data/cache`, and `/data/share` exist, executes custom argv when arguments are
-passed, and otherwise runs `Hive::Web::Supervisor`. The supervisor starts
-`hive daemon start`, `hive web --bind 0.0.0.0`, and `hive bot start
---foreground` when global bot config is enabled. While `run` is active it
-publishes `HIVEBOX_SUPERVISOR_PID` so the web child can SIGHUP the supervisor
-after enabling Telegram, then restores the caller's prior env value and signal
-traps on exit. Crashed daemon/web/bot children restart, fast failures back off,
-clean exits and signal deaths do not respawn, and shutdown drains all child
-process groups concurrently within the configured daemon grace window before
-SIGKILL escalation. The container healthcheck calls `GET /health` on
-`127.0.0.1:4567`.
-
-`/data` is the persistence boundary: `HOME`, XDG config/state/cache/data, repos,
-Hive state, generated session secret, and agent credential dirs all live there.
-`packaging/docker/compose.example.yml` binds `./hivebox-data:/data` and passes
-an optional `HIVEBOX_SESSION_SECRET` (GitHub sign-in needs no secrets — device
-flow). The image serves plain HTTP on port 4567; TLS is expected at a reverse
-proxy or tunnel.
+`packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
+the gem builds/installs from `/app`; the Rails app bundles and precompiles
+assets (propshaft — no node build) at `/app/web` with a dummy build-time
+secret. The supervisor still spawns `hive web --bind 0.0.0.0` — unchanged
+interface, now exec-ing Rails. The healthcheck hits the Rails `/health`.
+`/data` remains the persistence boundary; the sqlite files for
+cable/cache/queue live under `/data/state/hive/web-storage`.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
-[[modules/bot]].
+[[modules/bot]], [[decisions]].

@@ -1,0 +1,49 @@
+<% content_for(:title, "hivebox — #{task_title(@row)}") %>
+
+<div class="task-header">
+  <h1><%= task_title(@row) %></h1>
+  <%= stage_badge(@row["stage"]) %>
+  <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
+</div>
+<p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
+
+<div class="task-actions">
+  <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
+        params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
+  <%= button_to "Run stage", task_run_path(@project["name"], @row["slug"]),
+        params: { action_name: "run", stage: @row["stage"] }, class: "btn-secondary",
+        data: { turbo_submits_with: "Queueing…" } %>
+  <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary" %>
+  <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
+        params: { from: @row["stage"] }, class: "btn-danger",
+        data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
+  <%# Deliberately last and ghost-styled: it bypasses the gate's completion
+      marker, so it must not read as the default next action. %>
+  <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
+        params: { from: @row["stage"], force: "1" }, class: "btn-ghost",
+        data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+</div>
+
+<%= form_with url: task_intervene_path(@project["name"], @row["slug"]), class: "intervene" do |f| %>
+  <%= f.label :message, "Steer or answer the agent" %>
+  <%= f.text_area :message, required: true, placeholder: "Answer a brainstorm question, or steer the next run…" %>
+  <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
+<% end %>
+
+<% if @log %>
+  <h2>Log</h2>
+  <%= turbo_frame_tag "task-log", src: task_log_path(@project["name"], @row["slug"]),
+        data: { controller: "poll", poll_interval_value: 3000 } do %>
+    <div class="log-pane"><pre>Loading log…</pre></div>
+  <% end %>
+<% end %>
+
+<% if @files.any? %>
+  <h2>Artifacts</h2>
+  <% @files.each_with_index do |(name, content), i| %>
+    <details class="artifact" <%= "open" if i.zero? %>>
+      <summary><%= name %></summary>
+      <div class="artifact-body"><pre><%= content %></pre></div>
+    </details>
+  <% end %>
+<% end %>

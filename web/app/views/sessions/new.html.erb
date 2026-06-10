@@ -1,0 +1,8 @@
+<% content_for(:title, "hivebox — sign in") %>
+<div class="card auth-card">
+  <h1>hivebox</h1>
+  <p>This box is gated to its configured GitHub owner.</p>
+  <%= form_with url: auth_github_path do |f| %>
+    <%= f.submit "Continue with GitHub", data: { turbo_submits_with: "Contacting GitHub…" } %>
+  <% end %>
+</div>

@@ -33,6 +33,30 @@ jobs:
           HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
+  web:
+    name: hivebox web (Rails tests + system)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: web
+      - name: Install Playwright chromium for Capybara system tests
+        run: |
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Rails integration tests
+        run: bin/rails test
+      - name: Rails system tests (Capybara + Playwright)
+        run: bin/rails test:system
+      - name: rubocop (web)
+        run: bin/rubocop --format github
+
   rubocop:
     name: rubocop (37signals omakase)
     runs-on: ubuntu-latest

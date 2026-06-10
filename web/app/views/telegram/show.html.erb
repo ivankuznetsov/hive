@@ -1,0 +1,20 @@
+<% content_for(:title, "hivebox — telegram") %>
+<h1>Telegram</h1>
+<p class="muted">Connect the hive bot so you can drive the pipeline from Telegram. The token is validated against the real API before anything is saved.</p>
+
+<%= form_with url: update_telegram_path, class: "form-grid" do |f| %>
+  <div class="form-row">
+    <%= f.label :token, "Bot token" %>
+    <%= f.password_field :token, required: true, placeholder: @bot["enabled"] ? "Saved — enter a new token to rotate" : "123456:ABC…" %>
+  </div>
+  <div class="form-row">
+    <%= f.label :chat_ids, "Allowed chat IDs (comma or space separated)" %>
+    <%= f.text_field :chat_ids, value: Array(@bot["chat_id_allowlist"]).join(", ") %>
+  </div>
+  <p><%= f.submit "Validate and save", data: { turbo_submits_with: "Validating…" } %></p>
+<% end %>
+
+<h2>Round trip</h2>
+<p class="muted">Sends a real message to every allowed chat with the saved token.</p>
+<%= button_to "Send test message", test_telegram_path, class: "btn-secondary",
+      data: { turbo_submits_with: "Sending…" } %>

@@ -100,7 +100,8 @@ class GithubAuthTest < Minitest::Test
 
     result = auth.poll_device_flow("dev-1")
 
-    assert_equal({ state: :ok, login: "octo" }, result)
+    assert_equal({ state: :ok, login: "octo", token: "tok" }, result,
+                 "the granted token must be returned for callers that need API access (repo listing)")
     token_req = http.requests.find { |r| r.path.include?("/login/oauth/access_token") }
     assert token_req, "the poll must hit the token endpoint"
     assert_match(/device_code=dev-1/, token_req.body)

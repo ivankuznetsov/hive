@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/workflows.rb, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-06-10
 tags: [commands, api]
@@ -18,6 +18,7 @@ not add a second runtime and does not publish one ClawHub listing per Hive verb.
 - `bin/hive`
 - `bin/hv`
 - `bin/hive-e2e`
+- `lib/hive/workflows.rb`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
 
@@ -47,7 +48,9 @@ mapped agent-callable surfaces rather than leaving callers with empty stdout
 and Thor prose on stderr. The wrapper map currently covers `run`, `approve`,
 `drop`, `findings`, `accept-finding`, `reject-finding`, workflow verbs
 (`brainstorm` through `archive`, with `pr` normalized to `open-pr`), `markers`,
-`patrol`, `prune`, and `status`; other command-local JSON errors are handled
+`patrol`, `prune`, and `status`; the workflow-verb set comes from
+`Hive::Workflows::VERBS` so command renames/additions do not require a second
+stage-action list in the wrapper. Other command-local JSON errors are handled
 after normal Thor dispatch by their command classes where supported.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the

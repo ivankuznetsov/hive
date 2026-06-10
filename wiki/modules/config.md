@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-10
 tags: [config, yaml, validation]
 ---
 

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-09
+updated: 2026-06-10
 tags: [test, minitest, fixtures]
 ---
 
@@ -78,11 +78,14 @@ task default: :test
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, `gh api` implicit-POST payload flag blocking, git executable/write-option skips, env config/command seam skips, hermetic HOME/XDG/local git config passthrough guards, `--textconv` abbreviation and `cat-file --filters` skips, subcommand `-p` passthrough, `grep`/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, and pathspec separator handling. |
 | `openclaw_skills_test.rb` | OpenClaw skill metadata — only the umbrella `hive-cli` listing is published, setup stays visible before the CLI is installed, `/hive` common paths include `wiki compile-log --check`, fragment-first changelog guidance is present, destructive/foreground admin commands require confirmation, and README publish instructions avoid shortcut listings. |
 | `commands/babysit_test.rb` | `Hive::Commands::Babysit` — lifecycle command routing, PID-file ownership handling, stale-runtime status/reload warnings, foreground restart, detached restart re-exec into canonical `start --detach` through the stable invoked wrapper, aborting restart and failing direct stop after a refused stop, clear detached re-exec failure reporting, initial/post-grace ownership-probe clean-exit handling, pre-KILL ownership refusal, bounded PID-lock timeout, guarded stop cleanup that preserves a replacement PID file, and skip-KILL PID-file preservation when ownership becomes unverified. |
-| `web/app_test.rb` | `Hive::Web::App` — public health endpoint and unauthenticated redirect to `/login`. |
-| `web/status_feed_test.rb` | `Hive::Web::StatusFeed` — status snapshots call the registered-project status payload path. |
-| `web/agents_auth_test.rb` | `Hive::Web::AgentsAuth` — Pi token JSON rejection/persistence and `AgentProfiles.logged_in?` integration. |
-| `web/github_auth_test.rb` | `Hive::Web::GithubAuth` — GitHub authorize URL construction and case-insensitive owner matching. |
-| `web/config_test.rb` | Global web config defaults and validation failures. |
+| `web/web_command_test.rb` | `Hive::Commands::Web` — Puma listener wiring, config fallback, SSE headroom constants, and public-bind warning policy. |
+| `web/app_test.rb`, `web/github_auth_flow_test.rb`, `web/github_auth_test.rb`, `web/session_secret_test.rb` | `Hive::Web::App` / auth — public health endpoint, unauthenticated login redirect, GitHub OAuth URL/callback owner gate, state/denied-consent failures, session renewal, persisted session secret, and case-insensitive owner matching. |
+| `web/status_feed_test.rb`, `web/status_routes_test.rb`, `web/sse_limiter_test.rb` | Hivebox status/read routes — registered-project snapshots, shared one-scan-per-tick SSE polling, dedup/keep-alive, stream limiter 503/release behavior, named `status`/`log` SSE frames, safe slug guards, diff 404/422 handling, and bounded log-tail idle release. |
+| `web/actions_test.rb`, `web/dispatcher_test.rb` | Hivebox mutation routes and dispatcher — CSRF enforcement, approve/reject routing, dispatch action allowlist, URI-safe redirects, known-project validation, web brainstorm-answer intervention writes, and daemon queue requests. |
+| `web/agents_auth_test.rb`, `web/agents_auth_login_test.rb`, `web/agents_routes_test.rb` | `Hive::Web::AgentsAuth` — Claude/Codex PTY login URL capture, pasted-code relay, rejected-code errors, watchdog/process-group cleanup, concurrent-session cap, Pi token JSON rejection/persistence, and route wiring. |
+| `web/repos_routes_test.rb` | Hivebox repo setup routes — GitHub URL/shorthand allowlist, leading-dash rejection, repo-name sanitization, `gh repo clone`, existing-checkout `hive init`, and delete/forget CSRF boundaries. |
+| `web/telegram_routes_test.rb`, `web/telegram_transport_test.rb` | Hivebox Telegram wizard — token `getMe` validation before persistence, `.env` token rewrite, global bot config enablement, saved-token test-message path, and supervisor SIGHUP tolerance. |
+| `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
 | `stages/review/run_reviewers_test.rb` | `Hive::Stages::Review.run_reviewers` — reviewer list selection for normal vs patrol-sourced tasks, per-reviewer failures, wall-clock deadlines, shared Claude tmux sessions, and GitHub comment mirroring. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |

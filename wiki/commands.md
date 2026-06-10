@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, public/, hive.gemspec, packaging/docker/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-09
+updated: 2026-06-10
 tags: [commands, api]
 ---
 

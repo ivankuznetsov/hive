@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-10
 tags: [architecture, overview]
 ---
 
@@ -240,9 +240,11 @@ hive web  →  Hive::Commands::Web
                └─ Puma::Server(Hive::Web::App)
                     ├─ GithubAuth → GitHub OAuth owner gate
                     ├─ StatusFeed → Hive::Commands::Status#json_payload
+                    ├─ SseLimiter → bounded status/log stream slots
                     ├─ Dispatcher
                     │    ├─ approve/reject → Hive::Commands::Approve
                     │    ├─ workflow action → DispatchRequestWriter → daemon queue
+                    │    ├─ brainstorm answer → BrainstormAnswerWriter
                     │    └─ new idea → Hive::Commands::New
                     ├─ AgentsAuth → PTY relay for Claude/Codex login; Pi token file
                     └─ routes for task artifacts, diffs, logs, repos, and Telegram config
@@ -253,9 +255,14 @@ CSRF tokens for mutations. GitHub provider pages are never proxied under the
 hivebox origin. Claude/Codex login is a paste-the-code relay into the real CLI
 PTY, while Pi stores non-empty JSON in `~/.pi/agent/auth.json`; with
 `HOME=/data/home`, all agent credential directories persist across image
-upgrades. The web routes still share the daemon single-dispatcher invariant from
-ADR-033: state-mutating workflow actions enqueue daemon dispatch requests
-instead of spawning `hive run` directly.
+upgrades. Status dashboards and task log tails use server-sent events, but all
+status subscribers share one background poller and a process-wide stream cap
+leaves Puma threads available for auth/action routes. The web routes still share
+the daemon single-dispatcher invariant from ADR-033: state-mutating workflow
+actions enqueue daemon dispatch requests instead of spawning `hive run`
+directly; web "intervene" answers are written through the same
+`BrainstormAnswerWriter` path as Telegram answers rather than through a separate
+state surface.
 
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 

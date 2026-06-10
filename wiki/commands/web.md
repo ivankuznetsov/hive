@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, hive.gemspec, public/, packaging/docker/
 created: 2026-06-04
-updated: 2026-06-08
+updated: 2026-06-10
 tags: [command, web, hivebox]
 ---
 
@@ -25,44 +25,66 @@ agent profiles.
 
 `Hive::Commands::Web#call` loads `Hive::Config.load_global_web`, requires Puma,
 mounts `Hive::Web::App`, adds one TCP listener, prints the listening URL, and
-joins the Puma server thread. It is a foreground server command.
+joins the Puma server thread. It is a foreground server command. Puma runs with
+`MAX_THREADS = 32`; the SSE stream cap is `MAX_SSE_STREAMS = 24`, leaving eight
+threads for auth/action/diff requests even when dashboards and log tails are
+open. A `0.0.0.0` bind without an `https://` `web.origin` emits a startup
+warning because Rack::Protection host authorization is disabled for the box and
+a trusted reverse proxy or tunnel must validate Host.
 
 ## Surface
 
 - `/` renders the live status grid from the same status JSON consumed by
   [[commands/tui]].
-- `/events` streams changed status snapshots as server-sent events.
+- `/events` streams changed status snapshots as named `status` server-sent
+  events. All subscribers share one background `StatusFeed` poller, unchanged
+  snapshots become keep-alives, and `SseLimiter` returns a plain 503 before the
+  response switches to `text/event-stream` when the stream cap is full.
 - `/tasks/:project/:slug` shows task artifacts and forms for approve, dispatch,
   and intervention notes.
-- `/tasks/:project/:slug/diff` shells out to array-form `git -C <worktree> diff
-  --` for the task's configured worktree root.
-- `/tasks/:project/:slug/logs` streams the newest task log under
-  `<hive_state_path>/logs/<slug>/`.
+- `/tasks/:project/:slug/diff` validates the slug, shells out to array-form
+  `git -C <worktree> diff --` for the task's configured worktree root, and
+  returns 422 instead of rendering stderr as a diff when git fails.
+- `/tasks/:project/:slug/logs` validates the slug, tails the newest task log
+  under `<hive_state_path>/logs/<slug>/` as named `log` SSE events, releases its
+  stream slot on client disconnect or bounded idle timeout, and uses the same
+  stream cap as `/events`.
 - `POST /tasks/:project/:slug/approve` and `/reject` call
   `Hive::Commands::Approve`; `POST /tasks/:project/:slug/dispatch` writes a
   daemon dispatch request using the same queue writer as [[modules/bot]].
-- `POST /tasks/:project/:slug/intervene` appends an operator note to
-  `web-interventions.md` in the task folder.
+- `POST /tasks/:project/:slug/intervene` writes the operator message into the
+  next unanswered slot of `brainstorm.md` via the same
+  `Hive::Bot::BrainstormAnswerWriter` path used by Telegram answers; it is only
+  valid while the task has a brainstorm file with an unanswered question.
 - `POST /ideas` calls `Hive::Commands::New`.
 - `/agents` orchestrates Claude/Codex login in a PTY and writes Pi auth JSON.
-- `/repos` clones repos into the box and runs `hive init`.
+- `/repos` lists registered projects. `POST /repos` accepts github.com
+  HTTPS/SSH URLs or `owner/repo` shorthand, clones through `gh repo clone` into
+  `HIVEBOX_REPOS_DIR` (default `/data/repos`) when the target does not exist,
+  and otherwise re-runs `hive init` in the existing checkout.
 - `POST /repos/:name/delete` unregisters a repo through `Hive::Commands::Forget`.
-- `/telegram` writes the global bot config and `.env` token consumed by
-  [[commands/bot]].
+- `/telegram` validates the bot token with Telegram `getMe` before writing the
+  global bot config and `.env` token consumed by [[commands/bot]]. The
+  `/telegram/test` POST sends a real test message to configured chats, and a
+  successful save SIGHUPs the container supervisor via `HIVEBOX_SUPERVISOR_PID`
+  so the bot can start without recreating the container.
 
 ## Auth
 
-Every route except `/health`, `/login`, and GitHub OAuth callback routes is
-behind the GitHub owner gate. The session secret comes from
+Every route except `/health`, `/login`, `/logout`, and GitHub OAuth callback
+routes is behind the GitHub owner gate. The session secret comes from
 `HIVEBOX_SESSION_SECRET` or a generated file under `Hive::Paths.state_home` so
-container restarts preserve sessions. POST/PUT/DELETE routes require the
+container restarts preserve sessions; cookies are `HttpOnly`, `SameSite=Lax`,
+and `Secure` when `web.origin` is HTTPS. POST/PUT/DELETE routes require the
 session CSRF token emitted by `csrf_tag`.
 
 GitHub auth is owner-only. `Hive::Web::GithubAuth` builds a GitHub OAuth URL
 from `web.origin`, `web.github.client_id`, and a random state; exchanges the
 callback code with `HIVEBOX_GITHUB_CLIENT_SECRET`; reads the authenticated login
 from `https://api.github.com/user`; and admits only the configured
-`web.github.owner` case-insensitively.
+`web.github.owner` case-insensitively. The callback rejects absent/mismatched
+OAuth state, denied-consent callbacks with no code, and non-owner logins, then
+renews the session at the auth boundary.
 
 ## Agent Auth Relay
 
@@ -76,7 +98,10 @@ The Claude and Codex login flows run the actual provider CLI in a PTY:
 
 Hivebox captures the first `http(s)://` URL from PTY output, asks the operator to
 open the provider URL directly, and writes the pasted code or callback URL back
-to the waiting PTY. It does not proxy provider login pages. The design note is
+to the waiting PTY. It does not proxy provider login pages. Login sessions are
+bounded by a four-session concurrency cap, a watchdog timeout, and process-group
+termination; `complete` waits briefly for success or a clear rejected-code
+signal instead of silently redirecting. The design note is
 `docs/notes/hivebox-agent-oauth-relay.md`; see [[decisions]] ADR-035.
 
 ## Docker
@@ -103,7 +128,10 @@ passed, and otherwise runs `Hive::Web::Supervisor`. The supervisor starts
 --foreground` when global bot config is enabled. While `run` is active it
 publishes `HIVEBOX_SUPERVISOR_PID` so the web child can SIGHUP the supervisor
 after enabling Telegram, then restores the caller's prior env value and signal
-traps on exit. The container healthcheck calls `GET /health` on
+traps on exit. Crashed daemon/web/bot children restart, fast failures back off,
+clean exits and signal deaths do not respawn, and shutdown drains all child
+process groups concurrently within the configured daemon grace window before
+SIGKILL escalation. The container healthcheck calls `GET /health` on
 `127.0.0.1:4567`.
 
 `/data` is the persistence boundary: `HOME`, XDG config/state/cache/data, repos,

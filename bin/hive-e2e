@@ -250,11 +250,15 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
+JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
+JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
+JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+
 def normalize_leading_class_options!(argv)
   return if argv.length < 2
 
   leading_class_options = []
-  leading_class_options << argv.shift while argv.first == "--json" || argv.first == "--no-json"
+  leading_class_options << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading_class_options.empty? || argv.empty?
   return argv.unshift(*leading_class_options) unless %w[clean help list replay run version].include?(argv.first)
 
@@ -265,24 +269,34 @@ end
 # matches what the inner commands actually parse. Thor's truthy set for a
 # boolean option value is the exact-match list `true`, `TRUE`, `t`, `T` (NOT
 # case-insensitive — `True`/`tRuE` are not honored), so we accept bare `--json`
-# plus exactly those spellings. `--json=false`, `--json=0`, `--no-json`, and
-# non-boolean spellings such as `--json=1` fall through to Thor's prose path.
+# plus exactly those spellings. False forms do not request JSON; unsupported
+# `--json=<value>` assignments are rejected before Thor can use the value as a
+# command or pattern.
 def json_requested?(argv)
-  argv.any? { |arg| arg == "--json" || arg.match?(/\A--json=(?:true|TRUE|t|T)\z/) }
+  argv.any? { |arg| JSON_TRUE_OPTIONS.include?(arg) }
+end
+
+def reject_unsupported_json_assignments!(argv)
+  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  return unless arg
+
+  raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
 def normalize_leading_global_options!(argv)
-  return unless argv.first == "--json"
+  leading = []
+  leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
+  return if leading.empty?
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
-  cmd_idx = argv[1..]&.index { |arg| commands.include?(arg) }
-  return unless cmd_idx
+  cmd_idx = argv.index { |arg| commands.include?(arg) }
+  return argv.unshift(*leading) unless cmd_idx
 
-  argv.delete_at(0)
-  argv.insert(cmd_idx + 1, "--json")
+  argv.insert(cmd_idx + 1, *leading)
 end
 
 begin
+  reject_unsupported_json_assignments!(ARGV)
   normalize_leading_global_options!(ARGV)
   rewrite_help_flag!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when

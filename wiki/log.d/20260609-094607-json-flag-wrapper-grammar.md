@@ -1,0 +1,3 @@
+## [2026-06-09T09:46:07Z] cli/e2e — align wrapper JSON flag grammar with Thor
+
+**Action:** Hardened `bin/hive` and `bin/hive-e2e` wrapper-level `--json` handling so accepted assignment forms match Thor's exact boolean grammar. Leading accepted forms such as `--json=true` are normalized behind the command before dispatch, while unsupported assignments such as `--json=1` and `--json=yes` now fail as usage before their values can become task targets or e2e run patterns. Added focused regressions in `test/integration/cli_version_test.rb` and `test/e2e/lib/hive_e2e_binary_test.rb`; refreshed [[cli]], [[e2e]], and [[testing]]. Did not run `qmd update` or `qmd embed`.

@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "open3"
 require "rbconfig"
 
@@ -28,6 +29,28 @@ class CliVersionTest < Minitest::Test
       trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json"))
 
       assert_equal without_generated_at(trailing), without_generated_at(leading)
+    end
+  end
+
+  def test_bin_hive_accepts_leading_json_true_before_status_command
+    with_tmp_global_config do
+      leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json=true", "status"))
+      trailing = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "status", "--json=true"))
+
+      assert_equal without_generated_at(trailing), without_generated_at(leading)
+    end
+  end
+
+  def test_bin_hive_rejects_unsupported_json_assignments_before_target_dispatch
+    with_tmp_global_config do
+      %w[--json=1 --json=yes].each do |flag|
+        out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", flag)
+
+        assert_equal 64, status.exitstatus, "#{flag}: malformed JSON flag should be a usage error"
+        assert_empty out, "#{flag}: unsupported JSON assignments must not request JSON mode"
+        assert_match(/invalid boolean value for --json/, err)
+        refute_match(/slug '#{Regexp.escape(flag.split("=", 2).last)}'/, err)
+      end
     end
   end
 

@@ -60,6 +60,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      assert_passes env, "gh", "run", "list", "-w", "ci.yml"
 
       # Glued/inline @file payload forms must be caught on explicit GET too,
       # not just the space-separated `-F q=@secret` form: each branch
@@ -316,6 +317,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "--web=true"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "-w"
+      assert_stubbed env, "gh", "pr", "checks", "42", "-w"
+      assert_stubbed env, "gh", "pr", "checks", "42", "-wdetails"
+      assert_stubbed env, "gh", "pr", "diff", "42", "-w"
+      assert_stubbed env, "gh", "pr", "diff", "42", "-wdiff"
+      assert_stubbed env, "gh", "pr", "list", "-w"
+      assert_stubbed env, "gh", "pr", "list", "-wopen"
 
       refute File.exist?(File.join(dir, "real.log"))
     end

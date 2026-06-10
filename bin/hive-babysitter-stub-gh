@@ -112,7 +112,15 @@ end
 
 def external_launcher_option?(rest)
   return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
-  return false unless [%w[pr view], %w[repo view], %w[run view], %w[workflow view]].include?(rest[0, 2])
+  return false unless [
+    %w[pr checks],
+    %w[pr diff],
+    %w[pr list],
+    %w[pr view],
+    %w[repo view],
+    %w[run view],
+    %w[workflow view]
+  ].include?(rest[0, 2])
 
   rest.drop(2).any? { |arg| arg == "-w" || arg.start_with?("-w") }
 end

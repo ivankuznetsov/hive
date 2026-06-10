@@ -32,6 +32,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil model.tail_state
     assert_nil model.red_status_detail_state
     assert_nil model.token_stats_state
+    assert_equal 0, model.help_scroll_offset
     assert_nil model.last_error
   end
 
@@ -151,7 +152,7 @@ class HiveTuiModelTest < Minitest::Test
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
                   new_idea_broken_labels info_panel_state flash flash_set_at
                   tail_state red_status_detail_state token_stats_state
-                  cols rows last_error]
+                  help_scroll_offset cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end
 

@@ -55,9 +55,37 @@ module Hive
           (" " * [ width - display_width(string), 0 ].max) + string
         end
 
+        def wrap(label, width)
+          string = label.to_s
+          return [ "" ] if string.empty?
+
+          string.lines.flat_map { |line| wrap_line(line.chomp, width) }
+        end
+
         def display_width(label)
           Unicode::DisplayWidth.of(label.to_s)
         end
+
+        def wrap_line(line, width)
+          max_width = width.to_i
+          return [ "" ] if line.empty?
+          return [ truncate(line, max_width) ] if max_width <= 8
+
+          rows = []
+          current = +""
+          line.split(/\s+/).each do |word|
+            candidate = current.empty? ? word : "#{current} #{word}"
+            if display_width(candidate) <= max_width
+              current = candidate
+            else
+              rows << truncate(current, max_width) unless current.empty?
+              current = word
+            end
+          end
+          rows << truncate(current, max_width) unless current.empty?
+          rows.empty? ? [ "" ] : rows
+        end
+        private_class_method :wrap_line
 
         # Internal primitive: a raw cell-bounded cut with no ellipsis.
         # Private so callers can't bypass `truncate`'s ellipsis contract.

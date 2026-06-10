@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/tui/model"
 require "hive/tui/messages"
+require "hive/tui/key_map"
 require "hive/tui/update"
 
 # Hive::Tui::Update is the MVU dispatcher: (Model, Message) → [Model, Cmd].
@@ -77,6 +78,19 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 120, new_model.cols
     assert_equal 40, new_model.rows
     assert_nil cmd, "WindowSized has no side-effect Cmd"
+  end
+
+  def test_window_sized_reclamps_help_scroll_offset
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 1_000)
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 200)
+    )
+
+    assert_equal :help, new_model.mode
+    assert_equal Hive::Tui::Views::HelpOverlay.max_scroll_offset(new_model),
+                 new_model.help_scroll_offset
   end
 
   # ---------- SnapshotArrived ----------
@@ -1582,6 +1596,89 @@ class HiveTuiUpdateTest < Minitest::Test
   def test_show_help_sets_mode_to_help
     new_model, _cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::SHOW_HELP)
     assert_equal :help, new_model.mode
+  end
+
+  def test_show_help_resets_help_scroll_offset
+    starting = model.with(help_scroll_offset: 12)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::SHOW_HELP)
+
+    assert_equal :help, new_model.mode
+    assert_equal 0, new_model.help_scroll_offset
+  end
+
+  def test_help_scroll_down_increases_offset
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: 3)
+    )
+
+    assert_equal 3, new_model.help_scroll_offset
+  end
+
+  def test_help_scroll_up_decreases_offset
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 5)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :up, amount: 2)
+    )
+
+    assert_equal 3, new_model.help_scroll_offset
+  end
+
+  def test_help_scroll_down_clamps_to_bottom
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 0)
+    max = Hive::Tui::Views::HelpOverlay.max_scroll_offset(starting)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: Hive::Tui::KeyMap::SCROLL_TO_EDGE)
+    )
+
+    assert_operator max, :>, 0
+    assert_equal max, new_model.help_scroll_offset
+  end
+
+  def test_help_scroll_up_from_top_is_noop
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :up, amount: 1)
+    )
+
+    assert_same starting, new_model
+  end
+
+  def test_help_scroll_down_at_bottom_is_noop
+    starting = model.with(mode: :help, cols: 80, rows: 14)
+    max = Hive::Tui::Views::HelpOverlay.max_scroll_offset(starting)
+    bottom = starting.with(help_scroll_offset: max)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      bottom,
+      Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: 1)
+    )
+
+    assert_same bottom, new_model
+  end
+
+  def test_help_scroll_ignores_non_help_mode
+    starting = model.with(mode: :grid, help_scroll_offset: 5)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :down, amount: 1)
+    )
+
+    assert_same starting, new_model
+  end
+
+  def test_help_scroll_unknown_direction_keeps_offset
+    starting = model.with(mode: :help, cols: 80, rows: 14, help_scroll_offset: 2)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::HelpScroll.new(direction: :sideways, amount: 5)
+    )
+
+    assert_same starting, new_model,
+                "an unrecognized scroll direction must leave the help offset untouched"
   end
 
   def test_open_filter_prompt_pre_fills_buffer_with_active_filter

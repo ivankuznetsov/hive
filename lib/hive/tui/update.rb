@@ -4,6 +4,7 @@ require "hive/tui/model"
 require "hive/tui/messages"
 require "hive/tui/red_status_detail_layout"
 require "hive/tui/subprocess"
+require "hive/tui/views/help_overlay"
 
 module Hive
   module Tui
@@ -79,6 +80,8 @@ module Hive
           [ apply_open_red_status_detail(model, message), nil ]
         when Messages::RedStatusDetailScroll
           [ apply_red_status_detail_scroll(model, message), nil ]
+        when Messages::HelpScroll
+          [ apply_help_scroll(model, message), nil ]
         when Messages::Back
           [ apply_back(model), nil ]
         when Messages::CloseTokenStats
@@ -154,7 +157,10 @@ module Hive
       end
 
       def apply_window_sized(model, msg)
-        model.with(cols: msg.cols, rows: msg.rows)
+        resized = model.with(cols: msg.cols, rows: msg.rows)
+        return clamp_help_scroll_offset(resized) if resized.mode == :help
+
+        resized
       end
 
       # Successful poll → store snapshot, clear last_error so the stalled
@@ -724,7 +730,7 @@ module Hive
       end
 
       def apply_show_help(model)
-        model.with(mode: :help)
+        model.with(mode: :help, help_scroll_offset: 0)
       end
 
       # Pre-fill the filter buffer with the active filter so `/` followed
@@ -777,6 +783,26 @@ module Hive
         return model if clamped == state.log_scroll_offset
 
         model.with(red_status_detail_state: state.with(log_scroll_offset: clamped))
+      end
+
+      def apply_help_scroll(model, msg)
+        return model unless model.mode == :help
+
+        amount = msg.amount.to_i
+        next_offset = case msg.direction
+        when :up then model.help_scroll_offset.to_i - amount
+        when :down then model.help_scroll_offset.to_i + amount
+        else model.help_scroll_offset.to_i
+        end
+        clamp_help_scroll_offset(model, next_offset)
+      end
+
+      def clamp_help_scroll_offset(model, offset = model.help_scroll_offset)
+        max_offset = Views::HelpOverlay.max_scroll_offset(model)
+        clamped = [ [ offset.to_i, 0 ].max, max_offset ].min
+        return model if clamped == model.help_scroll_offset
+
+        model.with(help_scroll_offset: clamped)
       end
 
 def red_status_detail_log_capacity(model)

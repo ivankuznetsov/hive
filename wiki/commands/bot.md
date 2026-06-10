@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-08
+updated: 2026-06-09
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -118,23 +118,19 @@ typing or scripting.
 ### Dispatch acknowledgment on success
 
 Commands dispatched as child processes (`hive new`, `hive approve`,
-`hive run`, recovery sequences) are **silent on exit 0** by design:
-`Supervisor#child_completion_text` only speaks on failure, because the
-operator normally sees the effect in the next status row or push
-notification. The lone exception is `hive new`: an idea lands in
-`1-inbox`, whose `ready_to_brainstorm` notification is **suppressed
-entirely when the project's daemon is enabled** (`suppress_ready_action?`,
-since the daemon dispatches the transition itself) and, when the daemon
-is off, only fires on a later dispatcher poll tick — never at tap time.
-So a silent success looked like a dead button, and because the picker
-token is consumed on tap, a confused re-tap reported "idea picker expired." `child_completion_text`
-therefore acknowledges a successful `hive new` (keyed on the verb at
-`argv[1]`, since `ChildSupervisor#normalize_hive_bin` rewrites `argv[0]`
-to a resolved binary path). `/approve` and `/done` share the same
-silent-success shape but degrade gracefully — they advance the task into
-a state the daemon/next tick re-surfaces, and a double-tap hits
-`WRONG_STAGE` → `"Already advanced by another device"` rather than a
-misleading message.
+`hive run`, recovery sequences) now return a positive Telegram
+confirmation on exit 0 instead of staying silent or surfacing raw
+process text such as `exit 0`. `hive new` keeps the specific idea-capture
+message because an idea lands in `1-inbox`, whose
+`ready_to_brainstorm` notification is **suppressed entirely when the
+project's daemon is enabled** (`suppress_ready_action?`, since the daemon
+dispatches the transition itself) and, when the daemon is off, only fires
+on a later dispatcher poll tick — never at tap time. Other commands use
+human command-specific messages such as approved, run completed,
+archived, finalized, status check completed, or accepted/rejected
+findings. Detection keys on the verb at `argv[1]`, since
+`ChildSupervisor#normalize_hive_bin` rewrites `argv[0]` to a resolved
+binary path.
 
 On bot start the supervisor calls Telegram's `setMyCommands` so the
 blue quick-actions menu (shown when the operator taps the `/` icon in

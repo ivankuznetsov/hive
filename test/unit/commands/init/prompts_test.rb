@@ -42,7 +42,7 @@ class InitPromptsTest < Minitest::Test
       "development_agent" => "codex",
       "enabled_reviewers" => REVIEWER_NAMES,
       "patrol_reviewers" => Hive::Commands::Init::Prompts::DEFAULT_PATROL_REVIEWER_NAMES,
-      "patrol_mode" => "medium",
+      "patrol_mode" => "low",
       "triage_bias" => "courageous",
       "budgets" => Hive::Commands::Init::Prompts::LIMIT_KEYS.each_with_object({}) do |k, h|
         h[k] = Hive::Config::DEFAULTS["budget_usd"][k]
@@ -105,7 +105,7 @@ class InitPromptsTest < Minitest::Test
     assert_match(/dev=codex/, summary)
     assert_match(/reviewers=all3/, summary)
     assert_match(/patrol_reviewers=codex/, summary)
-    assert_match(/patrol_mode=medium/, summary)
+    assert_match(/patrol_mode=low/, summary)
     assert_match(/triage=courageous/, summary)
     assert_match(/limits=defaults/, summary)
     assert_equal 1, summary.lines.size,
@@ -140,7 +140,7 @@ class InitPromptsTest < Minitest::Test
     prompts.collect
     assert_match(/limits\s+= all defaults/, output.string)
     assert_match(/patrol_reviewers\s+= \[codex-ce-code-review\]/, output.string)
-    assert_match(/patrol_mode\s+= medium/, output.string)
+    assert_match(/patrol_mode\s+= low/, output.string)
   end
 
   # --- planning / development agent: name, index, override -----------------
@@ -320,10 +320,10 @@ class InitPromptsTest < Minitest::Test
     assert_match(/unknown reviewer "pr-review-toolkit"/, output.string)
   end
 
-  def test_interactive_patrol_mode_blank_defaults_to_medium
+  def test_interactive_patrol_mode_blank_defaults_to_low
     prompts, _output = make_prompts(interactive_input(patrol_mode: ""))
     answers = prompts.collect
-    assert_equal "medium", answers["patrol_mode"]
+    assert_equal "low", answers["patrol_mode"]
   end
 
   def test_interactive_patrol_mode_by_index
@@ -611,7 +611,7 @@ class InitPromptsTest < Minitest::Test
     prompts, _output, _summary = make_prompts("", tty: false)
     answers = prompts.collect
     assert_equal "courageous", answers["triage_bias"]
-    assert_equal "medium", answers["patrol_mode"]
+    assert_equal "low", answers["patrol_mode"]
   end
 
   # --- confirmation -------------------------------------------------------

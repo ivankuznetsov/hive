@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-08
+updated: 2026-06-09
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -181,16 +181,23 @@ rg -n 'Process.spawn|spawn!|system\(' lib/hive/bot/
 See [[modules/daemon]] §"Single-dispatcher" and [[architecture]]
 §"Dispatch flow" for the daemon side of the contract.
 
-## Dispatch failure notices
+## Dispatch result notices
 
 After the single-dispatcher refactor, the daemon is the process that
 spawns queue-routed bot requests, but it has no Telegram client. When a
-bot-originated daemon child exits non-zero or with a nil exit status
-(signal/timeout), `Hive::Daemon::Dispatcher` writes a
-`hive-dispatch-result` notice under `<state_home>/dispatch_results/`.
-`Supervisor#reaper_loop` calls `drain_dispatch_results`, which relays
-those notices back to the originating chat as
+bot-originated daemon child completes, `Hive::Daemon::Dispatcher`
+writes a `hive-dispatch-result` notice under
+`<state_home>/dispatch_results/`. `Supervisor#reaper_loop` calls
+`drain_dispatch_results`, which relays those notices back to the
+originating chat. Exit 0 is rendered as a positive command-specific
+confirmation (for example `Run completed for <project>/<slug>.` or
+`Archived <project>/<slug>.`); non-zero exits and nil signal/timeout
+exits still render as
 `<slug>: hive <verb> failed (exit N)` or `killed (signal/timeout)`.
+For queue-routed recovery sequences, the daemon suppresses the
+intermediate success notice for the marker-clear step when it promotes
+the retry command, so the operator sees the final result rather than two
+success pings.
 Before relaying, `drain_dispatch_results` re-checks each notice's
 `chat_id` against `chat_id_allowlist` (defense-in-depth, #263): the
 chat_id round-trips from the on-disk request file through the daemon with
@@ -206,7 +213,7 @@ Malformed notices are removed quietly. Notices older than
 `Hive::Daemon::DispatchResultQueue::EXPIRY_SEC` (1h) are stale and are
 dropped without relaying; the daemon also prunes them each tick as a
 backstop when no bot is running. To avoid reconnect floods,
-`DISPATCH_RESULT_SEND_CAP` limits individual failure messages per drain
+`DISPATCH_RESULT_SEND_CAP` limits individual result messages per drain
 and collapses the overflow into one per-chat summary, removing the
 overflow files only after the summary sends.
 

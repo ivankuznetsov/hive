@@ -176,12 +176,18 @@ class HvTest < Minitest::Test
     fake_bin
   end
 
+  # Generous hang-detector budget. The `hv` shim should exit near-instantly;
+  # this only fires on a real infinite-recursion hang. 2s was too tight under
+  # loaded CI (bash startup + subprocess spawn), which caused spurious
+  # Timeout::Error flakes — 30s detects a genuine hang while tolerating load.
+  HV_HANG_TIMEOUT_SEC = 30
+
   def capture_hv_with_timeout(env, *args)
     Open3.popen3(env, HV_BIN, *args) do |stdin, stdout, stderr, wait_thread|
       stdin.close
       out_reader = Thread.new { stdout.read }
       err_reader = Thread.new { stderr.read }
-      status = Timeout.timeout(2) { wait_thread.value }
+      status = Timeout.timeout(HV_HANG_TIMEOUT_SEC) { wait_thread.value }
       [ out_reader.value, err_reader.value, status ]
     rescue Timeout::Error
       Process.kill("TERM", wait_thread.pid)

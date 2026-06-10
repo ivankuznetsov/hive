@@ -18,6 +18,13 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[approve --json], "hive-approve", "invalid_task_path", {} ],
       [ %w[markers clear --json], "hive-markers-clear", "invalid_task_path", {} ],
       [ %w[brainstorm --json], "hive-stage-action", "invalid_task_path", { "verb" => "brainstorm" } ],
+      [ %w[pr --json], "hive-stage-action", "invalid_task_path", { "verb" => "open-pr" } ],
+      [ %w[drop --json], "hive-drop", "invalid_task_path", {} ],
+      [ %w[findings --json], "hive-findings", "invalid_task_path", {} ],
+      [ %w[accept-finding --json], "hive-findings", "invalid_task_path", { "operation" => "accept" } ],
+      [ %w[reject-finding --json], "hive-findings", "invalid_task_path", { "operation" => "reject" } ],
+      [ %w[patrol --json], "hive-patrol", "error", {} ],
+      [ %w[status --bogus --json], "hive-status", "error", {} ],
       [ %w[prune --bogus --json], "hive-prune", "usage", {} ]
     ]
 

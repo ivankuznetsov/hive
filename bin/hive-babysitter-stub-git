@@ -67,17 +67,44 @@ def unsafe_command_options?(rest)
   options.any? { |arg| unsafe_read_option?(subcommand, arg) }
 end
 
+# `git grep` short options that consume the remainder of a cluster as their value. Once one
+# appears, the characters after it are an operand (a pattern, file, or count) — not packed
+# flags — so cluster scanning must stop there; e.g. `-eTODO` is the pattern `TODO`, not a
+# hidden `-O` pager flag.
+GREP_VALUE_TAKING_SHORT = "efmABC".chars.freeze
+
+def grep_short_cluster_has_pager?(arg)
+  arg[1..].each_char do |ch|
+    return true if ch == "O"                          # `-O[<cmd>]` opens an arbitrary pager
+    break if GREP_VALUE_TAKING_SHORT.include?(ch)     # rest of cluster is this option's value
+  end
+  false
+end
+
 def unsafe_read_option?(subcommand, arg)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
 
-  # `--open-files-in-pager` / `-O` (its short form, including glued `-O<cmd>`) runs an
-  # arbitrary pager command, but only on `git grep` — that is the precise RCE seam this guard
-  # exists to close. On `diff` / `log` / `show`, `-O<orderfile>` is `--output-ordering`, which
-  # only reads an orderfile, so the pager block must be scoped to grep or it over-skips reads.
-  # `git grep -o` / `--only-matching` is a read-only match filter (grep has no `--output`).
+  # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
+  # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the
+  # precise RCE seam this guard exists to close. On `diff` / `log` / `show`,
+  # `-O<orderfile>` is `--output-ordering`, which only reads an orderfile, so the pager
+  # block must be scoped to grep or it over-skips reads. `git grep -o` / `--only-matching`
+  # is a read-only match filter (grep has no `--output`).
   if subcommand == "grep"
-    return arg == "--open-files-in-pager" || arg.start_with?("--open-files-in-pager=", "-O")
+    # git resolves any unambiguous long-option prefix, so `--open`, `--open-files`, down to
+    # the shortest unique `--op`, all reach `--open-files-in-pager` and must be blocked (with
+    # or without a glued `=<cmd>`). `--op` is the shortest prefix that is not shared with
+    # another grep long option (`--only-matching`, `--or`), so require length >= 4.
+    name = arg.split("=", 2).first
+    return true if name.length >= 4 && "--open-files-in-pager".start_with?(name)
+
+    # Short-option clusters: walk char by char so a value-taking option consumes the rest of
+    # the cluster as its operand. Without this, a read-only attached pattern like `-eTODO`
+    # would be misread as carrying the `-O` pager flag merely because its value contains `O`.
+    return grep_short_cluster_has_pager?(arg) if arg.start_with?("-") && !arg.start_with?("--")
+
+    return false
   end
 
   # `git ls-files -o` / `--others` lists untracked files — a read, not a write. ls-files has

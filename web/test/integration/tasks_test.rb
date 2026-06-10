@@ -62,6 +62,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_includes [ 302, 422 ], response.status
   end
 
+  test "run stage dispatches the current stage's verb to the daemon queue" do
+    post "/tasks/#{@project}/#{@slug}/run",
+         params: { action_name: "ready_to_brainstorm", stage: "1-inbox" }
+
+    assert_redirected_to "/tasks/#{@project}/#{@slug}",
+                         "a queued dispatch returns to the task page"
+    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_requests", "**", "*"))
+               .select { |f| File.file?(f) }
+    assert queue.any? { |f| File.read(f).include?(@slug) },
+           "the dispatch request must land in the daemon queue"
+  end
+
+  test "run stage rejects a bogus action with a readable 422" do
+    post "/tasks/#{@project}/#{@slug}/run",
+         params: { action_name: "run", stage: "1-inbox" }
+
+    assert_response :unprocessable_entity
+    assert_match "unknown dispatch action", response.body
+  end
+
   test "diff for a task without a worktree is 404 not a crash" do
     get "/tasks/#{@project}/#{@slug}/diff"
     assert_response :not_found

@@ -10,9 +10,11 @@
 <div class="task-actions">
   <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
         params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
-  <%= button_to "Run stage", task_run_path(@project["name"], @row["slug"]),
-        params: { action_name: "run", stage: @row["stage"] }, class: "btn-secondary",
-        data: { turbo_submits_with: "Queueing…" } %>
+  <% if (dispatch_action = stage_dispatch_action(@row["stage"])) %>
+    <%= button_to "Run stage", task_run_path(@project["name"], @row["slug"]),
+          params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
+          data: { turbo_submits_with: "Queueing…" } %>
+  <% end %>
   <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary" %>
   <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
         params: { from: @row["stage"] }, class: "btn-danger",

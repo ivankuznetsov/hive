@@ -68,6 +68,25 @@ module ApplicationHelper
     nil
   end
 
+  # The dispatcher speaks action keys (ready_to_brainstorm…) that map to
+  # stage verbs. "Run stage" means "run THIS task's current stage", so the
+  # key derives from the stage dir; 1-inbox advances into brainstorm and
+  # 9-done has nothing to run.
+  STAGE_DISPATCH_ACTIONS = {
+    "1" => "ready_to_brainstorm",
+    "2" => "ready_to_brainstorm",
+    "3" => "ready_to_plan",
+    "4" => "ready_to_develop",
+    "5" => "ready_to_open_pr",
+    "6" => "ready_for_review",
+    "7" => "ready_to_artifacts",
+    "8" => "ready_to_finalize"
+  }.freeze
+
+  def stage_dispatch_action(stage_dir)
+    STAGE_DISPATCH_ACTIONS[stage_dir.to_s.split("-", 2).first]
+  end
+
   # Color the JSONL log tail by event class so errors jump out of the noise.
   def log_line_class(line)
     if /"type"\s*:\s*"(error|turn\.failed)"|"error"\s*:/.match?(line)

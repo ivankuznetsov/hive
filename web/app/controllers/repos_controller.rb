@@ -16,7 +16,25 @@ class ReposController < ApplicationController
     @github_repos = session[:github_token] ? github_repositories(registered_names) : nil
   end
 
+  # The setup questionnaire — the web equivalent of `hive init`'s TTY
+  # prompts. Reached from the clone form, a GitHub repo's "Add to hive",
+  # or a registered project's "Re-run setup".
+  def new
+    @url = params[:url].to_s.strip
+    @project_name = params[:project].to_s.strip.presence
+    @suggested_name = params[:name].to_s.strip.presence ||
+                      (@project_name || File.basename(@url).delete_suffix(".git") if @url.present? || @project_name)
+    @defaults = InitSetup.defaults
+  end
+
   def create
+    if params[:project].present?
+      # Re-run setup for an already-registered project (no clone).
+      project = find_project!(File.basename(params[:project].to_s.strip))
+      reinit!(project["path"], InitSetup.new(params[:settings]))
+      return redirect_to repos_path, notice: "#{project["name"]} settings applied"
+    end
+
     url = params[:url].to_s.strip
     raise Hive::Error, "repo URL required" if url.empty?
     raise Hive::Error, "invalid repo URL — use a github.com URL or owner/repo" unless valid_repo_url?(url)
@@ -34,12 +52,19 @@ class ReposController < ApplicationController
     FileUtils.mkdir_p(root)
     target = File.join(root, name)
 
+    setup = InitSetup.new(params[:settings])
     clone!(url, target) unless File.directory?(target)
-    Hive::Commands::Init.new(target, force: true, json: false).call
+    reinit!(target, setup)
     redirect_to repos_path, notice: "#{name} is registered"
   end
 
   private
+
+  # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
+  # indistinguishable from an interactive `hive init`.
+  def reinit!(target, setup)
+    Hive::Commands::Init.new(target, force: true, json: false, prompts: setup).call
+  end
 
   # Clone via `gh` with the operator's device-flow token in GH_TOKEN, so
   # private repos clone with the session grant — the box needs no separate

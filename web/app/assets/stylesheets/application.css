@@ -437,6 +437,37 @@ pre {
 
 .form-grid { display: grid; gap: 16px; max-width: 540px; }
 .form-row { display: grid; gap: 4px; }
+.field-label { font-size: 0.9rem; color: var(--ink-muted); }
+
+/* ---- Project setup questionnaire ---- */
+
+.setup-form { display: grid; gap: 16px; max-width: 720px; }
+.setup-section h2 { margin: 0 0 14px; }
+.setup-section summary {
+  cursor: pointer;
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 1.25rem;
+}
+.setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.setup-section .form-row { margin-bottom: 12px; }
+
+.checks { display: flex; gap: 14px; flex-wrap: wrap; }
+.checks-column { flex-direction: column; gap: 10px; }
+.check { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-size: 0.93rem; margin: 0; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+.limits-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 110px 110px;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 14px;
+}
+.limits-grid label { margin: 0; font-size: 0.88rem; color: var(--ink-muted); }
+.limits-grid input { padding: 6px 8px; }
+
+.repo-actions { display: inline-flex; align-items: center; gap: 10px; }
 
 /* ---- Responsive ---- */
 

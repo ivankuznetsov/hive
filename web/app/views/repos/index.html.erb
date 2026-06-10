@@ -15,18 +15,22 @@
           <span class="repo-name"><%= project["name"] %></span>
           <span class="repo-desc"><%= project["path"] %></span>
         </div>
-        <span class="tag tag-registered">registered</span>
+        <span class="repo-actions">
+          <%= link_to "Settings", new_repo_path(project: project["name"]), class: "btn btn-ghost btn-sm" %>
+          <span class="tag tag-registered">registered</span>
+        </span>
       </article>
     <% end %>
   </div>
 <% end %>
 
 <h2>Clone by URL</h2>
-<%= form_with url: create_repo_path, class: "repo-form" do |f| %>
+<%# GET to the setup questionnaire — the same questions `hive init` asks. %>
+<%= form_with url: new_repo_path, method: :get, class: "repo-form" do |f| %>
   <%= f.text_field :url, placeholder: "https://github.com/org/repo or org/repo",
         required: true, aria: { label: "Repository URL" } %>
   <%= f.text_field :name, placeholder: "Name (optional)", aria: { label: "Local name" } %>
-  <%= f.submit "Clone and init", data: { turbo_submits_with: "Cloning…" } %>
+  <%= f.submit "Set up…" %>
 <% end %>
 
 <h2>Your GitHub repositories</h2>
@@ -56,8 +60,7 @@
         <% if repo["registered"] %>
           <span class="tag tag-registered">registered</span>
         <% else %>
-          <%= button_to "Add to hive", create_repo_path, params: { url: repo["full_name"] },
-                class: "btn-secondary btn-sm", data: { turbo_submits_with: "Cloning…" } %>
+          <%= link_to "Add to hive", new_repo_path(url: repo["full_name"]), class: "btn btn-secondary btn-sm" %>
         <% end %>
       </article>
     <% end %>

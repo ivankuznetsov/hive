@@ -31,6 +31,7 @@ Rails.application.routes.draw do
   end
 
   get  "repos" => "repos#index", as: :repos
+  get  "repos/new" => "repos#new", as: :new_repo
   post "repos" => "repos#create", as: :create_repo
 
   get  "agents" => "agents#index", as: :agents

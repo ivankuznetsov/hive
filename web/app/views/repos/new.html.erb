@@ -1,0 +1,128 @@
+<% content_for(:title, "hivebox — project setup") %>
+<h1>Project setup</h1>
+<% if @project_name %>
+  <p class="muted">Re-running setup for <strong><%= @project_name %></strong> — the same questions <code>hive init</code> asks, applied to the existing checkout.</p>
+<% else %>
+  <p class="muted">The questions <code>hive init</code> would ask in the terminal. Defaults are sensible — change what you care about and clone.</p>
+<% end %>
+
+<%= form_with url: create_repo_path, class: "setup-form" do |f| %>
+  <% if @project_name %>
+    <%= hidden_field_tag :project, @project_name %>
+  <% else %>
+    <div class="card setup-section">
+      <h2>Repository</h2>
+      <div class="form-row">
+        <%= label_tag :url, "GitHub URL or owner/repo" %>
+        <%= text_field_tag :url, @url, required: true, placeholder: "https://github.com/org/repo or org/repo" %>
+      </div>
+      <div class="form-row">
+        <%= label_tag :name, "Local name (optional)" %>
+        <%= text_field_tag :name, @suggested_name %>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="card setup-section">
+    <h2>Agents</h2>
+    <div class="setup-grid">
+      <div class="form-row">
+        <%= label_tag "settings_planning_agent", "Planning agent (brainstorm + plan)" %>
+        <%= select_tag "settings[planning_agent]", options_for_select(InitSetup.agents, @defaults["planning_agent"]) %>
+      </div>
+      <div class="form-row">
+        <%= label_tag "settings_development_agent", "Development agent (execute)" %>
+        <%= select_tag "settings[development_agent]", options_for_select(InitSetup.agents, @defaults["development_agent"]) %>
+      </div>
+      <div class="form-row">
+        <%= label_tag "settings_claude_mode", "Claude launch mode" %>
+        <%= select_tag "settings[claude_mode]", options_for_select(InitSetup.claude_modes, @defaults["claude_mode"]) %>
+      </div>
+      <div class="form-row">
+        <%= label_tag "settings_claude_permission_mode", "Claude permission mode" %>
+        <%= select_tag "settings[claude_permission_mode]", options_for_select(InitSetup.claude_permission_modes, @defaults["claude_permission_mode"]) %>
+      </div>
+    </div>
+  </div>
+
+  <div class="card setup-section">
+    <h2>Review</h2>
+    <%= hidden_field_tag "settings[enabled_reviewers_submitted]", "1" %>
+    <div class="form-row">
+      <span class="field-label">PR reviewers</span>
+      <div class="checks">
+        <% InitSetup.reviewer_names.each do |name| %>
+          <label class="check">
+            <%= check_box_tag "settings[enabled_reviewers][]", name, @defaults["enabled_reviewers"].include?(name), id: "reviewer_#{name.parameterize}" %>
+            <%= name %>
+          </label>
+        <% end %>
+      </div>
+    </div>
+    <%= hidden_field_tag "settings[patrol_reviewers_submitted]", "1" %>
+    <div class="form-row">
+      <span class="field-label">Patrol PR reviewers</span>
+      <div class="checks">
+        <% InitSetup.patrol_reviewer_names.each do |name| %>
+          <label class="check">
+            <%= check_box_tag "settings[patrol_reviewers][]", name, @defaults["patrol_reviewers"].include?(name), id: "patrol_#{name.parameterize}" %>
+            <%= name %>
+          </label>
+        <% end %>
+      </div>
+    </div>
+    <div class="setup-grid">
+      <div class="form-row">
+        <%= label_tag "settings_patrol_mode", "Patrol mode" %>
+        <%= select_tag "settings[patrol_mode]", options_for_select(InitSetup.patrol_modes, @defaults["patrol_mode"]) %>
+      </div>
+      <div class="form-row">
+        <%= label_tag "settings_triage_bias", "Triage bias" %>
+        <%= select_tag "settings[triage_bias]", options_for_select(InitSetup::TRIAGE_CHOICES, @defaults["triage_bias"]) %>
+      </div>
+    </div>
+  </div>
+
+  <div class="card setup-section">
+    <h2>Pipeline</h2>
+    <div class="checks checks-column">
+      <%# Paired hidden "0" fields so UNchecking actually posts false
+          instead of vanishing into the server-side default. %>
+      <label class="check">
+        <%= hidden_field_tag "settings[daemon_enabled]", "0" %>
+        <%= check_box_tag "settings[daemon_enabled]", "1", @defaults["daemon_enabled"] %>
+        Daemon auto-advances the pipeline
+      </label>
+      <label class="check">
+        <%= hidden_field_tag "settings[babysitter_enabled]", "0" %>
+        <%= check_box_tag "settings[babysitter_enabled]", "1", @defaults["babysitter_enabled"] %>
+        PR babysitter (experimental)
+      </label>
+      <label class="check">
+        <%= hidden_field_tag "settings[daemon_autostart]", "0" %>
+        <%= check_box_tag "settings[daemon_autostart]", "1", @defaults["daemon_autostart"] %>
+        Start the daemon service now
+      </label>
+    </div>
+  </div>
+
+  <details class="card setup-section">
+    <summary>Limits — budgets (USD) and timeouts (seconds) per stage</summary>
+    <div class="limits-grid">
+      <span class="field-label"></span>
+      <span class="field-label">Budget $</span>
+      <span class="field-label">Timeout s</span>
+      <% InitSetup.limit_keys.each do |key| %>
+        <label for="budget_<%= key %>"><%= key.tr("_", " ") %></label>
+        <%= number_field_tag "settings[budgets][#{key}]", @defaults["budgets"][key], min: 0, id: "budget_#{key}" %>
+        <%= number_field_tag "settings[timeouts][#{key}]", @defaults["timeouts"][key], min: 0, id: "timeout_#{key}" %>
+      <% end %>
+    </div>
+  </details>
+
+  <p>
+    <%= f.submit @project_name ? "Apply settings" : "Clone and init",
+          data: { turbo_submits_with: @project_name ? "Applying…" : "Cloning…" } %>
+    <%= link_to "Cancel", repos_path, class: "btn btn-ghost" %>
+  </p>
+<% end %>

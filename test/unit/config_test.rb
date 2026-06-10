@@ -45,8 +45,13 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("patrol", "commands", "test")
       assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
       assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
-      assert_equal %w[codex-ce-code-review],
+      assert_equal %w[codex-native-review],
                    cfg.dig("patrol", "review", "reviewers").map { |entry| entry.fetch("name") }
+      native = cfg.dig("patrol", "review", "reviewers").first
+      assert_equal "codex_review", native["kind"]
+      assert_equal "codex", native["agent"]
+      assert_equal "reviewer_codex_native_review.md.erb", native["prompt_template"]
+      refute native.key?("skill"), "the codex-native patrol reviewer takes no CE skill"
     end
   end
 
@@ -998,6 +1003,80 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/duplicate output_basename "collision"/, err.message)
+    end
+  end
+
+  def test_load_accepts_codex_review_reviewer_without_skill
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: codex-native-review
+              kind: codex_review
+              agent: codex
+              output_basename: codex-native-review
+              prompt_template: reviewer_codex_native_review.md.erb
+      YAML
+      cfg = Hive::Config.load(dir)
+      reviewer = cfg.dig("review", "reviewers").first
+      assert_equal "codex_review", reviewer["kind"]
+      refute reviewer.key?("skill"), "codex_review needs no skill"
+    end
+  end
+
+  def test_load_still_requires_name_and_basename_uniqueness_for_codex_review
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: dup-native
+              kind: codex_review
+              agent: codex
+              output_basename: a
+              prompt_template: reviewer_codex_native_review.md.erb
+            - name: dup-native
+              kind: codex_review
+              agent: codex
+              output_basename: b
+              prompt_template: reviewer_codex_native_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/duplicate name "dup-native"/, err.message)
+    end
+  end
+
+  def test_load_requires_prompt_template_for_codex_review
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: codex-native-review
+              kind: codex_review
+              agent: codex
+              output_basename: codex-native-review
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.prompt_template.*is missing/, err.message)
+    end
+  end
+
+  def test_load_rejects_unknown_reviewer_kind
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: bogus
+              kind: nonsense
+              agent: codex
+              output_basename: bogus
+              prompt_template: reviewer_codex_native_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/kind.*must be one of/, err.message)
     end
   end
 

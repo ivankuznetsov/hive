@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Minimal fake codex CLI for CodexReview reviewer tests. Handles two
+# subcommands:
+#
+#   --version        prints a parseable version line (default 0.139.0;
+#                    override with HIVE_FAKE_CODEX_VERSION, e.g. "0.1.0"
+#                    to simulate a too-old binary below min_version).
+#
+#   review [...]     logs argv to HIVE_FAKE_CODEX_ARGV_LOG (if set), then
+#                    prints HIVE_FAKE_CODEX_STDOUT (default: a valid
+#                    GFM-checkbox findings block) and exits with
+#                    HIVE_FAKE_CODEX_EXIT (default 0). HIVE_FAKE_CODEX_HANG
+#                    sleeps that many seconds first (timeout tests).
+set -u
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli %s\n' "${HIVE_FAKE_CODEX_VERSION:-0.139.0}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "review" ]]; then
+  if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
+    {
+      echo "---"
+      echo "cwd=$(pwd)"
+      for a in "$@"; do
+        printf 'arg=%s\n' "$a"
+      done
+    } >> "${HIVE_FAKE_CODEX_ARGV_LOG}"
+  fi
+
+  if [[ -n "${HIVE_FAKE_CODEX_HANG:-}" ]]; then
+    sleep "${HIVE_FAKE_CODEX_HANG}"
+  fi
+
+  default_out='OpenAI Codex v0.139.0
+--------
+user
+changes against main
+codex
+## High
+- [ ] uses subtraction instead of addition: breaks add()
+## Medium
+No findings.
+## Nit
+No findings.'
+
+  printf '%s\n' "${HIVE_FAKE_CODEX_STDOUT-$default_out}"
+  exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+fi
+
+echo "fake-codex: unsupported argv: $*" >&2
+exit 99

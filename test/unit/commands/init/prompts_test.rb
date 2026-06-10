@@ -139,7 +139,7 @@ class InitPromptsTest < Minitest::Test
     prompts, output = make_prompts(interactive_input)
     prompts.collect
     assert_match(/limits\s+= all defaults/, output.string)
-    assert_match(/patrol_reviewers\s+= \[codex-ce-code-review\]/, output.string)
+    assert_match(/patrol_reviewers\s+= \[codex-native-review\]/, output.string)
     assert_match(/patrol_mode\s+= low/, output.string)
   end
 
@@ -300,20 +300,21 @@ class InitPromptsTest < Minitest::Test
     assert_equal REVIEWER_NAMES, answers["enabled_reviewers"]
   end
 
-  def test_interactive_patrol_reviewers_blank_accepts_codex_only
+  def test_interactive_patrol_reviewers_blank_accepts_codex_native_only
     prompts, _output = make_prompts(interactive_input(patrol_reviewers: ""))
     answers = prompts.collect
-    assert_equal %w[codex-ce-code-review], answers["patrol_reviewers"]
+    assert_equal %w[codex-native-review], answers["patrol_reviewers"]
   end
 
-  def test_interactive_patrol_reviewers_can_add_claude
-    prompts, _output = make_prompts(interactive_input(patrol_reviewers: "1,2"))
+  def test_interactive_patrol_reviewers_can_add_ce_code_review
+    # 1 = codex-native-review, 2 = codex-ce-code-review, 3 = claude-ce-code-review
+    prompts, _output = make_prompts(interactive_input(patrol_reviewers: "2,3"))
     answers = prompts.collect
     assert_equal %w[codex-ce-code-review claude-ce-code-review], answers["patrol_reviewers"]
   end
 
   def test_interactive_patrol_reviewers_reject_pr_toolkit
-    raw = interactive_input(patrol_reviewers: "pr-review-toolkit\n2")
+    raw = interactive_input(patrol_reviewers: "pr-review-toolkit\n3")
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal %w[claude-ce-code-review], answers["patrol_reviewers"]

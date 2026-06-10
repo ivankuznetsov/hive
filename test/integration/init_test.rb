@@ -99,7 +99,9 @@ class InitTest < Minitest::Test
     # Order: planning, claude_mode, claude_permission_mode, development,
     # reviewers, patrol_reviewers, patrol_mode, triage, then limits, daemon-enable, babysitter-enable,
     # daemon-autostart, confirm.
-    inputs = ([ "codex", "2", "", "pi", "2", "2", "high", "safetyist", "60,120" ] +
+    # patrol_reviewers index 3 = claude-ce-code-review (1=codex-native-review,
+    # 2=codex-ce-code-review, 3=claude-ce-code-review).
+    inputs = ([ "codex", "2", "", "pi", "2", "3", "high", "safetyist", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
 
@@ -398,7 +400,8 @@ class InitTest < Minitest::Test
 
         patrol_reviewers = cfg.dig("patrol", "review", "reviewers")
         assert_kind_of Array, patrol_reviewers
-        assert_equal [ "codex-ce-code-review" ], patrol_reviewers.map { |r| r["name"] }
+        assert_equal [ "codex-native-review" ], patrol_reviewers.map { |r| r["name"] }
+        assert_equal "codex_review", patrol_reviewers.first["kind"]
 
         # Each entry references a registered AgentProfile.
         (reviewers + patrol_reviewers).each do |entry|
@@ -667,8 +670,8 @@ class InitTest < Minitest::Test
         assert_equal %w[claude-ce-code-review pr-review-toolkit], names,
                      "only the two selected reviewers should be rendered"
         patrol_names = cfg.dig("patrol", "review", "reviewers").map { |r| r["name"] }
-        assert_equal %w[codex-ce-code-review], patrol_names,
-                     "blank patrol reviewer prompt should render codex-only patrol review"
+        assert_equal %w[codex-native-review], patrol_names,
+                     "blank patrol reviewer prompt should render the codex native-review default"
         assert_equal "high", cfg.dig("patrol", "mode")
         assert_equal "timer", cfg.dig("patrol", "trigger")
         assert_equal 7200, cfg.dig("patrol", "poll_interval_sec")

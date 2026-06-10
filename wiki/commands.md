@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-09
+updated: 2026-06-10
 tags: [commands, api]
 ---
 
@@ -41,6 +41,14 @@ false forms such as `--no-json`, `--skip-json`, or `--json=false` move behind
 the command before dispatch; unsupported assignments such as `--json=1` or
 `--json=yes` fail as usage errors before the assigned value can become a
 command argument or task target.
+When a `--json` request reaches Thor but fails before the command object is
+constructed, the wrapper emits schema-specific `ErrorEnvelope` JSON for the
+mapped agent-callable surfaces rather than leaving callers with empty stdout
+and Thor prose on stderr. The wrapper map currently covers `run`, `approve`,
+`drop`, `findings`, `accept-finding`, `reject-finding`, workflow verbs
+(`brainstorm` through `archive`, with `pr` normalized to `open-pr`), `markers`,
+`patrol`, `prune`, and `status`; other command-local JSON errors are handled
+after normal Thor dispatch by their command classes where supported.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not

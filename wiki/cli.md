@@ -31,7 +31,9 @@ objects are constructed are routed through schema-specific JSON envelopes for
 the compatible agent-callable surfaces: `run`, `approve`, `drop`, `findings`,
 `accept-finding`, `reject-finding`, workflow verbs (`brainstorm` through
 `archive`, plus the `pr` alias as `open-pr`), `markers`, `patrol`, `prune`, and
-`status`.
+`status`. Commands outside that wrapper map either rely on their command-local
+rescue path after Thor dispatch, or retain Thor's pre-dispatch prose-only usage
+error behavior.
 
 `bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
 

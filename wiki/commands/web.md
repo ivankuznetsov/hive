@@ -71,20 +71,28 @@ a trusted reverse proxy or tunnel must validate Host.
 
 ## Auth
 
-Every route except `/health`, `/login`, `/logout`, and GitHub OAuth callback
-routes is behind the GitHub owner gate. The session secret comes from
+Every route except `/health`, `/login`, `/logout`, and the `/auth/github*`
+sign-in routes is behind the GitHub owner gate. The session secret comes from
 `HIVEBOX_SESSION_SECRET` or a generated file under `Hive::Paths.state_home` so
 container restarts preserve sessions; cookies are `HttpOnly`, `SameSite=Lax`,
 and `Secure` when `web.origin` is HTTPS. POST/PUT/DELETE routes require the
 session CSRF token emitted by `csrf_tag`.
 
-GitHub auth is owner-only. `Hive::Web::GithubAuth` builds a GitHub OAuth URL
-from `web.origin`, `web.github.client_id`, and a random state; exchanges the
-callback code with `HIVEBOX_GITHUB_CLIENT_SECRET`; reads the authenticated login
-from `https://api.github.com/user`; and admits only the configured
-`web.github.owner` case-insensitively. The callback rejects absent/mismatched
-OAuth state, denied-consent callbacks with no code, and non-owner logins, then
-renews the session at the auth boundary.
+GitHub auth is owner-only and uses the OAuth **device flow** (RFC 8628): no
+callback URL and no client secret exist, so the gate works identically on
+localhost and behind any tunnel/proxy with zero per-deployment OAuth-app
+configuration. `POST /auth/github` (a CSRF-protected form on `/login`) calls
+`Hive::Web::GithubAuth#start_device_flow` and stores the device session in the
+signed cookie; `GET /auth/github/wait` shows the user code (entered at
+github.com/login/device), meta-refreshes every poll interval, and performs at
+most one GitHub poll per render — gated by `next_poll_at` and honoring
+`slow_down`. On a granted poll the app resolves the login via
+`https://api.github.com/user`, admits only the configured `web.github.owner`
+case-insensitively, and renews the session at the auth boundary. Denied
+grants, expired device codes, and non-owner logins surface as 403 pages;
+GitHub transport failures map to `Hive::Error` (friendly 422), not a blank
+500. `web.github.client_id` defaults to the shared hivebox OAuth app — public
+by design; operators may override it with their own device-flow-enabled app.
 
 ## Agent Auth Relay
 
@@ -137,8 +145,9 @@ SIGKILL escalation. The container healthcheck calls `GET /health` on
 `/data` is the persistence boundary: `HOME`, XDG config/state/cache/data, repos,
 Hive state, generated session secret, and agent credential dirs all live there.
 `packaging/docker/compose.example.yml` binds `./hivebox-data:/data` and passes
-`HIVEBOX_GITHUB_CLIENT_SECRET` plus optional `HIVEBOX_SESSION_SECRET`. The image
-serves plain HTTP on port 4567; TLS is expected at a reverse proxy or tunnel.
+an optional `HIVEBOX_SESSION_SECRET` (GitHub sign-in needs no secrets — device
+flow). The image serves plain HTTP on port 4567; TLS is expected at a reverse
+proxy or tunnel.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]].

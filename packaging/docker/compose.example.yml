@@ -9,5 +9,7 @@ services:
     volumes:
       - ./hivebox-data:/data
     environment:
-      HIVEBOX_GITHUB_CLIENT_SECRET: "${HIVEBOX_GITHUB_CLIENT_SECRET}"
+      # GitHub sign-in uses the OAuth *device flow*: no client secret and no
+      # callback URL exist. Configure `web.github.owner` in the bind-mounted
+      # config.yml; the default client_id is the shared hivebox OAuth app.
       HIVEBOX_SESSION_SECRET: "${HIVEBOX_SESSION_SECRET:-}"

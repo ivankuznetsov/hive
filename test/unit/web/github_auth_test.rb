@@ -3,13 +3,18 @@ require "net/http"
 require "hive/web/github_auth"
 
 class GithubAuthTest < Minitest::Test
-  # Drives the `http:` DI seam without a network round-trip: returns the token
-  # response for the github.com host and the user response for api.github.com,
-  # so `exchange_code` exercises its real token-then-user request chain.
+  # Drives the `http:` DI seam without a network round-trip. Routes on the
+  # request path (device-code vs token vs user endpoint) and RECORDS every
+  # outgoing request so tests can assert the wire contract (path, form
+  # fields, headers) — not just response handling.
   class FakeHttp
-    def initialize(token:, user:)
-      @token = token
-      @user = user
+    Recorded = Struct.new(:host, :path, :body, :headers)
+
+    attr_reader :requests
+
+    def initialize(responses)
+      @responses = responses
+      @requests = []
     end
 
     def start(host, _port, **_opts)
@@ -17,9 +22,21 @@ class GithubAuthTest < Minitest::Test
       yield self
     end
 
-    def request(_req)
-      @host == "api.github.com" ? @user : @token
+    def request(req)
+      @requests << Recorded.new(@host, req.path, req.body.to_s, req.to_hash)
+      key =
+        if @host == "api.github.com" then :user
+        elsif req.path.include?("/login/device/code") then :device
+        else :token
+        end
+      @responses.fetch(key)
     end
+  end
+
+  # An http seam that raises a transport error on first contact, to prove
+  # network failures map to Hive::Error (friendly 422) not a blank 500.
+  class TimeoutHttp
+    def start(*) = raise Net::OpenTimeout, "execution expired"
   end
 
   def self.http_ok(body)
@@ -29,77 +46,128 @@ class GithubAuthTest < Minitest::Test
     res
   end
 
-  def build_auth(token_body:, user_body:)
-    Hive::Web::GithubAuth.new(
-      config: { "origin" => "https://box.example", "github" => { "client_id" => "id", "owner" => "octo" } },
-      http: FakeHttp.new(
-        token: self.class.http_ok(token_body),
-        user: self.class.http_ok(user_body)
-      )
+  DEVICE_OK = JSON.generate(
+    "device_code" => "dev-1", "user_code" => "ABCD-1234",
+    "verification_uri" => "https://github.com/login/device",
+    "expires_in" => 899, "interval" => 5
+  )
+
+  def build_auth(device: DEVICE_OK, token: nil, user: nil)
+    http = FakeHttp.new(
+      device: self.class.http_ok(device),
+      token: self.class.http_ok(token.to_s),
+      user: self.class.http_ok(user.to_s)
     )
+    auth = Hive::Web::GithubAuth.new(
+      config: { "github" => { "client_id" => "cid", "owner" => "octo" } },
+      http: http
+    )
+    [ auth, http ]
   end
 
-  def test_exchange_code_returns_login_on_success
-    auth = build_auth(
-      token_body: JSON.generate("access_token" => "tok"),
-      user_body: JSON.generate("login" => "octo")
-    )
+  def test_start_device_flow_returns_codes_and_sends_client_id_and_scope
+    auth, http = build_auth
 
-    assert_equal "octo", auth.exchange_code("good-code")
+    device = auth.start_device_flow
+
+    assert_equal "ABCD-1234", device["user_code"], "user_code must come from the GitHub payload"
+    assert_equal "dev-1", device["device_code"]
+    req = http.requests.first
+    assert_equal "/login/device/code", req.path, "device authorization must hit the device-code endpoint"
+    assert_match(/client_id=cid/, req.body)
+    assert_match(/scope=read%3Auser/, req.body)
   end
 
-  def test_exchange_code_raises_on_error_payload
-    auth = build_auth(
-      token_body: JSON.generate("error" => "bad_verification_code"),
-      user_body: JSON.generate("login" => "octo")
+  def test_start_device_flow_raises_on_error_payload
+    auth, = build_auth(device: JSON.generate("error" => "unauthorized_client", "error_description" => "device flow disabled"))
+
+    error = assert_raises(Hive::Error) { auth.start_device_flow }
+    assert_match(/device flow disabled/, error.message)
+  end
+
+  def test_start_device_flow_raises_on_missing_fields
+    auth, = build_auth(device: JSON.generate("user_code" => "ABCD-1234"))
+
+    error = assert_raises(Hive::Error) { auth.start_device_flow }
+    assert_match(/missing device_code/, error.message)
+  end
+
+  def test_poll_grants_login_and_sends_device_grant_contract
+    auth, http = build_auth(
+      token: JSON.generate("access_token" => "tok"),
+      user: JSON.generate("login" => "octo")
     )
 
-    error = assert_raises(Hive::Error) { auth.exchange_code("stale-code") }
-    assert_match(/bad_verification_code/, error.message)
+    result = auth.poll_device_flow("dev-1")
+
+    assert_equal({ state: :ok, login: "octo" }, result)
+    token_req = http.requests.find { |r| r.path.include?("/login/oauth/access_token") }
+    assert token_req, "the poll must hit the token endpoint"
+    assert_match(/device_code=dev-1/, token_req.body)
+    assert_match(/grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code/, token_req.body)
+    user_req = http.requests.find { |r| r.host == "api.github.com" }
+    assert_equal "Bearer tok", user_req.headers["authorization"].first, "the user lookup must carry the granted token"
   end
-  def test_exchange_code_raises_on_unparseable_token_response
+
+  def test_poll_maps_pending_slow_down_denied_and_expired
+    { "authorization_pending" => { state: :pending },
+      "access_denied" => { state: :denied },
+      "expired_token" => { state: :expired } }.each do |error, expected|
+      auth, = build_auth(token: JSON.generate("error" => error))
+      assert_equal expected, auth.poll_device_flow("dev-1"), "GitHub error #{error} must map to #{expected[:state]}"
+    end
+
+    auth, = build_auth(token: JSON.generate("error" => "slow_down", "interval" => 11))
+    assert_equal({ state: :slow_down, interval: 11 }, auth.poll_device_flow("dev-1"))
+  end
+
+  def test_poll_raises_on_unknown_error_payload
+    auth, = build_auth(token: JSON.generate("error" => "incorrect_device_code"))
+
+    error = assert_raises(Hive::Error) { auth.poll_device_flow("dev-1") }
+    assert_match(/incorrect_device_code/, error.message)
+  end
+
+  def test_poll_raises_on_unparseable_token_response
     # A proxy/error page returns 200 with non-JSON; JSON.parse raises and the
     # rescue must surface a clean Hive::Error, not a raw JSON::ParserError.
-    auth = build_auth(
-      token_body: "<html>not json</html>",
-      user_body: JSON.generate("login" => "octo")
-    )
+    auth, = build_auth(token: "<html>not json</html>")
 
-    error = assert_raises(Hive::Error) { auth.exchange_code("good-code") }
+    error = assert_raises(Hive::Error) { auth.poll_device_flow("dev-1") }
     assert_match(/unparseable response/, error.message)
   end
 
-  def test_exchange_code_raises_on_unparseable_user_response
-    # The token leg parses fine but the user lookup returns non-JSON; the
-    # second rescue must map that to a friendly Hive::Error too.
-    auth = build_auth(
-      token_body: JSON.generate("access_token" => "tok"),
-      user_body: "<html>not json</html>"
+  def test_poll_raises_on_unparseable_user_response
+    auth, = build_auth(
+      token: JSON.generate("access_token" => "tok"),
+      user: "<html>not json</html>"
     )
 
-    error = assert_raises(Hive::Error) { auth.exchange_code("good-code") }
+    error = assert_raises(Hive::Error) { auth.poll_device_flow("dev-1") }
     assert_match(/user lookup returned an unparseable response/, error.message)
   end
 
-  def test_authorize_url_contains_callback_and_state
+  def test_network_timeouts_map_to_hive_error
     auth = Hive::Web::GithubAuth.new(
-      config: {
-        "origin" => "https://box.example",
-        "github" => { "client_id" => "abc", "owner" => "octo" }
-      }
+      config: { "github" => { "client_id" => "cid", "owner" => "octo" } },
+      http: TimeoutHttp.new
     )
 
-    url = auth.authorize_url(state: "state123")
+    error = assert_raises(Hive::Error) { auth.start_device_flow }
+    assert_match(/could not reach GitHub/, error.message)
+  end
 
-    assert_match(%r{\Ahttps://github\.com/login/oauth/authorize\?}, url)
-    assert_match(/client_id=abc/, url)
-    assert_match(/state=state123/, url)
-    assert_match(/redirect_uri=https%3A%2F%2Fbox\.example%2Fauth%2Fgithub%2Fcallback/, url)
+  def test_configured_requires_client_id_and_owner_only
+    auth = Hive::Web::GithubAuth.new(config: { "github" => { "client_id" => "cid", "owner" => "octo" } })
+    assert auth.configured?, "device flow needs no client secret — client_id + owner suffice"
+
+    no_owner = Hive::Web::GithubAuth.new(config: { "github" => { "client_id" => "cid" } })
+    refute no_owner.configured?
   end
 
   def test_owner_match_is_case_insensitive
     auth = Hive::Web::GithubAuth.new(
-      config: { "origin" => "http://localhost", "github" => { "owner" => "Alice", "client_id" => "id" } }
+      config: { "github" => { "owner" => "Alice", "client_id" => "id" } }
     )
 
     assert auth.owner?("alice")

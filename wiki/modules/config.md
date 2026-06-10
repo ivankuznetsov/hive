@@ -188,9 +188,10 @@ Global web settings are validated separately for [[commands/web]]:
 `1..65535`, `web.origin` must start with `http://` or `https://`,
 `web.github` must be a hash, optional `web.github.owner` and
 `web.github.client_id` must be non-empty strings when set, and
-`web.session_secret_file` must be a non-empty string when set. The GitHub client
-secret is intentionally not stored in YAML; `Hive::Web::GithubAuth` reads
-`HIVEBOX_GITHUB_CLIENT_SECRET`.
+`web.session_secret_file` must be a non-empty string when set. GitHub sign-in
+uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
+exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
+app — public by design, since device flow is a public-client grant.
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 

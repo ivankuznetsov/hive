@@ -7,11 +7,23 @@ require "rack/test"
 module WebSessionHelper
   include Rack::Test::Methods
 
+  # Device-flow shaped (see Hive::Web::GithubAuth): `interval => 0` lets the
+  # first GET /auth/github/wait poll immediately, so login! needs no clock
+  # manipulation; poll_device_flow grants the configured login right away.
   FakeGithubAuth = Struct.new(:owner_login) do
     def configured? = true
-    def new_state = "test-oauth-state"
-    def authorize_url(state:) = "https://github.test/authorize?state=#{state}"
-    def exchange_code(_code) = owner_login
+
+    def start_device_flow
+      {
+        "device_code" => "test-device-code",
+        "user_code" => "ABCD-1234",
+        "verification_uri" => "https://github.test/login/device",
+        "expires_in" => 900,
+        "interval" => 0
+      }
+    end
+
+    def poll_device_flow(_device_code) = { state: :ok, login: owner_login }
     def owner?(login) = login == owner_login
   end
 
@@ -49,12 +61,20 @@ module WebSessionHelper
     @app
   end
 
-  # Establish an authenticated session via the OAuth callback. Rack::Test
-  # carries the session cookie across subsequent requests.
+  # Establish an authenticated session via the device flow: start it from the
+  # login form (CSRF-protected POST), then let the waiting page's immediate
+  # poll (interval 0) grant the session. Rack::Test carries the session
+  # cookie across subsequent requests.
   def login!(host: "127.0.0.1")
-    get "/auth/github", {}, "HTTP_HOST" => host
-    get "/auth/github/callback", { "code" => "ok", "state" => "test-oauth-state" }, "HTTP_HOST" => host
-    follow_redirect! if last_response.redirect?
+    token = csrf_token_from("/login", host: host)
+    post "/auth/github", { "authenticity_token" => token }, "HTTP_HOST" => host
+    # Explicit path request, NOT follow_redirect!: the redirect Location is an
+    # absolute http://#{host}/... URL, and Rack::Test's cookie jar scopes the
+    # session cookie to its default host (the requests above are path-only
+    # with an HTTP_HOST header override) — following the absolute URL would
+    # drop the cookie and the grant. The wait page polls once (interval 0)
+    # and establishes the session.
+    get "/auth/github/wait", {}, "HTTP_HOST" => host
   end
 
   # Pull the authenticity_token out of the first form on the given page so a

@@ -36,7 +36,7 @@ if (!baseURL) {
 class LoginPage {
   constructor(page) {
     this.page = page;
-    this.githubButton = page.getByRole("link", { name: "Continue with GitHub" });
+    this.githubButton = page.getByRole("button", { name: "Continue with GitHub" });
     this.statusGrid = page.locator("[data-status-grid]");
   }
 

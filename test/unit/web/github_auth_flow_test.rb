@@ -3,21 +3,21 @@ require "rack/test"
 require "net/http"
 require "hive/web/github_auth"
 
-# U2's make-or-break control: the GitHub OAuth callback in app.rb must reject a
-# mismatched state, a denied consent, and a *non-owner* login — and admit only
-# the configured owner. Earlier suites swapped in FakeGithubAuth and only drove
-# the owner=200 path, so the real `exchange_code` http seam and every 403 branch
-# went unexercised. This drives the *real* GithubAuth against a fake http
-# transport so the box's primary authz gate is proven, not a stub's
+# U2's make-or-break control: the GitHub device-flow gate in app.rb must admit
+# only the configured owner and surface every failure (denied grant, expired
+# code, non-owner login) as a readable page — never a session. This drives the
+# *real* GithubAuth against a fake http transport so the box's primary authz
+# gate is proven end to end (start → wait-page poll → grant), not a stub's
 # reimplementation of `owner?`.
 class WebGithubAuthFlowTest < Minitest::Test
   include Rack::Test::Methods
   include HiveTestHelper
 
-  # Returns the token response for github.com and the user response for
-  # api.github.com so the callback's token-then-user chain runs end to end.
+  # Routes on request path: device-code endpoint, token (poll) endpoint, and
+  # the api.github.com user lookup.
   class FakeHttp
-    def initialize(token:, user:)
+    def initialize(device:, token:, user:)
+      @device = device
       @token = token
       @user = user
     end
@@ -27,10 +27,21 @@ class WebGithubAuthFlowTest < Minitest::Test
       yield self
     end
 
-    def request(_req)
-      @host == "api.github.com" ? @user : @token
+    def request(req)
+      return @user if @host == "api.github.com"
+
+      req.path.include?("/login/device/code") ? @device : @token
     end
   end
+
+  DEVICE_BODY = JSON.generate(
+    "device_code" => "dev-1", "user_code" => "ABCD-1234",
+    "verification_uri" => "https://github.com/login/device",
+    "expires_in" => 900,
+    # interval 0 → the first GET /auth/github/wait polls immediately, so the
+    # flow needs no clock manipulation.
+    "interval" => 0
+  )
 
   def http_ok(body)
     res = Net::HTTPOK.new("1.1", "200", "OK")
@@ -48,13 +59,11 @@ class WebGithubAuthFlowTest < Minitest::Test
     @old_env = {
       "HIVE_HOME" => ENV["HIVE_HOME"],
       "HOME" => ENV["HOME"],
-      "HIVEBOX_SESSION_SECRET" => ENV["HIVEBOX_SESSION_SECRET"],
-      "HIVEBOX_GITHUB_CLIENT_SECRET" => ENV["HIVEBOX_GITHUB_CLIENT_SECRET"]
+      "HIVEBOX_SESSION_SECRET" => ENV["HIVEBOX_SESSION_SECRET"]
     }
     ENV["HIVE_HOME"] = @tmp
     ENV["HOME"] = @tmp
     ENV["HIVEBOX_SESSION_SECRET"] = "x" * 64
-    ENV["HIVEBOX_GITHUB_CLIENT_SECRET"] = "secret"
     File.write(File.join(@tmp, "config.yml"), {
       "registered_projects" => [],
       "web" => { "origin" => "http://127.0.0.1", "github" => { "owner" => "alice", "client_id" => "client" } }
@@ -69,75 +78,98 @@ class WebGithubAuthFlowTest < Minitest::Test
     FileUtils.rm_rf(@tmp)
   end
 
-  def install_auth(login:)
+  def install_auth(login: "alice", token_body: nil)
+    token_body ||= JSON.generate("access_token" => "tok")
     @app.set :github_auth, Hive::Web::GithubAuth.new(
       config: Hive::Config.load_global_web,
       http: FakeHttp.new(
-        token: http_ok(JSON.generate("access_token" => "tok")),
+        device: http_ok(DEVICE_BODY),
+        token: http_ok(token_body),
         user: http_ok(JSON.generate("login" => login))
       )
     )
   end
 
-  # Establish a valid OAuth state in the session via the real /auth/github
-  # redirect, then return the state value the app stored.
-  def begin_oauth
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
-    last_response["Location"][/state=([^&]+)/, 1]
+  # Start the device flow from the real login form: pull the CSRF token off
+  # /login, POST /auth/github, and follow to the waiting page path.
+  def begin_device_flow
+    get "/login", {}, "HTTP_HOST" => "127.0.0.1"
+    token = last_response.body[/name="authenticity_token" value="([^"]+)"/, 1]
+    post "/auth/github", { "authenticity_token" => token }, "HTTP_HOST" => "127.0.0.1"
+    assert_equal 302, last_response.status, "starting the device flow must redirect to the waiting page"
+    assert_match %r{/auth/github/wait\z}, last_response["Location"]
   end
 
-  def test_state_mismatch_is_denied
-    install_auth(login: "alice")
-    begin_oauth
+  def test_start_without_csrf_token_is_rejected
+    install_auth
+    post "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
 
-    get "/auth/github/callback", { "code" => "c", "state" => "forged" }, "HTTP_HOST" => "127.0.0.1"
-
-    assert_equal 403, last_response.status
-    assert_match(/Invalid OAuth state/, last_response.body)
+    assert_equal 403, last_response.status, "the device-flow start is a mutation and must ride verify_csrf!"
   end
 
-  def test_denied_consent_is_surfaced
-    install_auth(login: "alice")
-    state = begin_oauth
+  def test_wait_without_started_flow_redirects_to_login
+    install_auth
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
 
-    get "/auth/github/callback",
-        { "state" => state, "error" => "access_denied", "error_description" => "The user denied" },
-        "HTTP_HOST" => "127.0.0.1"
+    assert_equal 302, last_response.status
+    assert_match %r{/login\z}, last_response["Location"]
+  end
+
+  def test_pending_grant_keeps_showing_the_user_code
+    install_auth(token_body: JSON.generate("error" => "authorization_pending"))
+    begin_device_flow
+
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
+
+    assert_equal 200, last_response.status
+    assert_match(/ABCD-1234/, last_response.body, "the waiting page must show the user code while pending")
+    assert_match(/github\.com\/login\/device/, last_response.body)
+    refute_match(/Log out/, last_response.body, "a pending grant must not produce a session")
+  end
+
+  def test_denied_grant_is_surfaced
+    install_auth(token_body: JSON.generate("error" => "access_denied"))
+    begin_device_flow
+
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
 
     assert_equal 403, last_response.status
     assert_match(/sign-in failed/, last_response.body)
   end
 
+  def test_expired_device_code_is_surfaced
+    install_auth(token_body: JSON.generate("error" => "expired_token"))
+    begin_device_flow
+
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
+
+    assert_equal 403, last_response.status
+    assert_match(/expired/, last_response.body)
+  end
+
   def test_non_owner_is_denied
     install_auth(login: "mallory")
-    state = begin_oauth
+    begin_device_flow
 
-    get "/auth/github/callback", { "code" => "c", "state" => state }, "HTTP_HOST" => "127.0.0.1"
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
 
     assert_equal 403, last_response.status, "a second GitHub account must be denied (U2)"
     assert_match(/is not allowed/, last_response.body)
-  end
 
-  # P3: when no OAuth flow ever started there is no stored state. A naive
-  # `params["state"] == stored` passes when BOTH are nil, bypassing the CSRF
-  # guard. The callback must reject an absent/empty stored state outright.
-  def test_absent_state_is_denied
-    install_auth(login: "alice")
-    # No begin_oauth → nothing stored in the session. Send a callback with no
-    # state param at all; nil == nil must NOT be treated as a valid match.
-    get "/auth/github/callback", { "code" => "c" }, "HTTP_HOST" => "127.0.0.1"
-
-    assert_equal 403, last_response.status, "an absent stored state must not pass the OAuth state check"
-    assert_match(/Invalid OAuth state/, last_response.body)
+    get "/", {}, "HTTP_HOST" => "127.0.0.1"
+    assert_equal 302, last_response.status, "a denied login must not leave a usable session"
   end
 
   def test_owner_is_admitted
     install_auth(login: "alice")
-    state = begin_oauth
+    begin_device_flow
 
-    get "/auth/github/callback", { "code" => "c", "state" => state }, "HTTP_HOST" => "127.0.0.1"
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
 
     assert_equal 302, last_response.status
     assert_equal "http://127.0.0.1/", last_response["Location"]
+
+    get "/", {}, "HTTP_HOST" => "127.0.0.1"
+    assert_equal 200, last_response.status, "the owner's session must survive into the status grid"
   end
 end

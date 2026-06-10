@@ -164,42 +164,73 @@ module Hive
         erb :login
       end
 
-      get "/auth/github" do
+      # Start a GitHub *device flow* sign-in (RFC 8628). A POST (not a GET)
+      # because it creates server-visible state and a GitHub device code —
+      # and as a mutation it rides the global `verify_csrf!` like every other
+      # form; the anonymous session carries a CSRF token via `csrf_tag` on
+      # the login page. No redirect URI, no client secret: the operator
+      # enters the short code at github.com/login/device from any browser.
+      post "/auth/github" do
         auth = settings.github_auth
         halt 500, "GitHub OAuth is not configured" unless auth.configured?
-        state = auth.new_state
-        session[:github_oauth_state] = state
-        redirect auth.authorize_url(state: state)
+        device = auth.start_device_flow
+        now = Time.now.to_i
+        session[:github_device] = {
+          "device_code" => device["device_code"],
+          "user_code" => device["user_code"],
+          "verification_uri" => device["verification_uri"],
+          "interval" => device["interval"].to_i,
+          "expires_at" => now + device["expires_in"].to_i,
+          # GitHub requires waiting a full interval before the FIRST poll too.
+          "next_poll_at" => now + device["interval"].to_i
+        }
+        redirect "/auth/github/wait"
       end
 
-      get "/auth/github/callback" do
-        # Require a non-empty stored state that secure-compares against the
-        # supplied one. A bare `stored == supplied` passes when BOTH are nil
-        # (no OAuth flow ever started), defeating the CSRF/state check; demand
-        # a real stored value and constant-time compare it.
-        stored = session.delete(:github_oauth_state)
-        supplied = params["state"].to_s
-        valid_state = stored && !stored.empty? && Rack::Utils.secure_compare(stored, supplied)
-        halt 403, erb(:unauthorized, locals: { message: "Invalid OAuth state" }) unless valid_state
+      # The waiting page: shows the user code and meta-refreshes itself every
+      # poll interval. Each render performs AT MOST one GitHub poll, gated by
+      # `next_poll_at` — so a refresh-happy tab (or several tabs) cannot
+      # out-poll GitHub's minimum interval and trip its slow_down penalty.
+      get "/auth/github/wait" do
+        device = session[:github_device]
+        redirect "/login" unless device
 
-        # A denied consent screen (or any GitHub error) comes back as
-        # `?error=...&error_description=...` with no `code`. Render a
-        # friendly sign-in-failed page instead of a KeyError 500.
-        code = params["code"].to_s
-        if code.empty?
-          reason = [ params["error_description"], params["error"] ].map(&:to_s).find { |s| !s.empty? } || "no authorization code returned"
-          halt 403, erb(:unauthorized, locals: { message: "GitHub sign-in failed: #{reason}" })
+        now = Time.now.to_i
+        if now >= device["expires_at"].to_i
+          session.delete(:github_device)
+          halt 403, erb(:unauthorized, locals: { message: "GitHub sign-in failed: the device code expired. Start again." })
         end
 
-        login = settings.github_auth.exchange_code(code)
-        halt 403, erb(:unauthorized, locals: { message: "#{login} is not allowed" }) unless settings.github_auth.owner?(login)
+        if now >= device["next_poll_at"].to_i
+          result = settings.github_auth.poll_device_flow(device["device_code"])
+          case result[:state]
+          when :ok
+            session.delete(:github_device)
+            login = result[:login]
+            halt 403, erb(:unauthorized, locals: { message: "#{login} is not allowed" }) unless settings.github_auth.owner?(login)
 
-        # Rotate the session id at the auth boundary. Signed cookies already
-        # blunt fixation today, but renewing here keeps the box safe if a
-        # server-side session store is ever introduced.
-        request.session_options[:renew] = true
-        session[:github_login] = login
-        redirect "/"
+            # Rotate the session id at the auth boundary. Signed cookies
+            # already blunt fixation today, but renewing here keeps the box
+            # safe if a server-side session store is ever introduced.
+            request.session_options[:renew] = true
+            session[:github_login] = login
+            redirect "/"
+          when :denied
+            session.delete(:github_device)
+            halt 403, erb(:unauthorized, locals: { message: "GitHub sign-in failed: the authorization was denied." })
+          when :expired
+            session.delete(:github_device)
+            halt 403, erb(:unauthorized, locals: { message: "GitHub sign-in failed: the device code expired. Start again." })
+          when :slow_down
+            device["interval"] = result[:interval]
+          end
+          device["next_poll_at"] = now + device["interval"].to_i
+          session[:github_device] = device
+        end
+
+        # Native refresh, no JS: re-render after the poll interval.
+        @head = %(<meta http-equiv="refresh" content="#{device["interval"].to_i}">)
+        erb :device, locals: { device: device }
       end
 
       post "/logout" do

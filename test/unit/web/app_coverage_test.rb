@@ -13,13 +13,21 @@ class WebAppCoverageTest < Minitest::Test
   include Rack::Test::Methods
   include HiveTestHelper
 
-  # `returns` is the login exchange_code resolves to; `owner` is the allowed
-  # account. They differ in the non-owner test so owner? actually rejects.
-  FakeAuth = Struct.new(:owner, :configured, :returns) do
+  # `poll_result` is what the device-grant poll resolves to; `owner` is the
+  # allowed account. They differ in the non-owner test so owner? actually
+  # rejects. `interval => 0` makes the first wait-page render poll at once.
+  FakeAuth = Struct.new(:owner, :configured, :poll_result) do
     def configured? = configured
-    def new_state = "real-state-value"
-    def authorize_url(state:) = "https://gh.test/authorize?state=#{state}"
-    def exchange_code(_code) = (returns || owner)
+
+    def start_device_flow
+      {
+        "device_code" => "dev-cov", "user_code" => "COVR-2026",
+        "verification_uri" => "https://gh.test/login/device",
+        "expires_in" => 900, "interval" => 0
+      }
+    end
+
+    def poll_device_flow(_device_code) = (poll_result || { state: :ok, login: owner })
     def owner?(login) = login == owner
   end
 
@@ -62,9 +70,10 @@ class WebAppCoverageTest < Minitest::Test
   end
 
   def login!
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
-    state = last_response["Location"][/state=([^&]+)/, 1]
-    get "/auth/github/callback", { "code" => "ok", "state" => state }, "HTTP_HOST" => "127.0.0.1"
+    get "/login", {}, "HTTP_HOST" => "127.0.0.1"
+    token = last_response.body[/name="authenticity_token" value="([^"]+)"/, 1]
+    post "/auth/github", { "authenticity_token" => token }, "HTTP_HOST" => "127.0.0.1"
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
   end
 
   def test_login_page_renders
@@ -72,52 +81,67 @@ class WebAppCoverageTest < Minitest::Test
     assert last_response.ok?
   end
 
-  def test_auth_github_redirects_and_stores_state
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
+  def test_start_redirects_to_wait_page
+    get "/login", {}, "HTTP_HOST" => "127.0.0.1"
+    token = last_response.body[/name="authenticity_token" value="([^"]+)"/, 1]
+    post "/auth/github", { "authenticity_token" => token }, "HTTP_HOST" => "127.0.0.1"
     assert last_response.redirect?
-    assert_match(/state=real-state-value/, last_response["Location"])
+    assert_match(%r{/auth/github/wait\z}, last_response["Location"])
   end
 
-  def test_auth_github_unconfigured_500s
+  def test_start_unconfigured_500s
     app.set :github_auth, FakeAuth.new("alice", false)
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
+    get "/login", {}, "HTTP_HOST" => "127.0.0.1"
+    token = last_response.body[/name="authenticity_token" value="([^"]+)"/, 1]
+    post "/auth/github", { "authenticity_token" => token }, "HTTP_HOST" => "127.0.0.1"
     assert_equal 500, last_response.status
   end
 
-  def test_callback_admits_owner_and_sets_session
+  def test_wait_admits_owner_and_sets_session
     login!
     assert last_response.redirect?
     assert_equal "http://127.0.0.1/", last_response["Location"]
   end
 
-  def test_callback_rejects_absent_state
-    # No /auth/github first → no stored state. nil-vs-nil must NOT pass.
-    get "/auth/github/callback", { "code" => "ok" }, "HTTP_HOST" => "127.0.0.1"
-    assert_equal 403, last_response.status
-    assert_match(/Invalid OAuth state/, last_response.body)
+  def test_wait_without_started_flow_redirects_to_login
+    # No POST /auth/github first → no device session; the wait page must not
+    # poll, it sends the visitor back to the sign-in page.
+    get "/auth/github/wait", {}, "HTTP_HOST" => "127.0.0.1"
+    assert last_response.redirect?
+    assert_match(%r{/login\z}, last_response["Location"])
   end
 
-  def test_callback_rejects_mismatched_state
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
-    get "/auth/github/callback", { "code" => "ok", "state" => "forged" }, "HTTP_HOST" => "127.0.0.1"
-    assert_equal 403, last_response.status
+  def test_wait_keeps_pending_grant_on_the_code_page
+    app.set :github_auth, FakeAuth.new("alice", true, { state: :pending })
+    login!
+    assert last_response.ok?
+    assert_match(/COVR-2026/, last_response.body)
   end
 
-  def test_callback_surfaces_denied_consent
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
-    state = last_response["Location"][/state=([^&]+)/, 1]
-    get "/auth/github/callback",
-        { "state" => state, "error" => "access_denied", "error_description" => "denied" },
-        "HTTP_HOST" => "127.0.0.1"
+  def test_wait_honors_slow_down_and_reschedules
+    app.set :github_auth, FakeAuth.new("alice", true, { state: :slow_down, interval: 11 })
+    login!
+    assert last_response.ok?
+    assert_match(/content="11"/, last_response.body, "slow_down must stretch the meta-refresh interval")
+  end
+
+  def test_wait_surfaces_denied_grant
+    app.set :github_auth, FakeAuth.new("alice", true, { state: :denied })
+    login!
     assert_equal 403, last_response.status
     assert_match(/sign-in failed/, last_response.body)
   end
 
-  def test_callback_rejects_non_owner
-    app.set :github_auth, FakeAuth.new("alice", true, "mallory")
-    get "/auth/github", {}, "HTTP_HOST" => "127.0.0.1"
-    state = last_response["Location"][/state=([^&]+)/, 1]
-    get "/auth/github/callback", { "code" => "ok", "state" => state }, "HTTP_HOST" => "127.0.0.1"
+  def test_wait_surfaces_expired_device_code
+    app.set :github_auth, FakeAuth.new("alice", true, { state: :expired })
+    login!
+    assert_equal 403, last_response.status
+    assert_match(/expired/, last_response.body)
+  end
+
+  def test_wait_rejects_non_owner
+    app.set :github_auth, FakeAuth.new("alice", true, { state: :ok, login: "mallory" })
+    login!
     assert_equal 403, last_response.status
     assert_match(/is not allowed/, last_response.body)
   end

@@ -305,7 +305,10 @@ module Hive
         "origin" => "http://127.0.0.1:4567",
         "github" => {
           "owner" => nil,
-          "client_id" => nil
+          # The shared hivebox OAuth app (device flow only — public by
+          # design, no client secret exists). Operators can override with
+          # their own app's client_id; "Enable Device Flow" must be checked.
+          "client_id" => "Ov23liYChIkP5PU4bvo1"
         },
         "session_secret_file" => nil
       },

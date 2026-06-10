@@ -7,7 +7,35 @@ updated: 2026-06-08
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's paste-the-code agent OAuth relay instead of provider-page proxying.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's paste-the-code agent OAuth relay instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in (no callback URL, no client secret).
+
+## ADR-036: Hivebox operator sign-in uses GitHub OAuth device flow, not the callback web flow
+
+**Status:** Active (replaced the authorization-code web flow before PR #300 merged, 2026-06-10).
+
+**Context:** The web gate originally shipped as the OAuth authorization-code
+web flow: a per-operator GitHub OAuth app whose callback URL had to match
+`web.origin` exactly, plus a client secret in `HIVEBOX_GITHUB_CLIENT_SECRET`.
+For a headless box whose origin changes between localhost and a VPS/tunnel,
+that coupling was the largest first-run configuration surface — and it
+contradicted the box's own agent-auth UX, which is already device-code-style
+(ADR-035).
+
+**Decision:** `Hive::Web::GithubAuth` implements the device flow (RFC 8628):
+`POST /auth/github` requests a device/user code pair, `GET /auth/github/wait`
+shows the code and polls the token endpoint at GitHub's stated interval
+(at most one poll per page render, honoring `slow_down`). No redirect URI, no
+client secret; `web.github.client_id` defaults to the shared hivebox OAuth app
+(public by design — device flow is a public-client grant) and remains
+overridable. The owner-only gate, session renewal at the auth boundary, and
+403-on-failure semantics are unchanged.
+
+**Consequences:** A fresh box needs only `web.github.owner` to gate itself;
+moving the box between origins requires no GitHub-side changes; the secrets
+surface shrinks to the session secret. The UX cost is one extra step (entering
+a short code at github.com/login/device) — symmetrical with the agent relay.
+Operators overriding `client_id` must check "Enable Device Flow" on their app.
+Route behavior and tests: [[commands/web]].
 
 ## ADR-035: Hivebox agent OAuth uses PTY paste-the-code relay, not provider-page proxying
 

@@ -27,7 +27,10 @@ class ReposController < ApplicationController
     name = File.basename(name)
     raise Hive::Error, "invalid repo name" if name.empty? || name == "." || name == ".."
 
-    root = ENV.fetch("HIVEBOX_REPOS_DIR", "/data/repos")
+    # The container sets HIVEBOX_REPOS_DIR=/data/repos; a host run (dev
+    # checkout) keeps clones under hive's data home instead of assuming a
+    # /data mount exists.
+    root = ENV["HIVEBOX_REPOS_DIR"] || File.join(Hive::Paths.data_home, "repos")
     FileUtils.mkdir_p(root)
     target = File.join(root, name)
 

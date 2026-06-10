@@ -306,7 +306,17 @@ module Hive
       def finalize_session(session, status)
         @mutex.synchronize do
           session.done = true
-          session.error = "exit #{status.exitstatus}" if status && !status.success?
+          # A signaled child (the watchdog's TERM/KILL after the login
+          # timeout) has a nil exitstatus — "exit " with no number told the
+          # operator nothing. Mirror the bot supervisor's rendering.
+          if status && !status.success?
+            session.error =
+              if status.exitstatus
+                "exit #{status.exitstatus}"
+              else
+                "killed (signal #{status.termsig || "?"} — likely the login timed out)"
+              end
+          end
         end
       end
 

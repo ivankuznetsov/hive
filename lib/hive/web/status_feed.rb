@@ -48,17 +48,25 @@ module Hive
       # so a dead socket raises on the next write instead of parking its thread
       # forever). All subscribers share ONE poller thread, so the filesystem
       # scan runs once per tick regardless of subscriber count.
+      # json_payload regenerates `generated_at` (and per-task `age_seconds`)
+      # on every poll, so comparing raw serialized payloads re-emitted every
+      # tick — the documented dedup was dead in production and the on_idle
+      # keep-alive branch never ran. Strip the volatile fields for the
+      # comparison; subscribers still receive the full payload.
+      VOLATILE_KEYS = %w[generated_at age_seconds].freeze
+
       def each_snapshot(on_idle: nil)
         ensure_poller!
 
-        payload, json, seen_generation = current_snapshot
-        last_json = json
+        payload, _json, seen_generation = current_snapshot
+        last_key = comparable_key(payload)
         yield payload
 
         loop do
-          payload, json, seen_generation = await_tick(seen_generation)
-          if json != last_json
-            last_json = json
+          payload, _json, seen_generation = await_tick(seen_generation)
+          key = comparable_key(payload)
+          if key != last_key
+            last_key = key
             yield payload
           else
             on_idle&.call
@@ -96,7 +104,16 @@ module Hive
       def poll_loop
         loop do
           sleep @interval
-          publish(compute_json)
+          # A transient snapshot failure (operator mid-edit on config.yml, a
+          # task folder mv racing the scan) must not kill the poller thread:
+          # a dead poller silently freezes every subscriber forever — ticks
+          # stop, so even the on_idle keep-alive path never runs again. Log
+          # and try again next tick.
+          begin
+            publish(compute_json)
+          rescue StandardError => e
+            warn "hive web: status poll failed (#{e.class}: #{e.message}); retrying"
+          end
         end
       end
 
@@ -126,6 +143,14 @@ module Hive
         @monitor.synchronize do
           @tick.wait while @generation == seen_generation
           [ @latest_payload, @latest_json, @generation ]
+        end
+      end
+
+      def comparable_key(node)
+        case node
+        when Hash then node.except(*VOLATILE_KEYS).transform_values { |v| comparable_key(v) }
+        when Array then node.map { |v| comparable_key(v) }
+        else node
         end
       end
     end

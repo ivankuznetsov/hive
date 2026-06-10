@@ -97,6 +97,44 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  # F3: a token/allowlist rotation saved via the web wizard SIGHUPs the
+  # supervisor — but the running bot long-polls with its boot-time
+  # credentials, so reload must RESTART it, not skip it as "already up".
+  def test_handle_reload_restarts_a_running_bot
+    with_tmp_global_config do
+      Hive::Config.update_global_config! do |data|
+        data["bot"] = { "enabled" => true, "chat_id_allowlist" => [ 1 ] }
+      end
+      sup = build
+      bot_pid = Process.spawn("sleep", "30", pgroup: true)
+      sup.instance_variable_get(:@children) <<
+        Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: bot_pid, started_at: Time.now)
+
+      sup.send(:handle_reload)
+
+      _, status = Process.waitpid2(bot_pid)
+      assert status.signaled?, "reload must TERM the running bot so it reboots with the new token"
+      assert restart_at(sup).key?("bot"), "reload must schedule the bot's immediate respawn"
+      assert_operator restart_at(sup)["bot"], :<=, Time.now, "the respawn must be due immediately"
+    end
+  end
+
+  def test_handle_reload_stops_the_bot_when_disabled
+    with_tmp_global_config do
+      sup = build
+      bot_pid = Process.spawn("sleep", "30", pgroup: true)
+      sup.instance_variable_get(:@children) <<
+        Child.new(name: "bot", argv: %w[hive bot start --foreground], pid: bot_pid, started_at: Time.now)
+      restart_at(sup)["bot"] = Time.now
+
+      sup.send(:handle_reload)
+
+      _, status = Process.waitpid2(bot_pid)
+      assert status.signaled?, "reload with bot disabled must stop the running bot"
+      refute restart_at(sup).key?("bot"), "a disabled bot must not be rescheduled"
+    end
+  end
+
   def test_handle_reload_is_a_noop_when_bot_disabled
     with_tmp_global_config do
       sup = build

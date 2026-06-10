@@ -15,3 +15,7 @@
 /config/master.key
 /config/credentials/*.key
 .env*
+# hivebox does not use Rails credentials: SECRET_KEY_BASE is injected by
+# `hive web` from the persisted session secret. Never commit either file
+# (the original master.key leaked once — rotated by removing credentials).
+/config/credentials.yml.enc

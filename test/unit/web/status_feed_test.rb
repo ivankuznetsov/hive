@@ -151,4 +151,86 @@ class StatusFeedTest < Minitest::Test
       feed.stop # no subscriber ever started the poller
     end
   end
+
+  # A status command whose payloads differ ONLY in the volatile fields
+  # json_payload regenerates every scan (generated_at, per-task age_seconds).
+  # Byte-comparing payloads made the documented dedup dead in production:
+  # every tick re-emitted and the on_idle keep-alive never ran.
+  def test_dedup_ignores_volatile_timestamp_fields
+    with_tmp_global_config do
+      payloads = (1..6).map do |n|
+        { "schema" => "hive-status", "generated_at" => "2026-06-10T0#{n}:00:00Z",
+          "projects" => [ { "name" => "demo",
+                            "tasks" => [ { "slug" => "t", "age_seconds" => n * 10 } ] } ] }
+      end
+      feed = Hive::Web::StatusFeed.new(interval: 0.02, status_command: CountingStatus.new(payloads))
+      yields = 0
+      idles = 0
+      idle_mutex = Mutex.new
+      subscriber = Thread.new do
+        feed.each_snapshot(on_idle: -> { idle_mutex.synchronize { idles += 1 } }) do |_payload|
+          yields += 1
+        end
+      end
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+      sleep 0.01 until idle_mutex.synchronize { idles } >= 2 ||
+                       Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      assert_operator idle_mutex.synchronize { idles }, :>=, 2,
+                      "unchanged-but-for-timestamps ticks must fire on_idle (dedup dead otherwise)"
+      assert_equal 1, yields,
+                   "payloads differing only in generated_at/age_seconds must dedup to the connect emit"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      feed&.stop
+    end
+  end
+
+  # A transient snapshot failure (config mid-edit, a task folder mv racing
+  # the scan) must not kill the shared poller: a dead poller stops ticks,
+  # which silently freezes every subscriber AND the on_idle keep-alive path.
+  class FlakyOnceStatus
+    def initialize(payloads)
+      @payloads = payloads
+      @calls = 0
+      @mutex = Mutex.new
+    end
+
+    def json_payload(_projects)
+      @mutex.synchronize do
+        @calls += 1
+        raise Hive::ConfigError, "config.yml is mid-edit" if @calls == 2
+
+        @payloads[[ @calls - 1, @payloads.length - 1 ].min]
+      end
+    end
+  end
+
+  def test_poller_survives_a_snapshot_error_and_keeps_publishing
+    with_tmp_global_config do
+      first = { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+      second = { "projects" => [ { "name" => "demo", "tasks" => [ { "slug" => "new" } ] } ] }
+      feed = Hive::Web::StatusFeed.new(interval: 0.02, status_command: FlakyOnceStatus.new([ first, second ]))
+      seen = []
+      seen_mutex = Mutex.new
+      subscriber = Thread.new do
+        capture_io do
+          feed.each_snapshot { |payload| seen_mutex.synchronize { seen << payload } }
+        end
+      end
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+      sleep 0.01 until seen_mutex.synchronize { seen.length } >= 2 ||
+                       Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      assert_equal 2, seen_mutex.synchronize { seen.length },
+                   "the poller must outlive a raising snapshot and publish the next change"
+      assert_equal second, seen_mutex.synchronize { seen.last },
+                   "the post-error snapshot must reach the subscriber"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      feed&.stop
+    end
+  end
 end

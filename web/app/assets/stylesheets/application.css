@@ -360,6 +360,9 @@ pre {
 }
 
 .log-pane pre { max-height: 420px; }
+.log-error { color: var(--danger); }
+.log-meta { color: var(--ink-faint); }
+.composer-attach { display: inline-flex; align-items: center; gap: 6px; }
 
 .intervene { margin: 26px 0; }
 .intervene textarea { width: 100%; min-height: 70px; }
@@ -438,8 +441,10 @@ pre {
 /* ---- Responsive ---- */
 
 @media (max-width: 720px) {
-  .topbar-inner { flex-wrap: wrap; gap: 10px; }
-  .topbar nav { order: 3; width: 100%; overflow-x: auto; }
+  .topbar-inner { gap: 12px; }
+  .topbar nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .topbar nav::-webkit-scrollbar { display: none; }
+  .session-login { display: none; }
   .task-row { grid-template-columns: 1fr; gap: 8px; }
   .task-meta { flex-wrap: wrap; white-space: normal; }
   main { padding: 20px 14px 48px; }

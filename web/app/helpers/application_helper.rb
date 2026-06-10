@@ -39,12 +39,44 @@ module ApplicationHelper
   end
 
   # Pipeline-generated display names arrive later in a task's life; until
-  # then derive a readable title from the slug, dropping the date-hash
-  # suffix ("add-dark-mode-260610-3c75" → "Add dark mode").
+  # then prefer the operator's ORIGINAL idea text (idea.md front matter) —
+  # a de-slugged title truncates mid-phrase ("Add dark mode toggle to").
+  # The slug stays the fallback of last resort.
   def task_title(task)
     return task["display_name"] if task["display_name"].present? && task["display_name"] != task["slug"]
 
-    task["slug"].to_s.sub(/-\d{6}-\h{4}\z/, "").tr("-", " ").upcase_first
+    original_idea_line(task) ||
+      task["slug"].to_s.sub(/-\d{6}-\h{4}\z/, "").tr("-", " ").upcase_first
+  end
+
+  def original_idea_line(task)
+    folder = task["folder"]
+    return nil unless folder
+
+    path = File.join(folder, "idea.md")
+    return nil unless File.file?(path)
+
+    front = File.read(path, 4096).to_s[/\A---\n(.*?)\n---/m, 1]
+    return nil unless front
+
+    # permitted_classes: the front matter's unquoted created_at parses as a
+    # Time, which plain safe_load rejects wholesale.
+    text = YAML.safe_load(front, permitted_classes: [ Time, Date ])&.dig("original_text").to_s
+    line = text.gsub(/\[image\d+\]/, "").strip.lines.first.to_s.strip
+    line.presence&.truncate(90)
+  rescue StandardError
+    nil
+  end
+
+  # Color the JSONL log tail by event class so errors jump out of the noise.
+  def log_line_class(line)
+    if /"type"\s*:\s*"(error|turn\.failed)"|"error"\s*:/.match?(line)
+      "log-error"
+    elsif /"type"\s*:\s*"(thread|turn)\./.match?(line)
+      "log-meta"
+    else
+      ""
+    end
   end
 
   def relative_age(seconds)

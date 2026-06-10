@@ -8,6 +8,7 @@ require "application_system_test_case"
 class PipelineFlowTest < ApplicationSystemTestCase
   setup do
     @project = create_hive_project!
+    configure_owner!
     StatusBroadcaster.start!
   end
 
@@ -90,6 +91,18 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".flash-notice", text: "Approved", wait: 5
     assert stage_dir(@project, "2-brainstorm").children.any? { |c| c.basename.to_s.start_with?("browser-test-idea") },
            "approve must move the task into 2-brainstorm"
+  end
+
+  test "an unconfigured box explains setup instead of a dead sign-in button" do
+    path = File.join(ENV["HIVE_HOME"], "config.yml")
+    data = YAML.safe_load_file(path) || {}
+    data.delete("web")
+    File.write(path, data.to_yaml)
+
+    visit "/login"
+
+    assert_text "know its owner"
+    assert_no_button "Continue with GitHub", wait: 0
   end
 
   test "pasting an image attaches it like the TUI" do

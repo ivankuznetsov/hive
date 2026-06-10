@@ -88,12 +88,37 @@ module Hive
         end
       end
 
+      # SIGHUP = config changed. Three bot cases:
+      #   enabled + not running → start it (first-time enable);
+      #   enabled + running     → RESTART it — the running process long-polls
+      #     with the credentials it booted with, so a token/allowlist
+      #     rotation saved via the web wizard never reaches it otherwise;
+      #   disabled + running    → stop it.
+      # The restart works by TERMing the group and scheduling an immediate
+      # respawn: reap_once collects the signal death (which should_restart?
+      # deliberately ignores) and start_due_restarts brings it back up.
       def handle_reload
         @reload_requested = false
         bot = child("bot")
-        return unless bot_enabled? && (bot.nil? || bot.pid.nil?)
+        running = bot && bot.pid
 
-        start_child("bot", %w[hive bot start --foreground])
+        if bot_enabled?
+          if running
+            signal_group(bot.pid, "TERM")
+            @restart_at["bot"] = Time.now
+          else
+            start_child("bot", %w[hive bot start --foreground])
+          end
+        elsif running
+          @restart_at.delete("bot")
+          signal_group(bot.pid, "TERM")
+        end
+      end
+
+      def signal_group(pid, signal)
+        Process.kill(signal, -pid)
+      rescue Errno::ESRCH
+        nil
       end
 
       def reap_once

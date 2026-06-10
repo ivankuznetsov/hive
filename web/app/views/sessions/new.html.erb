@@ -1,8 +1,18 @@
 <% content_for(:title, "hivebox — sign in") %>
 <div class="card auth-card">
   <h1>hivebox</h1>
-  <p>This box is gated to its configured GitHub owner.</p>
-  <%= form_with url: auth_github_path do |f| %>
-    <%= f.submit "Continue with GitHub", data: { turbo_submits_with: "Contacting GitHub…" } %>
+  <% if @configured %>
+    <p>This box is gated to its configured GitHub owner.</p>
+    <%= form_with url: auth_github_path do |f| %>
+      <%= f.submit "Continue with GitHub", data: { turbo_submits_with: "Contacting GitHub…" } %>
+    <% end %>
+  <% else %>
+    <p>Almost there — the box doesn't know its owner yet.</p>
+    <p class="muted">
+      Set <code>web.github.owner</code> (your GitHub login) in the box's
+      <code>config.yml</code> on the <code>/data</code> mount, then reload
+      this page. No OAuth app or secret is needed — sign-in uses the GitHub
+      device flow.
+    </p>
   <% end %>
 </div>

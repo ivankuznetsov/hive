@@ -14,7 +14,11 @@ class SessionsController < ApplicationController
   class_attribute :http_client, default: Net::HTTP
 
   def new
-    redirect_to root_path if current_login
+    return redirect_to root_path if current_login
+
+    # Surface a misconfigured box on the page itself — a sign-in button that
+    # errors only after the click is a broken first-run.
+    @configured = github_auth.configured?
   end
 
   def create

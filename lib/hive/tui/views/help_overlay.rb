@@ -138,14 +138,13 @@ module Hive
         def scrollbar_lines(total:, rows:, offset:)
           return Array.new(rows, " ") if total <= rows
 
-          max_offset = [ total - rows, 0 ].max
+          # `total > rows` here (smaller totals took the early return above),
+          # so `max_offset` is always positive and the thumb position is well
+          # defined without a divide-by-zero guard.
+          max_offset = total - rows
           thumb_size = [ (rows.to_f * rows / total).ceil, 1 ].max
           thumb_size = [ thumb_size, rows ].min
-          thumb_top = if max_offset.zero?
-            0
-          else
-            ((offset.to_f / max_offset) * (rows - thumb_size)).round
-          end
+          thumb_top = ((offset.to_f / max_offset) * (rows - thumb_size)).round
 
           rows.times.map do |row|
             row.between?(thumb_top, thumb_top + thumb_size - 1) ? "█" : "│"

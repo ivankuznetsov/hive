@@ -503,6 +503,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_translate_horizontal_wheel_in_help_is_noop
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :help),
+      dispatch: @dispatch
+    )
+
+    # Button 6 is a horizontal-wheel event (wheel? is true) but is neither
+    # WHEEL_UP nor WHEEL_DOWN, so the help overlay must ignore it.
+    horizontal_wheel = mouse_message(button: 6)
+    assert horizontal_wheel.wheel?, "button 6 must register as a wheel event"
+
+    msg = @model.send(:translate, horizontal_wheel)
+
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   # ---- View dispatch by mode ----
 
   def test_view_renders_grid_in_grid_mode

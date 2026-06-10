@@ -149,9 +149,10 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  # The `hive init`-rendered template writes an explicit `mode: "medium"`,
-  # so an init'd project round-trips to enabled medium patrol.
-  def test_load_init_rendered_template_round_trips_to_enabled_medium
+  # An explicit `mode: "medium"` round-trips to enabled medium patrol with the
+  # timer/14400 cadence. (`hive init` defaults the prompt to `low`, but a user
+  # can pick `medium`; this locks medium's derivation either way.)
+  def test_load_enables_patrol_on_explicit_medium_round_trip
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)

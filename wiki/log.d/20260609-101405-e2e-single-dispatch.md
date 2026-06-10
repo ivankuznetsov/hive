@@ -1,0 +1,3 @@
+## [2026-06-09T10:14:05Z] e2e — keep bin/hive-e2e to one Thor dispatch
+
+**Action:** Fixed a `bin/hive-e2e` wrapper regression where the executable called `Hive::E2E::Binary.start` twice after the JSON flag grammar change. Successful JSON commands such as `bin/hive-e2e list --json` emitted two envelopes, so `test/e2e/lib/hive_e2e_binary_test.rb` failed with `JSON::ParserError`. Removed the stale second dispatch, preserved the single `debug: true` path for wrapper-formatted usage errors, and updated [[e2e]] with the single-dispatch invariant. Verified `test/integration/cli_version_test.rb`, `test/e2e/lib/hive_e2e_binary_test.rb`, `bundle exec rake e2e:lib_test`, and `bundle exec rake test`. Did not run `qmd update` or `qmd embed`.

@@ -146,11 +146,18 @@ class TmuxRunnerTest < Minitest::Test
   def test_capture_pane_tail_returns_bounded_output
     with_tmp_dir do |dir|
       runner = runner(name: unique_name("tail"), cwd: dir)
-      runner.start_detached(command: "bash -lc 'printf abcdefghijklmnopqrstuvwxyz; sleep 10'")
+      # Keep the pane alive (sleep 60) well past the poll deadline so a slow
+      # CI host can't let the command exit before we observe its output.
+      runner.start_detached(command: "bash -lc 'printf abcdefghijklmnopqrstuvwxyz; sleep 60'")
+      # Poll on a monotonic deadline rather than a fixed 2s budget: under loaded
+      # CI, tmux session startup + login-shell + pane render can take several
+      # seconds, which made the old 20×0.1s loop flake with an empty capture.
       tail = nil
-      20.times do
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 20
+      loop do
         tail = runner.capture_pane_tail(bytes: 10)
         break if tail.include?("uvwxyz")
+        break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
 
         sleep 0.1
       end

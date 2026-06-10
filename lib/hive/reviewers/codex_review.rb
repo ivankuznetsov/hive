@@ -1,5 +1,3 @@
-require "open3"
-require "shellwords"
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
 require "hive/agent_profiles"
@@ -37,8 +35,11 @@ module Hive
       # omits timeout_sec behaves identically across reviewer kinds.
       DEFAULT_TIMEOUT_SEC = 7200
 
-      # Cap captured stdout so a runaway review can't OOM the host. A real
-      # review is a few KB; 4 MiB is generous headroom.
+      # Cap the bytes RETAINED from a runaway review so it can't OOM the
+      # host. This is NOT a hard abort: the reader keeps draining the pipe
+      # past the cap (discarding the overflow) so the child always reaches
+      # EOF promptly and never blocks forever on a full pipe. A real review
+      # is a few KB; 4 MiB is generous headroom.
       MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
       # Findings file is valid only if it contains at least one severity
@@ -169,7 +170,19 @@ module Hive
       end
 
       def capture_run(pipe_r, pid, timeout_sec)
-        reader = Thread.new { pipe_r.read(MAX_OUTPUT_BYTES) }
+        # Drain the pipe FULLY in chunks but RETAIN at most MAX_OUTPUT_BYTES.
+        # Reading exactly MAX_OUTPUT_BYTES and stopping would leave the pipe
+        # full once a review emits more than the cap, blocking the child on
+        # write() forever — the run would then only end at the wall-clock
+        # timeout. Keep reading past the cap (discarding overflow) so EOF is
+        # always reached and the child can exit promptly.
+        reader = Thread.new do
+          buf = +"".b
+          while (chunk = pipe_r.read(65_536))
+            buf << chunk if buf.bytesize < MAX_OUTPUT_BYTES
+          end
+          buf.byteslice(0, MAX_OUTPUT_BYTES)
+        end
 
         status = wait_with_timeout(pid, timeout_sec)
         if status.nil?
@@ -200,16 +213,35 @@ module Hive
         end
       end
 
-      # TERM the child's process group (best-effort), then reap it. The
-      # short KILL escalation is intentionally omitted — codex review is
-      # read-only and TERM-clean; the reader-thread join + pipe close bound
-      # the wait regardless.
+      # TERM the child's process group (best-effort), give it a short grace,
+      # then KILL the group if anything in it is still alive before reaping.
+      # codex review is normally TERM-clean, but a wedged child (e.g. stuck
+      # in uninterruptible IO or ignoring TERM) would otherwise keep the pipe
+      # write-end open and stall the reader join; the KILL escalation
+      # guarantees the group is torn down.
       def terminate(pid)
-        Process.kill("TERM", -Process.getpgid(pid))
+        pgid = Process.getpgid(pid)
+        Process.kill("TERM", -pgid)
+        sleep 1
+        Process.kill("KILL", -pgid) if process_group_alive?(pgid)
       rescue Errno::ESRCH, Errno::EPERM, Errno::ECHILD
         nil
       ensure
         reap(pid)
+      end
+
+      # Best-effort liveness probe for a process group. `Process.kill(0, ...)`
+      # signals nothing but raises ESRCH when no process in the group exists,
+      # so a clean return means the group still has at least one member.
+      def process_group_alive?(pgid)
+        Process.kill(0, -pgid)
+        true
+      rescue Errno::ESRCH, Errno::ECHILD
+        false
+      rescue Errno::EPERM
+        # The group exists but we lack permission to signal it — treat as
+        # alive so the KILL attempt still fires (and is itself guarded).
+        true
       end
 
       def reap(pid)

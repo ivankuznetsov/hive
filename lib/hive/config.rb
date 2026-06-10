@@ -1315,8 +1315,14 @@ module Hive
         # (closes ce-code-review AC-6). Mirrors the framing used by the
         # output_basename / agent checks below. `skill` is required only
         # for skill-driven adapters; the codex_review adapter runs codex's
-        # built-in review and takes no CE skill, so it is exempt.
-        required = kind == "codex_review" ? %w[name prompt_template] : %w[name skill prompt_template]
+        # built-in review and takes no CE skill, so it is exempt. The
+        # codex_review adapter DOES require `agent` (it resolves the codex
+        # binary via Hive::AgentProfiles.lookup(spec.fetch("agent")) — see
+        # lib/hive/reviewers/codex_review.rb), so require it here to fail at
+        # load instead of crashing mid-dispatch with a KeyError. (The generic
+        # validate_agent_name! below returns early on nil, so without this
+        # entry a codex_review spec missing `agent` would pass load.)
+        required = kind == "codex_review" ? %w[name agent prompt_template] : %w[name skill prompt_template]
         required.each do |field|
           value = entry[field]
           missing = value.nil? || (value.is_a?(String) && value.strip.empty?)

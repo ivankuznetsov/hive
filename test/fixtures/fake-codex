@@ -11,6 +11,13 @@
 #                    GFM-checkbox findings block) and exits with
 #                    HIVE_FAKE_CODEX_EXIT (default 0). HIVE_FAKE_CODEX_HANG
 #                    sleeps that many seconds first (timeout tests).
+#
+#                    HIVE_FAKE_CODEX_BIG_MIB, when set, emits valid findings
+#                    headers first, then floods stdout with that many MiB of
+#                    filler so the total combined output exceeds the
+#                    reviewer's MAX_OUTPUT_BYTES retain cap. Used to prove the
+#                    reader fully drains the pipe (no write() deadlock) instead
+#                    of stopping at the cap and wedging the child.
 set -u
 
 if [[ "${1:-}" == "--version" ]]; then
@@ -32,6 +39,21 @@ if [[ "${1:-}" == "review" ]]; then
 
   if [[ -n "${HIVE_FAKE_CODEX_HANG:-}" ]]; then
     sleep "${HIVE_FAKE_CODEX_HANG}"
+  fi
+
+  if [[ -n "${HIVE_FAKE_CODEX_BIG_MIB:-}" ]]; then
+    # Valid findings headers up front (inside the retained cap), then a
+    # flood of filler that pushes the total past MAX_OUTPUT_BYTES. If the
+    # reader stopped reading at the cap, this write() would block forever.
+    printf 'OpenAI Codex v0.139.0\n## High\n- [ ] big: overflow case\n## Medium\nNo findings.\n## Nit\nNo findings.\n'
+    # Emit HIVE_FAKE_CODEX_BIG_MIB chunks of ~1 MiB each.
+    chunk="$(head -c 1048576 /dev/zero | tr '\0' 'x')"
+    i=0
+    while [[ "$i" -lt "${HIVE_FAKE_CODEX_BIG_MIB}" ]]; do
+      printf '%s\n' "$chunk"
+      i=$((i + 1))
+    done
+    exit "${HIVE_FAKE_CODEX_EXIT:-0}"
   fi
 
   default_out='OpenAI Codex v0.139.0

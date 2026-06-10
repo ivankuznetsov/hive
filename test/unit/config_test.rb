@@ -1063,6 +1063,67 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_requires_agent_for_codex_review
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      # codex_review resolves the codex binary via
+      # Hive::AgentProfiles.lookup(spec.fetch("agent")); a spec missing
+      # `agent` would crash mid-dispatch with KeyError, so it must fail at
+      # config load. (The generic validate_agent_name! returns early on nil,
+      # so without `agent` in the required list this entry would pass load.)
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: codex-native-review
+              kind: codex_review
+              output_basename: codex-native-review
+              prompt_template: reviewer_codex_native_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.agent.*is missing/, err.message)
+    end
+  end
+
+  def test_load_requires_name_for_codex_review
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - kind: codex_review
+              agent: codex
+              output_basename: codex-native-review
+              prompt_template: reviewer_codex_native_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.name.*is missing/, err.message)
+    end
+  end
+
+  def test_load_accepts_linter_reviewer_kind_at_config_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      # `linter` is deliberately accepted at config-load time and rejected
+      # only at dispatch (Hive::Reviewers.dispatch) so the more actionable
+      # dispatch-time error — pointing at review.ci.command — is what the
+      # user sees. Pin that design: load must NOT raise and the kind must
+      # round-trip.
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: my-linter
+              kind: linter
+              skill: ce-code-review
+              output_basename: my-linter
+              prompt_template: reviewer_codex_native_review.md.erb
+      YAML
+      cfg = Hive::Config.load(dir)
+      reviewer = cfg.dig("review", "reviewers").first
+      assert_equal "linter", reviewer["kind"],
+                   "linter kind is accepted at config load and rejected only at dispatch"
+    end
+  end
+
   def test_load_rejects_unknown_reviewer_kind
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

@@ -16,7 +16,7 @@ class ReviewersCodexReviewTest < Minitest::Test
   def teardown
     ENV["HIVE_CODEX_BIN"] = @prev_bin
     %w[HIVE_FAKE_CODEX_STDOUT HIVE_FAKE_CODEX_EXIT HIVE_FAKE_CODEX_ARGV_LOG
-       HIVE_FAKE_CODEX_HANG HIVE_FAKE_CODEX_VERSION].each { |k| ENV.delete(k) }
+       HIVE_FAKE_CODEX_HANG HIVE_FAKE_CODEX_VERSION HIVE_FAKE_CODEX_BIG_MIB].each { |k| ENV.delete(k) }
     Hive::AgentProfile.reset_version_cache!
   end
 
@@ -115,6 +115,50 @@ class ReviewersCodexReviewTest < Minitest::Test
 
       assert result.ok?, "a single severity header is enough to count as valid findings"
       assert_equal "## Medium\n- [ ] thing: reason\n", File.read(reviewer.output_path)
+    end
+  end
+
+  def test_trims_banner_and_trailing_blanks_to_exact_findings_body
+    with_tmp_dir do |dir|
+      # Banner before the first header, plus trailing blank lines after the
+      # findings. normalize_output must drop the banner, rstrip the trailing
+      # blanks, and append exactly one newline.
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "OpenAI Codex v0.139.0\nsome banner\n## High\n- [ ] x: y\n\n\n"
+      reviewer = build_reviewer(dir)
+
+      result = reviewer.run!
+
+      assert result.ok?, "expected :ok, got #{result.status} (#{result.error_message})"
+      assert_equal "## High\n- [ ] x: y\n", File.read(reviewer.output_path),
+                   "banner trimmed to first header and exactly one trailing newline"
+    end
+  end
+
+  # --- FIX 1: full pipe drain (no write() deadlock past the retain cap) ---
+
+  def test_oversized_output_drains_without_deadlock_and_yields_valid_findings
+    with_tmp_dir do |dir|
+      # Emit valid headers up front, then ~6 MiB of filler — past the 4 MiB
+      # MAX_OUTPUT_BYTES retain cap. If the reader stopped at the cap the
+      # child would block on write() forever and the run would only end via
+      # the wall-clock timeout. A generous-but-finite timeout proves the run
+      # completes promptly because the pipe is fully drained.
+      ENV["HIVE_FAKE_CODEX_BIG_MIB"] = "6"
+      reviewer = build_reviewer(dir, "timeout_sec" => 60, "max_attempts" => 1)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = reviewer.run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert result.ok?,
+             "oversized output must still produce valid findings, got #{result.status} (#{result.error_message})"
+      assert elapsed < 30,
+             "run must finish promptly (drained pipe), not hang to timeout; took #{elapsed.round(1)}s"
+      body = File.read(reviewer.output_path)
+      assert body.start_with?("## High"), "retained findings must start at the first severity header"
+      assert_includes body, "big: overflow case"
+      assert_operator File.size(reviewer.output_path), :<=, Hive::Reviewers::CodexReview::MAX_OUTPUT_BYTES,
+                      "retained output must not exceed the cap"
     end
   end
 
@@ -296,6 +340,73 @@ class ReviewersCodexReviewTest < Minitest::Test
       assert result.error?
       assert_match(/timed out after 1s/, result.error_message)
       refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  def test_terminate_escalates_to_kill_when_term_is_ignored
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir)
+      # Child traps (ignores) TERM and sleeps. TERM alone won't reap it, so
+      # terminate must escalate to KILL after the grace and then reap it.
+      pid = Process.spawn("trap '' TERM; sleep 30", pgroup: true)
+      # Let the shell install the trap before we signal.
+      sleep 0.2
+
+      # terminate must not raise even though TERM is ignored.
+      reviewer.send(:terminate, pid)
+      # The process group must be gone after KILL escalation + reap.
+      refute reviewer.send(:process_group_alive?, Process.getpgid(pid)),
+             "process group must be torn down by the KILL escalation"
+    rescue Errno::ESRCH
+      # getpgid after reap can race to ESRCH — that itself proves the group
+      # is gone, which is the assertion's intent.
+      assert true
+    end
+  end
+
+  def test_process_group_alive_true_for_running_group
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir)
+      pid = Process.spawn("sleep 30", pgroup: true)
+      begin
+        assert reviewer.send(:process_group_alive?, Process.getpgid(pid)),
+               "a running group must report alive"
+      ensure
+        Process.kill("KILL", pid)
+        Process.wait(pid)
+      end
+    end
+  end
+
+  def test_process_group_alive_false_for_dead_group
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir)
+      # Spawn a child in its own group, capture its pgid, then reap it. The
+      # group no longer exists, so the liveness probe (Process.kill(0, ...))
+      # raises ESRCH and the probe reports false.
+      pid = Process.spawn("true", pgroup: true)
+      pgid = Process.getpgid(pid)
+      Process.wait(pid)
+
+      refute reviewer.send(:process_group_alive?, pgid),
+             "a reaped group must report not-alive"
+    end
+  end
+
+  def test_process_group_alive_treats_eperm_as_alive
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir)
+      # A group we can see but not signal (EPERM) must be treated as alive so
+      # the guarded KILL attempt still fires. Temporarily make Process.kill
+      # raise EPERM to simulate the unsignalable-but-present case.
+      original = Process.method(:kill)
+      Process.singleton_class.send(:define_method, :kill) { |*| raise Errno::EPERM }
+      begin
+        assert reviewer.send(:process_group_alive?, 12_345),
+               "EPERM (exists but unsignalable) must be treated as alive"
+      ensure
+        Process.singleton_class.send(:define_method, :kill, original)
+      end
     end
   end
 

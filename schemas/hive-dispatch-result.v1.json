@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-dispatch-result.v1.json",
   "title": "hive dispatch result notice (v1)",
-  "description": "One JSON file under <state_home>/dispatch_results/, atomic-written by the daemon when a bot-originated, daemon-spawned run exits non-zero, and consumed by the Telegram bot to relay the failure back to the originating chat (ADV-1). Runs the opposite direction of hive-dispatch-request. The bot removes each notice after relaying it. Strict-version-matched — any schema_version != 1 is rejected and the file removed.",
+  "description": "One JSON file under <state_home>/dispatch_results/, atomic-written by the daemon when a bot-originated, daemon-spawned run completes, and consumed by the Telegram bot to relay the result back to the originating chat (ADV-1). Runs the opposite direction of hive-dispatch-request. The bot removes each notice after relaying it. Strict-version-matched — any schema_version != 1 is rejected and the file removed.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -33,7 +33,7 @@
     "chat_id": {
       "type": "integer",
       "not": { "const": 0 },
-      "description": "Telegram chat to relay the failure to — copied from the originating dispatch request. Always present (the daemon only writes a notice when it has a chat to reply to). 0 is never a valid Telegram chat id; private chats are positive and group/supergroup/channel chats are negative, so the machine-checked contract is 'non-zero' rather than 'positive' (#258)."
+      "description": "Telegram chat to relay the result to — copied from the originating dispatch request. Always present (the daemon only writes a notice when it has a chat to reply to). 0 is never a valid Telegram chat id; private chats are positive and group/supergroup/channel chats are negative, so the machine-checked contract is 'non-zero' rather than 'positive' (#258)."
     },
     "update_id": {
       "type": ["integer", "null"],
@@ -43,15 +43,15 @@
     "slug": { "type": "string" },
     "request_id": {
       "type": "string",
-      "description": "request_id of the dispatch request whose child failed."
+      "description": "request_id of the dispatch request whose child completed."
     },
     "exit_code": {
       "type": ["integer", "null"],
-      "description": "Non-zero exit status of the failed child."
+      "description": "Exit status of the completed child. 0 is success; non-zero is command failure; null means the child was killed or timed out before producing an exit status."
     },
     "command": {
       "type": "string",
-      "description": "The command string the daemon spawned (for surfacing the failing verb)."
+      "description": "The command string the daemon spawned (for surfacing the completed verb)."
     }
   }
 }

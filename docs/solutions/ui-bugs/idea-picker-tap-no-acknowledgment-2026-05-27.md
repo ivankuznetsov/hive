@@ -17,6 +17,7 @@ resolution_type: code_fix
 tags:
   - telegram-bot
   - idea-capture
+  - success-confirmation
   - supervisor
   - child-process
   - callback-handler
@@ -46,7 +47,8 @@ Future readers: do **not** chase the token/expiry logic in `CallbackHandlers#ide
 
 PR #226, `lib/hive/bot/supervisor.rb`.
 
-Before:
+The original fix made `hive new` the exception to the silent-success
+rule:
 
 ```ruby
 elsif child.exit_code == 0
@@ -79,7 +81,34 @@ def new_capture_text(child)
 end
 ```
 
-Detection keys on `argv[1]`, **not** `argv[0]`: `ChildSupervisor#normalize_hive_bin` rewrites `argv[0]` to a resolved absolute binary path (e.g. `/usr/local/bin/hive`), so the literal `"hive"` is gone by the time the reaper sees it — but the verb (`"new"`) is stable at index 1. All other exit-0 commands still return `nil`.
+Follow-up on 2026-06-09 generalized the rule after a `/idea` report for
+Screenote showed that operators could still see low-level `exit 0`
+output or no useful confirmation for other successful actions. The
+current behavior is:
+
+```ruby
+elsif child.exit_code == 0
+  child_success_text(child)
+end
+
+def child_success_text(child)
+  new_capture_text(child) || command_success_text(
+    command_argv: child.command_argv,
+    project: child.project,
+    slug: child.slug
+  )
+end
+```
+
+`hive new` keeps the specific inbox message. Other successful direct
+child commands now get human confirmations such as `Approved
+<project>/<slug>. Hive will continue.`, `Accepted findings for
+<project>/<slug>.`, or `Status check completed for <project>/<slug>.`
+The daemon-backed dispatch-result channel also relays exit-0 notices as
+positive confirmations, while non-zero/nil exits keep the warning-style
+failure message.
+
+Detection keys on `argv[1]`, **not** `argv[0]`: `ChildSupervisor#normalize_hive_bin` rewrites `argv[0]` to a resolved absolute binary path (e.g. `/usr/local/bin/hive`), so the literal `"hive"` is gone by the time the reaper sees it — but the verb (`"new"`, `run`, `approve`, etc.) is stable at index 1.
 
 ## Why This Works
 
@@ -88,16 +117,21 @@ The root cause is two compounding gaps:
 1. The dispatch path (`CallbackHandlers#idea_project` → `dispatch_then_reply` → `hive new`) was **silent on success**.
 2. The resulting `1-inbox` state has **no immediate follow-up signal** — its `ready_to_brainstorm` action is suppressed entirely when the daemon is on, and when the daemon is off it only fires on a later poll tick (never at tap time); there is no status row the operator is watching for a freshly-captured idea.
 
-Most commands are fine staying silent because their effect surfaces in the next status row or a downstream notification; `hive new` had neither, so the only correct fix is an explicit ack at the moment the result lands. `/approve` and `/done` share the silent-success shape but were deliberately left unchanged: they degrade gracefully — a re-tap hits `WRONG_STAGE` → "Already advanced by another device", and the stage advance emits a downstream notification.
+The stable rule is now simpler: no successful bot action should surface
+raw process text such as `exit 0`, and no successful button tap should
+appear dead. A command may still have a downstream status-row or alert,
+but the immediate Telegram reply should confirm that the action the user
+just initiated completed.
 
 ## Prevention
 
 - Tests added in `test/unit/bot/supervisor_test.rb`:
   - `test_child_completion_text_acknowledges_successful_idea_capture` — confirms the ack names the project.
   - `test_child_completion_text_acknowledges_capture_when_hive_bin_resolved` — locks in `argv[1]` detection against the resolved-binary-path regression.
-  - `test_child_completion_text_stays_silent_for_non_new_success` — guards the silent default for all other commands.
-- **General guard:** fire-and-forget dispatch that is silent on success needs an explicit acknowledgment whenever the result lands in a state that has no follow-up signal (no status row, no downstream notification, suppressed action).
-- **How to spot other instances:** audit every `dispatch_then_reply` / `dispatch_commands` callback for commands whose success produces neither a status-row change the operator is watching nor a downstream push. Each such command needs its own confirmation in `child_completion_text`. Flag any new exit-0 branch that returns `nil` unconditionally and pair it with the question: "is there a follow-up signal for this command's result state?"
+  - `test_child_completion_text_confirms_non_new_success` — confirms the generalized success path.
+  - `test_drain_dispatch_results_relays_success_to_chat_and_removes` — confirms daemon-routed exit-0 results become positive Telegram messages.
+- **General guard:** bot actions that end successfully need a user-facing positive confirmation, not silence and not a raw `exit 0` diagnostic.
+- **How to spot other instances:** audit every `dispatch_then_reply`, `dispatch_commands`, and daemon dispatch-result path for exit-0 branches that return `nil`, produce raw process text, or rely only on a later status-row change.
 
 ## Related Issues
 

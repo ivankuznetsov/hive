@@ -83,8 +83,8 @@ class InitTest < Minitest::Test
         assert_equal File.expand_path(dir), payload.fetch("path")
         assert_equal File.join(dir, ".hive-state"), payload.fetch("hive_state_path")
         assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
-        assert_equal "medium", payload.fetch("answers").fetch("patrol_mode")
-        assert_equal "medium", payload.fetch("patrol_mode")
+        assert_equal "low", payload.fetch("answers").fetch("patrol_mode")
+        assert_equal "low", payload.fetch("patrol_mode")
         assert_equal payload.fetch("answers").fetch("budgets"), payload.fetch("budgets")
         assert_equal false, payload.fetch("daemon_autostart_requested")
 
@@ -423,12 +423,12 @@ class InitTest < Minitest::Test
         raw_patrol = raw_cfg.fetch("patrol")
         cfg = Hive::Config.load(dir)
 
-        assert_equal "medium", raw_patrol.fetch("mode")
+        assert_equal "low", raw_patrol.fetch("mode")
         refute raw_patrol.key?("trigger"), "fresh init config must let patrol.mode derive trigger"
         refute raw_patrol.key?("poll_interval_sec"), "fresh init config must let patrol.mode derive poll cadence"
         refute raw_patrol.key?("enabled"), "fresh init config must let patrol.mode derive enabled"
-        assert_equal "timer", cfg.dig("patrol", "trigger")
-        assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
+        assert_equal "new_commits", cfg.dig("patrol", "trigger")
+        assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
         assert_equal true, cfg.dig("patrol", "enabled")
       end
     end

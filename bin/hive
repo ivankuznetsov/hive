@@ -14,6 +14,7 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+JSON_STAGE_ACTION_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
 
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
@@ -57,13 +58,31 @@ end
 
 def json_usage_error_contract(argv)
   command = argv.find { |arg| !arg.start_with?("-") }
+  return [ "hive-stage-action", "invalid_task_path", { "verb" => command } ] if JSON_STAGE_ACTION_COMMANDS.include?(command)
+
   case command
+  when "pr"
+    [ "hive-stage-action", "invalid_task_path", { "verb" => "open-pr" } ]
   when "run"
     [ "hive-run", "invalid_task_path" ]
   when "approve"
     [ "hive-approve", "invalid_task_path" ]
+  when "drop"
+    [ "hive-drop", "invalid_task_path" ]
+  when "findings"
+    [ "hive-findings", "invalid_task_path" ]
+  when "accept-finding"
+    [ "hive-findings", "invalid_task_path", { "operation" => "accept" } ]
+  when "reject-finding"
+    [ "hive-findings", "invalid_task_path", { "operation" => "reject" } ]
   when "markers"
     [ "hive-markers-clear", "invalid_task_path" ]
+  when "patrol"
+    [ "hive-patrol", "error" ]
+  when "prune"
+    [ "hive-prune", "usage" ]
+  when "status"
+    [ "hive-status", "error" ]
   end
 end
 
@@ -71,11 +90,12 @@ def emit_json_usage_error(argv, error)
   contract = json_usage_error_contract(argv)
   return false unless contract && json_requested?(argv)
 
-  schema, error_kind = contract
+  schema, error_kind, extras = contract
   payload = Hive::Schemas::ErrorEnvelope.build(
     schema: schema,
     error: error,
-    error_kind: error_kind
+    error_kind: error_kind,
+    extras: extras || {}
   )
   puts JSON.generate(payload)
   true

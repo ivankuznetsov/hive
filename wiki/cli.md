@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-09
+updated: 2026-06-10
 tags: [cli, api]
 ---
 
@@ -26,6 +26,12 @@ truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
 (`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
 assignments such as `--json=1` or `--json=yes` exit with usage before their
 values can be treated as a command argument or task target.
+Thor usage errors that happen after wrapper normalization but before command
+objects are constructed are routed through schema-specific JSON envelopes for
+the compatible agent-callable surfaces: `run`, `approve`, `drop`, `findings`,
+`accept-finding`, `reject-finding`, workflow verbs (`brainstorm` through
+`archive`, plus the `pr` alias as `open-pr`), `markers`, `patrol`, `prune`, and
+`status`.
 
 `bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
 
@@ -122,7 +128,7 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 
 A few stage runners still call `warn`/`exit N` directly for non-bug user errors that don't yet have a typed class — most notably `Init#validate_git_repo!` / `validate_clean_tree!` (exit 1), `Execute#run!` for `plan.md missing` (exit 1), and the `OpenPr` / `Finalize` network/auth abort paths. Migrating these to typed exceptions is tracked as Phase 2 follow-up work.
 
-**Error envelopes.** Every `--json`-supporting command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`) appear automatically. `hive daemon queue --json` uses its own `hive-daemon-queue.v1` `ErrorPayload` arm for queue-command failures (`unknown_action`, `missing_request_id`, `internal`) so queue inspectors still receive one schema-specific document. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). Errors that fire before Thor parses argv (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
+**Error envelopes.** Every `--json`-supporting command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`, `verb` for `hive-stage-action`, and `operation` for finding toggles) appear automatically. `hive daemon queue --json` uses its own `hive-daemon-queue.v1` `ErrorPayload` arm for queue-command failures (`unknown_action`, `missing_request_id`, `internal`) so queue inspectors still receive one schema-specific document. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). Errors that fire before Ruby/Thor reaches the wrapper rescue (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
 
 ## Backlinks
 

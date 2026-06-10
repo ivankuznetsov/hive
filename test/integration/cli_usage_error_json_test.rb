@@ -14,13 +14,15 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   def test_json_usage_errors_emit_envelopes_before_command_dispatch
     cases = [
-      [ %w[run --json], "hive-run" ],
-      [ %w[approve --json], "hive-approve" ],
-      [ %w[markers clear --json], "hive-markers-clear" ]
+      [ %w[run --json], "hive-run", "invalid_task_path", {} ],
+      [ %w[approve --json], "hive-approve", "invalid_task_path", {} ],
+      [ %w[markers clear --json], "hive-markers-clear", "invalid_task_path", {} ],
+      [ %w[brainstorm --json], "hive-stage-action", "invalid_task_path", { "verb" => "brainstorm" } ],
+      [ %w[prune --bogus --json], "hive-prune", "usage", {} ]
     ]
 
     with_tmp_global_config do |home|
-      cases.each do |argv, schema|
+      cases.each do |argv, schema, error_kind, extras|
         out, _err, status = run_hive(home, *argv)
 
         refute status.success?, "#{argv.join(' ')} should fail"
@@ -29,8 +31,11 @@ class CliUsageErrorJsonTest < Minitest::Test
         assert_equal schema, payload["schema"]
         assert_equal false, payload["ok"]
         assert_equal "InvalidTaskPath", payload["error_class"]
-        assert_equal "invalid_task_path", payload["error_kind"]
+        assert_equal error_kind, payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        extras.each do |key, value|
+          assert_equal value, payload[key]
+        end
       end
     end
   end

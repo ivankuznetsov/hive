@@ -120,6 +120,16 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"
+      # `--textconv` runs the repo-local `diff.<driver>.textconv` command — an exec seam. The
+      # spelled-out flag must skip, and so must every prefix git accepts as the long option
+      # (`--text`, `--textc`, ...), e.g. `git cat-file --text` / `git grep --textc`.
+      assert_stubbed env, "git", "diff", "--textconv"
+      assert_stubbed env, "git", "cat-file", "--text", "HEAD:README.md"
+      assert_stubbed env, "git", "grep", "--textc", "needle"
+      # `git cat-file --filters` is an allowlisted read, but `--filters` runs the repo-local
+      # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
+      # hardening never covers, so it must skip.
+      assert_stubbed env, "git", "cat-file", "--filters", "HEAD:README.md"
       # The read/write boundary for ls-files: `-o` / `--others` is a read (allowed below), but
       # the file-writing `--output` long form must still skip — narrowing the guard must not
       # re-allow the write form.
@@ -241,28 +251,28 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
-      assert_includes real_invocations, "real-git -C #{dir} status --short"
-      assert_includes real_invocations, "real-git config --get remote.origin.url"
-      assert_includes real_invocations, "real-git config --get-all remote.origin.fetch"
-      assert_includes real_invocations, "real-git config --list"
-      assert_includes real_invocations, "real-git config --bool --get commit.gpgsign"
-      assert_includes real_invocations, "real-git config --int --get core.abbrev"
-      assert_includes real_invocations, "real-git config --path --get core.excludesfile"
-      assert_includes real_invocations, "real-git config -z --get-all remote.origin.fetch"
-      assert_includes real_invocations, "real-git config --type=bool --get commit.gpgsign"
-      assert_includes real_invocations, "real-git remote"
-      assert_includes real_invocations, "real-git remote -v"
-      assert_includes real_invocations, "real-git remote show -n origin"
-      assert_includes real_invocations, "real-git remote get-url --push origin"
-      assert_includes real_invocations, "real-git remote get-url --all origin"
+      assert_includes real_invocations, expected_real_invocation("git", "-C", dir, "status", "--short")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--get", "remote.origin.url")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--get-all", "remote.origin.fetch")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--list")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--bool", "--get", "commit.gpgsign")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--int", "--get", "core.abbrev")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--path", "--get", "core.excludesfile")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "-z", "--get-all", "remote.origin.fetch")
+      assert_includes real_invocations, expected_real_invocation("git", "config", "--type=bool", "--get", "commit.gpgsign")
+      assert_includes real_invocations, expected_real_invocation("git", "remote")
+      assert_includes real_invocations, expected_real_invocation("git", "remote", "-v")
+      assert_includes real_invocations, expected_real_invocation("git", "remote", "show", "-n", "origin")
+      assert_includes real_invocations, expected_real_invocation("git", "remote", "get-url", "--push", "origin")
+      assert_includes real_invocations, expected_real_invocation("git", "remote", "get-url", "--all", "origin")
       # The PR's headline regression target: `-p` must reach real git as the subcommand flag,
       # not be misclassified as the global `--paginate` and skipped.
-      assert_includes real_invocations, "real-git log -p"
-      assert_includes real_invocations, "real-git show -p"
-      assert_includes real_invocations, "real-git diff -p"
-      assert_includes real_invocations, "real-git grep -p needle"
-      assert_includes real_invocations, "real-git grep -o needle"
-      assert_includes real_invocations, "real-git log -- -o"
+      assert_includes real_invocations, expected_real_invocation("git", "log", "-p")
+      assert_includes real_invocations, expected_real_invocation("git", "show", "-p")
+      assert_includes real_invocations, expected_real_invocation("git", "diff", "-p")
+      assert_includes real_invocations, expected_real_invocation("git", "grep", "-p", "needle")
+      assert_includes real_invocations, expected_real_invocation("git", "grep", "-o", "needle")
+      assert_includes real_invocations, expected_real_invocation("git", "log", "--", "-o")
     end
   end
 
@@ -326,6 +336,117 @@ class BabysitterDryRunEnvTest < Minitest::Test
       refute_path_exists trace_path
     end
   end
+
+  def test_git_stub_disables_optional_locks_before_read_only_passthrough
+    with_tmp_dir do |dir|
+      # `git status` (and other reads) otherwise take the optional index/refs locks and
+      # rewrite `.git/index` to refresh stat data; the stub sets GIT_OPTIONAL_LOCKS=0 to keep
+      # a dry-run read side-effect-free. Record the env the real binary actually receives so
+      # deleting that guard (stub: `ENV["GIT_OPTIONAL_LOCKS"] = "0"`) turns this test red.
+      real_git = recording_env_binary(dir, "real-git", %w[GIT_OPTIONAL_LOCKS])
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => real_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
+
+      assert status.success?, err
+      assert_equal "GIT_OPTIONAL_LOCKS=0\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_git_stub_ignores_user_config_sources_before_read_only_passthrough
+    with_tmp_git_repo do |dir|
+      home = File.join(dir, "home")
+      xdg = File.join(dir, "xdg")
+      empty_xdg = File.join(dir, "empty-xdg")
+      FileUtils.mkdir_p([ home, File.join(xdg, "git"), empty_xdg ])
+
+      home_pwn = File.join(dir, "home-extdiff-ran")
+      xdg_pwn = File.join(dir, "xdg-extdiff-ran")
+      home_extdiff = executable_touch_binary(dir, "home-extdiff", home_pwn)
+      xdg_extdiff = executable_touch_binary(dir, "xdg-extdiff", xdg_pwn)
+      File.write(File.join(home, ".gitconfig"), <<~CONFIG)
+        [diff]
+          external = #{home_extdiff}
+      CONFIG
+      File.write(File.join(xdg, "git", "config"), <<~CONFIG)
+        [diff]
+          external = #{xdg_extdiff}
+      CONFIG
+      File.write(File.join(dir, "README.md"), "changed\n")
+
+      base_env = {
+        "HIVE_BABYSITTER_REAL_GIT" => "git",
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      [
+        [ "HOME", base_env.merge("HOME" => home, "XDG_CONFIG_HOME" => empty_xdg), home_extdiff, home_pwn ],
+        [ "XDG_CONFIG_HOME", base_env.merge("HOME" => File.join(dir, "empty-home"), "XDG_CONFIG_HOME" => xdg), xdg_extdiff, xdg_pwn ]
+      ].each do |source, env, configured_extdiff, pwn_path|
+        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "config", "--list")
+
+        assert status.success?, err
+        refute_includes out, configured_extdiff, "#{source} git config reached real git"
+
+        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "diff")
+
+        assert status.success?, err
+        assert_includes out, "README.md"
+        refute_path_exists pwn_path, "#{source} diff.external executed during dry-run passthrough"
+      end
+    end
+  end
+
+  def test_git_stub_disables_local_exec_config_before_read_only_passthrough
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "local-extdiff-ran")
+      extdiff = executable_touch_binary(dir, "local-extdiff", pwn_path)
+      run!("git", "-C", dir, "config", "diff.external", extdiff)
+      File.write(File.join(dir, "README.md"), "changed\n")
+
+      out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
+
+      assert status.success?, err
+      assert_includes out, "README.md"
+      refute_path_exists pwn_path
+    end
+
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "textconv-ran")
+      textconv = executable_touch_binary(
+        dir,
+        "textconv",
+        pwn_path,
+        "print File.read(ARGV.first) if ARGV.first && File.file?(ARGV.first)"
+      )
+      File.write(File.join(dir, ".gitattributes"), "README.md diff=hivepwn\n")
+      run!("git", "-C", dir, "config", "diff.hivepwn.textconv", textconv)
+      run!("git", "-C", dir, "add", ".gitattributes")
+      run!("git", "-C", dir, "commit", "-m", "attrs", "--quiet")
+      File.write(File.join(dir, "README.md"), "changed\n")
+
+      out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
+
+      assert status.success?, err
+      assert_includes out, "README.md"
+      refute_path_exists pwn_path
+    end
+
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "fsmonitor-ran")
+      fsmonitor = executable_touch_binary(dir, "fsmonitor", pwn_path)
+      run!("git", "-C", dir, "config", "core.fsmonitor", fsmonitor)
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "status", "--short")
+
+      assert status.success?, err
+      refute_path_exists pwn_path
+    end
+  end
+
   private
 
   def assert_stubbed(env, binary, *args)
@@ -336,8 +457,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
     # regression that logs the skip *and then* still exec's real git/gh would pass the
     # stderr check above; the absence from real.log is what actually verifies no passthrough.
     real_log = @real_log && File.exist?(@real_log) ? File.read(@real_log) : ""
-    refute_includes real_log, "real-#{binary} #{args.join(' ')}",
-                     "#{binary} #{args.join(' ')} was skipped but still reached real #{binary}"
+    [ "real-#{binary} #{args.join(' ')}", expected_real_invocation(binary, *args) ].uniq.each do |invocation|
+      refute_includes real_log, invocation,
+                      "#{binary} #{args.join(' ')} was skipped but still reached real #{binary}"
+    end
   end
 
   def assert_passes(env, binary, *args)
@@ -347,8 +470,34 @@ class BabysitterDryRunEnvTest < Minitest::Test
     # — a "skipped-but-exit-0" regression would also exit 0. Confirm the invocation actually
     # reached the real binary by finding it in real.log.
     real_log = @real_log && File.exist?(@real_log) ? File.read(@real_log) : ""
-    assert_includes real_log, "real-#{binary} #{args.join(' ')}",
+    assert_includes real_log, expected_real_invocation(binary, *args),
                     "#{binary} #{args.join(' ')} passed (exit 0) but never reached real #{binary}"
+  end
+
+  def expected_real_invocation(binary, *args)
+    return "real-#{binary} #{args.join(' ')}" unless binary == "git"
+
+    passthrough = args.dup
+    index = git_subcommand_index(passthrough)
+    if %w[diff log show].include?(passthrough[index].to_s)
+      passthrough.insert(index + 1, "--no-ext-diff", "--no-textconv")
+    end
+
+    "real-git #{([ "-c", "core.fsmonitor=false" ] + passthrough).join(' ')}"
+  end
+
+  def git_subcommand_index(args)
+    index = 0
+    loop do
+      case args[index]
+      when "-C", "--git-dir", "--work-tree"
+        index += 2
+      when /\A--git-dir=/, /\A--work-tree=/
+        index += 1
+      else
+        return index
+      end
+    end
   end
 
   def recording_binary(dir, name)
@@ -378,6 +527,24 @@ class BabysitterDryRunEnvTest < Minitest::Test
           file.puts("\#{key}=\#{value}")
         end
       end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def real_git_env(dir)
+    {
+      "HIVE_BABYSITTER_REAL_GIT" => "git",
+      "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+    }
+  end
+
+  def executable_touch_binary(dir, name, pwn_path, after_touch = "")
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      File.write(#{pwn_path.dump}, "ran")
+      #{after_touch}
     RUBY
     FileUtils.chmod("+x", path)
     path

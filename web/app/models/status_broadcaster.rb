@@ -58,6 +58,10 @@ class StatusBroadcaster
         partial: "status/projects",
         locals: { projects: payload.fetch("projects", []) }
       )
+      # Pages without a #projects frame (task pages) subscribe to the same
+      # channel and morph-refresh on this signal — push, not poll: zero
+      # traffic when idle, instant when the pipeline moves.
+      Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
     end
   end
 end

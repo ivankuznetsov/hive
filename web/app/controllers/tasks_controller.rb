@@ -26,18 +26,6 @@ class TasksController < ApplicationController
                 notice: "Recorded #{answered.size == 1 ? "answer" : "answers"} to Q#{answered.join(", Q")}"
   end
 
-  # The task's live state block (badge, status, actions, Q&A / waiting
-  # banner) — rendered inside a polled turbo-frame so the page follows the
-  # daemon: answers recorded → agent resumes → next round's questions or a
-  # passable gate appear without a manual reload.
-  def state
-    @row = task_row!
-    @questions = open_questions(@row)
-    @worktree_exists = worktree_exists?(@row)
-    @daemon_enabled = project_daemon_enabled?
-    render partial: "tasks/state"
-  end
-
   # Rendered inside a polled turbo-frame on the task page so the tail stays
   # live without SSE plumbing.
   def log

@@ -102,6 +102,27 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_button "Continue with GitHub", wait: 0
   end
 
+  test "typing in the Q&A survives a pushed morph refresh" do
+    folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Focus probe"))
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
+    sign_in!
+    visit "/tasks/#{@project}/#{folder.basename}"
+
+    field = find("textarea[name='answers[1]']", wait: 5)
+    field.fill_in with: "typing slowly"
+    # Force a status change → StatusBroadcaster pushes a refresh → the page
+    # morphs. The permanent Q&A form must keep both the text and the caret.
+    create_task!(@project, "Refresh trigger")
+    assert_selector ".task-header", wait: 10
+    using_wait_time(8) do
+      assert_equal "typing slowly", find("textarea[name='answers[1]']").value,
+                   "a pushed morph must not discard typed-but-unsent input"
+    end
+    field.send_keys(" still here")
+    assert_equal "typing slowly still here", find("textarea[name='answers[1]']").value,
+                 "focus must remain in the field across refreshes"
+  end
+
   test "pasting an image attaches it like the TUI" do
     sign_in!
     compose_idea "Pasted screenshot"

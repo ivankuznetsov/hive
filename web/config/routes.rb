@@ -24,7 +24,6 @@ Rails.application.routes.draw do
     get  "" => "tasks#show", as: :task
     get  "diff" => "tasks#diff", as: :task_diff
     get  "log" => "tasks#log", as: :task_log
-    get  "state" => "tasks#state", as: :task_state
     post "approve" => "tasks#approve", as: :task_approve
     post "reject" => "tasks#reject", as: :task_reject
     post "run" => "tasks#run_stage", as: :task_run

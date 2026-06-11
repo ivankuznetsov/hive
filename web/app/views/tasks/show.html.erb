@@ -5,11 +5,17 @@
 </div>
 <p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
 
-<%# The live state block: badge, status, actions, Q&A / waiting banner.
-    Polled so the page follows the daemon — answers recorded → agent
-    resumes → next round's questions or a passable gate appear without a
-    manual reload. Forms inside target _top so submits navigate normally. %>
-<%= render "tasks/state", with_src: true %>
+<%# Live by PUSH, not poll: the page subscribes to the status channel and
+    morph-refreshes when StatusBroadcaster signals a change — answers
+    recorded → agent resumes → next round's questions or a passable gate
+    appear instantly. Morphing (vs replace) plus the data-turbo-permanent
+    Q&A form means typing is never disturbed. %>
+<% content_for(:head) do %>
+  <meta name="turbo-refresh-method" content="morph">
+  <meta name="turbo-refresh-scroll" content="preserve">
+<% end %>
+<%= turbo_stream_from StatusBroadcaster::CHANNEL %>
+<%= render "tasks/state" %>
 
 <% if @log %>
   <h2>Log</h2>

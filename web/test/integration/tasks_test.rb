@@ -174,19 +174,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "all-answered brainstorm shows the waiting-for-daemon banner via the live state frame" do
+  test "all-answered brainstorm shows the waiting banner on a push-refreshed page" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")
 
     get "/tasks/#{@project}/#{@slug}"
-    assert_select "turbo-frame#task-state[src]", 1, "the state block must poll itself"
+    assert_select "turbo-cable-stream-source", { minimum: 1 },
+                  "the task page must subscribe to the status channel for push refreshes"
+    assert_select "meta[name='turbo-refresh-method'][content='morph']", 1,
+                  "refreshes must morph so permanent forms survive"
     assert_select ".state-banner", text: /waiting for the daemon|agent is working/i,
                   count: 1
     assert_select ".qa-item", 0, "no open questions → no answer form"
+  end
 
-    get "/tasks/#{@project}/#{@slug}/state"
-    assert_response :success
-    assert_select "turbo-frame#task-state", 1, "the refresh endpoint must return the same frame"
+  test "the Q&A form is turbo-permanent so morphs never disturb typing" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select "form[data-turbo-permanent][id^='qa-form-']", 1
   end
 
   test "diff for a task without a worktree is 404 not a crash" do

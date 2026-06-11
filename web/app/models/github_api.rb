@@ -7,10 +7,10 @@ class GithubApi
   MAX_PAGES = 3
   PER_PAGE = 100
 
-  NETWORK_ERRORS = [
-    Net::OpenTimeout, Net::ReadTimeout, SocketError,
-    Errno::ECONNREFUSED, Errno::ECONNRESET, IOError
-  ].freeze
+  # Kept in lockstep with Hive::Web::GithubAuth::NETWORK_ERRORS — drift here
+  # already shipped one blank 500 (EHOSTUNREACH missing while the auth class
+  # had it).
+  NETWORK_ERRORS = Hive::Web::GithubAuth::NETWORK_ERRORS
 
   def initialize(token)
     @token = token

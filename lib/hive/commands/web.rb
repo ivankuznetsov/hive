@@ -47,7 +47,14 @@ module Hive
         Dir.chdir(app_dir) do
           # Idempotent: creates/migrates the solid-stack sqlite databases on
           # first boot, no-ops afterwards. Array form — no shell involved.
-          system(env, "bin/rails", "db:prepare", exception: true)
+          # Typed error so a persistent failure surfaces as guidance, not a
+          # raw backtrace looping every 5s under the container supervisor.
+          unless system(env, "bin/rails", "db:prepare")
+            raise Hive::Error,
+                  "hive web: db:prepare failed — check that " \
+                  "#{env.fetch("HIVEBOX_STORAGE_DIR")} is writable (the /data mount) " \
+                  "and that the web bundle is installed (cd #{app_dir} && bundle install)"
+          end
           puts "hive web: listening on http://#{bind}:#{port}"
           # Replace this process with the Rails server (array form, env hash;
           # Kernel#exec never touches a shell when given an argv list).

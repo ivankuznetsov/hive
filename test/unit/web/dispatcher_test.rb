@@ -155,7 +155,7 @@ Already answered
       # An unknown action must NOT be passed through as a literal hive verb
       # (which would enqueue a bad request); it raises so the app maps it to a
       # 422 rather than a queued bad verb or an opaque 500.
-      assert_raises(KeyError) do
+      assert_raises(Hive::Error) do
         dispatcher.dispatch(slug: "demo-task", project: "demo", action: "totally-bogus")
       end
     end

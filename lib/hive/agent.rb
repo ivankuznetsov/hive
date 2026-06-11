@@ -267,7 +267,13 @@ module Hive
       if @profile.budget_flag && @max_budget_usd
         cmd << @profile.budget_flag << @max_budget_usd.to_s
       end
-      # Per-run CLI extras (claude model/effort pins from config).
+      # Per-run CLI extras (claude model/effort pins from config). Guarded:
+      # every valid value today is claude vocabulary, and handing another
+      # profile `--model sonnet` would fail (or worse, mean something else)
+      # silently — the invariant lives here rather than in the call sites.
+      if @cli_flags.any? && @profile.name != :claude
+        raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
+      end
       cmd.concat(@cli_flags)
       cmd.concat(@profile.output_format_flags)
       cmd << (prompt_via_stdin? ? "-" : @prompt)

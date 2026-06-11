@@ -69,8 +69,16 @@ module Hive
         previous
       end
 
+      # A malformed config.yml must never take the supervisor down: the
+      # operator hand-edits the bind-mounted file (documented workflow), and
+      # a YAML typo plus a SIGHUP — or a container restart — would otherwise
+      # crash PID1, killing daemon, web, and bot together and crash-looping
+      # the box. Treat unreadable config as "bot disabled" and say so.
       def bot_enabled?
         Hive::Config.load_global_bot["enabled"]
+      rescue Hive::Error, Hive::ConfigError => e
+        warn "hivebox supervisor: config unreadable (#{e.message}); treating bot as disabled"
+        false
       end
 
       def child(name)
@@ -95,8 +103,8 @@ module Hive
       #     rotation saved via the web wizard never reaches it otherwise;
       #   disabled + running    → stop it.
       # The restart works by TERMing the group and scheduling an immediate
-      # respawn: reap_once collects the signal death (which should_restart?
-      # deliberately ignores) and start_due_restarts brings it back up.
+      # respawn: reap_once collects the signal death and start_due_restarts
+      # brings it back up (the pre-seeded @restart_at entry skips backoff).
       def handle_reload
         @reload_requested = false
         bot = child("bot")
@@ -131,21 +139,26 @@ module Hive
           child.pid = nil
           schedule_restart(child) if should_restart?(status)
         rescue Errno::ECHILD
+          # Reaped elsewhere — without a log line this child would silently
+          # cease to exist as far as the supervisor is concerned.
+          warn "hivebox supervisor: child #{child.name} (pid #{child.pid}) reaped elsewhere; clearing"
           child.pid = nil
         end
       end
 
-      # Restart any crashed child (web, daemon, or bot) — a daemon or bot that
-      # died must come back, not silently disappear. Three deaths are NOT
-      # respawned: (1) anything reaped while we are stopping, (2) a clean
-      # (success) exit, and (3) a signal death (e.g. SIGTERM) — a child killed
-      # by a signal during shutdown would otherwise be respawned only to be
-      # immediately re-killed, racing the drain in terminate_all. A genuine
-      # in-loop crash exits non-zero and is still restarted.
+      # Restart any crashed child (web, daemon, or bot) — a daemon or bot
+      # that died must come back, not silently disappear. Only two deaths
+      # are NOT respawned: anything reaped while we are stopping, and a
+      # clean (success) exit. Signal deaths ARE respawned: the shutdown
+      # race the old signal exemption feared is already excluded by the
+      # @stopping check (the trap sets it before terminate_all sends any
+      # signal), while the exemption's real-world cost was an OOM-killed
+      # daemon silently never coming back. Reload-driven bot TERMs are
+      # likewise safe: handle_reload pre-seeds @restart_at, and a second
+      # schedule here is harmless.
       def should_restart?(status)
         return false if @stopping
         return false if status.success?
-        return false if status.signaled?
 
         true
       end
@@ -153,6 +166,9 @@ module Hive
       # Defer the actual restart so a crash-looping child backs off instead
       # of respawning in the same tick.
       def schedule_restart(child)
+        # A child with no started_at deliberately classifies as a fast
+        # failure (gets the backoff) — missing bookkeeping means we cannot
+        # prove it ran long enough to deserve an instant respawn.
         ran_for = child.started_at ? Time.now - child.started_at : RESTART_BACKOFF_SEC
         delay = ran_for < FAST_FAILURE_SEC ? RESTART_BACKOFF_SEC : 0
         @restart_at[child.name] = Time.now + delay
@@ -173,7 +189,13 @@ module Hive
       end
 
       def terminate_all
-        grace = Hive::Config.load_global_daemon.fetch("shutdown_grace_sec", 60)
+        grace = begin
+          Hive::Config.load_global_daemon.fetch("shutdown_grace_sec", 60)
+        rescue Hive::Error, Hive::ConfigError
+          # Shutdown must drain children even when config.yml is broken —
+          # this path runs from `ensure`, possibly BECAUSE config is broken.
+          60
+        end
         @children.each do |child|
           next unless child.pid
 

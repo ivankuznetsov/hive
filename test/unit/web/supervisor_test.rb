@@ -54,7 +54,7 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
-  def test_should_restart_skips_clean_exit_signal_death_and_shutdown
+  def test_should_restart_skips_only_clean_exit_and_shutdown
     with_tmp_global_config do
       sup = build
       crashed = run_status([ "sh", "-c", "exit 1" ])
@@ -63,12 +63,34 @@ class WebSupervisorTest < Minitest::Test
 
       assert sup.send(:should_restart?, crashed), "a non-zero crash must restart"
       refute sup.send(:should_restart?, clean), "a clean (success) exit must NOT restart"
-      refute sup.send(:should_restart?, signaled),
-             "a signal death (e.g. SIGTERM during shutdown) must NOT respawn-then-re-kill"
+      assert sup.send(:should_restart?, signaled),
+             "a signal death OUTSIDE shutdown (e.g. the OOM killer) must respawn — " \
+             "@stopping already excludes the terminate_all race"
 
       sup.instance_variable_set(:@stopping, true)
       refute sup.send(:should_restart?, crashed),
              "nothing is restarted once the supervisor is stopping"
+      refute sup.send(:should_restart?, signaled),
+             "shutdown TERMs must not respawn-then-re-kill"
+    end
+  end
+
+  # A YAML typo in the bind-mounted config.yml must never crash PID1: reload
+  # treats unreadable config as "bot disabled" and shutdown still drains with
+  # the default grace.
+  def test_reload_and_shutdown_survive_a_malformed_config
+    with_tmp_global_config do
+      File.write(Hive::Config.global_config_path, "bot: [broken\n")
+      sup = build
+      started = stub_start_child(sup)
+
+      _out, err = capture_io { sup.send(:handle_reload) }
+
+      assert_empty started, "a malformed config must not start children"
+      assert_match(/config unreadable/, err)
+      # Shutdown path: terminate_all must fall back to the default grace
+      # instead of re-raising the config error out of the ensure block.
+      sup.send(:terminate_all)
     end
   end
 

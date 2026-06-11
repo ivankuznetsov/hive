@@ -24,8 +24,15 @@ class TelegramController < ApplicationController
       data["bot"]["enabled"] = true
       data["bot"]["chat_id_allowlist"] = chats
     end
-    request_bot_restart
-    redirect_to telegram_path, notice: "Telegram bot configured and (re)starting"
+    if request_bot_restart
+      redirect_to telegram_path, notice: "Telegram bot configured and (re)starting"
+    else
+      # Outside the supervised container (or with a dead supervisor) the HUP
+      # has nowhere to go — saying "(re)starting" would be a lie while the
+      # old process keeps long-polling with the previous token.
+      redirect_to telegram_path,
+                  notice: "Telegram settings saved. No supervisor reachable — restart the bot manually (hive bot stop && hive bot start)."
+    end
   end
 
   # Round-trip confirmation: getMe + a real sendMessage to every configured
@@ -52,14 +59,16 @@ class TelegramController < ApplicationController
 
   # The container supervisor sets HIVEBOX_SUPERVISOR_PID on its children and
   # reloads its child set on SIGHUP, bringing the bot up without recreating
-  # the container. No-op outside the supervised container.
+  # the container. Returns whether the signal was actually delivered so the
+  # caller can tell the operator the truth about a restart.
   def request_bot_restart
     pid = ENV["HIVEBOX_SUPERVISOR_PID"].to_i
-    return if pid <= 0
+    return false if pid <= 0
 
     Process.kill("HUP", pid)
+    true
   rescue Errno::ESRCH, Errno::EPERM
-    nil
+    false
   end
 
   def saved_telegram_token

@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-11
 tags: [decisions, adr]
 ---
 
@@ -11,7 +11,7 @@ tags: [decisions, adr]
 
 ## ADR-037: Hivebox web tier is a vanilla Rails 8 + Turbo app, replacing the Sinatra tier
 
-**Status:** Active (replaced the Sinatra/Puma tier before PR #300 merged, 2026-06-10).
+**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10).
 
 **Context:** The first web tier was Sinatra + hand-rolled SSE + hand-written
 DOM-reconciliation JS. It worked, but live updates needed a bespoke
@@ -40,7 +40,7 @@ unchanged (ADR-036 still applies).
 
 ## ADR-036: Hivebox operator sign-in uses GitHub OAuth device flow, not the callback web flow
 
-**Status:** Active (replaced the authorization-code web flow before PR #300 merged, 2026-06-10).
+**Status:** Active (replaced the authorization-code web flow during PR #300, 2026-06-10).
 
 **Context:** The web gate originally shipped as the OAuth authorization-code
 web flow: a per-operator GitHub OAuth app whose callback URL had to match

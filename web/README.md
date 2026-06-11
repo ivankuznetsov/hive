@@ -1,24 +1,5 @@
-# README
+# hivebox web
 
-This README would normally document whatever steps are necessary to get the
-application up and running.
-
-Things you may want to cover:
-
-* Ruby version
-
-* System dependencies
-
-* Configuration
-
-* Database creation
-
-* Database initialization
-
-* How to run the test suite
-
-* Services (job queues, cache servers, search engines, etc.)
-
-* Deployment instructions
-
-* ...
+The hivebox operator UI — a vanilla Rails 8 + Turbo app served by `hive web`
+(see `wiki/commands/web.md`). Operator docs live in `packaging/docker/README.md`;
+architecture decisions in `wiki/decisions.md` (ADR-036/ADR-037).

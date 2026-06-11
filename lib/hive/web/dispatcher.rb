@@ -55,9 +55,16 @@ module Hive
       def dispatch(slug:, project:, action:, stage: nil)
         # `fetch` with no fallback block raises KeyError on an unknown action
         # instead of passing the literal string through as a hive verb the
-        # daemon can't run. The app's `error Hive::Error, KeyError` handler
+        # daemon can't run. The app's `rescue_from Hive::Error` handler
         # turns that into a 422 rather than an opaque 500 or a queued bad verb.
-        verb = STAGE_VERB_BY_ACTION.fetch(action.to_s)
+        verb = begin
+          STAGE_VERB_BY_ACTION.fetch(action.to_s)
+        rescue KeyError
+          # Owned here so the app-level handler doesn't need a blanket
+          # KeyError rescue (which would reclassify programming errors
+          # anywhere in a request as 422 user errors).
+          raise Hive::Error, "unknown dispatch action: #{action.inspect}"
+        end
         argv = [ "hive", verb, slug, "--project", project ]
         argv += [ "--from", stage ] if stage
         request_id = Hive::Bot::DispatchRequestWriter.write!(
@@ -152,12 +159,16 @@ module Hive
       private
 
       # Map the task's current stage dir (e.g. "6-review") to the directory
-      # of the stage immediately before it. Falls back to the first stage
-      # when `from` is absent or unparseable so a reject still does something
-      # sane rather than raising.
+      # of the stage immediately before it. An absent `from` falls back to
+      # the first stage (a supported call shape), but an unparseable one
+      # RAISES: reject runs forced, so "guess 1-inbox" would silently drag
+      # a late-stage task back to the idea pile on a caller bug — the one
+      # place a sane-fallback is less safe than failing.
       def prior_gate(from)
-        parsed = from && Hive::Stages.parse(from)
-        return Hive::Stages::DIRS.first unless parsed
+        return Hive::Stages::DIRS.first if from.nil? || from.to_s.empty?
+
+        parsed = Hive::Stages.parse(from)
+        raise Hive::Error, "unknown stage #{from.inspect}" unless parsed
 
         Hive::Stages.prev_dir(parsed.first) || Hive::Stages::DIRS.first
       end

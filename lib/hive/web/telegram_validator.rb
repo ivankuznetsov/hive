@@ -30,7 +30,7 @@ module Hive
       rescue *TelegramTimeouts::NETWORK_ERRORS => e
         # A transport failure is NOT "bad token" — don't silently reject a good
         # token during a Telegram outage. Surface it as Hive::Error so the
-        # app's `error Hive::Error` handler renders a friendly page instead of
+        # app's `rescue_from Hive::Error` renders a friendly page instead of
         # an opaque blank 500 after the default 20s Faraday block.
         raise Hive::Error, "couldn't reach Telegram to validate the token (#{e.class}). Try again."
       end

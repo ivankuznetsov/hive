@@ -11,7 +11,7 @@ fixed OAuth redirect URI expectations.
 
 The implemented v1 path is B2, a paste-the-code relay:
 
-1. `POST /agents/:agent/login/start` spawns the agent CLI in a PTY.
+1. `POST /agents/:agent/login` spawns the agent CLI in a PTY.
 2. hivebox captures stdout/stderr and extracts the first `http(s)://` URL.
 3. The operator opens that real provider URL in their browser.
 4. The operator pastes the returned code or full callback URL into hivebox.

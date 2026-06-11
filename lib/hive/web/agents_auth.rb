@@ -9,9 +9,9 @@ module Hive
     class AgentsAuth
       # Capture the authorize URL once it is terminated by whitespace OR the
       # end of the captured buffer. The reader re-extracts the *latest* match
-      # on every char (not `||=` first-match), so a partial prefix seen
-      # mid-stream is replaced by the full URL as more chars arrive and the
-      # value settles once the CLI stops printing — this lets a URL emitted
+      # from newly arrived output (not `||=` first-match), so a partial
+      # prefix seen mid-stream is replaced by the full URL as more chars
+      # arrive and the value settles once the CLI stops printing — this lets a URL emitted
       # with no trailing space (URL immediately followed by the input prompt)
       # still be surfaced instead of leaving the operator with only the raw
       # `<pre>` output.
@@ -120,7 +120,7 @@ module Hive
         rescue IOError, Errno::EIO
           # The CLI exited between the `done` check and the write, closing the
           # master. Surface a friendly error instead of an opaque 500 (the
-          # app's `error Hive::Error` filter renders the 422 page).
+          # app's `rescue_from Hive::Error` renders the 422 page).
           raise Hive::Error, "the login session has already closed — start the login again"
         end
 
@@ -309,7 +309,11 @@ module Hive
           # A signaled child (the watchdog's TERM/KILL after the login
           # timeout) has a nil exitstatus — "exit " with no number told the
           # operator nothing. Mirror the bot supervisor's rendering.
-          if status && !status.success?
+          if status.nil?
+            # Reaped by the watchdog race (ECHILD): without attribution the
+            # session reads as a clean exit while the agent stays logged out.
+            session.error ||= "exited (reaped elsewhere — likely the login timed out)"
+          elsif !status.success?
             session.error =
               if status.exitstatus
                 "exit #{status.exitstatus}"

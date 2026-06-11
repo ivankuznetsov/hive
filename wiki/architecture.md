@@ -228,41 +228,19 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 ## Hivebox web pipeline
 
-`hive web` ([[commands/web]]) is a browser surface over the same command and
-queue contracts rather than a second workflow engine. The command starts a
-Puma-backed Sinatra app; the Docker entrypoint runs under `tini` and delegates
-to `Hive::Web::Supervisor`, which starts the daemon, web server, and optionally
-the Telegram bot in one `/data`-backed container. The container healthcheck hits
-the public `/health` route.
-
-```
-hive web  →  Hive::Commands::Web
-               └─ Puma::Server(Hive::Web::App)
-                    ├─ GithubAuth → GitHub OAuth owner gate
-                    ├─ StatusFeed → Hive::Commands::Status#json_payload
-                    ├─ SseLimiter → bounded status/log stream slots
-                    ├─ Dispatcher
-                    │    ├─ approve/reject → Hive::Commands::Approve
-                    │    ├─ workflow action → DispatchRequestWriter → daemon queue
-                    │    ├─ brainstorm answer → BrainstormAnswerWriter
-                    │    └─ new idea → Hive::Commands::New
-                    ├─ AgentsAuth → PTY relay for Claude/Codex login; Pi token file
-                    └─ routes for task artifacts, diffs, logs, repos, and Telegram config
-```
-
-The auth boundary is owner-only GitHub OAuth plus Rack sessions and per-session
-CSRF tokens for mutations. GitHub provider pages are never proxied under the
-hivebox origin. Claude/Codex login is a paste-the-code relay into the real CLI
-PTY, while Pi stores non-empty JSON in `~/.pi/agent/auth.json`; with
-`HOME=/data/home`, all agent credential directories persist across image
-upgrades. Status dashboards and task log tails use server-sent events, but all
-status subscribers share one background poller and a process-wide stream cap
-leaves Puma threads available for auth/action routes. The web routes still share
-the daemon single-dispatcher invariant from ADR-033: state-mutating workflow
-actions enqueue daemon dispatch requests instead of spawning `hive run`
-directly; web "intervene" answers are written through the same
-`BrainstormAnswerWriter` path as Telegram answers rather than through a separate
-state surface.
+`hive web` serves a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
+original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
+(ADR-036) restricted to `web.github.owner`. Reads render
+`Commands::Status#json_payload` snapshots; live updates flow over Turbo
+Streams: `StatusBroadcaster` (self-healing subscriber loop) bridges
+`Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
+broadcast of the projects frame over solid_cable. Mutations reuse gem
+primitives: `Commands::Approve` in-process, daemon dispatch queue for stage
+runs, `BrainstormAnswerWriter` for Q&A answers, `Commands::New` (with the
+TUI's `attachments:` contract) for the idea composer. The container
+supervisor (tini → `Hive::Web::Supervisor`) runs daemon + web + optional
+bot, restarts crashed or signal-killed children with backoff, survives
+malformed config, and SIGHUP-reloads the bot set. Details: [[commands/web]].
 
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 

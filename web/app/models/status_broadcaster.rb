@@ -6,7 +6,13 @@
 class StatusBroadcaster
   CHANNEL = "status".freeze
 
+  # Seconds to back off after the subscriber loop dies before resubscribing.
+  RETRY_SEC = 5
+
   class << self
+    # Injectable for tests; one feed per process in production.
+    attr_writer :feed
+
     def feed
       @feed ||= Hive::Web::StatusFeed.new
     end
@@ -15,14 +21,24 @@ class StatusBroadcaster
       feed.snapshot
     end
 
+    # Self-healing by construction: a raising broadcast (a solid_cable
+    # hiccup, one bad row blowing up the partial render) must not silently
+    # freeze live updates forever — the first version logged once and let
+    # the thread die, with `@thread ||=` pinning the corpse so even another
+    # start! was a no-op. The loop resubscribes after a backoff, and start!
+    # discards a dead thread before the ||=.
     def start!
+      @thread = nil unless @thread&.alive?
       @thread ||= Thread.new do
         Thread.current.name = "status-broadcaster"
-        # The feed dedups (volatile fields stripped), so every yield is a
-        # genuine change worth broadcasting.
-        feed.each_snapshot { |payload| broadcast(payload) }
-      rescue StandardError => e
-        Rails.logger.error("status broadcaster died: #{e.class}: #{e.message}")
+        loop do
+          # The feed dedups (volatile fields stripped), so every yield is a
+          # genuine change worth broadcasting.
+          feed.each_snapshot { |payload| broadcast(payload) }
+        rescue StandardError => e
+          Rails.logger.error("status broadcaster error (#{e.class}: #{e.message}); resubscribing in #{RETRY_SEC}s")
+          sleep RETRY_SEC
+        end
       end
     end
 

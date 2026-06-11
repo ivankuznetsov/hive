@@ -15,7 +15,10 @@ class ApplicationController < ActionController::Base
   # rescue_from matches the LAST registered handler first, so the specific
   # InvalidTaskPath (a Hive::Error subclass → 404) must come AFTER the
   # generic 422 handler or it would never fire.
-  rescue_from Hive::Error, KeyError do |e|
+  # NOT bare KeyError: that would reclassify programming errors anywhere in
+  # a request as 422 user errors. The dispatcher owns its verb-map KeyError;
+  # ParameterMissing (a KeyError subclass) is a genuine user error.
+  rescue_from Hive::Error, ActionController::ParameterMissing do |e|
     render "errors/show", status: :unprocessable_entity, locals: { heading: "Action failed", message: e.message }
   end
 

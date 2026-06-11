@@ -90,9 +90,10 @@ module ApplicationHelper
     "8" => "ready_to_finalize"
   }.freeze
 
-  # The exact marker set Commands::Approve accepts for a forward move —
-  # the Approve button renders only when it can actually succeed.
-  PASSABLE_MARKERS = %w[complete execute_complete review_complete].freeze
+  # Derived from the gem so the promise of exactness is enforced, not
+  # asserted: the Approve button renders only when Commands::Approve would
+  # actually accept the forward move.
+  PASSABLE_MARKERS = Hive::Commands::Approve::VALID_TERMINAL_MARKERS.map(&:to_s).freeze
 
   def stage_passable?(task)
     PASSABLE_MARKERS.include?(task["marker"].to_s)

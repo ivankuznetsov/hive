@@ -1,8 +1,8 @@
 require "test_helper"
 
-# The box's primary authz gate, driven through the REAL GithubAuth against a
-# fake http transport (the same DI seam the gem's unit suite uses — no API
-# stubbing): start → wait-page poll → grant/denial.
+# The box's primary authz gate: the REAL GithubAuth logic runs unstubbed —
+# only Net::HTTP is replaced via the `http:` DI seam (the same seam the
+# gem's unit suite uses): start → wait-page poll → grant/denial.
 class SessionsFlowTest < ActionDispatch::IntegrationTest
   class FakeHttp
     def initialize(device:, token:, user:)

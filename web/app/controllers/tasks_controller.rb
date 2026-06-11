@@ -110,9 +110,12 @@ class TasksController < ApplicationController
     return [] unless File.file?(path)
 
     Hive::Bot::BrainstormParser.unanswered_questions(Hive::Bot::BrainstormParser.parse(path))
-  rescue StandardError
+  rescue StandardError => e
     # A half-written brainstorm.md (agent mid-flight) must not 500 the page;
-    # the generic steer box remains available.
+    # the generic steer box remains available. Logged because a PERMANENTLY
+    # malformed file looks identical from here — a task silently waiting
+    # forever with no questions is diagnosable only from this line.
+    Rails.logger.warn("brainstorm.md unparseable for #{params[:slug]}: #{e.class}: #{e.message}")
     []
   end
 
@@ -123,10 +126,14 @@ class TasksController < ApplicationController
 
   # Manual stage runs only make sense when the project's daemon is NOT
   # auto-advancing (otherwise the daemon races the operator); per-project
-  # `daemon.enabled` defaults to true.
+  # `daemon.enabled` defaults to true. An unreadable project config also
+  # answers true — but LOUDLY: that state hides the manual Run button at
+  # the exact moment the daemon can't parse the config either, so the log
+  # line is the only breadcrumb.
   def project_daemon_enabled?
     Hive::Config.load(@project["path"]).dig("daemon", "enabled") != false
-  rescue StandardError
+  rescue StandardError => e
+    Rails.logger.warn("project config unreadable for #{@project["name"]}: #{e.class}: #{e.message}")
     true
   end
 

@@ -7,7 +7,7 @@ module Hive
     #
     # The telegram-bot gem reads its Faraday connect/read timeouts from a
     # process-global configuration that defaults to 20s each. A slow or
-    # unreachable Telegram would otherwise block a Sinatra request thread for
+    # unreachable Telegram would otherwise block a web request thread for
     # ~20s and then raise a Faraday/Socket error the routes never rescued —
     # producing an opaque blank 500. We clamp the timeouts to a short window so
     # a failure surfaces fast, and the validator/tester rescue NETWORK_ERRORS

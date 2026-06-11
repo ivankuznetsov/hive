@@ -31,7 +31,7 @@ module Hive
         { ok: false, error: e.message }
       rescue *TelegramTimeouts::NETWORK_ERRORS => e
         # A transport failure (timeout / connection refused / DNS) would
-        # otherwise escape to the Sinatra thread as an opaque 500 after a long
+        # otherwise escape to the request thread as an opaque 500 after a long
         # block. Convert it to Hive::Error so the app renders a friendly
         # "couldn't reach Telegram" page.
         raise Hive::Error, "couldn't reach Telegram to send the test message (#{e.class}). Try again."

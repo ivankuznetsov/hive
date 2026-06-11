@@ -20,8 +20,8 @@ does not publish one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/web/**/*.rb`
-- `lib/hive/web/views/*.erb`
-- `public/**/*`
+- `web/app/views/**`
+- `web/app/assets/**`
 - `hive.gemspec`
 - `packaging/docker/entrypoint.sh`
 - `openclaw/skills/hive/SKILL.md`
@@ -83,13 +83,13 @@ CLI.
 
 ### Hivebox Web
 
-`hive web` starts the Sinatra/Puma browser surface documented in
+`hive web` boots the hivebox Rails 8 + Turbo app from `web/` (see [[commands/web]]): it derives SECRET_KEY_BASE from the persisted session secret, keeps the solid-stack sqlite under state_home, runs db:prepare, and execs `bin/rails server`.
 [[commands/web]]. The web app reuses the same status, approval, daemon-queue,
 agent-auth, repo, and Telegram setup contracts as the CLI/bot/daemon stack; it
 does not introduce a separate workflow engine. Docker packaging adds the
 `hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
 directories and then runs `Hive::Web::Supervisor` unless custom argv is passed.
-The gem payload includes Hivebox ERB views and public CSS/JS, so the installed
+The gem deliberately does NOT package the web app (gemspec_test pins this); the Rails app ships in the Docker image at /app/web or runs from a source checkout.
 `hive web` command has the same renderable UI assets as a source checkout.
 
 ### E2E Harness

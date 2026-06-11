@@ -97,8 +97,9 @@ class InitTest < Minitest::Test
 
   def test_init_json_mirrors_non_default_prompt_answers
     # Order: planning, claude_mode, claude_permission_mode, development,
-    # reviewers, patrol_reviewers, patrol_mode, triage, then limits, daemon-enable, babysitter-enable,
-    # daemon-autostart, confirm.
+    # Slots: planning, claude mode, permission mode, claude model, claude
+    # effort, dev agent, reviewers, patrol_reviewers, patrol_mode, triage,
+    # then limits, daemon-enable, babysitter-enable, daemon-autostart, confirm.
     inputs = ([ "codex", "2", "", "", "", "pi", "2", "2", "high", "safetyist", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
@@ -638,11 +639,41 @@ class InitTest < Minitest::Test
     refute Hive::Config.find_project(File.basename(dir))
   end
 
+  # End-to-end for the model/effort pins: chosen answers must survive the
+  # ERB template render (the inline `effort:` branch is easy to break into
+  # invalid YAML), Config.load, and the argv builder both launch paths use.
+  def test_init_renders_model_and_effort_pins_through_to_cli_flags
+    answers_stub = Object.new
+    answers_stub.define_singleton_method(:collect) do
+      input = StringIO.new
+      input.define_singleton_method(:tty?) { false }
+      defaults = Hive::Commands::Init::Prompts.new(
+        input: input, output: StringIO.new, summary_io: StringIO.new
+      ).collect
+      defaults.merge("claude_model" => "sonnet", "claude_effort" => "low")
+    end
+
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir, prompts: answers_stub).call }
+
+        cfg = Hive::Config.load(dir)
+        assert_equal "sonnet", cfg.dig("claude", "model"), "the chosen model must land in the project config"
+        assert_equal "low", cfg.dig("claude", "effort"), "the chosen effort must render as valid YAML"
+        assert_equal [ "--model", "sonnet", "--effort", "low" ],
+                     Hive::Config.claude_cli_flags(cfg),
+                     "the rendered config must resolve to the launch flags"
+      end
+    end
+  end
+
   def test_init_with_piped_user_choices_writes_matching_config
-    # Order matches Prompts#collect. Choose codex for planning, default
-    # claude_mode, codex for development, safetyist triage, only first +
-    # third normal reviewer, default patrol reviewer, high patrol mode, override `plan`
-    # budget/timeout, accept the rest.
+    # Order matches Prompts#collect: planning, claude mode, permission mode,
+    # claude model, claude effort, development, reviewers, patrol reviewers,
+    # patrol mode, triage, limits…, daemon, babysitter, autostart, confirm.
+    # Choose codex for planning, defaults for the claude block, codex for
+    # development, only first + third reviewer, default patrol reviewer,
+    # high patrol mode, safetyist triage, override `plan` budget/timeout.
     inputs = [
       "codex", "", "", "", "", "2", "1,3", "", "high", "safetyist",
       "", "30,900", "", "", "", "", "", "", "", "",
@@ -687,8 +718,9 @@ class InitTest < Minitest::Test
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), claude_permission_mode=blank,
     # dev=blank, reviewers=blank, patrol_reviewers=blank, patrol_mode=blank,
-    # triage=blank, limit blanks, daemon-enable=blank,
-    # babysitter-enable=blank, daemon-autostart=blank, confirm=blank.
+    # Slots: planning blank, claude_mode "2", then blanks through (permission,
+    # model, effort, dev, reviewers, patrol reviewers, patrol mode, triage),
+    # limit blanks, daemon/babysitter/autostart/confirm blanks.
     inputs = ([ "", "2", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
@@ -711,8 +743,9 @@ class InitTest < Minitest::Test
 
   def test_init_with_claude_permission_mode_auto_writes_matching_config
     # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
-    # dev/reviewers/patrol_reviewers/patrol_mode/triage=blank, limits blank,
-    # daemon/babysitter/autostart/confirm blank.
+    # Slots: planning + claude_mode blank, permission "2", then blanks through
+    # (model, effort, dev, reviewers, patrol reviewers, patrol mode, triage),
+    # limits blank, daemon/babysitter/autostart/confirm blank.
     inputs = ([ "", "", "2", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
@@ -730,9 +763,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, patrol reviewers, patrol mode, triage bias, limits. Then "n" for daemon-enable and blanks for
-    # babysitter-enable, daemon-autostart, and confirm.
+    # Blanks: planning, claude mode, permission mode, claude model, claude
+    # effort, dev, reviewers, patrol reviewers, patrol mode, triage (10) +
+    # limits. Then "n" for daemon-enable and blanks for babysitter-enable,
+    # daemon-autostart, and confirm.
     inputs = (([ "" ] * (10 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -749,9 +783,9 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, patrol reviewers, patrol mode, triage bias, limits, daemon-enable, babysitter-enable,
-    # daemon-autostart.
+    # Blanks: the ten pre-limit prompts (planning … triage, incl. claude
+    # model/effort) + limits + daemon-enable, babysitter-enable,
+    # daemon-autostart (13 + limits).
     inputs = (([ "" ] * (13 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do

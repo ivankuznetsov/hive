@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, web/, packaging/docker/
 created: 2026-06-04
-updated: 2026-06-10
+updated: 2026-06-11
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -49,12 +49,15 @@ GitHub.
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`,
-  strips volatile fields (`age_seconds`), and broadcasts a replace of the
+  strips volatile fields (`generated_at`, `age_seconds`), and broadcasts a replace of the
   `projects` frame over solid_cable. No polling JS, no SSE.
-- **Task page** — artifacts (idea/brainstorm/plan/…), Approve /
-  Run stage / Diff / Reject / Force approve (ghost-styled, confirm-gated),
-  intervene box (BrainstormAnswerWriter), log tail in a turbo-frame refreshed
-  by a small Stimulus poll controller.
+- **Task page** — state-driven actions (Approve only when the marker makes
+  a forward move possible; Run <verb> only when the project daemon is
+  disabled; Diff only when the worktree exists; Reject and Force approve as
+  described cards in a bottom Advanced section, confirm-gated), per-question
+  brainstorm Q&A (the original idea shown above the form; answers go through
+  BrainstormAnswerWriter), artifacts, and a log tail in a turbo-frame
+  refreshed by a small Stimulus poll controller.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
@@ -66,8 +69,8 @@ GitHub.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. CSRF is Rails-default (per-form tokens); every
-route except `/health`, `/login`, `/auth/github*`, and `/up` is behind the
-owner gate.
+route except `/health`, `/up`, `/login`, `/logout`, `/auth/github*`, and the
+dev/test-only `/dev_login` is behind the owner gate.
 
 ## Tests
 

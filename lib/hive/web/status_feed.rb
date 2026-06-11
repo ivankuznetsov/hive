@@ -6,21 +6,21 @@ require "hive/config"
 
 module Hive
   module Web
-    # Publishes the live `hive status` snapshot to every open `/events` SSE
-    # connection.
+    # Publishes the live `hive status` snapshot to subscribers — in the
+    # Rails web tier that is StatusBroadcaster, which bridges each changed
+    # snapshot to a Turbo Streams broadcast.
     #
     # A single shared background poller computes the snapshot ONCE per tick
     # (one filesystem scan + YAML parse for the whole box) and publishes it to
     # a mutex-protected latest-value. Every subscriber reads that shared value,
-    # so N open dashboards cost one scan per tick — not N. Before this, each
-    # `/events` connection ran its own `each_snapshot` loop that scanned the
-    # filesystem and parsed YAML once per second, so the cost scaled with the
-    # number of open tabs.
+    # so N subscribers cost one scan per tick — not N.
     #
-    # Public behavior is preserved: a new subscriber gets the current snapshot
-    # immediately (emit on connect), unchanged snapshots are suppressed (dedup)
-    # and instead fire `on_idle` (the SSE keep-alive), and `snapshot` still
-    # returns a freshly-computed payload for the per-request read path.
+    # Contract: a new subscriber gets the current snapshot immediately (emit
+    # on connect); unchanged snapshots are suppressed (dedup, volatile fields
+    # stripped) and instead fire `on_idle` (a keep-alive seam — no production
+    # subscriber passes it today, tests use it to observe deduped ticks); and
+    # `snapshot` returns a freshly-computed payload for the per-request read
+    # path (the grid render, task_row lookups).
     class StatusFeed
       def initialize(interval: 1.0, status_command: Hive::Commands::Status.new(json: true))
         @interval = interval
@@ -40,14 +40,6 @@ module Hive
         @status_command.json_payload(Hive::Config.registered_projects)
       end
 
-      # Yield the shared snapshot to one SSE subscriber.
-      #
-      # Emits the current snapshot immediately on connect, then yields again
-      # only when the published snapshot changes (dedup); on an unchanged tick
-      # it calls `on_idle` (the route uses it to emit an SSE keep-alive comment
-      # so a dead socket raises on the next write instead of parking its thread
-      # forever). All subscribers share ONE poller thread, so the filesystem
-      # scan runs once per tick regardless of subscriber count.
       # json_payload regenerates `generated_at` (and per-task `age_seconds`)
       # on every poll, so comparing raw serialized payloads re-emitted every
       # tick — the documented dedup was dead in production and the on_idle
@@ -96,7 +88,15 @@ module Hive
         @monitor.synchronize do
           return if @poller&.alive?
 
-          publish(compute_json)
+          # The connect-emit compute rides the same safety net as the loop:
+          # a config error at exactly boot time must not kill the subscriber
+          # thread before the poller ever starts.
+          begin
+            publish(compute_json)
+          rescue StandardError => e
+            warn "hive web: initial status snapshot failed (#{e.class}: #{e.message}); retrying on the next tick"
+            publish([ { "projects" => [] }, "{}" ])
+          end
           @poller = Thread.new { poll_loop }
         end
       end

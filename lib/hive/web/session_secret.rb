@@ -6,6 +6,10 @@ module Hive
     module SessionSecret
       module_function
 
+      # HIVEBOX_SESSION_SECRET shorter than the minimum is IGNORED (a random
+      # secret is generated instead): a weak operator-chosen value must not
+      # silently weaken cookie crypto. The visible symptom is sessions not
+      # surviving recreation — this comment is the breadcrumb for that.
       def load_or_create(path)
         env = ENV["HIVEBOX_SESSION_SECRET"].to_s
         return env if env.bytesize >= 32

@@ -23,7 +23,12 @@
 </div>
 
 <% if defined?(@login_session) && @login_session %>
-  <%= turbo_frame_tag "agent-login", data: ({ controller: "poll", poll_interval_value: 2000 } unless @session_url) do %>
+  <%# The poll controller refreshes via frame.reload(), which re-fetches the
+      frame's OWN src — without one, reload() is a silent no-op and the
+      operator would wait on "Waiting for the login URL…" forever. %>
+  <%= turbo_frame_tag "agent-login",
+        src: (@session_url ? nil : agent_login_status_path(@login_session.agent, @login_session.id)),
+        data: ({ controller: "poll", poll_interval_value: 2000 } unless @session_url) do %>
     <div class="card">
       <h2><%= @login_session.agent %> login</h2>
       <% if @session_url %>

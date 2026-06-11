@@ -59,22 +59,13 @@ class InitPromptsTest < Minitest::Test
   end
 
   # Helper to build an interactive input string. The flow asks:
-  #   1. planning agent
-  #   2. claude mode
-  #   3. claude permission mode
-  #   4. development agent
-  #   5. reviewer multi-select
-  #   6. patrol PR reviewer multi-select
-  #   7. patrol mode
-  #   8. triage bias
-  #   9-18. ten limit prompts (brainstorm, plan, execute_implementation,
-  #         open_pr, artifacts, finalize, review_ci, review_triage, review_fix,
-  #         review_browser)
-  #  19. daemon enable Y/n            (added under ADR-024)
-  #  20. babysitter enable Y/n
-  #  21. daemon service autostart y/N
-  #  22. confirmation Y/n
-  # Each line is one answer; blank line = accept default.
+  # Interactive slot order (matches Prompts#collect):
+  #   1. planning agent   2. claude mode   3. claude permission mode
+  #   4. claude model     5. claude effort 6. development agent
+  #   7. reviewers        8. patrol reviewers  9. patrol mode
+  #  10. triage bias     11..20 limits (LIMIT_KEYS.size lines)
+  #  21. daemon enable   22. babysitter enable 23. daemon autostart
+  #  24. confirmation
   def interactive_input(planning: "", claude_mode: "", claude_permission_mode: "",
                         claude_model: "", claude_effort: "", development: "", reviewers: "",
                         patrol_reviewers: "", patrol_mode: "", triage_bias: "",

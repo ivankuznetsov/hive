@@ -2,8 +2,8 @@
 # /repos/new form AND plugs into Hive::Commands::Init's `prompts:` seam —
 # `collect` returns the exact answers hash Prompts#collect produces, so a
 # project set up from the browser is indistinguishable from one set up
-# interactively. Every value is validated against the same choice
-# constants the TTY uses; an out-of-range value raises Hive::Error (the
+# interactively. Every enumerated value is validated against the same
+# choice constants the TTY uses (claude_model is deliberately free text); an out-of-range value raises Hive::Error (the
 # operator-readable 422 page), never silently falls back.
 class InitSetup
   Prompts = Hive::Commands::Init::Prompts
@@ -67,7 +67,7 @@ class InitSetup
       "budgets" => limits(p, "budgets", d),
       "timeouts" => limits(p, "timeouts", d),
       **BOOLEAN_KEYS.index_with { |k| boolean(p, k, d) }
-    }
+    }.freeze
   end
 
   # The Init `prompts:` contract.
@@ -81,7 +81,12 @@ class InitSetup
   # "default" tracks its recommended model, "inherit" follows the
   # operator's interactive pick, aliases pass through).
   def free_text(params, key, defaults)
-    params[key].to_s.strip.presence || defaults.fetch(key)
+    value = params[key].to_s.strip.presence || defaults.fetch(key)
+    # The value eventually becomes argv (--model <value>); a leading dash
+    # would smuggle an extra flag into the claude command line.
+    raise Hive::Error, "#{key} must not start with '-' (got #{value.inspect})" if value.start_with?("-")
+
+    value
   end
 
   def choose(params, key, allowed, defaults)

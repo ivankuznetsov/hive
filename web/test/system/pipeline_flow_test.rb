@@ -134,6 +134,18 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     page.execute_script("const p = document.querySelector('pre[data-tail-follow]'); p.scrollTop = p.scrollHeight")
     assert_text "marker-while-reading", wait: 10
+
+    # No-blink contract: reloads MORPH the pane (patch, not replace). Tag the
+    # live DOM node, let the next refresh bring a new line in, and verify the
+    # same node survived — a child-replacing reload (the old behavior, a
+    # visible 3s blink) would have swapped it out. This line appearing at all
+    # also proves the pane re-pinned after the previous morph: an unpinned
+    # pane pauses the poll.
+    page.execute_script("document.querySelector('pre[data-tail-follow]').__sameNode = true")
+    log_file.write("line 122 after-morph\n", mode: "a")
+    assert_text "after-morph", wait: 10
+    assert page.evaluate_script("document.querySelector('pre[data-tail-follow]').__sameNode"),
+           "a poll refresh must patch the pane in place, not rebuild it"
   end
 
   test "artifact open state survives a pushed morph while content stays live" do

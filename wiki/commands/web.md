@@ -61,9 +61,10 @@ GitHub.
   BrainstormAnswerWriter), artifacts whose open/closed choices survive pushed
   morphs (a Stimulus controller snapshots/restores them around the morph
   while content stays live), and a log tail in a turbo-permanent turbo-frame
-  with `tail -f` semantics: the poll controller pins the pane to its bottom
-  while following, pauses reloads while the operator scrolls up to read, and
-  resumes when scrolled back down.
+  whose own reloads use Turbo frame morphing. The poll controller gives the
+  pane `tail -f` semantics: it pins to the bottom while following, pauses
+  reloads while the operator scrolls up to read, and resumes when scrolled
+  back down.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline

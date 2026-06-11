@@ -419,55 +419,63 @@ module Hive
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
-          Dir[File.join(stage_dir, "*")].each do |entry|
+          stage_task_entries(stage_dir).each do |entry|
             next unless File.directory?(entry)
 
             slug = File.basename(entry)
             begin
               task = Hive::Task.new(entry)
+              marker = Hive::Markers.current(task.state_file)
+              folder_mtime = File.mtime(entry)
+              mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              lock_holder = task_lock_holder(task)
+              live_holder = live_task_lock_holder(lock_holder)
+              icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
+              claude_pid = claude_pid_from_lock(lock_holder)
+              # Resolve once per row so JSON consumers (bot / daemon / agents)
+              # get the absolute worktree path without re-implementing the
+              # branch.yml lookup. Pre-execute stages legitimately return
+              # nil. See PR #84 review finding #8.
+              worktree_path =
+                begin
+                  task.worktree_path
+                rescue StandardError
+                  nil
+                end
+              rows << {
+                stage: stage,
+                slug: slug,
+                id: task.id,
+                display_name: task.display_name,
+                folder: entry,
+                state_file: task.state_file,
+                worktree_path: worktree_path,
+                task: task,
+                marker_name: marker.name,
+                marker_attrs: marker.attrs,
+                icon: icon,
+                state_label: state_label,
+                mtime: mtime,
+                folder_mtime: folder_mtime,
+                age: humanise_age(mtime),
+                claude_pid: claude_pid,
+                claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
+                live_task_lock: !live_holder.nil?
+              }
             rescue Hive::InvalidTaskPath
               next
+            rescue Errno::ENOENT
+              raise if File.directory?(entry)
+
+              next
             end
-            marker = Hive::Markers.current(task.state_file)
-            folder_mtime = File.mtime(entry)
-            mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
-            lock_holder = task_lock_holder(task)
-            live_holder = live_task_lock_holder(lock_holder)
-            icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
-            claude_pid = claude_pid_from_lock(lock_holder)
-            # Resolve once per row so JSON consumers (bot / daemon / agents)
-            # get the absolute worktree path without re-implementing the
-            # branch.yml lookup. Pre-execute stages legitimately return
-            # nil. See PR #84 review finding #8.
-            worktree_path =
-              begin
-                task.worktree_path
-              rescue StandardError
-                nil
-              end
-            rows << {
-              stage: stage,
-              slug: slug,
-              id: task.id,
-              display_name: task.display_name,
-              folder: entry,
-              state_file: task.state_file,
-              worktree_path: worktree_path,
-              task: task,
-              marker_name: marker.name,
-              marker_attrs: marker.attrs,
-              icon: icon,
-              state_label: state_label,
-              mtime: mtime,
-              folder_mtime: folder_mtime,
-              age: humanise_age(mtime),
-              claude_pid: claude_pid,
-              claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
-              live_task_lock: !live_holder.nil?
-            }
           end
         end
         rows
+      end
+
+      def stage_task_entries(stage_dir)
+        Dir[File.join(stage_dir, "*")]
       end
 
       def decorate(task, marker, lock_holder: nil, live_task_lock: false)

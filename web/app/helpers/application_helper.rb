@@ -50,11 +50,13 @@ module ApplicationHelper
 
   # Agent-written .md artifacts render as real markdown (GFM tables, fenced
   # code). Two safety layers for LLM-authored content: escape_html turns raw
-  # HTML in the source into visible text (markers like <!-- WAITING --> stay
-  # legible state info, nothing executes), and sanitize strips whatever
-  # survives (e.g. javascript: link protocols). Leading YAML front matter is
-  # metadata, not prose — dropped from the rendered view. A fresh renderer
-  # per call: Redcarpet instances are not thread-safe under Puma.
+  # HTML in the source into visible text (nothing executes), and sanitize
+  # strips whatever survives (e.g. javascript: link protocols). Two kinds of
+  # machinery are dropped from the rendered view, matching how GitHub renders
+  # markdown: leading YAML front matter and HTML comments — which is where
+  # stage markers like <!-- COMPLETE --> live; the stage badge owns that
+  # state, the prose should not repeat it. A fresh renderer per call:
+  # Redcarpet instances are not thread-safe under Puma.
   def render_markdown(text)
     renderer = Redcarpet::Markdown.new(
       Redcarpet::Render::HTML.new(escape_html: true,
@@ -62,7 +64,7 @@ module ApplicationHelper
       fenced_code_blocks: true, tables: true, autolink: true,
       strikethrough: true, no_intra_emphasis: true, lax_spacing: true
     )
-    body = text.to_s.sub(/\A---\n.*?\n---\n/m, "")
+    body = text.to_s.sub(/\A---\n.*?\n---\n/m, "").gsub(/<!--.*?-->/m, "")
     sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
   end
 

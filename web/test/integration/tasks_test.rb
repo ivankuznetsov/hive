@@ -101,6 +101,8 @@ class TasksTest < ActionDispatch::IntegrationTest
       | 1    | ship |
 
       **bold move** and <script>alert(1)</script> stays inert.
+
+      <!-- COMPLETE -->
     MD
 
     get "/tasks/#{@project}/#{@slug}"
@@ -111,6 +113,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_includes plan, "<strong>bold move</strong>"
     refute_includes plan, "<script>", "agent-written HTML must never execute"
     refute_includes plan, "created_at", "front matter is metadata, not prose"
+    refute_includes plan, "COMPLETE",
+                    "stage markers are machinery — the stage badge owns that state"
   end
 
   test "a complete stage offers Approve and hides the force override" do

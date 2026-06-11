@@ -65,7 +65,8 @@ GitHub.
   brainstorm Q&A (the original idea shown above the form; answers go through
   BrainstormAnswerWriter), artifacts rendered as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
-  sanitized after; leading YAML front matter dropped) whose open/closed
+  sanitized after; leading YAML front matter and HTML comments — i.e. stage
+  markers — dropped, GitHub-style) whose open/closed
   choices survive pushed morphs (a Stimulus controller snapshots/restores
   them around the morph while content stays live) and whose order is
   stage-aware — chronological (idea first) while working, artifact.md first

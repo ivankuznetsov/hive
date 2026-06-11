@@ -1,13 +1,13 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, hive.gemspec, Gemfile.lock
+source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-11
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Eight direct runtime gems (sinatra, rack-protection, and puma left with the Rails web rewrite — the web app under web/ carries its own bundle).
+**TLDR**: The `hive-cli` gem has eight direct runtime gems; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
 
 ## Runtime gems
 
@@ -28,6 +28,21 @@ transport. Hive also uses those transitive gems directly in
 configured OpenAI-compatible audio transcription endpoint. `Gemfile.lock`
 keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags
 `2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
+
+## Web app bundle
+
+`web/Gemfile` is deliberately separate from the gem payload: `hive web`
+execs the Rails app from a source checkout or Docker image, and
+`test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
+
+Direct web runtime dependencies include Rails 8.1, propshaft, sqlite3,
+puma, importmap-rails, turbo-rails, stimulus-rails, jbuilder, solid_cache,
+solid_queue, solid_cable, bootsnap, thruster, image_processing, and
+`hive-cli` from the parent checkout. Redcarpet (`~> 3.6`, locked 3.6.1) is
+used only by the task page markdown renderer: agent-written `.md` artifacts
+render with GFM tables/fenced code/autolinks, while raw HTML is escaped
+before rendering and the result is sanitized by Rails with an explicit
+allowlist. See [[commands/web]].
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

@@ -104,19 +104,23 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   test "grid updates preserve scroll position and composer state" do
     # Enough rows to overflow the viewport so window scroll is meaningful.
-    12.times { |n| create_task!(@project, "Filler idea number #{n}") }
+    30.times { |n| create_task!(@project, "Filler idea number #{n}") }
     sign_in!
     visit "/"
+    assert_selector ".task-row", text: "Filler idea number 29", wait: 10
     fill_in "New idea", with: "half-typed thought"
 
     # Window scroll is unobservable through user-facing APIs — the sanctioned
     # JS exception, used only to position and read scrollY.
     page.execute_script("window.scrollTo(0, 400)")
+    scrolled_to = page.evaluate_script("window.scrollY")
+    assert_operator scrolled_to, :>, 0, "the grid must overflow the viewport for this test to mean anything"
+
     create_task!(@project, "Live arrival probe")
     assert_selector ".task-row", text: "Live arrival probe", wait: 10
 
-    assert_operator page.evaluate_script("window.scrollY"), :>=, 300,
-                    "a grid update must not yank the operator back to the top"
+    assert_equal scrolled_to, page.evaluate_script("window.scrollY"),
+                 "a grid update must not yank the operator back to the top"
     assert_equal "half-typed thought", find("textarea[aria-label='New idea']").value,
                  "a grid update must not clear the composer"
   end

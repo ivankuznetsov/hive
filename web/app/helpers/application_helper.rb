@@ -42,6 +42,30 @@ module ApplicationHelper
   # then prefer the operator's ORIGINAL idea text (idea.md front matter) —
   # a de-slugged title truncates mid-phrase ("Add dark mode toggle to").
   # The slug stays the fallback of last resort.
+  MARKDOWN_TAGS = %w[
+    h1 h2 h3 h4 h5 h6 p a ul ol li blockquote pre code em strong del hr br img
+    table thead tbody tr th td
+  ].freeze
+  MARKDOWN_ATTRS = %w[href src alt title rel target].freeze
+
+  # Agent-written .md artifacts render as real markdown (GFM tables, fenced
+  # code). Two safety layers for LLM-authored content: escape_html turns raw
+  # HTML in the source into visible text (markers like <!-- WAITING --> stay
+  # legible state info, nothing executes), and sanitize strips whatever
+  # survives (e.g. javascript: link protocols). Leading YAML front matter is
+  # metadata, not prose — dropped from the rendered view. A fresh renderer
+  # per call: Redcarpet instances are not thread-safe under Puma.
+  def render_markdown(text)
+    renderer = Redcarpet::Markdown.new(
+      Redcarpet::Render::HTML.new(escape_html: true,
+                                  link_attributes: { rel: "noopener noreferrer", target: "_blank" }),
+      fenced_code_blocks: true, tables: true, autolink: true,
+      strikethrough: true, no_intra_emphasis: true, lax_spacing: true
+    )
+    body = text.to_s.sub(/\A---\n.*?\n---\n/m, "")
+    sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
+  end
+
   def task_title(task)
     return task["display_name"] if task["display_name"].present? && task["display_name"] != task["slug"]
 

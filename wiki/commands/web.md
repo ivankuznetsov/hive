@@ -50,17 +50,27 @@ GitHub.
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
   Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`,
-  strips volatile fields (`generated_at`, `age_seconds`), and broadcasts a replace of the
-  `projects` frame over solid_cable. No polling JS, no SSE.
+  strips volatile fields (`generated_at`, `age_seconds`), broadcasts a replace
+  of the `projects` frame over solid_cable, and also sends a page refresh for
+  subscribers that do not have that frame. The index opts that refresh into
+  Turbo morphing with scroll preservation so a live row arrival does not yank
+  the operator back to the top; the composer form is `data-turbo-permanent`
+  because typed-but-unsent idea text and staged image chips live in browser
+  state. No polling JS, no SSE.
 - **Task page** — state-driven actions (Approve only when the marker makes
   a forward move possible; Run <verb> only when the project daemon is
   disabled; Diff only when the worktree exists; Reject, Force approve, and
   Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
   described cards in a bottom Advanced section, confirm-gated), per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
-  BrainstormAnswerWriter), artifacts whose open/closed choices survive pushed
-  morphs (a Stimulus controller snapshots/restores them around the morph
-  while content stays live), and a log tail in a turbo-permanent turbo-frame
+  BrainstormAnswerWriter), artifacts rendered as sanitized markdown
+  (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
+  sanitized after; leading YAML front matter dropped) whose open/closed
+  choices survive pushed morphs (a Stimulus controller snapshots/restores
+  them around the morph while content stays live) and whose order is
+  stage-aware — chronological (idea first) while working, artifact.md first
+  and open from 8-finalize/9-done — and, as the page's appendix after the
+  artifacts, a log tail in a turbo-permanent turbo-frame
   whose own reloads use Turbo frame morphing, patching the live pane in place
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
@@ -104,12 +114,12 @@ NEVER touches the developer's real config — `test_helper.rb` sets the sandbox
 before the app loads). `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
-sanctioned JS exception), Turbo Stream live row arrival without reload, and
-both approve paths (typed refusal page + confirmed force), log-tail
-follow/pause/resume with node-preserving frame morph reloads, and artifact
-open-state preservation across pushed morphs with live content refresh. CI
-runs both in the `web` job (`.github/workflows/ci.yml`) plus the web app's
-own rubocop.
+sanctioned JS exception), Turbo Stream live row arrival without reload, grid
+scroll plus composer draft preservation across a live broadcast, both approve
+paths (typed refusal page + confirmed force), log-tail follow/pause/resume
+with node-preserving frame morph reloads, and artifact open-state preservation
+across pushed morphs with live content refresh. CI runs both in the `web` job
+(`.github/workflows/ci.yml`) plus the web app's own rubocop.
 
 ## Docker
 

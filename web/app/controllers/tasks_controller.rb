@@ -98,14 +98,27 @@ class TasksController < ApplicationController
     row || raise(Hive::InvalidTaskPath, "unknown task #{params[:slug]}")
   end
 
+  ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
+
   def artifact_files(row)
     folder = row["folder"]
     return [] unless folder && File.directory?(folder)
 
-    %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].filter_map do |name|
+    artifact_order(row).filter_map do |name|
       path = File.join(folder, name)
       [ name, File.read(path) ] if File.file?(path)
     end
+  end
+
+  # Pipeline-chronological (idea first) while the task is being worked —
+  # earlier stages read top-to-bottom as a story. From finalize onward the
+  # run's deliverable is what the operator opens the page for, so artifact.md
+  # leads (and, being first, renders open). Not at 7-artifacts: the file is
+  # still being written there.
+  def artifact_order(row)
+    return ARTIFACT_ORDER unless %w[8-finalize 9-done].include?(row["stage"].to_s)
+
+    [ "artifact.md" ] + (ARTIFACT_ORDER - [ "artifact.md" ])
   end
 
   def open_questions(row)

@@ -360,6 +360,24 @@ pre {
 }
 
 .log-pane pre { max-height: 420px; }
+
+/* Rendered markdown inside artifact bodies. */
+.markdown { font-size: 0.92rem; line-height: 1.65; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { line-height: 1.3; margin: 18px 0 8px; }
+.markdown h1 { font-size: 1.15rem; }
+.markdown h2 { font-size: 1.05rem; }
+.markdown h3, .markdown h4 { font-size: 0.98rem; }
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote { margin: 8px 0; }
+.markdown ul, .markdown ol { padding-left: 22px; }
+.markdown li { margin: 3px 0; }
+.markdown code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+.markdown pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+.markdown blockquote { border-left: 3px solid var(--line); padding-left: 12px; color: var(--ink-muted); }
+.markdown table { border-collapse: collapse; margin: 10px 0; max-width: 100%; font-size: 0.88rem; }
+.markdown th, .markdown td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+.markdown th { background: var(--bg-sunken); }
+.markdown img { max-width: 100%; }
+.markdown hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
 .log-error { color: var(--danger); }
 .log-meta { color: var(--ink-faint); }
 .composer-attach { display: inline-flex; align-items: center; gap: 6px; }

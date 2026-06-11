@@ -129,7 +129,7 @@ command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, replay path safety, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ideas with uploads, task Q&A/actions including Advanced Drop and stale-stage 422, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job.
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ideas with uploads, task Q&A/actions including Advanced Drop and stale-stage 422, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job.
 
 The opt-in Dockerized hivebox smoke covers the packaged web surface. It skips unless `HIVEBOX_URL` is set, checks
 that a fresh box redirects to `/login` and shows the GitHub login link, and

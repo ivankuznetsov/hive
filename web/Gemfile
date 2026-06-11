@@ -17,6 +17,10 @@ gem "stimulus-rails"
 # Build JSON APIs with ease [https://github.com/rails/jbuilder]
 gem "jbuilder"
 
+# Artifact pages render agent-written .md files as real markdown (GFM
+# tables/fenced code); raw HTML is escaped at render and sanitized after.
+gem "redcarpet", "~> 3.6"
+
 # Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
 # gem "bcrypt", "~> 3.1.7"
 

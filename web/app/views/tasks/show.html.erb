@@ -17,6 +17,26 @@
 <%= turbo_stream_from StatusBroadcaster::CHANNEL %>
 <%= render "tasks/state" %>
 
+<% if @files.any? %>
+  <h2>Artifacts</h2>
+  <%# The controller re-applies the operator's open/closed choices after each
+      pushed morph; content stays live (agents keep writing these files). %>
+  <div data-controller="artifacts">
+    <% @files.each_with_index do |(name, content), i| %>
+      <details class="artifact" data-artifact-name="<%= name %>" <%= "open" if i.zero? %>>
+        <summary><%= name %></summary>
+        <div class="artifact-body">
+          <% if name.end_with?(".md") %>
+            <div class="markdown"><%= render_markdown(content) %></div>
+          <% else %>
+            <pre><%= content %></pre>
+          <% end %>
+        </div>
+      </details>
+    <% end %>
+  </div>
+<% end %>
+
 <% if @log %>
   <h2>Log</h2>
   <%# data-turbo-permanent: page morphs must never touch the frame — its own
@@ -31,20 +51,6 @@
         data: { controller: "poll", poll_interval_value: 3000, turbo_permanent: true } do %>
     <div class="log-pane"><pre>Loading log…</pre></div>
   <% end %>
-<% end %>
-
-<% if @files.any? %>
-  <h2>Artifacts</h2>
-  <%# The controller re-applies the operator's open/closed choices after each
-      pushed morph; content stays live (agents keep writing these files). %>
-  <div data-controller="artifacts">
-    <% @files.each_with_index do |(name, content), i| %>
-      <details class="artifact" data-artifact-name="<%= name %>" <%= "open" if i.zero? %>>
-        <summary><%= name %></summary>
-        <div class="artifact-body"><pre><%= content %></pre></div>
-      </details>
-    <% end %>
-  </div>
 <% end %>
 
 <details class="advanced">

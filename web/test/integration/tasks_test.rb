@@ -49,6 +49,70 @@ class TasksTest < ActionDispatch::IntegrationTest
            "a stale drop must leave the moved task untouched"
   end
 
+  test "finalize leads with the deliverable: artifact.md first and open" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "8-finalize").join(@slug))
+    folder = stage_dir(@project, "8-finalize").join(@slug)
+    folder.join("artifact.md").write("# Deliverable\n\nDone.\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
+    assert_equal "artifact.md", names.first,
+                 "from finalize on, the run's deliverable is what the page is opened for"
+    assert css_select("details[data-artifact-name='artifact.md']").first["open"],
+           "the leading artifact must render expanded"
+    assert_includes names, "idea.md", "the chronological story still follows"
+  end
+
+  test "earlier stages keep the chronological order, idea first" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("artifact.md").write("# Early\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
+    assert_equal "idea.md", names.first, "working stages read top-to-bottom as a story"
+  end
+
+  test "the log renders after the artifacts" do
+    log_dir = stage_dir(@project, "1-inbox").join("..", "..", "logs", @slug)
+    log_dir.mkpath
+    log_dir.join("stage-20260611T000000Z.log").write("one line\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    artifacts_at = response.body.index("<h2>Artifacts</h2>")
+    log_at = response.body.index("<h2>Log</h2>")
+    refute_nil artifacts_at
+    refute_nil log_at
+    assert_operator artifacts_at, :<, log_at, "the log is an appendix — artifacts come first"
+  end
+
+  test "md artifacts render as sanitized markdown, not raw text" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("plan.md").write(<<~MD)
+      ---
+      created_at: 2026-06-11
+      ---
+      ## The Plan
+
+      | step | what |
+      |------|------|
+      | 1    | ship |
+
+      **bold move** and <script>alert(1)</script> stays inert.
+    MD
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    plan = css_select("details[data-artifact-name='plan.md'] .markdown").first.to_s
+    assert_includes plan, "<h2>The Plan</h2>", "headings must render as headings"
+    assert_includes plan, "<td>ship</td>", "GFM tables must render as tables"
+    assert_includes plan, "<strong>bold move</strong>"
+    refute_includes plan, "<script>", "agent-written HTML must never execute"
+    refute_includes plan, "created_at", "front matter is metadata, not prose"
+  end
+
   test "a complete stage offers Approve and hides the force override" do
     # Stamp the marker Commands::Approve actually requires for a forward move.
     Hive::Markers.set(stage_dir(@project, "1-inbox").join(@slug, "idea.md").to_s, :complete)

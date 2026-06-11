@@ -1,10 +1,10 @@
 ---
 title: hive drop
 type: command
-source: lib/hive/commands/drop.rb
+source: lib/hive/commands/drop.rb, lib/hive/web/dispatcher.rb, web/app/controllers/tasks_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-05-22
-tags: [command, task, cleanup, json, tui]
+updated: 2026-06-11
+tags: [command, task, cleanup, json, tui, web]
 ---
 
 **TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]` hard-deletes an active task. It kills any recorded agent process, closes the draft PR best-effort, removes the task's worktree and branch, deletes the task folder from every active stage, removes per-slug logs, and records an audit commit on `hive/state`. There is no dropped bucket, archive, undo, reason prompt, or confirmation.
@@ -92,7 +92,23 @@ hive drop <slug> --project <project> --from <stage> --json
 
 Lowercase `x` is intentionally unbound. The archived-row and empty-grid cases flash a refusal and do not spawn the command.
 
+## Web Binding
+
+In [[commands/web]], the task page's Advanced section posts its Drop card to:
+
+```
+POST /tasks/:project/:slug/drop
+```
+
+`TasksController#drop` calls `Hive::Web::Dispatcher#drop`, which constructs the
+same `Hive::Commands::Drop` command in-process with `project:` and the rendered
+row stage as `from:`. The `from` parameter is load-bearing: a stale page whose
+task already moved to another stage raises `Hive::WrongStage`, which the Rails
+error handler renders as 422, leaving the moved task intact. On success the page
+redirects to the status grid because the detail page no longer has a task to
+show.
+
 ## Backlinks
 
-- [[cli]] · [[commands/tui]] · [[commands/status]]
+- [[cli]] · [[commands/tui]] · [[commands/status]] · [[commands/web]]
 - [[modules/git_ops]] · [[modules/worktree]] · [[modules/lock]]

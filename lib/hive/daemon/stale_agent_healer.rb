@@ -4,6 +4,7 @@ require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
+require "hive/daemon/dispatch_request_queue"
 
 module Hive
   module Daemon
@@ -87,9 +88,11 @@ module Hive
 
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
-                     error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT)
+                     error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT,
+                     request_queue: Hive::Daemon::DispatchRequestQueue)
         @controller = controller
         @logger = logger
+        @request_queue = request_queue
         @grace_sec = grace_sec
         @review_error_auto_recovery_limit = review_error_auto_recovery_limit
         @error_auto_recovery_limit = error_auto_recovery_limit
@@ -202,6 +205,7 @@ module Hive
                       state_file: row.state_file,
                       attempts: attempts,
                       max_attempts: @error_auto_recovery_limit)
+        requeue_plan_rerun(row) if heal_label == "terminal_agent_loss" && row.stage.to_s == "3-plan"
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -209,6 +213,29 @@ module Hive
                       stage: row.stage,
                       reason: error_heal_label(row, marker_reason(row)),
                       error: "#{e.class}: #{e.message}")
+      end
+
+      # 3-plan is the one agent-loss stage where clearing the marker cannot
+      # re-dispatch by itself: the state file is the dead run's OWN artifact,
+      # so the clear leaves an empty plan.md that classifies straight back to
+      # :error (TaskAction#incomplete_plan_artifact?) — an action Policy
+      # skips, and with no marker reason left this healer can never match it
+      # again. Re-entry must be explicit: enqueue the exact rerun an operator
+      # would type. The daemon executes it like any web/bot request, so the
+      # usual concurrency gates (caps, cooldown, quarantine) still apply.
+      def requeue_plan_rerun(row)
+        request_id = @request_queue.write_request!(
+          project: row.project,
+          slug: row.slug,
+          argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ],
+          requestor: "healer",
+          trigger: "terminal_agent_loss"
+        )
+        @logger.event(:heal_requeued,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      request_id: request_id)
       end
 
       def auto_recoverable_error?(row, now:)

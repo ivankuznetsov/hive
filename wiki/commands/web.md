@@ -1,7 +1,7 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, web/, packaging/docker/
+source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/
 created: 2026-06-04
 updated: 2026-06-11
 tags: [command, web, hivebox, rails, turbo]
@@ -12,9 +12,10 @@ tags: [command, web, hivebox, rails, turbo]
 repo root, shipped in the Docker image at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
-in-process, stage runs go through the daemon dispatch queue
-(`Hive::Web::Dispatcher`), and setup flows reuse `Hive::Web::GithubAuth`,
-`AgentsAuth`, and the Telegram validators from the gem.
+in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
+through the daemon dispatch queue (`Hive::Web::Dispatcher`), and setup flows
+reuse `Hive::Web::GithubAuth`, `AgentsAuth`, and the Telegram validators from
+the gem.
 
 ## CLI
 
@@ -76,6 +77,14 @@ GitHub.
 - **Telegram** — getMe-validated token save, allowlist, supervisor SIGHUP,
   round-trip test message.
 
+Task Drop is routed as `POST /tasks/:project/:slug/drop` →
+`TasksController#drop` → `Hive::Web::Dispatcher#drop` →
+`Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
+the task is gone after success, so the controller redirects to the grid. The
+form posts the row's rendered `stage` as `from`; if the task moved after the
+page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
+typed 422 error page, and the moved task folder is left intact.
+
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. CSRF is Rails-default (per-form tokens); every
 route except `/health`, `/up`, `/login`, `/logout`, `/auth/github*`, and the
@@ -85,8 +94,8 @@ dev/test-only `/dev_login` is behind the owner gate.
 
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), and the real
-`Commands::New`/`Approve` against a sandboxed `HIVE_HOME` (the suite NEVER
-touches the developer's real config — `test_helper.rb` sets the sandbox
+`Commands::New`/`Approve`/`Drop` against a sandboxed `HIVE_HOME` (the suite
+NEVER touches the developer's real config — `test_helper.rb` sets the sandbox
 before the app loads). `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the

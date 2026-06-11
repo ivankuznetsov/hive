@@ -45,11 +45,27 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   NOW = Time.utc(2026, 5, 20, 12, 0, 0)
 
+  # Records write_request! calls instead of touching the real queue dir.
+  class FakeRequestQueue
+    attr_reader :requests
+
+    def initialize
+      @requests = []
+    end
+
+    def write_request!(**kwargs)
+      @requests << kwargs
+      "fake-req-#{@requests.size}"
+    end
+  end
+
   def setup
     @logger = FakeLogger.new
     @controller = FakeController.new
+    @request_queue = FakeRequestQueue.new
     @healer = Hive::Daemon::StaleAgentHealer.new(
-      controller: @controller, logger: @logger, grace_sec: 300
+      controller: @controller, logger: @logger, grace_sec: 300,
+      request_queue: @request_queue
     )
   end
 
@@ -947,8 +963,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
         heal([ row ])
 
-        heal_event = @logger.events.last
-        assert_equal :marker_healed, heal_event[0]
+        heal_event = @logger.events.reverse.find { |e| e[0] == :marker_healed }
+        refute_nil heal_event, "#{stage}/#{reason} must log marker_healed"
         assert_equal "terminal_agent_loss", heal_event[1][:reason]
         assert_equal reason, heal_event[1][:marker_reason]
         assert_equal stage, heal_event[1][:stage]
@@ -956,8 +972,20 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         assert_equal({ project: "p", slug: "s", mtime: pre_clear_mtime }, @controller.observed_mtimes.last)
         assert Hive::Markers.current(state_file).none?,
                "#{stage}/#{reason} terminal ERROR should clear so the daemon can rerun the stage"
+
+        if stage == "3-plan"
+          req = @request_queue.requests.last
+          refute_nil req, "3-plan heal must enqueue a plan rerun - a markerless empty plan.md "                           "classifies straight back to :error and nothing else can re-enter the stage"
+          assert_equal [ "hive", "plan", "s", "--project", "p", "--from", "3-plan" ], req[:argv]
+          assert_equal "healer", req[:requestor]
+          assert_equal :heal_requeued, @logger.events.last[0],
+                       "the requeue must be logged so operators can trace the rerun to its heal"
+        end
       end
     end
+    plan_requeues = @request_queue.requests.size
+    assert_equal 2, plan_requeues,
+                 "ONLY the two 3-plan heals may requeue (other stages re-enter via the edit-resume path)"
   end
 
   def test_terminal_agent_loss_recovery_stays_out_of_review

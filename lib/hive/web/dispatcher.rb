@@ -106,6 +106,45 @@ module Hive
       # maps to a readable error page. `attachments` is the same
       # [[src_path, dest_name], ...] contract the TUI uses — files land in
       # the task's assets/ dir next to the [imageN] placeholders in `text`.
+      # Per-question answers from the web Q&A form: `answers` maps question
+      # number => answer text. Each is validated against the CURRENT parse
+      # (the daemon may have advanced rounds since the form rendered) and
+      # written through the same BrainstormAnswerWriter the bot and the
+      # free-text intervene path use. Blank answers are skipped so the
+      # operator can answer a subset and return for the rest.
+      def answer_questions(folder:, answers:)
+        brainstorm_path = File.join(folder.to_s, "brainstorm.md")
+        unless File.file?(brainstorm_path)
+          raise Hive::Error, "answers are only available while a task awaits a brainstorm answer"
+        end
+
+        provided = (answers || {}).to_h
+                                  .transform_keys { |k| Integer(k, exception: false) }
+                                  .transform_values { |v| v.to_s.strip }
+                                  .reject { |n, text| n.nil? || text.empty? }
+        raise Hive::Error, "no answers provided" if provided.empty?
+
+        open_numbers = Hive::Bot::BrainstormParser.unanswered_questions(
+          Hive::Bot::BrainstormParser.parse(brainstorm_path)
+        ).map(&:n)
+        stale = provided.keys - open_numbers
+        unless stale.empty?
+          raise Hive::Error,
+                "question(s) #{stale.sort.join(", ")} are no longer open — the brainstorm may have moved on; reload the page"
+        end
+
+        provided.keys.sort.each do |n|
+          result = Hive::Bot::BrainstormAnswerWriter.append!(
+            brainstorm_path: brainstorm_path,
+            question_n: n,
+            answer_text: provided[n]
+          )
+          raise Hive::Error, "could not record answer to Q#{n} (#{result})" unless result == :written
+        end
+
+        { ok: true, answered: provided.keys.sort }
+      end
+
       def new_idea(project:, text:, attachments: [])
         Hive::Commands::New.new(project, text, attachments: attachments).call!
       end

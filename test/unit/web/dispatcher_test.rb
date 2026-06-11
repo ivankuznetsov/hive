@@ -41,6 +41,60 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  def test_answer_questions_writes_each_numbered_answer
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, _slug, folder = seed_task_at(dir, "2-brainstorm")
+        brainstorm = File.join(folder, "brainstorm.md")
+        File.write(brainstorm, "### Q1. Scope?
+
+### A1.
+
+### Q2. Acceptance?
+
+### A2.
+
+")
+
+        result = Hive::Web::Dispatcher.new.answer_questions(
+          folder: folder,
+          answers: { "2" => "Green tests", "1" => "Header only", "3" => "  " }
+        )
+
+        assert_equal [ 1, 2 ], result[:answered], "both non-blank answers must be recorded, blanks skipped"
+        parsed = Hive::BrainstormParser.parse(brainstorm)
+        assert_equal "Header only", parsed.find { |q| q.n == 1 }.answer.to_s.strip
+        assert_equal "Green tests", parsed.find { |q| q.n == 2 }.answer.to_s.strip
+      end
+    end
+  end
+
+  def test_answer_questions_rejects_a_no_longer_open_question
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, _slug, folder = seed_task_at(dir, "2-brainstorm")
+        File.write(File.join(folder, "brainstorm.md"),
+                   "### Q1. Scope?
+
+### A1.
+Already answered
+
+### Q2. Acceptance?
+
+### A2.
+
+")
+
+        err = assert_raises(Hive::Error) do
+          Hive::Web::Dispatcher.new.answer_questions(folder: folder, answers: { "1" => "again" })
+        end
+
+        assert_match(/no longer open/, err.message,
+                     "a stale form submit must be told to reload, not silently overwrite")
+      end
+    end
+  end
+
   def test_intervene_writes_answer_into_brainstorm_file
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

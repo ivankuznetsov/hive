@@ -10,12 +10,17 @@
 <div class="task-actions">
   <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
         params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
-  <% if (dispatch_action = stage_dispatch_action(@row["stage"])) %>
-    <%= button_to "Run stage", task_run_path(@project["name"], @row["slug"]),
+  <%# Manual runs only when the project's daemon is NOT auto-advancing —
+      otherwise the daemon races the operator. The label names the exact
+      hive verb the dispatch will run. %>
+  <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row["stage"])) %>
+    <%= button_to "Run #{stage_run_verb(@row["stage"])}", task_run_path(@project["name"], @row["slug"]),
           params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
           data: { turbo_submits_with: "Queueing…" } %>
   <% end %>
-  <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary" %>
+  <% if @worktree_exists %>
+    <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary" %>
+  <% end %>
   <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
         params: { from: @row["stage"] }, class: "btn-danger",
         data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
@@ -26,10 +31,37 @@
         data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
 </div>
 
-<%= form_with url: task_intervene_path(@project["name"], @row["slug"]), class: "intervene" do |f| %>
-  <%= f.label :message, "Steer or answer the agent" %>
-  <%= f.text_area :message, required: true, placeholder: "Answer a brainstorm question, or steer the next run…" %>
-  <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
+<% if @questions.any? %>
+  <section class="qa">
+    <h2>Questions from the agent</h2>
+    <p class="muted">Answer what you can — the daemon resumes the brainstorm once answers land. Unanswered questions stay open.</p>
+    <%= form_with url: task_answers_path(@project["name"], @row["slug"]) do |f| %>
+      <% @questions.each do |question| %>
+        <div class="qa-item">
+          <%# Single line: qa-question is pre-wrap, so template indentation
+              would render as a first-line indent. %>
+          <p class="qa-question"><span class="qa-number">Q<%= question.n %></span><%= question.text %></p>
+          <%= text_area_tag "answers[#{question.n}]", "", placeholder: "Your answer…",
+                aria: { label: "Answer to question #{question.n}" } %>
+        </div>
+      <% end %>
+      <p><%= f.submit "Send answers", data: { turbo_submits_with: "Sending…" } %></p>
+    <% end %>
+  </section>
+
+  <details class="intervene">
+    <summary class="muted">Free-form steer instead</summary>
+    <%= form_with url: task_intervene_path(@project["name"], @row["slug"]) do |f| %>
+      <%= f.text_area :message, required: true, placeholder: "Steer the next run…" %>
+      <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
+    <% end %>
+  </details>
+<% else %>
+  <%= form_with url: task_intervene_path(@project["name"], @row["slug"]), class: "intervene" do |f| %>
+    <%= f.label :message, "Steer or answer the agent" %>
+    <%= f.text_area :message, required: true, placeholder: "Answer a brainstorm question, or steer the next run…" %>
+    <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
+  <% end %>
 <% end %>
 
 <% if @log %>

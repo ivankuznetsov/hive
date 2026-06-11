@@ -7,6 +7,23 @@ class TasksController < ApplicationController
     @row = task_row!
     @files = artifact_files(@row)
     @log = latest_log
+    @questions = open_questions(@row)
+    @worktree_exists = worktree_exists?(@row)
+    @daemon_enabled = project_daemon_enabled?
+  end
+
+  # Per-question answers from the Q&A form (answers[n] => text), written
+  # through the same BrainstormAnswerWriter path as the bot. The daemon's
+  # answers-pending gate resumes the brainstorm once questions are answered.
+  def answer
+    row = task_row!
+    # Validated field-by-field in the dispatcher (numbers against the open
+    # set, blanks skipped) — permit! just unlocks the hash conversion.
+    answers = params[:answers].respond_to?(:permit!) ? params[:answers].permit! : params[:answers]
+    result = dispatcher.answer_questions(folder: row["folder"], answers: answers)
+    answered = result[:answered]
+    redirect_to task_path(@project["name"], params[:slug]),
+                notice: "Recorded #{answered.size == 1 ? "answer" : "answers"} to Q#{answered.join(", Q")}"
   end
 
   # Rendered inside a polled turbo-frame on the task page so the tail stays
@@ -83,6 +100,34 @@ class TasksController < ApplicationController
       path = File.join(folder, name)
       [ name, File.read(path) ] if File.file?(path)
     end
+  end
+
+  def open_questions(row)
+    folder = row["folder"]
+    return [] unless folder
+
+    path = File.join(folder, "brainstorm.md")
+    return [] unless File.file?(path)
+
+    Hive::Bot::BrainstormParser.unanswered_questions(Hive::Bot::BrainstormParser.parse(path))
+  rescue StandardError
+    # A half-written brainstorm.md (agent mid-flight) must not 500 the page;
+    # the generic steer box remains available.
+    []
+  end
+
+  def worktree_exists?(row)
+    path = row["worktree_path"].to_s
+    path.present? && File.directory?(path)
+  end
+
+  # Manual stage runs only make sense when the project's daemon is NOT
+  # auto-advancing (otherwise the daemon races the operator); per-project
+  # `daemon.enabled` defaults to true.
+  def project_daemon_enabled?
+    Hive::Config.load(@project["path"]).dig("daemon", "enabled") != false
+  rescue StandardError
+    true
   end
 
   def latest_log

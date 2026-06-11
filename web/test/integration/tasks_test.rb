@@ -82,6 +82,83 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_match "unknown dispatch action", response.body
   end
 
+  test "open brainstorm questions render as a per-question Q&A form" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".qa-item", 2, "each open question must get its own answer field"
+    assert_select "textarea[name='answers[1]']", 1
+    assert_select "textarea[name='answers[2]']", 1
+    assert_match "Scope?", response.body
+  end
+
+  test "submitted answers land under the right question headers" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
+
+    post "/tasks/#{@project}/#{@slug}/answers",
+         params: { answers: { "1" => "Header only", "2" => "Green tests" } }
+
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    content = folder.join("brainstorm.md").read
+    assert_match(/### A1\.\nHeader only/, content, "answer 1 must land under its header")
+    assert_match(/### A2\.\nGreen tests/, content, "answer 2 must land under its header")
+  end
+
+  test "answering an already-closed question is a readable 422" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n")
+
+    post "/tasks/#{@project}/#{@slug}/answers", params: { answers: { "1" => "again" } }
+
+    assert_response :unprocessable_entity
+    assert_match "no longer open", response.body
+  end
+
+  test "diff link renders only when the worktree exists" do
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select "a", { text: "Diff", count: 0 }, "pre-execute stages have no worktree → no Diff link"
+
+    # Worktrees first exist at 4-execute; move the task there (the mv IS the
+    # pipeline's approval primitive) and materialize the derived path.
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "4-execute").join(@slug))
+    project_payload = StatusBroadcaster.snapshot.fetch("projects", [])
+                                        .find { |p| p["name"] == @project }
+    row = project_payload.fetch("tasks", []).find { |t| t["slug"] == @slug }
+    assert row["worktree_path"].present?, "an execute-stage task must derive a worktree path"
+    FileUtils.mkdir_p(row["worktree_path"])
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select "a", { text: "Diff", count: 1 }, "an existing worktree must expose the Diff link"
+  ensure
+    FileUtils.rm_rf(row["worktree_path"]) if row && row["worktree_path"].present?
+  end
+
+  test "run stage appears only when the project daemon is disabled, labeled with the verb" do
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select "form[action$='/run']", 0, "daemon-enabled projects must not offer manual runs"
+
+    config_path = stage_dir(@project, "1-inbox").join("..", "..", "config.yml").to_s
+    data = YAML.safe_load_file(config_path) || {}
+    data["daemon"] = (data["daemon"] || {}).merge("enabled" => false)
+    File.write(config_path, data.to_yaml)
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select "form[action$='/run']", 1
+    assert_select "form[action$='/run'] button", text: "Run brainstorm",
+                  count: 1
+  ensure
+    if config_path && File.exist?(config_path)
+      data = YAML.safe_load_file(config_path) || {}
+      data["daemon"] = (data["daemon"] || {}).merge("enabled" => true)
+      File.write(config_path, data.to_yaml)
+    end
+  end
+
   test "diff for a task without a worktree is 404 not a crash" do
     get "/tasks/#{@project}/#{@slug}/diff"
     assert_response :not_found

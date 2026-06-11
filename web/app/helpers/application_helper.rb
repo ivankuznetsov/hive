@@ -87,6 +87,12 @@ module ApplicationHelper
     STAGE_DISPATCH_ACTIONS[stage_dir.to_s.split("-", 2).first]
   end
 
+  # "ready_to_open_pr" → "open-pr": the hive verb the dispatch will run,
+  # shown on the button so the operator knows exactly what they trigger.
+  def stage_run_verb(stage_dir)
+    stage_dispatch_action(stage_dir)&.sub(/\Aready_(?:to|for)_/, "")&.tr("_", "-")
+  end
+
   # Color the JSONL log tail by event class so errors jump out of the noise.
   def log_line_class(line)
     if /"type"\s*:\s*"(error|turn\.failed)"|"error"\s*:/.match?(line)

@@ -366,6 +366,26 @@ pre {
 
 .intervene { margin: 26px 0; }
 .intervene textarea { width: 100%; min-height: 70px; }
+.intervene summary { cursor: pointer; font-size: 0.9rem; }
+
+/* ---- Brainstorm Q&A ---- */
+
+.qa { margin: 26px 0; }
+.qa-item {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+.qa-question { margin: 0 0 10px; white-space: pre-wrap; }
+.qa-number {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  margin-right: 8px;
+}
+.qa-item textarea { width: 100%; min-height: 64px; }
 
 /* ---- Repos ---- */
 

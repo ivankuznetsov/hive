@@ -28,6 +28,7 @@ Rails.application.routes.draw do
     post "reject" => "tasks#reject", as: :task_reject
     post "run" => "tasks#run_stage", as: :task_run
     post "intervene" => "tasks#intervene", as: :task_intervene
+    post "answers" => "tasks#answer", as: :task_answers
   end
 
   get  "repos" => "repos#index", as: :repos

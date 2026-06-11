@@ -45,6 +45,7 @@ module Hive
         merge_watcher_dropped
         gh_error
         marker_healed
+        heal_requeued
         marker_heal_failed
         marker_heal_exhausted
         marker_heal_observer_missing

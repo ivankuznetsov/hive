@@ -249,10 +249,11 @@ malformed config, and SIGHUP-reloads the bot set. Details: [[commands/web]].
 
 For state-mutating workflow verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`,
-`markers clear`) there is exactly ONE writer: the daemon. The bot
-and any future external caller (TUI, web UI) are producers that
-write file-backed JSON requests; the daemon's tick loop is the
-only thing that calls `Process.spawn` on those verbs.
+`markers clear`) there is exactly ONE subprocess dispatcher: the daemon.
+The Telegram bot and hivebox web write file-backed JSON requests; the daemon's
+own healer also uses the same queue for the `3-plan` terminal-agent-loss rerun.
+The daemon's tick loop is the only thing that calls `Process.spawn` on those
+verbs.
 
 ```
 operator → /done in Telegram

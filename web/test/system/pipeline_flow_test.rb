@@ -102,6 +102,62 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_button "Continue with GitHub", wait: 0
   end
 
+  test "log pane follows the tail, pauses for reading, resumes at the bottom" do
+    slug = create_task!(@project, "Tail probe")
+    log_dir = Pathname(ENV["HIVE_TEST_HOME_ROOT"]).join("repos", @project, ".hive-state", "logs", slug)
+    log_dir.mkpath
+    log_file = log_dir.join("stage-20260611T000000Z.log")
+    log_file.write((1..120).map { |n| "line #{n}" }.join("\n") + "\n")
+
+    sign_in!
+    visit "/tasks/#{@project}/#{slug}"
+    pane = find("pre[data-tail-follow]", wait: 5)
+    assert pane.text.include?("line 120"), "the tail must show the newest lines"
+    # The controller stamps data-following once it pins — the explicit wait
+    # for "Stimulus has booted and taken over", instead of racing it.
+    assert_selector "pre[data-tail-follow][data-following]", wait: 5
+
+    # Scroll geometry is unobservable through user-facing APIs, and
+    # capybara-playwright cannot wheel-scroll an inner pane — the sanctioned
+    # JS exception, used only to position and read scrollTop.
+    distance_from_bottom = page.evaluate_script(
+      "(() => { const p = document.querySelector('pre[data-tail-follow]'); return p.scrollHeight - p.scrollTop - p.clientHeight; })()"
+    )
+    assert_operator distance_from_bottom, :<=, 8, "the pane must start pinned to the live end (tail -f)"
+
+    page.execute_script("document.querySelector('pre[data-tail-follow]').scrollTop = 0")
+    log_file.write("line 121 marker-while-reading\n", mode: "a")
+    # Outlast a 3s poll tick: a paused pane must neither move nor refresh.
+    assert_no_text "marker-while-reading", wait: 5
+    assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),
+                 "reading position must survive poll ticks"
+
+    page.execute_script("const p = document.querySelector('pre[data-tail-follow]'); p.scrollTop = p.scrollHeight")
+    assert_text "marker-while-reading", wait: 10
+  end
+
+  test "artifact open state survives a pushed morph while content stays live" do
+    slug = create_task!(@project, "Artifact probe")
+    folder = stage_dir(@project, "1-inbox").join(slug)
+    folder.join("brainstorm.md").write("first draft\n")
+
+    sign_in!
+    visit "/tasks/#{@project}/#{slug}"
+    second = find("details[data-artifact-name='brainstorm.md']", wait: 5)
+    refute second[:open], "only the first artifact starts open"
+    second.find("summary").click
+    assert second[:open], "clicking the summary must expand the artifact"
+
+    # Change the artifact on disk and force a status change → broadcast →
+    # morph. The open choice must survive AND the content must update —
+    # preservation may not come at the price of staleness.
+    folder.join("brainstorm.md").write("first draft\nsecond draft line\n")
+    create_task!(@project, "Refresh trigger")
+    assert_text "second draft line", wait: 10
+    assert find("details[data-artifact-name='brainstorm.md']")[:open],
+           "the operator's open choice must survive the morph"
+  end
+
   test "typing in the Q&A survives a pushed morph refresh" do
     folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Focus probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")

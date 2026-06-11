@@ -1,7 +1,9 @@
 <%= turbo_frame_tag "task-log" do %>
   <div class="log-pane">
     <% if log %>
-      <pre data-log-tail><% log["tail"].each_line do |line| %><span class="<%= log_line_class(line) %>"><%= line %></span><% end %></pre>
+      <%# data-tail-follow: the poll controller pins this pane to its bottom
+          (tail -f) and pauses reloads while it is scrolled up for reading. %>
+      <pre data-tail-follow><% log["tail"].each_line do |line| %><span class="<%= log_line_class(line) %>"><%= line %></span><% end %></pre>
       <p class="faint"><%= File.basename(log["path"]) %></p>
     <% else %>
       <p class="muted">No log yet for this task.</p>

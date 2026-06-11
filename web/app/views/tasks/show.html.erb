@@ -19,20 +19,29 @@
 
 <% if @log %>
   <h2>Log</h2>
+  <%# data-turbo-permanent: page morphs must never touch the frame — its own
+      poll keeps it fresh, and a morph would clobber the loaded tail with the
+      placeholder. The poll itself follows tail -f semantics (see the poll
+      controller): pinned to the bottom while following, paused while the
+      operator scrolls up to read. %>
   <%= turbo_frame_tag "task-log", src: task_log_path(@project["name"], @row["slug"]),
-        data: { controller: "poll", poll_interval_value: 3000 } do %>
+        data: { controller: "poll", poll_interval_value: 3000, turbo_permanent: true } do %>
     <div class="log-pane"><pre>Loading log…</pre></div>
   <% end %>
 <% end %>
 
 <% if @files.any? %>
   <h2>Artifacts</h2>
-  <% @files.each_with_index do |(name, content), i| %>
-    <details class="artifact" <%= "open" if i.zero? %>>
-      <summary><%= name %></summary>
-      <div class="artifact-body"><pre><%= content %></pre></div>
-    </details>
-  <% end %>
+  <%# The controller re-applies the operator's open/closed choices after each
+      pushed morph; content stays live (agents keep writing these files). %>
+  <div data-controller="artifacts">
+    <% @files.each_with_index do |(name, content), i| %>
+      <details class="artifact" data-artifact-name="<%= name %>" <%= "open" if i.zero? %>>
+        <summary><%= name %></summary>
+        <div class="artifact-body"><pre><%= content %></pre></div>
+      </details>
+    <% end %>
+  </div>
 <% end %>
 
 <details class="advanced">

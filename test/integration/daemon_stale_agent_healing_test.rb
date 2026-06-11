@@ -163,6 +163,7 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     # without registering it, this test catches it instead of the
     # daemon crashing on first stale row in production.
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_healed
+    assert_includes Hive::Daemon::Logger::EVENTS, :heal_requeued
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_heal_failed
   end
 

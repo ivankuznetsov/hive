@@ -58,8 +58,12 @@ GitHub.
   Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
   described cards in a bottom Advanced section, confirm-gated), per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
-  BrainstormAnswerWriter), artifacts, and a log tail in a turbo-frame
-  refreshed by a small Stimulus poll controller.
+  BrainstormAnswerWriter), artifacts whose open/closed choices survive pushed
+  morphs (a Stimulus controller snapshots/restores them around the morph
+  while content stays live), and a log tail in a turbo-permanent turbo-frame
+  with `tail -f` semantics: the poll controller pins the pane to its bottom
+  while following, pauses reloads while the operator scrolls up to read, and
+  resumes when scrolled back down.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline

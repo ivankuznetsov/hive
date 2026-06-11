@@ -26,6 +26,7 @@ Rails.application.routes.draw do
     get  "log" => "tasks#log", as: :task_log
     post "approve" => "tasks#approve", as: :task_approve
     post "reject" => "tasks#reject", as: :task_reject
+    post "drop" => "tasks#drop", as: :task_drop
     post "run" => "tasks#run_stage", as: :task_run
     post "intervene" => "tasks#intervene", as: :task_intervene
     post "answers" => "tasks#answer", as: :task_answers

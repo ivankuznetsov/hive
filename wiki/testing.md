@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-10
+updated: 2026-06-11
 tags: [test, minitest, fixtures]
 ---
 
@@ -128,14 +128,13 @@ command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, replay path safety, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ideas with uploads, task Q&A/actions, repos questionnaire) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, both approve outcomes). CI runs them in the `web` job.
-the Dockerized hivebox web surface. It skips unless `HIVEBOX_URL` is set, checks
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ideas with uploads, task Q&A/actions, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, both approve outcomes). CI runs them in the `web` job.
+
+The opt-in Dockerized hivebox smoke covers the packaged web surface. It skips unless `HIVEBOX_URL` is set, checks
 that a fresh box redirects to `/login` and shows the GitHub login link, and
 leaves the authenticated setup surface assertions skipped because real GitHub,
 Claude, Codex, and Telegram provider screens/tokens are intentionally not
 stubbed.
-
-The six starter scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 

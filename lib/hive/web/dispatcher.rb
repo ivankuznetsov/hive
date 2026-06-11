@@ -2,6 +2,7 @@ require "hive/bot/dispatch_request_writer"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/commands/approve"
+require "hive/commands/drop"
 require "hive/commands/new"
 require "hive/stages"
 
@@ -41,6 +42,16 @@ module Hive
       def reject(slug:, project:, from: nil, to: nil)
         destination = to || prior_gate(from)
         approve(slug: slug, project: project, from: from, to: destination, force: true)
+      end
+
+      # Drop = hard-delete the task, the parity of the TUI's Shift+X: kills
+      # any running agent, removes the stage folder(s), worktree, and branch,
+      # and closes a draft PR. Intentionally not an archive — no undo. `from`
+      # scopes the resolve to the stage the operator was looking at, so a
+      # stale page fails with a readable error instead of deleting a task
+      # whose state has moved on.
+      def drop(slug:, project:, from: nil)
+        Hive::Commands::Drop.new(slug, project: project, from: from, json: false).call
       end
 
       # Raise unless `action` maps to a known stage verb. Reused by the

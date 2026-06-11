@@ -57,4 +57,13 @@
             data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
     </div>
   <% end %>
+  <div class="advanced-item">
+    <div>
+      <p class="advanced-title">Drop task</p>
+      <p class="muted">Permanently delete this idea — kills any running agent, removes the task folder, worktree, and branch, and closes a draft PR. The TUI's Shift+X. There is no undo.</p>
+    </div>
+    <%= button_to "Drop", task_drop_path(@project["name"], @row["slug"]),
+          params: { from: @row["stage"] }, class: "btn-danger",
+          data: { turbo_confirm: "Permanently delete #{@row["slug"]}? This cannot be undone." } %>
+  </div>
 </details>

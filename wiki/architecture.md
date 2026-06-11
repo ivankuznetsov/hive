@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-10
+updated: 2026-06-11
 tags: [architecture, overview]
 ---
 
@@ -237,10 +237,13 @@ Streams: `StatusBroadcaster` (self-healing subscriber loop) bridges
 broadcast of the projects frame over solid_cable. Mutations reuse gem
 primitives: `Commands::Approve` in-process, daemon dispatch queue for stage
 runs, `BrainstormAnswerWriter` for Q&A answers, `Commands::New` (with the
-TUI's `attachments:` contract) for the idea composer. The container
-supervisor (tini → `Hive::Web::Supervisor`) runs daemon + web + optional
-bot, restarts crashed or signal-killed children with backoff, survives
-malformed config, and SIGHUP-reloads the bot set. Details: [[commands/web]].
+TUI's `attachments:` contract) for the idea composer. Repo setup clones via
+`gh`, reuses the `hive init` prompt seam, and normalizes GitHub SSH origins to
+https so later daemon-owned `5-open-pr` pushes use token-backed credentials.
+The container supervisor (tini → `Hive::Web::Supervisor`) runs daemon + web +
+optional bot, restarts crashed or signal-killed children with backoff,
+survives malformed config, and SIGHUP-reloads the bot set. Details:
+[[commands/web]].
 
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 

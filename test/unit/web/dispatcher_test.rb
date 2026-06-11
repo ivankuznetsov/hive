@@ -24,6 +24,35 @@ class WebDispatcherTest < Minitest::Test
     [ project, slug, dest ]
   end
 
+  def test_drop_hard_deletes_the_task_folder
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug, dest = seed_task_at(dir, "2-brainstorm")
+
+        capture_io do
+          Hive::Web::Dispatcher.new.drop(slug: slug, project: project, from: "2-brainstorm")
+        end
+
+        refute File.directory?(dest), "drop must remove the stage folder outright (Shift+X parity)"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", slug)],
+                     "the slug must not survive in any stage - drop is a delete, not a move"
+      end
+    end
+  end
+
+  def test_drop_scoped_to_a_stale_stage_refuses_instead_of_deleting
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug, dest = seed_task_at(dir, "3-plan")
+
+        assert_raises(Hive::WrongStage) do
+          capture_io { Hive::Web::Dispatcher.new.drop(slug: slug, project: project, from: "1-inbox") }
+        end
+        assert File.directory?(dest), "a stage-mismatched drop must not delete the task"
+      end
+    end
+  end
+
   def test_reject_sends_task_back_to_immediately_prior_gate
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

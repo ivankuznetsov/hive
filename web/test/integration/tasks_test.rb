@@ -24,6 +24,31 @@ class TasksTest < ActionDispatch::IntegrationTest
                   count: 0
   end
 
+  test "Advanced offers Drop, and dropping deletes the task for good" do
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select ".advanced form[action=?] button", "/tasks/#{@project}/#{@slug}/drop",
+                  text: "Drop", count: 1, message: "Drop must live in Advanced, not among primary actions"
+    assert_select ".task-actions > form[action=?]", "/tasks/#{@project}/#{@slug}/drop", count: 0
+
+    post "/tasks/#{@project}/#{@slug}/drop", params: { from: "1-inbox" }
+    assert_redirected_to "/"
+    refute stage_dir(@project, "1-inbox").join(@slug).directory?,
+           "drop must hard-delete the task folder — Shift+X parity, no archive"
+  end
+
+  test "drop from a stale page is a readable error, not a deletion" do
+    # The page rendered while the task sat in 1-inbox; by submit time it
+    # moved on. The stage-scoped resolve must refuse rather than delete a
+    # task whose state the operator never saw.
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "2-brainstorm").join(@slug))
+
+    post "/tasks/#{@project}/#{@slug}/drop", params: { from: "1-inbox" }
+    assert_response :unprocessable_entity
+    assert stage_dir(@project, "2-brainstorm").join(@slug).directory?,
+           "a stale drop must leave the moved task untouched"
+  end
+
   test "a complete stage offers Approve and hides the force override" do
     # Stamp the marker Commands::Approve actually requires for a forward move.
     Hive::Markers.set(stage_dir(@project, "1-inbox").join(@slug, "idea.md").to_s, :complete)

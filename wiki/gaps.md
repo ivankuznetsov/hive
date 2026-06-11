@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-06-10
+updated: 2026-06-11
 tags: [gap, todo]
 ---
 
@@ -30,7 +30,7 @@ tags: [gap, todo]
 | `openclaw/skills/hive/SKILL.md`, `openclaw/README.md` | ✓ [[commands]], [[operating]], and [[commands/wiki]] cover the single ClawHub `hive-cli` skill, `/hive` slash-command dispatch, guided setup, wiki changelog verification, and publish-shape constraints. |
 | `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage. |
 
-Uncertainty: this table was refreshed manually from targeted source and wiki reads on 2026-06-10. It verifies domain coverage, not exact one-to-one file coverage. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
+Uncertainty: this table was refreshed manually from targeted source and wiki reads on 2026-06-11. It verifies domain coverage, not exact one-to-one file coverage. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 
 ## Open questions about the codebase
 
@@ -69,6 +69,7 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 33. **Finalize merged-error archive recovery is unit/integration-pinned but not live-smoked.** The merged-error archive recovery change routes whitelisted `8-finalize` `ERROR reason=git_status_failed` / `reason=claude_launch_failed` rows to `Hive::Daemon::PrMergeWatcher`; when GitHub reports the PR as `MERGED`, the watcher dispatches `hive archive --recover-merged-error-reason <reason>`, and `Hive::Commands::StageAction` re-confirms the current marker reason plus `Hive::Gh.pr_state(pr_url) == "MERGED"` before moving the task to `9-done`. `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, `test/unit/gh_test.rb`, and `test/integration/run_stage_action_test.rb` cover the command generation, routing, `pr_state` success/error parsing, and accept/reject boundaries. The 2026-06-10 post-commit audit found no in-tree artifact showing a live daemon observing a red finalized row after a real GitHub merge, dispatching the internal archive command, and surfacing the archived task through `hive status`/TUI/bot.
 34. Hivebox web-tier residuals after the Rails rewrite (ADR-037): browser-level coverage of agents/telegram/repos pages beyond the pipeline system test; Action Cable behavior under many tabs; `tasks#log` / diff happy-path tests; cross-round brainstorm answer-numbering semantics (see dispatcher answer_questions); hoisting the action→verb map into the gem (duplicated in Dispatcher and bot NotificationBuilders).
 35. **Root README/FAQ still mentions "why no built-in web UI".** The committed hivebox work touched packaging and OpenClaw/wiki docs, but the root README still points readers to a FAQ entry framed as "why no built-in web UI" and `docs/faq.md` still says a web UI would add another state surface before the file protocol is finished. This refresh did not edit user-facing README/FAQ content because the request was scoped to the LLM wiki.
+36. **Hivebox HTTPS-origin push path is source/integration-pinned but not live-Docker-smoked.** Commit `8be458bd` added `ReposController#normalize_origin!`, a Rails integration regression proving an existing `git@github.com:` origin is rewritten to `https://github.com/...`, and a Dockerfile system credential helper for `https://github.com` via `gh auth git-credential`. This refresh did not find an in-tree artifact showing the full Dockerized path after a real Agents-page `gh` login: register/clone a repo whose `gh` config prefers SSH, open a Hive PR, and observe `5-open-pr` push succeeding over the rewritten https origin.
 
 ## Release install follow-ups
 

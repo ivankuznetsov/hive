@@ -53,7 +53,8 @@ GitHub.
   `projects` frame over solid_cable. No polling JS, no SSE.
 - **Task page** — state-driven actions (Approve only when the marker makes
   a forward move possible; Run <verb> only when the project daemon is
-  disabled; Diff only when the worktree exists; Reject and Force approve as
+  disabled; Diff only when the worktree exists; Reject, Force approve, and
+  Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
   described cards in a bottom Advanced section, confirm-gated), per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
   BrainstormAnswerWriter), artifacts, and a log tail in a turbo-frame
@@ -62,11 +63,14 @@ GitHub.
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
   notice when GitHub is unreachable or the grant was revoked). Every
-  registration rewrites a `git@github.com:` origin to https: the box can only
-  push with token-fed https credentials (`gh` clones over ssh when the
-  operator's `git_protocol` prefers it, and ssh pushes dead-end — no keys in
-  the container, no agent for a headless daemon). The Docker image wires
-  git's github.com https credential helper to `gh auth git-credential`.
+  registration runs a post-clone/post-existing-dir origin normalization pass:
+  absent or non-GitHub remotes are left alone, while GitHub SSH remotes
+  (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
+  become `https://github.com/owner/repo.git`. The box can only push with
+  token-fed https credentials (`gh` clones over ssh when the operator's
+  `git_protocol` prefers it, and ssh pushes dead-end because the container has
+  no keys and no agent for a headless daemon). The Docker image wires git's
+  github.com https credential helper to `gh auth git-credential`.
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
   meta-refresh; pi token form.
 - **Telegram** — getMe-validated token save, allowlist, supervisor SIGHUP,
@@ -95,7 +99,10 @@ the `web` job (`.github/workflows/ci.yml`) plus the web app's own rubocop.
 `packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
 the gem builds/installs from `/app`; the Rails app bundles and precompiles
 assets (propshaft — no node build) at `/app/web` with a dummy build-time
-secret. The supervisor still spawns `hive web --bind 0.0.0.0` — unchanged
+secret. The image sets git's system credential helper for `https://github.com`
+to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
+credentials for repos under `/data/repos`. The supervisor still spawns
+`hive web --bind 0.0.0.0` — unchanged
 interface, now exec-ing Rails. The healthcheck hits the Rails `/health`.
 `/data` remains the persistence boundary; the sqlite files for
 cable/cache/queue live under `/data/state/hive/web-storage`.

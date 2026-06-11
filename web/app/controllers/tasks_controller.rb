@@ -62,6 +62,12 @@ class TasksController < ApplicationController
     redirect_to root_path, notice: "Sent #{params[:slug]} back a stage"
   end
 
+  def drop
+    dispatcher.drop(slug: params[:slug], project: @project["name"], from: params[:from])
+    # The task no longer exists at any stage — its page is gone too.
+    redirect_to root_path, notice: "Dropped #{params[:slug]}"
+  end
+
   def run_stage
     dispatcher.assert_dispatchable!(params[:action_name])
     dispatcher.dispatch(slug: params[:slug], project: @project["name"],

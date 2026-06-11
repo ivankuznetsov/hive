@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, public/, hive.gemspec, packaging/docker/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-10
+updated: 2026-06-11
 tags: [commands, api]
 ---
 
@@ -86,8 +86,10 @@ CLI.
 `hive web` boots the hivebox Rails 8 + Turbo app from `web/` (see [[commands/web]]): it derives SECRET_KEY_BASE from the persisted session secret, keeps the solid-stack sqlite under state_home, runs db:prepare, and execs `bin/rails server`.
 [[commands/web]]. The web app reuses the same status, approval, daemon-queue,
 agent-auth, repo, and Telegram setup contracts as the CLI/bot/daemon stack; it
-does not introduce a separate workflow engine. Docker packaging adds the
-`hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
+does not introduce a separate workflow engine. Repo setup clones through `gh`,
+normalizes GitHub SSH origins to https, and relies on the Docker image's
+`gh auth git-credential` helper for GitHub push auth. Docker packaging adds
+the `hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
 directories and then runs `Hive::Web::Supervisor` unless custom argv is passed.
 The gem deliberately does NOT package the web app (gemspec_test pins this); the Rails app ships in the Docker image at /app/web or runs from a source checkout.
 `hive web` command has the same renderable UI assets as a source checkout.

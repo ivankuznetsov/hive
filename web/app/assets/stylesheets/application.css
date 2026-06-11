@@ -424,6 +424,13 @@ pre {
 .log-meta { color: var(--ink-faint); }
 .composer-attach { display: inline-flex; align-items: center; gap: 6px; }
 
+/* Step-by-step setup guides (Telegram, agents). */
+.setup-guide { margin: 18px 0 26px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 18px; }
+.setup-guide summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; }
+.setup-steps { margin: 12px 0 4px; padding-left: 22px; }
+.setup-steps li { margin: 10px 0; line-height: 1.55; }
+.setup-steps code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+
 .intervene { margin: 26px 0; }
 .intervene textarea { width: 100%; min-height: 70px; }
 .intervene summary { cursor: pointer; font-size: 0.9rem; }

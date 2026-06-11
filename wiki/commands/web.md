@@ -47,10 +47,13 @@ GitHub.
 
 - **Status grid (`/`)** — a TUI-left-pane-parity project rail filters the
   grid client-side ("All projects" + one button per registered project;
-  buttons not links so the permanent composer's typed text survives; choice
-  mirrored to `?project=` via replaceState; a MutationObserver re-applies
-  the filter after every broadcast replace/morph), composer (new idea with
-  image attach: clipboard
+  buttons not links so the permanent composer's typed text survives; a
+  `+ Add project` link navigates to Repos because adding a project is a real
+  page change; choice mirrored to `?project=` via replaceState; explicit
+  project clicks sync the composer project select so new ideas land in that
+  context, while filtered deep-links preselect the composer only when it is
+  unset; a MutationObserver re-applies the filter after every broadcast
+  replace/morph), composer (new idea with image attach: clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
@@ -124,9 +127,10 @@ before the app loads). `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Turbo Stream live row arrival without reload, grid
-project-rail filtering with URL sync and re-application after a live broadcast,
-grid scroll plus composer draft preservation across a live broadcast, both
-approve paths (typed refusal page + confirmed force), log-tail
+project-rail filtering with URL sync, composer project sync, and
+`+ Add project` routing, plus re-application after a live broadcast, grid
+scroll plus composer draft preservation across a live broadcast, both approve
+paths (typed refusal page + confirmed force), log-tail
 follow/pause/resume with node-preserving frame morph reloads, and artifact
 open-state preservation across pushed morphs with live content refresh. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own

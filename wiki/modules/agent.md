@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-11
 tags: [agent, claude, subprocess]
 ---
 
@@ -108,6 +108,8 @@ validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
 Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
+
+Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_shared_session` first asks Claude to `/quit`, then kills the managed tmux session, then runs `sweep_orphan_processes(task)`. The sweep searches with `pgrep -fa -- "--add-dir[[:space:]]+<task.folder>([[:space:]]|$)"`, terminates matched non-tmux PIDs one by one with `TERM`, and skips any matched command whose executable basename is `tmux`. This matters because the tmux server can retain the first `tmux new-session ... --add-dir <task.folder> ...` argv; a blanket `pkill -f` would kill the tmux server and terminate unrelated live Hive sessions. The sweep appends the raw matches plus killed/skipped counts to `<task>/claude-tmux-orphan-sweep.log` (rotated at 64 KiB) and writes warning rows there when `pgrep` is missing or fails.
 
 ## `handle_exit`
 

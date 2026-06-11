@@ -3,7 +3,7 @@ title: 2-brainstorm stage
 type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-11
 tags: [stage, brainstorm, qa, tmux]
 ---
 
@@ -17,6 +17,7 @@ tags: [stage, brainstorm, qa, tmux]
 - **Tmux readiness env vars**: `Hive::ClaudeLauncher` owns `HIVE_CLAUDE_TMUX_*` readiness settings. `SESSION_READY`, `PID_READY`, and `CLAUDE_READY` inherit `HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC` when their specific env var is unset; `CLAUDE_READY` otherwise keeps a 120s bare default for slow Claude TUI startup. Legacy `HIVE_BRAINSTORM_TMUX_*` names remain fallback inputs during the migration window.
 - **Claude TUI readiness predicates**: Trust and ready strings are named constants in `Hive::ClaudeLauncher`, pinned to the Claude Code 2.1.133 TUI observed during the 2026-05-25 tmux dogfood. `claude_ready_prompt?` accepts the idle caret at the bottom of the input box with the current Claude footer, including the patrol-observed case where the captured pane tail has scrolled the `Claude Code` banner out but still shows `... PR #N ... for agents`; it classifies trust and permission prompts from the current prompt block instead of stale scrollback, and rejects numbered menu options as non-ready.
 - **Tmux submit/session failures**: `Hive::TmuxRunner#send_prompt` loads and pastes the prompt through a tmux buffer, then sends one explicit Enter. If tmux disappears before that Enter submit or a tmux command exceeds `HIVE_TMUX_COMMAND_TIMEOUT_SEC`, the typed tmux error propagates immediately. During marker polling, `Hive::ClaudeLauncher.wait_for_terminal_marker` also checks that the tmux session still exists while `brainstorm.md` is stuck on `AGENT_WORKING`; a disappeared session stamps `ERROR reason=tmux_session_terminated` instead of waiting for the full brainstorm timeout.
+- **Tmux cleanup/orphan sweep**: cleanup is shared in `Hive::ClaudeLauncher`. After `/quit` and `kill_session`, the launcher sweeps leftover Claude processes by this task's `--add-dir <task.folder>` while skipping matched `tmux` commands and logging killed/skipped entries to `claude-tmux-orphan-sweep.log`. The skip is load-bearing because the tmux server can keep the first session's full argv and would otherwise match the task-specific sweep pattern.
 - **Profile**: `Hive::Stages::Base.stage_profile(cfg, "brainstorm")` — reads `cfg.dig("brainstorm", "agent")` with `|| "claude"` fallback so legacy configs keep working. Spawn pins `status_mode: :state_file_marker` regardless of profile, because brainstorm's lifecycle contract is the WAITING/COMPLETE marker the agent writes to `brainstorm.md` — codex's profile default `:output_file_exists` would never satisfy that.
 - **Budgets**: `cfg["budget_usd"]["brainstorm"]` (default 50), `cfg["timeout_sec"]["brainstorm"]` (default 1800). Bumped ~5× in plan 2026-05-04-001 — generous sanity caps for runaway agents, not cost targets.
 
@@ -51,6 +52,7 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 
 - `test/integration/run_brainstorm_test.rb` exercises the prompt shape and marker transitions using the fake-claude fixture.
 - `test/integration/run_brainstorm_tmux_test.rb` exercises the tmux launcher path.
+- `test/unit/stages/brainstorm_tmux_sentinel_test.rb` pins the tmux readiness/sentinel helpers and the orphan-sweep invariant that matched Claude PIDs are terminated individually while the tmux server is skipped and logged.
 
 ## Backlinks
 

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-09
+updated: 2026-06-11
 tags: [test, minitest, fixtures]
 ---
 
@@ -69,6 +69,7 @@ task default: :test
 | `wiki_log_test.rb` | `Hive::WikiLog` — fragment sorting, generated-block idempotency, stale detection for compiled `wiki/log.md`, and dropping template prose that is not a real legacy `##` entry. |
 | `cli_test.rb` | `Hive::CLI` — command delegation and option threading for the Thor surface, including `hive generate-name` lookup scoping and internal archive recovery flags. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers and expected-output waits, provider-limit menu classification, signal cleanup, and wrapper argv policy. |
+| `stages/brainstorm_tmux_sentinel_test.rb` | Claude/tmux sentinel and cleanup behavior — readiness/sentinel delegation, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
 | `tmux_runner_test.rb` | `Hive::TmuxRunner` — detached session startup, environment propagation, prompt injection via tmux buffers, typed tmux failure/timeout classes, bounded pane-tail capture, PID lookup, idempotent teardown, and a lightweight fake-tmux timeout harness so setup commands cannot consume the timeout budget before the intentionally hanging `send-keys` call. |
 | `daemon/pr_merge_watcher_test.rb`, `daemon/dispatcher_test.rb` | Finalize merge watcher routing — `MERGED` PR polling returns archive dispatches, carries the internal `--recover-merged-error-reason` flag for whitelisted finalize errors, ignores unknown error reasons, and the dispatcher hands `8-finalize ERROR reason=git_status_failed` rows to the watcher instead of skipping them as generic errors. |

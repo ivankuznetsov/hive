@@ -228,12 +228,10 @@ class ClaudeLauncherTest < Minitest::Test
     runner.define_singleton_method(:capture_pane_tail) { |bytes:| "Claude Code\nstill starting\n" }
 
     monotonic_now = 1_000.0
-    calls = 0
     with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
-      with_replaced_singleton_method(Hive::AgentLimit, :limit_reached?, lambda { |_text|
-        calls += 1
-        calls >= 2
-      }) do
+      # The post-wait classification is now the ONLY limit check (readiness
+      # wins inside the loop), so the stub answers that single call.
+      with_replaced_singleton_method(Hive::AgentLimit, :limit_reached?, ->(_text) { true }) do
         with_replaced_singleton_method(Hive::AgentLimit, :error_message, ->(_text, agent:) { "limits reached for #{agent}: after wait" }) do
           err = assert_raises(Hive::AgentError) do
             Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
@@ -764,6 +762,10 @@ class ClaudeLauncherTest < Minitest::Test
     assert_match(/terminated before becoming ready/, err.message)
   end
 
+  # Readiness-wins contract: the limit menu is only classified AFTER the
+  # ready wait exhausts (no fail-fast inside the loop — banner/footer copy
+  # in a still-booting pane must never kill a launch). The clock is stubbed
+  # so "after the ready timeout" costs no wall time.
   def test_prepare_claude_session_reports_limits_instead_of_ready_timeout
     limit_menu = <<~TEXT
       Claude Code
@@ -777,12 +779,47 @@ class ClaudeLauncherTest < Minitest::Test
       def capture_pane_tail(bytes:) = tail
     end.new("limited-session", limit_menu)
 
-    err = assert_raises(Hive::AgentError) do
-      Hive::ClaudeLauncher.prepare_claude_session!(runner)
+    monotonic_now = 1_000.0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, lambda { |seconds|
+        monotonic_now += seconds
+      }) do
+        err = assert_raises(Hive::AgentError) do
+          Hive::ClaudeLauncher.prepare_claude_session!(runner)
+        end
+
+        assert_match(/\Alimits reached for claude:/, err.message)
+        refute_match(/interactive prompt did not become ready/, err.message)
+      end
+    end
+  end
+
+  # A pane whose chrome mentions limits (the plan-inclusion promo) while
+  # the prompt comes up must launch cleanly — the exact dogfood failure.
+  def test_prepare_claude_session_ready_wins_over_promo_banner
+    promo = "▎ Included in your plan limits until Jun 22, then switch to usage credits to continue."
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-promo-session" }
+    runner.define_singleton_method(:session_exists?) { true }
+    captures = 0
+    runner.define_singleton_method(:capture_pane_tail) do |bytes:|
+      captures += 1
+      if captures < 3
+        "Claude Code v2.1.170\nstill starting\n#{promo}\n"
+      else
+        "Claude Code v2.1.170\n#{promo}\n❯ \n"
+      end
     end
 
-    assert_match(/\Alimits reached for claude:/, err.message)
-    refute_match(/interactive prompt did not become ready/, err.message)
+    monotonic_now = 1_000.0
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, lambda { |seconds|
+        monotonic_now += seconds
+      }) do
+        assert Hive::ClaudeLauncher.prepare_claude_session!(runner),
+               "a session that becomes ready must launch despite limit-flavored chrome"
+      end
+    end
   end
 
   def test_wait_for_status_dispatches_exit_output_and_unknown_modes

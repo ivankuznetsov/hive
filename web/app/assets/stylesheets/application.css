@@ -510,3 +510,27 @@ pre {
 }
 .idea-context summary { cursor: pointer; font-size: 0.88rem; }
 .idea-text { margin: 10px 0 2px; white-space: pre-wrap; }
+
+/* ---- Advanced section (sharp tools, bottom of the task page) ---- */
+
+.advanced { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 14px; }
+.advanced > summary {
+  cursor: pointer;
+  color: var(--ink-muted);
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+.advanced-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-top: 12px;
+}
+.advanced-title { margin: 0 0 2px; font-weight: 600; }
+.advanced-item .muted { margin: 0; font-size: 0.9rem; }

@@ -18,10 +18,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
     assert_match "idea.md", response.body
-    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
+    assert_select ".advanced form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
                   text: "Force approve", count: 1
-    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
-                  text: "Approve", count: 0
+    assert_select ".task-actions > form[action=?]", "/tasks/#{@project}/#{@slug}/approve",
+                  count: 0
   end
 
   test "a complete stage offers Approve and hides the force override" do
@@ -30,10 +30,10 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
 
-    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
+    assert_select ".task-actions > form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
                   text: "Approve", count: 1
-    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
-                  text: "Force approve", count: 0
+    assert_select ".advanced form[action=?]", "/tasks/#{@project}/#{@slug}/approve",
+                  count: 0, message: "a passable gate needs no force override in Advanced"
   end
 
   test "approve with force moves the task to the next stage" do

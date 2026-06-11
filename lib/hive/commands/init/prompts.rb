@@ -27,6 +27,16 @@ module Hive
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
         DEFAULT_CLAUDE_MODE = "tmux".freeze
         DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions".freeze
+        # "default" is a live Claude Code alias that tracks ITS recommended
+        # model (Opus-class today) — hive follows Claude Code's defaults
+        # without hardcoding a model name, and without inheriting the
+        # operator's (often expensive) interactive selection. "inherit"
+        # passes no --model flag at all.
+        DEFAULT_CLAUDE_MODEL = "default".freeze
+        # "default" omits --effort so the session uses Claude Code's own
+        # default tier (high today).
+        DEFAULT_CLAUDE_EFFORT = "default".freeze
+        CLAUDE_EFFORT_CHOICES = [ "default", "low", "medium", "high" ].freeze
         CLAUDE_MODES = Hive::Config::CLAUDE_MODES
         CLAUDE_PERMISSION_MODES = Hive::Config::CLAUDE_PERMISSION_MODES
         CLAUDE_MODE_CHOICES = [ "tmux", "headless" ].freeze
@@ -133,6 +143,8 @@ module Hive
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
           claude_mode = prompt_claude_mode
           claude_permission_mode = prompt_claude_permission_mode
+          claude_model = prompt_claude_model
+          claude_effort = prompt_claude_effort
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
           patrol_reviewers = prompt_patrol_reviewers
@@ -147,6 +159,8 @@ module Hive
             "planning_agent" => planning,
             "claude_mode" => claude_mode,
             "claude_permission_mode" => claude_permission_mode,
+            "claude_model" => claude_model,
+            "claude_effort" => claude_effort,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
             "patrol_reviewers" => patrol_reviewers,
@@ -179,6 +193,8 @@ module Hive
             "planning_agent" => DEFAULT_PLANNING_AGENT,
             "claude_mode" => DEFAULT_CLAUDE_MODE,
             "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
+            "claude_model" => DEFAULT_CLAUDE_MODEL,
+            "claude_effort" => DEFAULT_CLAUDE_EFFORT,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "patrol_reviewers" => DEFAULT_PATROL_REVIEWER_NAMES.dup,
@@ -196,6 +212,8 @@ module Hive
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
             "claude_mode=#{DEFAULT_CLAUDE_MODE}, " \
             "claude_permission_mode=#{DEFAULT_CLAUDE_PERMISSION_MODE}, " \
+            "claude_model=#{DEFAULT_CLAUDE_MODEL}, " \
+            "claude_effort=#{DEFAULT_CLAUDE_EFFORT}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
             "patrol_reviewers=codex, " \
@@ -303,6 +321,41 @@ module Hive
 
             @output.puts "  unknown Claude permission mode #{answer.inspect}; pick " \
                          "#{CLAUDE_PERMISSION_MODES.join('/')} or 1..#{CLAUDE_PERMISSION_MODE_CHOICES.size}"
+          end
+        end
+
+        def prompt_claude_model
+          @output.puts ""
+          @output.puts "Claude model for hive-launched sessions:"
+          @output.puts "  default - track Claude Code's recommended model (no hardcoding; Opus-class today)"
+          @output.puts "  inherit - use whatever your interactive Claude Code session uses (can be expensive)"
+          @output.puts "  or any Claude Code alias/full name: fable, opus, sonnet (budget pick), haiku, …"
+          @output.print "Claude model [#{DEFAULT_CLAUDE_MODEL}]: "
+          @output.flush
+          answer = read_line
+          answer.empty? ? DEFAULT_CLAUDE_MODEL : answer
+        end
+
+        def prompt_claude_effort
+          @output.puts ""
+          @output.puts "Claude reasoning effort — default keeps Claude Code's own tier (high today):"
+          CLAUDE_EFFORT_CHOICES.each_with_index { |choice, i| @output.puts "  #{i + 1}) #{choice}" }
+          loop do
+            @output.print "Claude effort [#{DEFAULT_CLAUDE_EFFORT}]: "
+            @output.flush
+            answer = read_line
+            return DEFAULT_CLAUDE_EFFORT if answer.empty?
+
+            if answer =~ /\A\d+\z/
+              idx = answer.to_i
+              return CLAUDE_EFFORT_CHOICES[idx - 1] if idx.between?(1, CLAUDE_EFFORT_CHOICES.size)
+            else
+              found = CLAUDE_EFFORT_CHOICES.find { |choice| choice.casecmp(answer).zero? }
+              return found if found
+            end
+
+            @output.puts "  unknown effort #{answer.inspect}; pick " \
+                         "#{CLAUDE_EFFORT_CHOICES.join('/')} or 1..#{CLAUDE_EFFORT_CHOICES.size}"
           end
         end
 
@@ -575,6 +628,8 @@ module Hive
           @output.puts "  planning_agent          = #{answers['planning_agent']}"
           @output.puts "  claude_mode             = #{answers['claude_mode']}"
           @output.puts "  claude_permission_mode  = #{answers['claude_permission_mode']}"
+          @output.puts "  claude_model            = #{answers['claude_model']}"
+          @output.puts "  claude_effort           = #{answers['claude_effort']}"
           @output.puts "  development_agent       = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
           @output.puts "  patrol_reviewers  = [#{answers['patrol_reviewers'].join(', ')}]"

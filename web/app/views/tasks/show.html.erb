@@ -7,19 +7,15 @@
 </div>
 <p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
 
-<%# The action row mirrors the state machine instead of offering every
-    verb always: Approve only when the stage's marker makes a forward move
-    possible (the exact set Commands::Approve accepts); Force approve only
-    when it does NOT (it exists to override an incomplete gate); Reject and
-    Diff only where they mean something. %>
+<%# The action row stays simple-user friendly: only the state-driven
+    primary actions appear (Approve when the gate is passable, Run when the
+    operator drives stages manually, Diff when a worktree exists). The
+    sharp tools live in the Advanced section at the bottom of the page. %>
 <div class="task-actions">
   <% if stage_passable?(@row) %>
     <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
           params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
   <% end %>
-  <%# Manual runs only when the project's daemon is NOT auto-advancing —
-      otherwise the daemon races the operator. The label names the exact
-      hive verb the dispatch will run. %>
   <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row["stage"])) %>
     <%= button_to "Run #{stage_run_verb(@row["stage"])}", task_run_path(@project["name"], @row["slug"]),
           params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
@@ -28,17 +24,8 @@
   <% if @worktree_exists %>
     <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary" %>
   <% end %>
-  <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
-        params: { from: @row["stage"] }, class: "btn-danger",
-        data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
-  <% unless stage_passable?(@row) %>
-    <%# The override for an incomplete gate — ghost-styled and confirm-gated
-        so it never reads as the default next action. %>
-    <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
-          params: { from: @row["stage"], force: "1" }, class: "btn-ghost",
-          data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
-  <% end %>
 </div>
+
 
 <% if @questions.any? %>
   <section class="qa">
@@ -96,3 +83,27 @@
     </details>
   <% end %>
 <% end %>
+
+<details class="advanced">
+  <summary>Advanced</summary>
+  <div class="advanced-item">
+    <div>
+      <p class="advanced-title">Send back a stage</p>
+      <p class="muted">Move this task to the previous gate. Artifacts are kept — the prior stage resumes where it left off.</p>
+    </div>
+    <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
+          params: { from: @row["stage"] }, class: "btn-danger",
+          data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
+  </div>
+  <% unless stage_passable?(@row) %>
+    <div class="advanced-item">
+      <div>
+        <p class="advanced-title">Force approve</p>
+        <p class="muted">Advance to the next stage even though this one isn't marked complete — the next agent runs with whatever exists now (e.g. unanswered questions stay unanswered).</p>
+      </div>
+      <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
+            params: { from: @row["stage"], force: "1" }, class: "btn-secondary",
+            data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+    </div>
+  <% end %>
+</details>

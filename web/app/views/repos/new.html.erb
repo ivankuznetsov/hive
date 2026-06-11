@@ -42,6 +42,27 @@
         <%= label_tag "settings_claude_permission_mode", "Claude permission mode" %>
         <%= select_tag "settings[claude_permission_mode]", options_for_select(InitSetup.claude_permission_modes, @defaults["claude_permission_mode"]) %>
       </div>
+      <div class="form-row">
+        <%= label_tag "settings_claude_model", "Claude model for pipeline runs" %>
+        <%= text_field_tag "settings[claude_model]", @defaults["claude_model"],
+              list: "claude-model-suggestions",
+              placeholder: "default" %>
+        <datalist id="claude-model-suggestions">
+          <option value="default">Claude Code's recommended model (no hardcoding)</option>
+          <option value="inherit">whatever your interactive session uses</option>
+          <option value="sonnet">budget pick</option>
+          <option value="opus">opus</option>
+          <option value="fable">fable</option>
+          <option value="haiku">haiku</option>
+        </datalist>
+      </div>
+      <div class="form-row">
+        <%= label_tag "settings_claude_effort", "Claude reasoning effort" %>
+        <%= select_tag "settings[claude_effort]",
+              options_for_select(InitSetup::EFFORT_CHOICES.map { |e|
+                [ e == "default" ? "default (Claude Code's own — high today)" : e, e ]
+              }, @defaults["claude_effort"]) %>
+      </div>
     </div>
   </div>
 

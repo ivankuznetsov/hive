@@ -80,9 +80,11 @@ class PipelineFlowTest < ApplicationSystemTestCase
     task_row("Browser test idea").find("a", match: :first).click
     assert_selector "h1", text: "Browser test idea", wait: 5
     # The state machine drives the buttons: an unmarked stage offers no
-    # doomed Approve — only the confirm-gated Force override.
+    # doomed Approve as a headline action — the Force override lives in the
+    # Advanced section at the bottom, confirm-gated.
     assert_no_button "Approve", exact: true, wait: 0
-    accept_confirm { click_button "Force approve" }
+    find(".advanced summary").click
+    accept_confirm { within(".advanced") { click_button "Force approve" } }
     assert_selector ".flash-notice", text: "Approved", wait: 5
     assert stage_dir(@project, "2-brainstorm").children.any? { |c| c.basename.to_s.start_with?("browser-test-idea") },
            "approve must move the task into 2-brainstorm"

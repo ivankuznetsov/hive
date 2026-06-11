@@ -12,7 +12,16 @@ claude:
   # bypassPermissions skips permission prompts (maps to
   # --dangerously-skip-permissions); auto uses Claude Code's auto-mode rules.
   permission_mode: <%= claude_permission_mode %>
-
+  # Model for hive-launched claude sessions. "default" tracks Claude Code's
+  # recommended model (Opus-class today) without hardcoding; "inherit" uses
+  # your interactive Claude Code selection (can be expensive); any alias or
+  # full model name passes through (sonnet is the budget pick).
+  model: <%= claude_model %>
+  # Reasoning effort: low / medium / high. Unset keeps Claude Code's own
+  # default tier (high today).
+<% if claude_effort %>  effort: <%= claude_effort %>
+<% else %>  # effort: medium
+<% end %>
 # Stage-level agent for single-agent stages. (6-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
 # below.) Defaults are claude for planning (deeper reasoning) and codex

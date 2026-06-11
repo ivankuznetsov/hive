@@ -99,7 +99,7 @@ class InitTest < Minitest::Test
     # Order: planning, claude_mode, claude_permission_mode, development,
     # reviewers, patrol_reviewers, patrol_mode, triage, then limits, daemon-enable, babysitter-enable,
     # daemon-autostart, confirm.
-    inputs = ([ "codex", "2", "", "pi", "2", "2", "high", "safetyist", "60,120" ] +
+    inputs = ([ "codex", "2", "", "", "", "pi", "2", "2", "high", "safetyist", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
 
@@ -644,7 +644,7 @@ class InitTest < Minitest::Test
     # third normal reviewer, default patrol reviewer, high patrol mode, override `plan`
     # budget/timeout, accept the rest.
     inputs = [
-      "codex", "", "", "2", "1,3", "", "high", "safetyist",
+      "codex", "", "", "", "", "2", "1,3", "", "high", "safetyist",
       "", "30,900", "", "", "", "", "", "", "", "",
       "", "", "", ""
     ].join("\n") + "\n"
@@ -689,7 +689,7 @@ class InitTest < Minitest::Test
     # dev=blank, reviewers=blank, patrol_reviewers=blank, patrol_mode=blank,
     # triage=blank, limit blanks, daemon-enable=blank,
     # babysitter-enable=blank, daemon-autostart=blank, confirm=blank.
-    inputs = ([ "", "2", "", "", "", "", "", "" ] +
+    inputs = ([ "", "2", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -713,7 +713,7 @@ class InitTest < Minitest::Test
     # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
     # dev/reviewers/patrol_reviewers/patrol_mode/triage=blank, limits blank,
     # daemon/babysitter/autostart/confirm blank.
-    inputs = ([ "", "", "2", "", "", "", "", "" ] +
+    inputs = ([ "", "", "2", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -733,7 +733,7 @@ class InitTest < Minitest::Test
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
     # reviewers, patrol reviewers, patrol mode, triage bias, limits. Then "n" for daemon-enable and blanks for
     # babysitter-enable, daemon-autostart, and confirm.
-    inputs = (([ "" ] * (8 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (10 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -752,7 +752,7 @@ class InitTest < Minitest::Test
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
     # reviewers, patrol reviewers, patrol mode, triage bias, limits, daemon-enable, babysitter-enable,
     # daemon-autostart.
-    inputs = (([ "" ] * (11 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (13 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -9,6 +9,7 @@ class InitSetup
   Prompts = Hive::Commands::Init::Prompts
 
   TRIAGE_CHOICES = %w[courageous safetyist].freeze
+  EFFORT_CHOICES = Prompts::CLAUDE_EFFORT_CHOICES
   BOOLEAN_KEYS = %w[daemon_enabled babysitter_enabled daemon_autostart].freeze
 
   class << self
@@ -27,6 +28,8 @@ class InitSetup
         "planning_agent" => Prompts::DEFAULT_PLANNING_AGENT,
         "claude_mode" => Prompts::DEFAULT_CLAUDE_MODE,
         "claude_permission_mode" => Prompts::DEFAULT_CLAUDE_PERMISSION_MODE,
+        "claude_model" => Prompts::DEFAULT_CLAUDE_MODEL,
+        "claude_effort" => Prompts::DEFAULT_CLAUDE_EFFORT,
         "development_agent" => Prompts::DEFAULT_DEVELOPMENT_AGENT,
         "enabled_reviewers" => Prompts::DEFAULT_REVIEWER_NAMES.dup,
         "patrol_reviewers" => Prompts::DEFAULT_PATROL_REVIEWER_NAMES.dup,
@@ -54,6 +57,8 @@ class InitSetup
       "planning_agent" => choose(p, "planning_agent", self.class.agents, d),
       "claude_mode" => choose(p, "claude_mode", self.class.claude_modes, d),
       "claude_permission_mode" => choose(p, "claude_permission_mode", self.class.claude_permission_modes, d),
+      "claude_model" => free_text(p, "claude_model", d),
+      "claude_effort" => choose(p, "claude_effort", EFFORT_CHOICES, d),
       "development_agent" => choose(p, "development_agent", self.class.agents, d),
       "enabled_reviewers" => choose_many(p, "enabled_reviewers", self.class.reviewer_names, d),
       "patrol_reviewers" => choose_many(p, "patrol_reviewers", self.class.patrol_reviewer_names, d),
@@ -71,6 +76,13 @@ class InitSetup
   def [](key) = @answers[key]
 
   private
+
+  # claude.model is free-form (Claude Code's alias vocabulary changes —
+  # "default" tracks its recommended model, "inherit" follows the
+  # operator's interactive pick, aliases pass through).
+  def free_text(params, key, defaults)
+    params[key].to_s.strip.presence || defaults.fetch(key)
+  end
 
   def choose(params, key, allowed, defaults)
     value = params[key].presence || defaults.fetch(key)

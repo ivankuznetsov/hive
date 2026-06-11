@@ -17,7 +17,8 @@ tags: [config, yaml, validation]
   "worktree_root"     => nil,
   "default_branch"    => nil,
   "project_name"      => nil,
-  "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions" },
+  "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions",
+                           "model" => "default", "effort" => "default" },
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
   # caps for runaway agents, not cost targets. The deprecated
   # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
@@ -161,9 +162,25 @@ Rules:
 Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
 
 1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
-2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
+2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `claude.model` / `claude.effort` pin hive-launched claude sessions:
+`model: default` (the default) uses Claude Code's live alias for ITS
+recommended model — no hardcoded name, no inheriting the operator's
+interactive selection; `inherit` omits the flag; aliases/full names pass
+through. `effort: default` omits `--effort` (Claude Code's own tier);
+low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
+the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
+
+`validate_agent_name!`.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
-4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
+4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `claude.model` / `claude.effort` pin hive-launched claude sessions:
+`model: default` (the default) uses Claude Code's live alias for ITS
+recommended model — no hardcoded name, no inheriting the operator's
+interactive selection; `inherit` omits the flag; aliases/full names pass
+through. `effort: default` omits `--effort` (Claude Code's own tier);
+low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
+the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
+
+`validate_agent_name!`.
 5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
 6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 7. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
@@ -194,6 +211,14 @@ exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
 app — public by design, since device flow is a public-client grant.
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
+
+`claude.model` / `claude.effort` pin hive-launched claude sessions:
+`model: default` (the default) uses Claude Code's live alias for ITS
+recommended model — no hardcoded name, no inheriting the operator's
+interactive selection; `inherit` omits the flag; aliases/full names pass
+through. `effort: default` omits `--effort` (Claude Code's own tier);
+low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
+the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

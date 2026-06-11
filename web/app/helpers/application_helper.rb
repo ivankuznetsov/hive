@@ -83,6 +83,14 @@ module ApplicationHelper
     "8" => "ready_to_finalize"
   }.freeze
 
+  # The exact marker set Commands::Approve accepts for a forward move —
+  # the Approve button renders only when it can actually succeed.
+  PASSABLE_MARKERS = %w[complete execute_complete review_complete].freeze
+
+  def stage_passable?(task)
+    PASSABLE_MARKERS.include?(task["marker"].to_s)
+  end
+
   def stage_dispatch_action(stage_dir)
     STAGE_DISPATCH_ACTIONS[stage_dir.to_s.split("-", 2).first]
   end

@@ -7,9 +7,16 @@
 </div>
 <p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
 
+<%# The action row mirrors the state machine instead of offering every
+    verb always: Approve only when the stage's marker makes a forward move
+    possible (the exact set Commands::Approve accepts); Force approve only
+    when it does NOT (it exists to override an incomplete gate); Reject and
+    Diff only where they mean something. %>
 <div class="task-actions">
-  <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
-        params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
+  <% if stage_passable?(@row) %>
+    <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
+          params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
+  <% end %>
   <%# Manual runs only when the project's daemon is NOT auto-advancing —
       otherwise the daemon races the operator. The label names the exact
       hive verb the dispatch will run. %>
@@ -24,11 +31,13 @@
   <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
         params: { from: @row["stage"] }, class: "btn-danger",
         data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
-  <%# Deliberately last and ghost-styled: it bypasses the gate's completion
-      marker, so it must not read as the default next action. %>
-  <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
-        params: { from: @row["stage"], force: "1" }, class: "btn-ghost",
-        data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+  <% unless stage_passable?(@row) %>
+    <%# The override for an incomplete gate — ghost-styled and confirm-gated
+        so it never reads as the default next action. %>
+    <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
+          params: { from: @row["stage"], force: "1" }, class: "btn-ghost",
+          data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+  <% end %>
 </div>
 
 <% if @questions.any? %>

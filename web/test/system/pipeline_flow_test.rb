@@ -79,14 +79,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # the redirect target).
     task_row("Browser test idea").find("a", match: :first).click
     assert_selector "h1", text: "Browser test idea", wait: 5
-    # An unforced approve on an unmarked stage must surface the typed
-    # refusal, not a blank 500 — then the confirmed force path advances.
-    click_button "Approve", match: :first
-    assert_selector "h1", text: "Action failed", wait: 5
-    assert_text "forward approve requires"
-    click_link "Back to status"
-    task_row("Browser test idea").find("a", match: :first).click
-    assert_selector "h1", text: "Browser test idea", wait: 5
+    # The state machine drives the buttons: an unmarked stage offers no
+    # doomed Approve — only the confirm-gated Force override.
+    assert_no_button "Approve", exact: true, wait: 0
     accept_confirm { click_button "Force approve" }
     assert_selector ".flash-notice", text: "Approved", wait: 5
     assert stage_dir(@project, "2-brainstorm").children.any? { |c| c.basename.to_s.start_with?("browser-test-idea") },

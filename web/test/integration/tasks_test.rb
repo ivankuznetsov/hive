@@ -14,11 +14,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "#projects", 1
   end
 
-  test "task page shows artifacts and actions" do
+  test "an unpassable stage offers Force approve, never a doomed Approve" do
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
     assert_match "idea.md", response.body
-    assert_select "form[action=?]", "/tasks/#{@project}/#{@slug}/approve"
+    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
+                  text: "Force approve", count: 1
+    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
+                  text: "Approve", count: 0
+  end
+
+  test "a complete stage offers Approve and hides the force override" do
+    # Stamp the marker Commands::Approve actually requires for a forward move.
+    Hive::Markers.set(stage_dir(@project, "1-inbox").join(@slug, "idea.md").to_s, :complete)
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
+                  text: "Approve", count: 1
+    assert_select "form[action=?] button", "/tasks/#{@project}/#{@slug}/approve",
+                  text: "Force approve", count: 0
   end
 
   test "approve with force moves the task to the next stage" do

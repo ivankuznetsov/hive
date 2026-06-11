@@ -18,7 +18,13 @@ module Hive
       /stop and wait for limit to reset/i,
       /add funds to continue with usage credits/i,
       /switch to team plan/i,
-      /usage credits/i,
+      # Deliberately NOT a bare /usage credits/i: Claude Code's startup
+      # banner shows an informational "Included in your plan limits until
+      # <date>, then switch to usage credits to continue." promo line to
+      # every subscriber — a bare match classified EVERY healthy launch as
+      # limits_reached. Genuine walls phrase an action or exhaustion around
+      # the words, covered by the patterns above and below.
+      /(?:out of|no remaining|purchase(?:\s+more)?) usage credits/i,
       /insufficient[_\s-]*quota/i,
       /quota (?:exhausted|exceeded|reached)/i,
       /rate limit (?:reached|exceeded|reset|hit)/i,

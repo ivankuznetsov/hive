@@ -16,6 +16,29 @@ class AgentLimitTest < Minitest::Test
                  Hive::AgentLimit.error_message(text, agent: "claude"))
   end
 
+  # The Claude Code startup banner advertises "Included in your plan limits
+  # until Jun 22, then switch to usage credits to continue." to every
+  # subscriber — an informational promo, not a wall. Classifying it as
+  # limits_reached made EVERY healthy claude launch fail (found dogfooding
+  # hivebox: all brainstorms died with "limits reached for claude" while
+  # the account had headroom).
+  def test_does_not_classify_the_plan_inclusion_banner_as_a_limit
+    banner = <<~TEXT
+      ▐▛███▜▌   Claude Code v2.1.170
+      Fable 5 with high effort · Claude Max
+      ▎ Included in your plan limits until Jun 22, then switch to usage credits to continue.
+    TEXT
+
+    refute Hive::AgentLimit.limit_reached?(banner),
+           "an informational plan-inclusion notice must not read as a usage wall"
+  end
+
+  def test_detects_genuine_usage_credit_exhaustion
+    assert Hive::AgentLimit.limit_reached?("You are out of usage credits."),
+           "real credit exhaustion must still be detected"
+    assert Hive::AgentLimit.limit_reached?("Purchase more usage credits to continue")
+  end
+
   def test_detects_common_provider_quota_errors
     assert Hive::AgentLimit.limit_reached?("Error: RESOURCE_EXHAUSTED: quota exceeded")
     assert Hive::AgentLimit.limit_reached?("429 Too Many Requests")

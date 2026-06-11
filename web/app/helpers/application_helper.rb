@@ -50,20 +50,27 @@ module ApplicationHelper
   end
 
   def original_idea_line(task)
+    text = original_idea_text(task).to_s.gsub(/\[image\d+\]/, "")
+    line = text.strip.lines.first.to_s.strip
+    line.presence&.truncate(90)
+  end
+
+  # The operator's full original idea from idea.md's front matter — shown
+  # above the brainstorm questionnaire so answers are written with the
+  # source request in view.
+  def original_idea_text(task)
     folder = task["folder"]
     return nil unless folder
 
     path = File.join(folder, "idea.md")
     return nil unless File.file?(path)
 
-    front = File.read(path, 4096).to_s[/\A---\n(.*?)\n---/m, 1]
+    front = File.read(path, 8192).to_s[/\A---\n(.*?)\n---/m, 1]
     return nil unless front
 
     # permitted_classes: the front matter's unquoted created_at parses as a
     # Time, which plain safe_load rejects wholesale.
-    text = YAML.safe_load(front, permitted_classes: [ Time, Date ])&.dig("original_text").to_s
-    line = text.gsub(/\[image\d+\]/, "").strip.lines.first.to_s.strip
-    line.presence&.truncate(90)
+    YAML.safe_load(front, permitted_classes: [ Time, Date ])&.dig("original_text").to_s.strip.presence
   rescue StandardError
     nil
   end

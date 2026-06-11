@@ -500,3 +500,13 @@ pre {
   .task-meta { flex-wrap: wrap; white-space: normal; }
   main { padding: 20px 14px 48px; }
 }
+
+.idea-context {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.idea-context summary { cursor: pointer; font-size: 0.88rem; }
+.idea-text { margin: 10px 0 2px; white-space: pre-wrap; }

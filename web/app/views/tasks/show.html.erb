@@ -43,6 +43,12 @@
 <% if @questions.any? %>
   <section class="qa">
     <h2>Questions from the agent</h2>
+    <% if (idea_text = original_idea_text(@row)) %>
+      <details class="idea-context" open>
+        <summary class="muted">Original idea</summary>
+        <p class="idea-text"><%= idea_text %></p>
+      </details>
+    <% end %>
     <p class="muted">Answer what you can — the daemon resumes the brainstorm once answers land. Unanswered questions stay open.</p>
     <%= form_with url: task_answers_path(@project["name"], @row["slug"]) do |f| %>
       <% @questions.each do |question| %>

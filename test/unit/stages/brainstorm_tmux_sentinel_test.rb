@@ -126,6 +126,41 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
   end
 
+  # The tmux SERVER's argv contains the first session's full command line
+  # (including `--add-dir <folder>`), so it matches the sweep pattern. The
+  # sweep must NEVER kill it — doing so destroys every live hive session on
+  # the box (observed: a finishing brainstorm killing its parallel sibling
+  # with tmux_session_terminated).
+  def test_orphan_sweep_kills_claude_but_never_the_tmux_server
+    with_tmp_task_folder do |task|
+      matches = "1084896 tmux new-session -d -s hive-x --add-dir #{task.folder} --bin claude\n" \
+                "1145777 /opt/claude-code/bin/claude --add-dir #{task.folder} --model default\n"
+      original = Open3.singleton_class.instance_method(:capture3)
+      ok = fake_status(success: true, exitstatus: 0)
+      Open3.define_singleton_method(:capture3) do |*args|
+        raise "unexpected command: #{args.inspect}" unless args.first == "pgrep"
+
+        [ matches, "", ok ]
+      end
+
+      killed_pids = []
+      with_replaced_singleton_method(Process, :kill, lambda { |sig, pid|
+        killed_pids << [ sig, pid ]
+        1
+      }) do
+        Hive::ClaudeLauncher.sweep_orphan_processes(task)
+      end
+
+      assert_equal [ [ "TERM", 1145777 ] ], killed_pids,
+                   "only the claude process may be killed — never the tmux server"
+      log = File.read(Hive::ClaudeLauncher.orphan_sweep_log_path(task))
+      assert_includes log, "killed=1"
+      assert_includes log, "skipped=1", "the tmux server must be logged as skipped"
+    ensure
+      Open3.singleton_class.send(:define_method, :capture3, original) if original
+    end
+  end
+
   def test_orphan_sweep_logs_warning_when_pgrep_fails
     with_tmp_task_folder do |task|
       original = Open3.singleton_class.instance_method(:capture3)
@@ -177,9 +212,8 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   def test_orphan_sweep_logging_ignores_missing_task_folder
     with_tmp_dir do |dir|
       task = Struct.new(:folder).new(File.join(dir, "missing"))
-      status_ok = fake_status(success: true, exitstatus: 0)
 
-      assert_nil Hive::ClaudeLauncher.log_orphan_sweep(task, "123 claude", "", "", status_ok)
+      assert_nil Hive::ClaudeLauncher.log_orphan_sweep(task, "123 claude", [ "123 claude" ], [])
       assert_nil Hive::ClaudeLauncher.log_orphan_sweep_warning(task, "pgrep failed")
     end
   end
@@ -389,15 +423,22 @@ class BrainstormTmuxSentinelTest < Minitest::Test
         end
       end
 
-      Hive::ClaudeLauncher.sweep_orphan_processes(task)
+      killed = []
+      with_replaced_singleton_method(Process, :kill, lambda { |sig, pid|
+        killed << [ sig, pid ]
+        1
+      }) do
+        Hive::ClaudeLauncher.sweep_orphan_processes(task)
+      end
 
       assert_equal "pgrep", calls.fetch(0).fetch(0)
       assert_equal "--", calls.fetch(0).fetch(2)
       assert_match(/\A--add-dir\[.+\]/, calls.fetch(0).fetch(3))
       refute_includes calls.fetch(0).fetch(3), "(?:"
-      assert_equal "pkill", calls.fetch(1).fetch(0)
-      assert_equal "--", calls.fetch(1).fetch(2)
-      assert_equal calls.fetch(0).fetch(3), calls.fetch(1).fetch(3)
+      # pkill is gone (it could match — and kill — the tmux server); matched
+      # pids are killed individually instead.
+      assert_equal 1, calls.size, "only pgrep shells out now"
+      assert_equal [ [ "TERM", 123 ] ], killed
     ensure
       Open3.singleton_class.send(:define_method, :capture3, original) if original
     end

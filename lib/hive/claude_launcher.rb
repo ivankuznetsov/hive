@@ -867,8 +867,35 @@ module Hive
       end
       return if matches.strip.empty?
 
-      out, err, status = Open3.capture3("pkill", "-f", "--", pattern)
-      log_orphan_sweep(task, matches, out, err, status)
+      # NOT pkill -f: the tmux SERVER's argv is the first session's full
+      # command line — including that task's `--add-dir` — so a blanket
+      # pattern kill from the task that happened to start the server took
+      # down the server and EVERY live hive session with it (observed as
+      # parallel brainstorms dying with tmux_session_terminated the moment
+      # a sibling finished). Kill matched pids individually, never tmux.
+      killed = []
+      skipped = []
+      matches.each_line do |line|
+        entry = line.strip
+        next if entry.empty?
+
+        pid_s, cmd = entry.split(" ", 2)
+        pid = Integer(pid_s, exception: false)
+        next unless pid && cmd
+
+        if File.basename(cmd.split(" ", 2).first.to_s) == "tmux"
+          skipped << entry
+          next
+        end
+
+        begin
+          Process.kill("TERM", pid)
+          killed << entry
+        rescue Errno::ESRCH, Errno::EPERM => e
+          skipped << "#{entry} (#{e.class})"
+        end
+      end
+      log_orphan_sweep(task, matches, killed, skipped)
     rescue Errno::ENOENT => e
       # `pgrep` / `pkill` not installed on this host. The blanket
       # rescue used to swallow this silently, disabling orphan cleanup
@@ -883,14 +910,14 @@ module Hive
       "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}([[:space:]]|$)"
     end
 
-    def log_orphan_sweep(task, matches, out, err, status)
+    def log_orphan_sweep(task, matches, killed, skipped)
       log_path = orphan_sweep_log_path(task)
       rotate_orphan_sweep_log(log_path)
       File.open(log_path, "a") do |f|
         f.puts "[#{Time.now.utc.iso8601}] pgrep matches:"
         f.puts matches
-        f.puts "[#{Time.now.utc.iso8601}] pkill exit=#{status&.exitstatus} " \
-               "out=#{out.strip.inspect} err=#{err.strip.inspect}"
+        f.puts "[#{Time.now.utc.iso8601}] killed=#{killed.size} #{killed.inspect}"
+        f.puts "[#{Time.now.utc.iso8601}] skipped=#{skipped.size} #{skipped.inspect}"
       end
     rescue StandardError => e
       # Full disk / EROFS / EACCES: don't swallow silently — the

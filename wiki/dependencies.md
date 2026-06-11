@@ -1,13 +1,20 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, Gemfile.lock
+source: Gemfile, hive.gemspec, Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-11
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Six runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`, `sqlite3`, `unicode-display_width`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
+**TLDR**: Eight runtime gems (`thor`, `telegram-bot-ruby`, `faraday`, `faraday-multipart`, `bubbletea`, `lipgloss`, `sqlite3`, `unicode-display_width`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
+
+`hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
+to pull those constraints into Bundler, then adds development/test-only
+tools. Commit `ad9b6204` changed the local path gem entry in
+`Gemfile.lock` from `hive-cli (0.2.2)` to `hive-cli (0.2.3)` to match
+`Hive::VERSION`; it did not change third-party gem constraints or
+resolved third-party versions.
 
 ## Runtime gems
 
@@ -15,17 +22,19 @@ tags: [dependencies, gems, runtime]
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
+| `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
+| `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
-`telegram-bot-ruby` pulls Faraday and `faraday-multipart` for HTTP
-transport. Hive also uses those transitive gems directly in
-`Hive::Bot::Transcriber` to POST Telegram voice-note bytes to the
-configured OpenAI-compatible audio transcription endpoint. `Gemfile.lock`
-keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags
-`2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
+`telegram-bot-ruby` also pulls Faraday and `faraday-multipart`, but
+Hive declares both directly because `Hive::Bot::Transcriber` requires
+them itself to POST Telegram voice-note bytes to the configured
+OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
+`faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
+for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
@@ -41,6 +50,9 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
 | `rubocop` | `~> 1.87` (locked 1.87.0) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
+| `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | 37signals/Omakase RuboCop baseline inherited by `.rubocop.yml`; pulls the Rails and performance cop bundles used by the local lint profile. |
+| `brakeman` | `~> 8.0` (locked 8.0.4) | Static security scanner. The documented local command is `bundle exec brakeman --no-pager`; `config/brakeman.ignore` carries accepted false positives. |
+| `bundler-audit` | `~> 0.9` (locked 0.9.3) | Dependency vulnerability scanner. The documented local command is `bundle exec bundler-audit check --update`; its Faraday advisory drove the `>= 2.14.2` runtime floor. |
 
 ## Standard library reliance
 
@@ -80,7 +92,10 @@ These are not gems but the CLI tools the runtime invokes:
 
 ## Ruby version
 
-`Gemfile` declares `ruby "~> 3.4"`. `.rubocop.yml` pins `TargetRubyVersion: 3.4`. `Gemfile.lock` records 3.4.7 as the resolved version.
+`Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
+`>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
+`TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
+2.7.2, and the current local path gem as `hive-cli (0.2.3)`.
 
 ## Backlinks
 

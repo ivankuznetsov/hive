@@ -7,7 +7,7 @@ updated: 2026-06-11
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem has eight direct runtime gems; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
+**TLDR**: The `hive-cli` gem has eight direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
 
 ## Runtime gems
 
@@ -35,14 +35,22 @@ keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags
 execs the Rails app from a source checkout or Docker image, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
 
-Direct web runtime dependencies include Rails 8.1, propshaft, sqlite3,
-puma, importmap-rails, turbo-rails, stimulus-rails, jbuilder, solid_cache,
-solid_queue, solid_cable, bootsnap, thruster, image_processing, and
-`hive-cli` from the parent checkout. Redcarpet (`~> 3.6`, locked 3.6.1) is
-used only by the task page markdown renderer: agent-written `.md` artifacts
-render with GFM tables/fenced code/autolinks, while raw HTML is escaped
-before rendering and the result is sanitized by Rails with an explicit
-allowlist. See [[commands/web]].
+Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3),
+propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
+jbuilder, solid_cache, solid_queue, solid_cable, bootsnap, thruster,
+image_processing, and `hive-cli` from the parent checkout. Redcarpet
+(`~> 3.6`, locked 3.6.1) was added by commit `d7ce55a9` for the task page
+markdown renderer: agent-written `.md` artifacts render with GFM
+tables/fenced code/autolinks, while raw HTML is escaped before rendering
+and the result is sanitized by Rails with an explicit allowlist. See
+[[commands/web]].
+
+Direct web development/test dependencies include `debug`,
+`bundler-audit`, `brakeman`, `rubocop-rails-omakase`, `web-console`,
+`capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
+`web/Gemfile` entry, but the web lock resolves it transitively through
+Rails/Capybara and the web integration upload tests use
+`Rack::Test::UploadedFile`.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
@@ -58,6 +66,15 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
 | `rubocop` | `~> 1.87` (locked 1.87.0) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
+| `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
+| `brakeman` | `~> 8.0` (locked 8.0.4) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
+| `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |
+
+Commit `b0a31edf` removed the root `rack-test` declaration from `Gemfile`,
+and `hive.gemspec` does not declare it. Current `Gemfile.lock` still lists
+`rack-test (~> 2.2)` under top-level `DEPENDENCIES`; `bundle check`
+passes, but this refresh did not rewrite the lockfile. The cleanup question
+is tracked in [[gaps]].
 
 ## Standard library reliance
 

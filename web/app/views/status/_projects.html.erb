@@ -6,7 +6,7 @@
     </div>
   <% else %>
     <% projects.each do |project| %>
-      <section class="project-section">
+      <section class="project-section" data-project-name="<%= project["name"] %>">
         <div class="project-title">
           <h2><%= project["name"] %></h2>
           <span class="muted"><%= project.fetch("tasks", []).size %> active</span>

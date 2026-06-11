@@ -45,7 +45,12 @@ GitHub.
 
 ## Surfaces
 
-- **Status grid (`/`)** — composer (new idea with image attach: clipboard
+- **Status grid (`/`)** — a TUI-left-pane-parity project rail filters the
+  grid client-side ("All projects" + one button per registered project;
+  buttons not links so the permanent composer's typed text survives; choice
+  mirrored to `?project=` via replaceState; a MutationObserver re-applies
+  the filter after every broadcast replace/morph), composer (new idea with
+  image attach: clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
@@ -66,9 +71,12 @@ GitHub.
   BrainstormAnswerWriter), artifacts rendered as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and HTML comments — i.e. stage
-  markers — dropped, GitHub-style) whose open/closed
-  choices survive pushed morphs (a Stimulus controller snapshots/restores
-  them around the morph while content stays live) and whose order is
+  markers — dropped, GitHub-style). Artifact summaries are UI chrome:
+  filename-style tabs in muted monospace, while rendered markdown bodies sit
+  in a bordered document panel so the file label and document headings do not
+  visually compete. Open/closed choices survive pushed morphs (a Stimulus
+  controller snapshots/restores them around the morph while content stays
+  live) and artifact order is
   stage-aware — chronological (idea first) while working, artifact.md first
   and open from 8-finalize/9-done — and, as the page's appendix after the
   artifacts, a log tail in a turbo-permanent turbo-frame

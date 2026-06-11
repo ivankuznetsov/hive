@@ -175,6 +175,17 @@ input[type="text"], input[type="password"], input[type="url"], textarea, select 
   transition: border-color 120ms ease;
 }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); outline: none; }
+/* Native select arrows hug the edge and vary per platform — draw our own
+   chevron with breathing room on the right. The mid-gray works on both
+   themes (between the two --ink-faint values). */
+select {
+  appearance: none;
+  padding-right: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23908c82' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 14px;
+}
 ::placeholder { color: var(--ink-faint); }
 
 label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-bottom: 4px; }
@@ -235,6 +246,23 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 }
 .composer-toolbar .spacer { flex: 1; }
 .composer select { max-width: 220px; }
+
+/* Project filter rail (TUI left-pane parity). */
+.status-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 30px; align-items: start; }
+.project-nav { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 2px; }
+.project-nav-item {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 0.9rem; color: var(--ink-muted);
+  text-align: left; padding: 7px 12px; border-radius: var(--radius-sm);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.project-nav-item:hover { background: var(--bg-sunken); color: var(--ink); }
+.project-nav-item.active { background: var(--bg-sunken); color: var(--ink); font-weight: 600; }
+@media (max-width: 760px) {
+  .status-layout { grid-template-columns: 1fr; gap: 12px; }
+  .project-nav { position: static; flex-direction: row; overflow-x: auto; scrollbar-width: none; }
+  .project-nav-item { flex: 0 0 auto; }
+}
 
 .attachment-chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 8px; }
 .attachment-chips:empty { display: none; }

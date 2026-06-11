@@ -102,6 +102,35 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_button "Continue with GitHub", wait: 0
   end
 
+  test "the project rail filters the grid and survives live updates" do
+    second = create_hive_project!("second-app")
+    create_task!(@project, "Demo task one")
+    create_task!(second, "Second task one")
+    sign_in!
+    visit "/"
+    assert_selector ".project-section[data-project-name='#{@project}']"
+    assert_selector ".project-section[data-project-name='second-app']"
+
+    click_button @project
+    assert_selector ".project-section[data-project-name='#{@project}']"
+    assert_no_selector ".project-section[data-project-name='second-app']",
+                       wait: 5
+    assert_includes page.current_url, "project=#{@project}",
+                    "the choice must reach the URL so reloads land filtered"
+
+    # The broadcast REPLACES the grid, discarding our hidden attributes —
+    # the filter must re-apply itself on the fresh DOM.
+    create_task!(second, "Second task two")
+    assert_selector ".project-section[data-project-name='second-app'][hidden]",
+                    visible: :hidden, wait: 10
+    assert_selector ".task-row", text: "Demo task one",
+                    count: 1
+
+    click_button "All projects"
+    assert_selector ".project-section[data-project-name='second-app']"
+    assert_selector ".task-row", text: "Second task two"
+  end
+
   test "grid updates preserve scroll position and composer state" do
     # Enough rows to overflow the viewport so window scroll is meaningful.
     30.times { |n| create_task!(@project, "Filler idea number #{n}") }

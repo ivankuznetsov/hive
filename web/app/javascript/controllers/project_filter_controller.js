@@ -16,6 +16,9 @@ export default class extends Controller {
     this.observer = new MutationObserver(() => this.apply())
     this.observer.observe(this.element, { childList: true, subtree: true })
     this.apply()
+    // A filtered deep-link also preselects the composer — but never over a
+    // value that is already chosen (e.g. the single-project preselect).
+    this.syncComposer(true)
   }
 
   disconnect() {
@@ -29,6 +32,22 @@ export default class extends Controller {
     else url.searchParams.delete("project")
     history.replaceState({}, "", url)
     this.apply()
+    // Filtering IS a project context switch — new ideas should land there.
+    // Only on the explicit click: apply() also runs on every broadcast, and
+    // re-syncing there would clobber a manual select change mid-compose.
+    this.syncComposer()
+  }
+
+  syncComposer(onlyIfUnset = false) {
+    if (!this.selected) return
+
+    const select = this.element.querySelector("#composer select[name='project']")
+    if (!select) return
+    if (onlyIfUnset && select.value) return
+
+    if (Array.from(select.options).some((option) => option.value === this.selected)) {
+      select.value = this.selected
+    }
   }
 
   apply() {

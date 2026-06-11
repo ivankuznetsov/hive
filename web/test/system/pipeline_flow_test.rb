@@ -20,6 +20,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   def compose_idea(text)
     fill_in "New idea", with: text
+    # Explicit project choice: the sandbox accumulates projects across tests
+    # in one process, so the single-project preselect cannot be relied on.
+    find(".composer select[name='project']").find("option[value='#{@project}']").select_option
   end
 
   def attach_composer_image(path)
@@ -117,6 +120,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
                        wait: 5
     assert_includes page.current_url, "project=#{@project}",
                     "the choice must reach the URL so reloads land filtered"
+    assert_equal @project, find(".composer select[name='project']").value,
+                 "filtering is a context switch — new ideas should land in that project"
 
     # The broadcast REPLACES the grid, discarding our hidden attributes —
     # the filter must re-apply itself on the fresh DOM.
@@ -129,6 +134,11 @@ class PipelineFlowTest < ApplicationSystemTestCase
     click_button "All projects"
     assert_selector ".project-section[data-project-name='second-app']"
     assert_selector ".task-row", text: "Second task two"
+    assert_equal @project, find(".composer select[name='project']").value,
+                 "widening the view must not discard the composer's project choice"
+
+    click_link "+ Add project"
+    assert_current_path "/repos"
   end
 
   test "grid updates preserve scroll position and composer state" do

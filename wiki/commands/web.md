@@ -124,11 +124,13 @@ before the app loads). `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Turbo Stream live row arrival without reload, grid
-scroll plus composer draft preservation across a live broadcast, both approve
-paths (typed refusal page + confirmed force), log-tail follow/pause/resume
-with node-preserving frame morph reloads, and artifact open-state preservation
-across pushed morphs with live content refresh. CI runs both in the `web` job
-(`.github/workflows/ci.yml`) plus the web app's own rubocop.
+project-rail filtering with URL sync and re-application after a live broadcast,
+grid scroll plus composer draft preservation across a live broadcast, both
+approve paths (typed refusal page + confirmed force), log-tail
+follow/pause/resume with node-preserving frame morph reloads, and artifact
+open-state preservation across pushed morphs with live content refresh. CI runs
+both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
+rubocop.
 
 ## Docker
 

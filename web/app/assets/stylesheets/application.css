@@ -258,6 +258,7 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 }
 .project-nav-item:hover { background: var(--bg-sunken); color: var(--ink); }
 .project-nav-item.active { background: var(--bg-sunken); color: var(--ink); font-weight: 600; }
+.project-nav-add { color: var(--ink-faint); text-decoration: none; display: block; margin-top: 6px; }
 @media (max-width: 760px) {
   .status-layout { grid-template-columns: 1fr; gap: 12px; }
   .project-nav { position: static; flex-direction: row; overflow-x: auto; scrollbar-width: none; }

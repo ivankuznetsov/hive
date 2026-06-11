@@ -61,7 +61,12 @@ GitHub.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
-  notice when GitHub is unreachable or the grant was revoked).
+  notice when GitHub is unreachable or the grant was revoked). Every
+  registration rewrites a `git@github.com:` origin to https: the box can only
+  push with token-fed https credentials (`gh` clones over ssh when the
+  operator's `git_protocol` prefers it, and ssh pushes dead-end — no keys in
+  the container, no agent for a headless daemon). The Docker image wires
+  git's github.com https credential helper to `gh auth git-credential`.
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
   meta-refresh; pi token form.
 - **Telegram** — getMe-validated token save, allowlist, supervisor SIGHUP,

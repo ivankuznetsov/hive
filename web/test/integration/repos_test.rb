@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 
 class ReposTest < ActionDispatch::IntegrationTest
   setup do
@@ -98,6 +99,30 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/repos"
     names = Hive::Config.registered_projects.map { |p| p["name"] }
     assert_includes names, "already-here", "the existing checkout must be registered via hive init"
+  end
+
+  test "registration rewrites a github ssh origin to https" do
+    # gh clones over ssh when the operator's git_protocol prefers it, but the
+    # box can only push https (no SSH keys in the container, no agent for a
+    # headless daemon) — an ssh origin means every 5-open-pr push fails.
+    sign_in!
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos-root3", "ssh-origin")
+    FileUtils.mkdir_p(dir)
+    system("git", "init", "-q", dir, exception: true)
+    File.write(File.join(dir, "README.md"), "x")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "-c", "user.email=t@e.c", "-c", "user.name=T", "commit", "-qm", "i", exception: true)
+    system("git", "-C", dir, "remote", "add", "origin",
+           "git@github.com:ivankuznetsov/ssh-origin.git", exception: true)
+
+    with_repos_root(File.dirname(dir)) do
+      post "/repos", params: { url: "ivankuznetsov/ssh-origin", name: "ssh-origin" }
+    end
+
+    assert_redirected_to "/repos"
+    origin, = Open3.capture2("git", "-C", dir, "remote", "get-url", "origin")
+    assert_equal "https://github.com/ivankuznetsov/ssh-origin.git", origin.strip,
+                 "the ssh origin must be rewritten to https so the daemon can push"
   end
 
   private

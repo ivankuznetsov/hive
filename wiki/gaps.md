@@ -87,6 +87,20 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 
 - **Parse provider reset-time hints for `limits_reached` cooldown** — the healer currently uses a fixed `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` cooldown (default 1h) to self-heal limit-parked tasks (see [[daemon]]). Providers sometimes print a concrete reset hint (e.g. codex's "try again at 4:42 PM"); parsing that wall-clock time could retry sooner/later than the fixed window. Deferred because wall-clock parsing across providers/timezones is brittle and the fixed cooldown is the robust default.
 
+- **Daemon quarantine is invisible to operators** — after the transient
+  backoff schedule (60/120/300s) is exhausted, `ConcurrencyController`
+  quarantines the `[project, slug]` pair for the daemon's lifetime. The state
+  lives only in daemon memory: `hive status` (and therefore the hivebox web
+  grid) recomputes the row from filesystem markers and shows the gate label
+  (e.g. "Ready to open PR") as if the task were merely waiting, while the
+  daemon logs `blocked reason=quarantined` every tick. Observed live during
+  the 2026-06-11 dogfood: three ssh-push failures in `5-open-pr` quarantined
+  the task and nothing surfaced in the UI. There is also no operator-facing
+  lift short of restarting the daemon or running the stage command manually.
+  Candidate fix: persist quarantine (or at least the last `stage_exit` error
+  + blocked reason) somewhere `Commands::Status` can read, render it as an
+  error row, and let a manual/web dispatch clear it.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

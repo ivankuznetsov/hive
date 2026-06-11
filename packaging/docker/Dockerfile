@@ -18,6 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # change least often, so a source edit must not re-pull them.
 RUN npm install -g @anthropic-ai/claude-code@2.1.118 @openai/codex@0.125.0 @mariozechner/pi@0.70.2
 
+# The box pushes over https only — no SSH keys exist in the container. gh's
+# credential helper turns the operator's Agents-page gh login into git push
+# auth for every clone under /data/repos.
+RUN git config --system credential."https://github.com".helper "!gh auth git-credential"
+
 RUN useradd --create-home --home-dir /data/home --shell /bin/bash hive \
     && mkdir -p /data/home /data/repos /app \
     && chown -R hive:hive /data /app

@@ -54,6 +54,7 @@ class ReposController < ApplicationController
 
     setup = InitSetup.new(params[:settings])
     clone!(url, target) unless File.directory?(target)
+    normalize_origin!(target)
     reinit!(target, setup)
     redirect_to repos_path, notice: "#{name} is registered"
   end
@@ -74,6 +75,23 @@ class ReposController < ApplicationController
     env = session[:github_token] ? { "GH_TOKEN" => session[:github_token] } : {}
     out, err, status = Open3.capture3(env, "gh", "repo", "clone", url, target)
     raise Hive::Error, "clone failed: #{[ out, err ].join("\n").strip}" unless status.success?
+  end
+
+  # Registered repos must push over https: the device-flow/gh token feeds
+  # git's https credential helper, while SSH is a dead end here — the
+  # container ships no keys, and a host daemon can't answer an interactive
+  # agent (1Password and friends). gh clones over ssh whenever the
+  # operator's git_protocol prefers it, so rewrite the origin afterwards.
+  def normalize_origin!(target)
+    out, _err, status = Open3.capture3("git", "-C", target, "remote", "get-url", "origin")
+    return unless status.success?
+
+    url = out.strip
+    https = url.sub(%r{\A(?:ssh://)?git@github\.com[:/]}, "https://github.com/")
+    return if https == url
+
+    _out, err, set_status = Open3.capture3("git", "-C", target, "remote", "set-url", "origin", https)
+    raise Hive::Error, "failed to switch origin to https: #{err.strip}" unless set_status.success?
   end
 
   def github_repositories(registered_names)

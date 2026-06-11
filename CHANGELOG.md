@@ -2,6 +2,12 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.2.3
+
+Hotfix: parallel agents were being killed by another task's cleanup sweep.
+
+- **Fixed**: the post-run orphan sweep `pkill`ed every command line matching the claude wrapper — including the tmux **server**, whose argv retains the first `new-session` command. Killing the server took down every other running agent on the box (`tmux_session_terminated` errors in parallel brainstorms/plans/reviews). The sweep now kills per-PID and never touches tmux itself; skipped PIDs are recorded in `claude-tmux-orphan-sweep.log`.
+
 ## 0.2.2
 
 Hotfix: claude launches were failing for every subscriber whose Claude Code shows the plan-inclusion banner.

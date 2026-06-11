@@ -927,7 +927,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   end
 
   def test_auto_recovers_terminal_agent_loss_error_matrix
-    %w[7-artifacts 8-finalize].product(%w[tmux_session_terminated agent_orphaned]).each_with_index do |(stage, reason), index|
+    # Every stage except 6-review: the sweep-kills-the-server incident took
+    # out parallel BRAINSTORMS, and a rerun resumes from on-disk artifacts.
+    %w[2-brainstorm 3-plan 4-execute 7-artifacts 8-finalize].product(%w[tmux_session_terminated agent_orphaned]).each_with_index do |(stage, reason), index|
       with_marker_file do |state_file|
         marker_id = "terminal-#{index}"
         File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} marker_id=#{marker_id} -->\n")
@@ -958,7 +960,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_terminal_agent_loss_recovery_does_not_clear_same_reasons_outside_late_stages
+  def test_terminal_agent_loss_recovery_stays_out_of_review
+    # 6-review owns its agent-loss healing (REVIEW_ERROR paths); the generic
+    # terminal-ERROR clear must not double-handle it.
     %w[tmux_session_terminated agent_orphaned].each do |reason|
       with_marker_file do |state_file|
         File.write(state_file, "# task\n\n<!-- ERROR reason=#{reason} -->\n")
@@ -975,7 +979,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         heal([ row ])
 
         refute @logger.events.any? { |name, _| name == :marker_healed },
-               "6-review/#{reason} should stay outside terminal agent-loss auto-retry"
+               "6-review/#{reason} must stay with the review-specific heal paths"
         refute @logger.events.any? { |name, _| name == :marker_heal_failed }
         assert_match(/ERROR reason=#{reason}/, File.read(state_file))
       end

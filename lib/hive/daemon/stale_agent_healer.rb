@@ -53,9 +53,10 @@ module Hive
     # Some terminal ERROR markers are also auto-retryable. `8-finalize`
     # `reason=unpushed_commits` can fail during ordinary interruptions
     # (sleep/network) even though the task state remains recoverable by
-    # rerunning finalize. Later-stage `reason=tmux_session_terminated`
-    # and `reason=agent_orphaned` markers in 7-artifacts / 8-finalize
-    # also describe a lost agent session, not a task-domain failure.
+    # rerunning finalize. `reason=tmux_session_terminated` and
+    # `reason=agent_orphaned` markers describe a lost agent session in ANY
+    # stage — not a task-domain failure — and stage reruns resume from the
+    # on-disk artifacts.
     # Clearing those specific markers lets the normal daemon dispatch
     # rerun the stage up to the configured limit (default 3) before
     # leaving the marker red for manual recovery. There is no healer-side
@@ -222,7 +223,16 @@ module Hive
         # ticks do NOT consume the retry budget.
         return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
 
-        %w[7-artifacts 8-finalize].include?(row.stage.to_s) &&
+        # Agent-loss reasons heal in every stage EXCEPT 6-review: a lost
+        # tmux session or orphaned agent is environmental wherever it
+        # happens (the sweep-kills-the-server bug took out parallel
+        # BRAINSTORMS), and a stage rerun resumes from on-disk artifacts —
+        # brainstorm picks its rounds back up from brainstorm.md exactly
+        # like a manual re-dispatch. 6-review stays excluded because the
+        # review tree has its own specialized heal paths (REVIEW_ERROR /
+        # review_error_signature) and generic clearing would double-handle.
+        # The retry budget (default 3) still bounds every stage.
+        row.stage.to_s != "6-review" &&
           %w[tmux_session_terminated agent_orphaned].include?(reason)
       end
 

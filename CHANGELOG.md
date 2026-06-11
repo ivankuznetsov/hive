@@ -2,6 +2,15 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.2.2
+
+Hotfix: claude launches were failing for every subscriber whose Claude Code shows the plan-inclusion banner.
+
+### Limits detection — false positive + hardening
+
+- **Fix**: Claude Code's informational startup/footer line — "Included in your plan limits until Jun 22, then switch to usage credits to continue." — matched the bare `usage credits` limit pattern, so every healthy claude launch (daemon, TUI-triggered runs, CLI verbs, bot dispatches) was classified `limits_reached` and killed in seconds; the same footer text persists for the whole session, so the mid-run sentinel poll was also killing healthy running agents.
+- **Hardening so chrome copy changes can't repeat this**: readiness now wins at launch (no fail-fast limit check while claude is still painting its UI; only a session that never becomes ready is classified, by the post-timeout check), and limit patterns run line-by-line behind a benign filter (plan-inclusion promos, `/status` usage hints, reset-date notices, box-drawing chrome). The documented bias: a missed wall degrades to a clean timeout the daemon healer retries; a false positive killed healthy sessions everywhere.
+
 ## 0.2.1
 
 Patrol reviews get dramatically cheaper, the Telegram bot now confirms successes, a scrollable TUI help overlay, daemon archive-recovery, a wave of patrol-found CLI/dry-run safety fixes, and a new public website.

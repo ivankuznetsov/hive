@@ -471,11 +471,20 @@ module Hive
             end
           end
         end
-        rows
+        drop_transient_stage_moves(rows)
       end
 
       def stage_task_entries(stage_dir)
         Dir[File.join(stage_dir, "*")]
+      end
+
+      def drop_transient_stage_moves(rows)
+        duplicated_slugs = rows.group_by { |row| row[:slug] }.select { |_slug, group| group.size > 1 }
+        return rows if duplicated_slugs.empty?
+
+        rows.reject do |row|
+          duplicated_slugs.key?(row[:slug]) && !File.directory?(row[:folder])
+        end
       end
 
       def decorate(task, marker, lock_holder: nil, live_task_lock: false)

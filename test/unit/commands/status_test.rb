@@ -196,6 +196,119 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_collect_rows_skips_old_stage_entry_that_vanishes_mid_read
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "archive-race-260611-abcd"
+      old_folder = create_finalize_ready_task(hive_state, slug)
+      new_folder = File.join(hive_state, "stages", "9-done", slug)
+      FileUtils.mkdir_p(File.dirname(new_folder))
+
+      cmd = StatusRaceCommand.new(
+        old_folder: old_folder,
+        new_folder: new_folder,
+        vanish_during_read_stage: "8-finalize"
+      )
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      status_project(project_root, hive_state),
+                      1,
+                      with_diagnostic: false)
+      race_rows = rows.select { |row| row.fetch(:slug) == slug }
+
+      assert_equal 1, race_rows.size
+      assert_equal "9-done", race_rows.first.fetch(:stage)
+      refute_equal Hive::Schemas::TaskActionKind::ERROR, race_rows.first.fetch(:action_key)
+    end
+  end
+
+  def test_collect_rows_drops_old_stage_duplicate_when_rename_lands_before_new_stage_scan
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "archive-race-260611-bcde"
+      old_folder = create_finalize_ready_task(hive_state, slug)
+      new_folder = File.join(hive_state, "stages", "9-done", slug)
+      FileUtils.mkdir_p(File.dirname(new_folder))
+
+      cmd = StatusRaceCommand.new(
+        old_folder: old_folder,
+        new_folder: new_folder,
+        rename_before_stage: "9-done"
+      )
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      status_project(project_root, hive_state),
+                      1,
+                      with_diagnostic: false)
+      race_rows = rows.select { |row| row.fetch(:slug) == slug }
+
+      assert_equal 1, race_rows.size
+      assert_equal "9-done", race_rows.first.fetch(:stage)
+      refute_equal Hive::Schemas::TaskActionKind::ERROR, race_rows.first.fetch(:action_key)
+    end
+  end
+
+  def test_json_payload_never_emits_transient_duplicate_for_stage_move_race
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "archive-race-260611-cdef"
+      old_folder = create_finalize_ready_task(hive_state, slug)
+      new_folder = File.join(hive_state, "stages", "9-done", slug)
+      FileUtils.mkdir_p(File.dirname(new_folder))
+
+      payload = StatusRaceCommand.new(
+        old_folder: old_folder,
+        new_folder: new_folder,
+        rename_before_stage: "9-done"
+      ).json_payload([
+        status_project(project_root, hive_state)
+      ])
+      tasks = payload.fetch("projects").first.fetch("tasks")
+      race_tasks = tasks.select { |task| task.fetch("slug") == slug }
+
+      assert_equal 1, race_tasks.size
+      assert_equal "9-done", race_tasks.first.fetch("stage")
+      refute_equal Hive::Schemas::TaskActionKind::ERROR, race_tasks.first.fetch("action")
+    end
+  end
+
+  def test_collect_rows_preserves_genuine_stage_collision_and_disambiguates_generic_command
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "genuine-collision-260611-abcd"
+      execute_folder = File.join(hive_state, "stages", "4-execute", slug)
+      review_folder = File.join(hive_state, "stages", "6-review", slug)
+      FileUtils.mkdir_p(execute_folder)
+      FileUtils.mkdir_p(review_folder)
+      File.write(File.join(execute_folder, "task.md"), "<!-- EXECUTE_STALE -->\n")
+      File.write(File.join(review_folder, "task.md"), "<!-- REVIEW_COMPLETE -->\n")
+
+      tasks = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first.fetch("tasks").select { |task| task.fetch("slug") == slug }
+      execute = tasks.find { |task| task.fetch("stage") == "4-execute" }
+
+      assert_equal [ "4-execute", "6-review" ], tasks.map { |task| task.fetch("stage") }.sort
+      assert_equal "hive findings #{slug} --stage 4-execute", execute.fetch("suggested_command")
+    end
+  end
+
+  def test_existing_finalize_folder_without_pr_md_stays_error
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "corrupt-finalize-260611-abcd"
+      folder = File.join(hive_state, "stages", "8-finalize", slug)
+      FileUtils.mkdir_p(folder)
+
+      task = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first.fetch("tasks").find { |candidate| candidate.fetch("slug") == slug }
+
+      assert_equal "8-finalize", task.fetch("stage")
+      assert_equal Hive::Schemas::TaskActionKind::ERROR, task.fetch("action")
+    end
+  end
+
   def test_live_task_lock_overrides_marker_derived_action
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -639,5 +752,81 @@ class CommandsStatusTest < Minitest::Test
     File.utime(old, old, state_file)
     File.utime(old, old, folder)
     folder
+  end
+
+  def create_finalize_ready_task(hive_state, slug)
+    folder = File.join(hive_state, "stages", "8-finalize", slug)
+    pr_url = "https://github.com/example/demo/pull/1"
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "task.md"), "# Task\n<!-- COMPLETE -->\n")
+    File.write(File.join(folder, "pr.md"), <<~MD)
+      ---
+      pr_url: #{pr_url}
+      ---
+      # Pull request
+      <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
+    MD
+    folder
+  end
+
+  class StatusRaceCommand < Hive::Commands::Status
+    def initialize(old_folder:, new_folder:, rename_before_stage: nil, vanish_during_read_stage: nil)
+      super()
+      @old_folder = old_folder
+      @new_folder = new_folder
+      @rename_before_stage = rename_before_stage
+      @vanish_during_read_stage = vanish_during_read_stage
+      @renamed = false
+    end
+
+    def stage_task_entries(stage_dir)
+      stage = File.basename(stage_dir)
+      rename_once if stage == @rename_before_stage
+      entries = super
+      return entries unless stage == @vanish_during_read_stage
+
+      entries.map do |entry|
+        entry == @old_folder ? VanishAfterDirectoryCheckPath.new(entry, @new_folder) : entry
+      end
+    end
+
+    private
+
+    def rename_once
+      return if @renamed
+
+      FileUtils.mkdir_p(File.dirname(@new_folder))
+      File.rename(@old_folder, @new_folder)
+      @renamed = true
+    end
+  end
+
+  class VanishAfterDirectoryCheckPath
+    def initialize(path, new_path)
+      @path = path
+      @new_path = new_path
+      @calls = 0
+      @renamed = false
+    end
+
+    def to_path
+      @calls += 1
+      rename_once if @calls > 1
+      @path
+    end
+
+    def to_s
+      @path
+    end
+
+    private
+
+    def rename_once
+      return if @renamed
+
+      FileUtils.mkdir_p(File.dirname(@new_path))
+      File.rename(@path, @new_path)
+      @renamed = true
+    end
   end
 end

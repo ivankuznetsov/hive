@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-06-09
+updated: 2026-06-11
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -80,7 +80,7 @@ The dry-run guard is best-effort: an agent that invokes absolute binary paths ca
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation, lifecycle helpers, foreground `restart`, detached restart re-exec into `start --detach`, stale-runtime status recommendations, stale-runtime reload warnings, refused-stop failures, PID-file cleanup races, and bounded PID-lock behavior.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard, git executable/write-option skips, subcommand `-p` passthrough, grep/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, `--textconv` abbreviation and `cat-file --filters` skips, pathspec separator handling, env config/command seams such as `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, and `GIT_CONFIG_SYSTEM`, plus HOME/XDG/local `.git/config` hardening for allowed git reads.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including the `gh api` implicit-POST payload flag guard, git executable/write-option skips, plain `git remote show <remote>` skipping before configured transport helpers can run, subcommand `-p` passthrough, grep/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, `--textconv` abbreviation and `cat-file --filters` skips, pathspec separator handling, env config/command seams such as `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, and `GIT_CONFIG_SYSTEM`, plus HOME/XDG/local `.git/config` hardening for allowed git reads.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

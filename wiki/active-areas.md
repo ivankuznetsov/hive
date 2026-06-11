@@ -13,18 +13,15 @@ tags: [roadmap, status]
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` replaces the dead `which` delegators. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 
-Recent history inspected on 2026-05-25:
+Recent release history inspected on 2026-06-11:
 
 | Commit | Area | Notes |
 |--------|------|-------|
-| `ea025846` | Daemon liveness | Propagates `live_task_lock` through `StatusConsumer`, `StaleAgentHealer`, and dispatcher capacity accounting so externally-running tasks count during the pre-Claude PID window. |
-| `0419b880` | Coverage | Restores strict 100% default coverage on current main and keeps CI explicit with `HIVE_COVERAGE_MIN_LINE=100`. |
-| `7e5989cd` | Runtime status/open-pr | Tightens marker parsing, live-lock status display, and merged-PR recovery `headRefOid` matching. |
-| `4b3d934d` | Token usage | Records and surfaces agent token usage through `UsageDB`, usage extractors, TUI footer, and token matrix. |
-| `3cd6ebc1` | Bot eval | Adds the opt-in Telegram bot evaluation harness under `test/eval/` and `bin/hive-eval`. |
-| `80d35a0a` | Claude launch mode | Adds project-global `claude.mode` and `Hive::ClaudeLauncher` for every Claude-backed stage. |
-
-Working tree at refresh time is intentionally not clean: uncommitted source edits add `claude.permission_mode` defaults, validation, `hive init` prompting, and propagation through `Hive::ClaudeLauncher`, `Hive::Agent`, reviewer spawns, rebase conflict spawns, and bot Codex conversations. Existing wiki edits already document part of that permission-mode surface; this refresh updates adjacent architecture/module pages.
+| `6b9f14bb` | Wiki refresh | Documents v0.2.3 release prep plus the Claude/tmux orphan-sweep contract across release, agent, brainstorm, testing, and gaps pages. |
+| `1c3baa8a` | Release | Tags v0.2.3 from `main`; the release prep commit sets `Hive::VERSION` and the lockfile path gem to `0.2.3` and points public Linux installer snippets at `v0.2.3`. |
+| `024b29b0` | Claude/tmux cleanup | Replaces blanket orphan-sweep `pkill -f` with `pgrep` plus per-PID `TERM`, skipping matched `tmux` server commands and logging killed/skipped rows. |
+| `903eb7dc` | Provider limits | Hardens Claude plan-inclusion banner handling so ordinary plan/usage copy no longer triggers `limits_reached`. |
+| `b2e568ba` | Patrol review cost | Adds the native `codex review` reviewer path for patrol PRs while keeping the fuller review path for human PRs. |
 
 ## What exists
 

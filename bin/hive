@@ -45,7 +45,7 @@ def rewrite_help_flag!(argv)
 end
 
 def json_requested?(argv)
-  argv.any? { |arg| JSON_TRUE_OPTIONS.include?(arg) }
+  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_unsupported_json_assignments!(argv)

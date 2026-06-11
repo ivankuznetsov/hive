@@ -534,3 +534,15 @@ pre {
 }
 .advanced-title { margin: 0 0 2px; font-weight: 600; }
 .advanced-item .muted { margin: 0; font-size: 0.9rem; }
+
+.state-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 18px 0 26px;
+}

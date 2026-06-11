@@ -1,0 +1,82 @@
+<%# Only the page's initial render wires src + the poll controller; the
+    refresh response must be a BARE frame — Turbo rejects ("source URL
+    which references itself") and empties any response frame that carries
+    its own src. Existing attributes persist across child swaps. %>
+<% frame_attrs = local_assigns.fetch(:with_src, false) ?
+     { src: task_state_path(@project["name"], @row["slug"]),
+       data: { controller: "poll", poll_interval_value: 5000 } } : {} %>
+<%= turbo_frame_tag "task-state", **frame_attrs do %>
+  <div class="task-header">
+    <%= stage_badge(@row["stage"]) %>
+    <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
+  </div>
+
+  <%# Only the state-driven primary actions appear (Approve when the gate is
+      passable, Run when the operator drives stages manually, Diff when a
+      worktree exists). The sharp tools live in the Advanced section. %>
+  <div class="task-actions">
+    <% if stage_passable?(@row) %>
+      <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
+            params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
+    <% end %>
+    <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row["stage"])) %>
+      <%= button_to "Run #{stage_run_verb(@row["stage"])}", task_run_path(@project["name"], @row["slug"]),
+            params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
+            data: { turbo_submits_with: "Queueing…" } %>
+    <% end %>
+    <% if @worktree_exists %>
+      <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary",
+            data: { turbo_frame: "_top" } %>
+    <% end %>
+  </div>
+
+  <% if @questions.any? %>
+    <section class="qa">
+      <h2>Questions from the agent</h2>
+      <% if (idea_text = original_idea_text(@row)) %>
+        <details class="idea-context" open>
+          <summary class="muted">Original idea</summary>
+          <p class="idea-text"><%= idea_text %></p>
+        </details>
+      <% end %>
+      <p class="muted">Answer what you can — the daemon resumes the brainstorm once answers land. Unanswered questions stay open.</p>
+      <%= form_with url: task_answers_path(@project["name"], @row["slug"]), data: { turbo_frame: "_top" } do |f| %>
+        <% @questions.each do |question| %>
+          <div class="qa-item">
+            <%# Single line: qa-question is pre-wrap, so template indentation
+                would render as a first-line indent. %>
+            <p class="qa-question"><span class="qa-number">Q<%= question.n %></span><%= question.text %></p>
+            <%= text_area_tag "answers[#{question.n}]", "", placeholder: "Your answer…",
+                  aria: { label: "Answer to question #{question.n}" } %>
+          </div>
+        <% end %>
+        <p><%= f.submit "Send answers", data: { turbo_submits_with: "Sending…" } %></p>
+      <% end %>
+    </section>
+
+    <%# Honest framing: intervene can ONLY fill the next open brainstorm
+        question (the bot's free-text parity path) — it does not steer
+        arbitrary stages, and without an open question it always fails. %>
+    <details class="intervene">
+      <summary class="muted">Reply free-form instead (fills Q<%= @questions.first.n %>)</summary>
+      <%= form_with url: task_intervene_path(@project["name"], @row["slug"]), data: { turbo_frame: "_top" } do |f| %>
+        <%= f.text_area :message, required: true,
+              placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>
+        <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
+      <% end %>
+    </details>
+  <% elsif @row["marker"].to_s == "waiting" && !stage_passable?(@row) %>
+    <%# Post-answer limbo: everything answered, daemon not done yet. This
+        frame polls, so the banner hands off to the next round's questions,
+        a running dot, or a passable gate on its own. %>
+    <div class="state-banner">
+      <span class="status-dot status-dot-waiting"></span>
+      <% if @row["claude_pid_alive"] %>
+        The agent is working — this page follows along automatically.
+      <% else %>
+        All questions answered — waiting for the daemon to resume this stage.
+        This page updates automatically.
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

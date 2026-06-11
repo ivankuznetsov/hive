@@ -174,6 +174,21 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "all-answered brainstorm shows the waiting-for-daemon banner via the live state frame" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select "turbo-frame#task-state[src]", 1, "the state block must poll itself"
+    assert_select ".state-banner", text: /waiting for the daemon|agent is working/i,
+                  count: 1
+    assert_select ".qa-item", 0, "no open questions → no answer form"
+
+    get "/tasks/#{@project}/#{@slug}/state"
+    assert_response :success
+    assert_select "turbo-frame#task-state", 1, "the refresh endpoint must return the same frame"
+  end
+
   test "diff for a task without a worktree is 404 not a crash" do
     get "/tasks/#{@project}/#{@slug}/diff"
     assert_response :not_found

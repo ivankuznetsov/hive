@@ -1,8 +1,19 @@
 <% content_for(:title, "hivebox — status") %>
+<%# The status channel delivers BOTH a targeted #projects replace and a page
+    refresh signal (task pages need the latter). Without these metas the
+    refresh falls back to a full-body replace — which resets window scroll to
+    the top mid-read. Morph + preserve keeps the grid updating in place. %>
+<% content_for(:head) do %>
+  <meta name="turbo-refresh-method" content="morph">
+  <meta name="turbo-refresh-scroll" content="preserve">
+<% end %>
 <%= turbo_stream_from StatusBroadcaster::CHANNEL %>
 
-<%= form_with url: ideas_path, multipart: true, class: "composer",
-              data: { controller: "composer" } do |f| %>
+<%# data-turbo-permanent: a morph must never touch the composer — it holds
+    typed-but-unsent idea text and staged image attachments (Stimulus state
+    the server can't re-render). %>
+<%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
+              data: { controller: "composer", turbo_permanent: true } do |f| %>
   <div class="composer-box">
     <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
           required: true, data: { composer_target: "text", action: "paste->composer#paste" },

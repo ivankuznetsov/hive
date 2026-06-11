@@ -102,6 +102,25 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_button "Continue with GitHub", wait: 0
   end
 
+  test "grid updates preserve scroll position and composer state" do
+    # Enough rows to overflow the viewport so window scroll is meaningful.
+    12.times { |n| create_task!(@project, "Filler idea number #{n}") }
+    sign_in!
+    visit "/"
+    fill_in "New idea", with: "half-typed thought"
+
+    # Window scroll is unobservable through user-facing APIs — the sanctioned
+    # JS exception, used only to position and read scrollY.
+    page.execute_script("window.scrollTo(0, 400)")
+    create_task!(@project, "Live arrival probe")
+    assert_selector ".task-row", text: "Live arrival probe", wait: 10
+
+    assert_operator page.evaluate_script("window.scrollY"), :>=, 300,
+                    "a grid update must not yank the operator back to the top"
+    assert_equal "half-typed thought", find("textarea[aria-label='New idea']").value,
+                 "a grid update must not clear the composer"
+  end
+
   test "log pane follows the tail, pauses for reading, resumes at the bottom" do
     slug = create_task!(@project, "Tail probe")
     log_dir = Pathname(ENV["HIVE_TEST_HOME_ROOT"]).join("repos", @project, ".hive-state", "logs", slug)

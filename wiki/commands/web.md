@@ -61,10 +61,10 @@ GitHub.
   BrainstormAnswerWriter), artifacts whose open/closed choices survive pushed
   morphs (a Stimulus controller snapshots/restores them around the morph
   while content stays live), and a log tail in a turbo-permanent turbo-frame
-  whose own reloads use Turbo frame morphing. The poll controller gives the
-  pane `tail -f` semantics: it pins to the bottom while following, pauses
-  reloads while the operator scrolls up to read, and resumes when scrolled
-  back down.
+  whose own reloads use Turbo frame morphing, patching the live pane in place
+  instead of replacing it on every poll. The poll controller gives the pane
+  `tail -f` semantics: it pins to the bottom while following, pauses reloads
+  while the operator scrolls up to read, and resumes when scrolled back down.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
@@ -105,8 +105,11 @@ before the app loads). `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Turbo Stream live row arrival without reload, and
-both approve paths (typed refusal page + confirmed force). CI runs both in
-the `web` job (`.github/workflows/ci.yml`) plus the web app's own rubocop.
+both approve paths (typed refusal page + confirmed force), log-tail
+follow/pause/resume with node-preserving frame morph reloads, and artifact
+open-state preservation across pushed morphs with live content refresh. CI
+runs both in the `web` job (`.github/workflows/ci.yml`) plus the web app's
+own rubocop.
 
 ## Docker
 

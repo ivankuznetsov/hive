@@ -72,7 +72,7 @@ File.write(File.join(demo_bin, "claude"), <<~SH)
   # the fake for a beat or two.
   case "$cwd" in
     */stages/2-brainstorm/*)
-      sleep 1.6
+      sleep 2.0
       if ! grep -q '^### Q1' brainstorm.md 2>/dev/null; then
         printf '### Q1. Should dark mode follow the system setting?\n\n### A1.\n\n<!-- WAITING -->\n' > brainstorm.md
       else
@@ -85,11 +85,11 @@ File.write(File.join(demo_bin, "claude"), <<~SH)
       fi
       ;;
     */stages/3-plan/*)
-      sleep 2.2
+      sleep 3.0
       printf '# Plan\n\n1. Add a theme setting (light / dark / system).\n2. Persist per user; apply via data-theme.\n3. Tests for toggle + system fallback.\n\n<!-- COMPLETE -->\n' > plan.md
       ;;
     *worktrees/*)
-      sleep 2.4
+      sleep 3.2
       printf 'theme toggle implemented\n' > implementation.txt
       git add implementation.txt
       git -c user.email=demo@hivecli.sh -c user.name="Hive Demo" \
@@ -227,27 +227,27 @@ begin
     $stdout.flush
     page.goto("#{base}/dev_login?as=ivan")
     page.wait_for_selector(".composer textarea")
-    sleep 2.2
+    sleep 3.0
 
     # Beat 1 — the idea, typed like a human.
     page.click(".composer textarea")
-    page.keyboard.type(IDEA, delay: 34)
+    page.keyboard.type(IDEA, delay: 52)
     sleep 0.8
     page.click("input[type='submit'][value='Add idea']")
     page.wait_for_selector(".task-row")
-    sleep 2.4
+    sleep 3.2
 
     # Beat 2 — open the task; the daemon's brainstorm asks a question.
     page.click(".task-row a")
     page.wait_for_selector("textarea[name='answers[1]']", timeout: 60_000)
     slug = page.url.split("/").last
     wait_answer_window!(daemon_events, slug)
-    sleep 0.9
+    sleep 2.0
     page.click("textarea[name='answers[1]']")
-    page.keyboard.type(ANSWER, delay: 30)
+    page.keyboard.type(ANSWER, delay: 42)
     sleep 0.5
     page.click("input[type='submit'][value='Send answers']")
-    sleep 1.6
+    sleep 2.4
 
     # Beat 3 — hands off: the pipeline advances live (push morphs, no
     # reloads). The camera lingers; the script only waits for the terminal
@@ -257,7 +257,7 @@ begin
       ".task-meta:has-text('Ready to open PR'), .stage-badge:has-text('open-pr'), .stage-badge:has-text('review')",
       timeout: 120_000
     )
-    sleep 2.6
+    sleep 3.4
 
     # CUT — segment A ends here. The daemon blows through open-pr and
     # into review within a tick; instead of fighting that race on camera,
@@ -307,9 +307,9 @@ begin
     page.wait_for_selector(".composer textarea")
     page.goto("#{base}/tasks/demo-app/#{slug}")
     page.wait_for_selector(".stage-badge:has-text('open-pr')", timeout: 15_000)
-    sleep 1.8
+    sleep 2.4
     page.click("details[data-artifact-name='pr.md'] summary")
-    sleep 5.5
+    sleep 7.0
     Timeout.timeout(60) { context.close }
     @video_b = newest_webm(webms_before_b)
     puts "==> segment B: #{@video_b}"

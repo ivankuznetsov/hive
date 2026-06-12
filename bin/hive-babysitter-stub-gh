@@ -98,12 +98,20 @@ def api_read_only?(rest)
   !payload && !cache
 end
 
+def auth_status_read_only?(rest)
+  return false unless rest[1] == "status"
+
+  rest.drop(2).none? do |arg|
+    arg == "--show-token" || arg.start_with?("--show-token=") || arg == "-t" || arg.start_with?("-t=")
+  end
+end
+
 def read_only?(rest)
   case rest[0]
   when "api"
     api_read_only?(rest)
   when "auth"
-    rest[1] == "status"
+    auth_status_read_only?(rest)
   when "pr"
     %w[checks diff list status view].include?(rest[1])
   when "run"
@@ -119,7 +127,7 @@ end
 
 def external_launcher_option?(rest)
   return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
-  return false unless [%w[pr view], %w[repo view], %w[run view], %w[workflow view]].include?(rest[0, 2])
+  return false unless [ %w[pr view], %w[repo view], %w[run view], %w[workflow view] ].include?(rest[0, 2])
 
   rest.drop(2).any? { |arg| arg == "-w" || arg.start_with?("-w") }
 end

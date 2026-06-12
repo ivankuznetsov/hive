@@ -56,7 +56,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "repo", "view", "--web"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
       assert_stubbed env, "gh", "run", "view", "123", "-w"
+      assert_stubbed env, "gh", "auth", "status", "--show-token"
+      assert_stubbed env, "gh", "auth", "status", "-t"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
+      assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
@@ -231,6 +234,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh repo view --web skipped"
       assert_includes skipped, "gh pr view 42 --web skipped"
       assert_includes skipped, "gh run view 123 -w skipped"
+      assert_includes skipped, "gh auth status --show-token skipped"
+      assert_includes skipped, "gh auth status -t skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
@@ -248,6 +253,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
+      assert_includes real_invocations, "real-gh auth status"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"

@@ -59,7 +59,7 @@ Concurrency: any number of `hive run` processes on **different** tasks can proce
 | `plan` | `Stages::Plan` | yes | no |
 | `execute` | `Stages::Execute` | yes (impl-only since ADR-014) | yes (in feature worktree) |
 | `open-pr` | `Stages::OpenPr` | yes | no code edits (`git push`, `gh pr create --draft`) |
-| `review` | `Stages::Review` (orchestrator) → `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | yes (CI-fix + reviewers + triage + fix + browser; sub-spawns use `status_mode: :exit_code_only` per ADR-021) | yes (fix agent commits in feature worktree) |
+| `review` | `Stages::Review` (orchestrator) → `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Hive::Reviewers` adapters | yes (CI-fix + reviewers + triage + fix + browser; sub-spawns use `status_mode: :exit_code_only` per ADR-021) | yes (fix agent commits in feature worktree) |
 | `artifacts` | `Stages::Artifacts` | yes | no code edits (`artifact.md` collection handoff) |
 | `finalize` | `Stages::Finalize` | yes | no code edits (`gh pr edit`, `gh pr ready`, `summary.md`) |
 | `done` | `Stages::Done` | no | no |
@@ -70,18 +70,31 @@ Inbox/Done are the two non-working stages: capture-only and archive-only.
 
 Headless agent spawns are profile-driven. `Hive::Agent#build_cmd`
 starts with the selected `AgentProfile` binary/headless flag, then adds
-profile-specific permission, add-dir, budget, and output-format flags.
-Claude, Codex, and Pi therefore share one subprocess wrapper while
-keeping their CLI-specific argv and status-detection contracts in
-`lib/hive/agent_profiles/`.
+profile-specific permission, add-dir, budget, per-run CLI extras, and
+output-format flags. Claude, Codex, and Pi therefore share one subprocess
+wrapper while keeping their CLI-specific argv and status-detection
+contracts in `lib/hive/agent_profiles/`.
+
+Claude-backed stages add one config-specific layer on top of the profile:
+`Hive::Config.claude_cli_flags(cfg)` turns `claude.model` and
+`claude.effort` into an argv fragment used by both headless
+`Hive::Agent` and tmux `Hive::ClaudeLauncher` sessions. Fresh projects
+default `claude.model` to `default`, so Hive passes Claude Code's live
+recommended-model alias instead of inheriting the operator's interactive
+selection. `model: inherit` (or blank) omits `--model`; aliases/full
+model names pass through. `effort: default`, `inherit`, or blank omits
+`--effort`; other explicit values pass through, with fresh init offering
+`low`, `medium`, and `high`.
 
 Fresh project setup separates reviewer policy by source. Normal feature
 PRs use `review.reviewers`, populated by `hive init` from the normal
 reviewer prompt. Synthetic patrol PR tasks whose `task.md` frontmatter
 has `source: patrol` use `patrol.review.reviewers` instead; the fresh
-default is Codex CE code review only, with Claude CE code review as the
-init-time opt-in. The review runner selects between those lists at Phase
-2, before dispatching reviewer adapters.
+default is the native single-pass `codex-native-review`
+(`kind: codex_review`) adapter. `hive init` can add the Codex or Claude
+CE `ce-code-review` fan-out reviewers for broader patrol review coverage;
+`pr-review-toolkit` remains a normal-reviewer option only. The review runner
+selects between those lists at Phase 2, before dispatching reviewer adapters.
 
 For the built-in Claude profile, the default headless argv is:
 
@@ -90,6 +103,8 @@ claude -p
   --dangerously-skip-permissions
   [--add-dir <dir> ...]
   --max-budget-usd <stage_budget>
+  [--model <claude.model>]
+  [--effort <claude.effort>]
   --output-format stream-json
   --include-partial-messages
   --verbose

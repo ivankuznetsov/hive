@@ -158,12 +158,17 @@ class GithubAuthTest < Minitest::Test
     assert_match(/could not reach GitHub/, error.message)
   end
 
-  def test_configured_requires_client_id_and_owner_only
+  def test_configured_requires_client_id_only_and_ownerless_is_claimable
     auth = Hive::Web::GithubAuth.new(config: { "github" => { "client_id" => "cid", "owner" => "octo" } })
-    assert auth.configured?, "device flow needs no client secret — client_id + owner suffice"
+    assert auth.configured?, "device flow needs no client secret — client_id suffices"
+    refute auth.claimable?, "a pinned owner keeps the gate closed"
 
     no_owner = Hive::Web::GithubAuth.new(config: { "github" => { "client_id" => "cid" } })
-    refute no_owner.configured?
+    assert no_owner.configured?, "an ownerless box can still START sign-in (the first login claims it)"
+    assert no_owner.claimable?
+
+    no_client = Hive::Web::GithubAuth.new(config: { "github" => {} })
+    refute no_client.configured?, "without a client_id no flow can start"
   end
 
   def test_owner_match_is_case_insensitive

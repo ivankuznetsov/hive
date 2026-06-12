@@ -44,7 +44,7 @@ class InitPromptsTest < Minitest::Test
       "development_agent" => "codex",
       "enabled_reviewers" => REVIEWER_NAMES,
       "patrol_reviewers" => Hive::Commands::Init::Prompts::DEFAULT_PATROL_REVIEWER_NAMES,
-      "patrol_mode" => "low",
+      "patrol_mode" => "medium",
       "triage_bias" => "courageous",
       "budgets" => Hive::Commands::Init::Prompts::LIMIT_KEYS.each_with_object({}) do |k, h|
         h[k] = Hive::Config::DEFAULTS["budget_usd"][k]
@@ -59,13 +59,22 @@ class InitPromptsTest < Minitest::Test
   end
 
   # Helper to build an interactive input string. The flow asks:
-  # Interactive slot order (matches Prompts#collect):
-  #   1. planning agent   2. claude mode   3. claude permission mode
-  #   4. claude model     5. claude effort 6. development agent
-  #   7. reviewers        8. patrol reviewers  9. patrol mode
-  #  10. triage bias     11..20 limits (LIMIT_KEYS.size lines)
-  #  21. daemon enable   22. babysitter enable 23. daemon autostart
-  #  24. confirmation
+  #   1. planning agent
+  #   2. claude mode
+  #   3. claude permission mode
+  #   4. development agent
+  #   5. reviewer multi-select
+  #   6. patrol PR reviewer multi-select
+  #   7. patrol mode
+  #   8. triage bias
+  #   9-18. ten limit prompts (brainstorm, plan, execute_implementation,
+  #         open_pr, artifacts, finalize, review_ci, review_triage, review_fix,
+  #         review_browser)
+  #  19. daemon enable Y/n            (added under ADR-024)
+  #  20. babysitter enable Y/n
+  #  21. daemon service autostart y/N
+  #  22. confirmation Y/n
+  # Each line is one answer; blank line = accept default.
   def interactive_input(planning: "", claude_mode: "", claude_permission_mode: "",
                         claude_model: "", claude_effort: "", development: "", reviewers: "",
                         patrol_reviewers: "", patrol_mode: "", triage_bias: "",
@@ -75,6 +84,27 @@ class InitPromptsTest < Minitest::Test
     answers.concat([ development, reviewers, patrol_reviewers, patrol_mode, triage_bias,
                      *limits, daemon, babysitter, autostart, confirm ])
     answers.map { |a| "#{a}\n" }.join
+  end
+
+  def test_claude_effort_accepts_numeric_and_named_choices
+    choices = Hive::Commands::Init::Prompts::CLAUDE_EFFORT_CHOICES
+    prompts, _output = make_prompts(interactive_input(claude_effort: "2", confirm: "y"))
+    assert_equal choices[1], prompts.collect["claude_effort"],
+                 "a numeric pick must map to the listed choice"
+
+    prompts, _output = make_prompts(interactive_input(claude_effort: "HIGH", confirm: "y"))
+    assert_equal "high", prompts.collect["claude_effort"],
+                 "a named pick must match case-insensitively"
+  end
+
+  def test_claude_effort_reprompts_on_unknown_answer
+    prompts, output = make_prompts(
+      interactive_input(claude_effort: "turbo\nmedium", confirm: "y")
+    )
+    assert_equal "medium", prompts.collect["claude_effort"],
+                 "the loop must accept the corrected answer"
+    assert_match(/unknown effort "turbo"/, output.string,
+                 "the reprompt must teach the valid set")
   end
 
   # --- non-TTY: short-circuit to defaults ----------------------------------
@@ -99,7 +129,7 @@ class InitPromptsTest < Minitest::Test
     assert_match(/dev=codex/, summary)
     assert_match(/reviewers=all3/, summary)
     assert_match(/patrol_reviewers=codex/, summary)
-    assert_match(/patrol_mode=low/, summary)
+    assert_match(/patrol_mode=medium/, summary)
     assert_match(/triage=courageous/, summary)
     assert_match(/limits=defaults/, summary)
     assert_equal 1, summary.lines.size,
@@ -133,8 +163,8 @@ class InitPromptsTest < Minitest::Test
     prompts, output = make_prompts(interactive_input)
     prompts.collect
     assert_match(/limits\s+= all defaults/, output.string)
-    assert_match(/patrol_reviewers\s+= \[codex-ce-code-review\]/, output.string)
-    assert_match(/patrol_mode\s+= low/, output.string)
+    assert_match(/patrol_reviewers\s+= \[codex-native-review\]/, output.string)
+    assert_match(/patrol_mode\s+= medium/, output.string)
   end
 
   # --- planning / development agent: name, index, override -----------------
@@ -294,30 +324,31 @@ class InitPromptsTest < Minitest::Test
     assert_equal REVIEWER_NAMES, answers["enabled_reviewers"]
   end
 
-  def test_interactive_patrol_reviewers_blank_accepts_codex_only
+  def test_interactive_patrol_reviewers_blank_accepts_codex_native_only
     prompts, _output = make_prompts(interactive_input(patrol_reviewers: ""))
     answers = prompts.collect
-    assert_equal %w[codex-ce-code-review], answers["patrol_reviewers"]
+    assert_equal %w[codex-native-review], answers["patrol_reviewers"]
   end
 
-  def test_interactive_patrol_reviewers_can_add_claude
-    prompts, _output = make_prompts(interactive_input(patrol_reviewers: "1,2"))
+  def test_interactive_patrol_reviewers_can_add_ce_code_review
+    # 1 = codex-native-review, 2 = codex-ce-code-review, 3 = claude-ce-code-review
+    prompts, _output = make_prompts(interactive_input(patrol_reviewers: "2,3"))
     answers = prompts.collect
     assert_equal %w[codex-ce-code-review claude-ce-code-review], answers["patrol_reviewers"]
   end
 
   def test_interactive_patrol_reviewers_reject_pr_toolkit
-    raw = interactive_input(patrol_reviewers: "pr-review-toolkit\n2")
+    raw = interactive_input(patrol_reviewers: "pr-review-toolkit\n3")
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal %w[claude-ce-code-review], answers["patrol_reviewers"]
     assert_match(/unknown reviewer "pr-review-toolkit"/, output.string)
   end
 
-  def test_interactive_patrol_mode_blank_defaults_to_low
+  def test_interactive_patrol_mode_blank_defaults_to_medium
     prompts, _output = make_prompts(interactive_input(patrol_mode: ""))
     answers = prompts.collect
-    assert_equal "low", answers["patrol_mode"]
+    assert_equal "medium", answers["patrol_mode"]
   end
 
   def test_interactive_patrol_mode_by_index
@@ -605,7 +636,7 @@ class InitPromptsTest < Minitest::Test
     prompts, _output, _summary = make_prompts("", tty: false)
     answers = prompts.collect
     assert_equal "courageous", answers["triage_bias"]
-    assert_equal "low", answers["patrol_mode"]
+    assert_equal "medium", answers["patrol_mode"]
   end
 
   # --- confirmation -------------------------------------------------------

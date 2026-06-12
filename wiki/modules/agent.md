@@ -1,9 +1,9 @@
 ---
 title: Hive::Agent
 type: module
-source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb
+source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-12
 tags: [agent, claude, subprocess]
 ---
 
@@ -23,7 +23,8 @@ Hive::Agent.new(
   profile: nil,         # AgentProfile; defaults to claude profile
   expected_output: nil, # used by :output_file_exists profiles
   status_mode: nil,     # per-spawn override
-  permission_mode: nil  # Claude-only override; nil uses profile default/config caller
+  permission_mode: nil, # Claude-only override; nil uses profile default/config caller
+  cli_flags: []         # per-run argv extras, currently Claude model/effort pins
 )
 ```
 
@@ -57,6 +58,7 @@ hardcoded Claude template:
   <permission flags>
   [<profile.add_dir_flag> <dir> ...]
   [<profile.budget_flag> <amount>]
+  [<cli_flags...>]
   <profile.output_format_flags...>
   <prompt>
 ```
@@ -68,6 +70,8 @@ claude -p
   --dangerously-skip-permissions
   [--add-dir <dir> ...]
   --max-budget-usd <amount>
+  [--model <claude.model>]
+  [--effort <claude.effort>]
   --output-format stream-json
   --include-partial-messages
   --verbose
@@ -90,6 +94,17 @@ permission mode is emitted as `--permission-mode <mode>`; current config
 validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `dontAsk`, and `plan`.
 
+Claude model/effort flags are config-derived rather than profile-derived.
+When `Stages::Base.spawn_agent` receives `cfg:` and the selected profile is
+Claude, it passes `Hive::Config.claude_cli_flags(cfg)` into `cli_flags`.
+That means `claude.model: default` reaches the headless argv as
+`--model default`; `model: inherit` or blank omits `--model`; and
+`claude.effort` reaches argv for any explicit non-default/non-inherit
+value (fresh init offers `low`, `medium`, and `high`).
+`Hive::ClaudeLauncher.wrapper_command` uses the same flag fragment for
+tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
+`--effort` without shell re-parsing.
+
 ## `spawn_and_wait` (the long part)
 
 1. Open a logfile (`<task.log_dir>/<label>-<UTC-ts>.log`), append a `[hive] <ts> spawn cwd=… cmd=…` line.
@@ -108,6 +123,8 @@ validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
 Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
+
+Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_shared_session` first asks Claude to `/quit`, then kills the managed tmux session, then runs `sweep_orphan_processes(task)`. The sweep searches with `pgrep -fa -- "--add-dir[[:space:]]+<task.folder>([[:space:]]|$)"`, terminates matched non-tmux PIDs one by one with `TERM`, and skips any matched command whose executable basename is `tmux`. This matters because the tmux server can retain the first `tmux new-session ... --add-dir <task.folder> ...` argv; a blanket `pkill -f` would kill the tmux server and terminate unrelated live Hive sessions. The sweep appends the raw matches plus killed/skipped counts to `<task>/claude-tmux-orphan-sweep.log` (rotated at 64 KiB) and writes warning rows there when `pgrep` is missing or fails.
 
 ## `handle_exit`
 
@@ -131,7 +148,8 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 ## Tests
 
-- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv.
+- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv and model/effort `cli_flags` reaching the headless command.
+- `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns.
 
 ## Backlinks

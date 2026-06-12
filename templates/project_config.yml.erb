@@ -228,13 +228,24 @@ patrol:
     lint: null
     typecheck: null
     test: null
-  # Review handoff for patrol-created PRs uses a narrower reviewer set
-  # than normal feature PRs. Keep Codex on by default; optionally add
+  # Review handoff for patrol-created PRs uses a cheaper reviewer set
+  # than normal feature PRs. The default is the native `codex review`
+  # single-pass adapter; optionally add the ce-code-review fan-out or
   # Claude during init when you want broader patrol review coverage.
   review:
     max_context_files: 24
     max_owned_files: 12
     reviewers:
+<% if patrol_reviewers.include?("codex-native-review") -%>
+      # Native `codex review` — one cheap, tuned, read-only pass whose
+      # stdout is captured into the findings file. Needs no CE skill.
+      - name: codex-native-review
+        kind: codex_review
+        agent: codex
+        output_basename: codex-native-review
+        prompt_template: reviewer_codex_native_review.md.erb
+        timeout_sec: 5400
+<% end -%>
 <% if patrol_reviewers.include?("codex-ce-code-review") -%>
       - name: codex-ce-code-review
         kind: agent

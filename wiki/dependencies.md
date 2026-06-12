@@ -15,19 +15,19 @@ tags: [dependencies, gems, runtime]
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
-| `faraday` | `>= 2.14.2`, `< 3.0` | HTTP client used directly by `Hive::Bot::Transcriber`; declared explicitly so voice transcription does not rely on `telegram-bot-ruby` keeping Faraday as a transitive dependency. |
-| `faraday-multipart` | `~> 1.0` | Multipart upload support for OpenAI-compatible audio transcription requests. |
+| `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
+| `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
-`telegram-bot-ruby` pulls Faraday and `faraday-multipart` for HTTP
-transport. Hive also uses those transitive gems directly in
-`Hive::Bot::Transcriber` to POST Telegram voice-note bytes to the
-configured OpenAI-compatible audio transcription endpoint. `Gemfile.lock`
-keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags
-`2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
+`telegram-bot-ruby` also pulls Faraday and `faraday-multipart`, but
+Hive declares both directly because `Hive::Bot::Transcriber` requires
+them itself to POST Telegram voice-note bytes to the configured
+OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
+`faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
+for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
 ## Web app bundle
 
@@ -114,7 +114,10 @@ These are not gems but the CLI tools the runtime invokes:
 
 ## Ruby version
 
-`Gemfile` declares `ruby "~> 3.4"`. `.rubocop.yml` pins `TargetRubyVersion: 3.4`. `Gemfile.lock` records 3.4.7 as the resolved version.
+`Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
+`>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
+`TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
+2.7.2, and the current local path gem as `hive-cli (0.2.3)`.
 
 ## Backlinks
 

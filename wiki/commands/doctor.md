@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: lib/hive/commands/doctor.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-05-26
+updated: 2026-06-11
 tags: [command, preflight, skills, tmux]
 ---
 
@@ -35,7 +35,7 @@ Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
 - **`kind: "stage"`** — one row per entry in `STAGES = %w[brainstorm plan]`. `label = stage`. Reads `cfg.dig(stage, "agent")` (default `"claude"`) and resolves the skill via `Hive::Config.stage_skill`. Plan defaults are agent-aware: Claude keeps the legacy `/plan` alias, Codex gets `/llm-wiki:wiki-plan`, and Pi gets `/skill:wiki-plan` after profile formatting. A legacy `plan.skill: /plan` config is also mapped to llm-wiki's canonical `wiki-plan` skill for Codex/Pi. The resolved skill is routed through `profile.format_skill_invocation(skill)` before verification.
 - **`kind: "reviewer"`** — one row per entry in `cfg.dig("review", "reviewers")`. `label = "6-review/<name>"`. Reads `agent`, `name`, `kind` (default `"agent"`), and `skill`. The bare config skill is formatted through `profile.format_skill_invocation` to obtain the full invocation before passing to `verify_skill`, so the JSON envelope's `skill` field is uniform across stage and reviewer rows.
 
-Reviewer entries with `kind != "agent"` short-circuit to `:not_applicable` with a "kind '<X>' is not 'agent'; doctor only checks agent-kind reviewers" message. **This is the only load-time signal for non-agent kinds** — `Hive::Config.validate_reviewers!` does not validate `kind`; only `Hive::Reviewers.dispatch` does, at run-time.
+Reviewer entries with `kind != "agent"` short-circuit to `:not_applicable` with a "kind '<X>' is not 'agent'; doctor only checks agent-kind reviewers" message. `Hive::Config.validate_reviewers!` now validates `kind` against `agent`, `codex_review`, and `linter`; Doctor still only verifies slash-command/SKILL.md resolution for `agent` reviewers because `codex_review` uses Codex's built-in `review` subcommand and `linter` is intentionally rejected by reviewer dispatch with a pointer to `review.ci.command`.
 
 ## Per-agent verifiers (`Hive::SkillCheck::*`)
 

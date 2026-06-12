@@ -2,6 +2,65 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.2.4
+
+Hive-launched claude sessions stop silently billing the operator's interactive model.
+
+- **`claude.model` / `claude.effort`** (global or per-project config, asked at `hive init`): sessions now launch with `--model default` — Claude Code's live alias for its recommended model (Opus-class today) — instead of inheriting the operator's interactive pick (e.g. a premium long-context configuration). `inherit` restores the old behavior; any alias/full name passes through; `effort` accepts low/medium/high or keeps Claude Code's own tier. Applies to every stage including reviewers, triage, and fix phases.
+
+## 0.2.3
+
+Hotfix: parallel agents were being killed by another task's cleanup sweep.
+
+- **Fixed**: the post-run orphan sweep `pkill`ed every command line matching the claude wrapper — including the tmux **server**, whose argv retains the first `new-session` command. Killing the server took down every other running agent on the box (`tmux_session_terminated` errors in parallel brainstorms/plans/reviews). The sweep now kills per-PID and never touches tmux itself; skipped PIDs are recorded in `claude-tmux-orphan-sweep.log`.
+
+## 0.2.2
+
+Hotfix: claude launches were failing for every subscriber whose Claude Code shows the plan-inclusion banner.
+
+### Limits detection — false positive + hardening
+
+- **Fix**: Claude Code's informational startup/footer line — "Included in your plan limits until Jun 22, then switch to usage credits to continue." — matched the bare `usage credits` limit pattern, so every healthy claude launch (daemon, TUI-triggered runs, CLI verbs, bot dispatches) was classified `limits_reached` and killed in seconds; the same footer text persists for the whole session, so the mid-run sentinel poll was also killing healthy running agents.
+- **Hardening so chrome copy changes can't repeat this**: readiness now wins at launch (no fail-fast limit check while claude is still painting its UI; only a session that never becomes ready is classified, by the post-timeout check), and limit patterns run line-by-line behind a benign filter (plan-inclusion promos, `/status` usage hints, reset-date notices, box-drawing chrome). The documented bias: a missed wall degrades to a clean timeout the daemon healer retries; a false positive killed healthy sessions everywhere.
+
+## 0.2.1
+
+Patrol reviews get dramatically cheaper, the Telegram bot now confirms successes, a scrollable TUI help overlay, daemon archive-recovery, a wave of patrol-found CLI/dry-run safety fixes, and a new public website.
+
+### Patrol — much cheaper reviews
+
+- **Native `codex review` reviewer**: patrol PRs are now reviewed by codex's single-pass `codex review` instead of the multi-persona `ce-code-review` fan-out — far cheaper per review, via a new `kind: codex_review` reviewer. Human PRs keep the full `ce-code-review`.
+- The `hive init` patrol default stays **medium** (the commit-driven `low` mode is costlier on high-velocity repos).
+
+### Telegram bot
+
+- The bot now **confirms successful actions**, not just failures — the daemon→bot channel relays all completions, and a misleading "exit 0" diagnosis on an empty result is fixed.
+
+### TUI
+
+- New **scrollable, word-wrapping help overlay**, including mouse-wheel scrolling.
+
+### Daemon
+
+- Fixed: a task whose finalize errored on an **already-merged PR** now archives cleanly instead of getting stuck.
+
+### Safety & CLI hardening
+
+- Fixed: leading `--json=true/1/yes` no longer leaks option values as commands or targets — unified JSON-flag normalization + rejection across `hive` and `hive-e2e`.
+- Fixed: `hive-e2e` no longer dispatches successful commands twice, and no longer emits duplicate JSON documents.
+- Fixed: the patrol/babysitter **dry-run git stub** now blocks `git grep -O`/pager abbreviations and short-option clusters, and `--textconv` / `cat-file --filters` external-command seams (with hardened, hermetic git passthrough).
+- Fixed: `hive-eval` honors the scenario-root override.
+
+### Docs & website
+
+- New public website — **[hivecli.sh](https://hivecli.sh)**: an outcome-first landing page, curated docs, and AI-native `llms.txt` / per-page markdown. The README now links to it.
+
+### Packaging & internals
+
+- Bumped `sqlite3` 2.9.4 → 2.9.5.
+- GitHub Release notes are now pulled from the matching `CHANGELOG.md` section.
+- Hardened two flaky subprocess-timing tests (the `hv` recursion guard and a tmux pane-capture test).
+
 ## 0.2.0
 
 A big release: smarter and cheaper autonomous **patrol**, a new PR-repair **babysitter**, a richer **Telegram bot**, and a much more resilient **daemon** — plus a wave of reliability/tmux and safety fixes.

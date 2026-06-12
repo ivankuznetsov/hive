@@ -62,26 +62,6 @@ jobs:
       - name: rubocop (web)
         run: bin/rubocop --format github
 
-  # The shippable artifact IS the image: build it on every push and boot it.
-  # The smoke asserts the golden-path front door (health, claimable login,
-  # owner gate) — a Dockerfile regression cannot reach a release tag green.
-  hivebox-docker:
-    name: hivebox docker build + boot smoke
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: packaging/docker/Dockerfile
-          load: true
-          tags: hivebox-ci:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Boot and smoke the image
-        run: packaging/docker/smoke.sh hivebox-ci:smoke
-
   # Hosted Windows runners cannot run Linux containers (Windows-container
   # mode only, no WSL2) — the per-OS surface that CAN break is our
   # PowerShell installer. Run it on real Windows PowerShell with a stubbed

@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-06-07
+updated: 2026-06-11
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -35,10 +35,12 @@ Hive ships as the `hive-cli` rubygem attached to each GitHub Release,
 signed with cosign keyless attestation. All channels download the same `.gem`,
 verify the signature, run `gem install` against it, and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
-Runtime deps (bubbletea, lipgloss, thor, telegram-bot-ruby) come from
-rubygems.org with precompiled platform binaries. The managed llm-wiki indexer,
-QMD, is installed separately through npm into Hive's data prefix when npm is
-available; Hive does not auto-install Node.js/npm itself.
+Runtime gem constraints live in `hive.gemspec` and resolve from rubygems.org:
+the direct set is `thor`, `telegram-bot-ruby`, `faraday`,
+`faraday-multipart`, `bubbletea`, `lipgloss`, `sqlite3`, and
+`unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
+separately through npm into Hive's data prefix when npm is available; Hive
+does not auto-install Node.js/npm itself.
 
 | Tier | Platforms | Status |
 |------|-----------|--------|
@@ -58,7 +60,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.3/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -183,8 +185,8 @@ the published schemas, and asserts no state leaks outside the prefix.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.2.0
-packaging/verify-release.sh --version=v0.2.0 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.2.3
+packaging/verify-release.sh --version=v0.2.3 --report=json | jq .ok
 ```
 
 Exit codes:

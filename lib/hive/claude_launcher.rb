@@ -527,10 +527,13 @@ module Hive
 
         return true if claude_ready_prompt?(last_tail)
 
-        if Hive::AgentLimit.limit_reached?(last_tail)
-          raise Hive::AgentError,
-                Hive::AgentLimit.error_message(last_tail, agent: "claude")
-        end
+        # Deliberately NO fail-fast limit check here: while claude is still
+        # painting its UI the pane legitimately contains banner/footer copy
+        # that can mention limits (the plan-inclusion promo classified every
+        # healthy launch as limits_reached). Readiness wins; only a session
+        # that NEVER becomes ready is classified by the post-timeout check
+        # below. Cost: a genuine wall takes the ready-wait timeout to
+        # surface instead of failing fast — correctness over speed.
 
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         break if remaining <= 0

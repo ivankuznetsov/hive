@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-06-06
+updated: 2026-06-11
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -30,7 +30,12 @@ patrol:
   review_prs: true    # default: enqueue each opened patrol PR into 6-review as "Patrol: ..."
   review:
     reviewers:
-      - name: codex-ce-code-review  # default patrol PR reviewer; Claude can be added during init
+      - name: codex-native-review  # default patrol PR reviewer: native codex review, no CE skill
+        kind: codex_review
+        agent: codex
+        output_basename: codex-native-review
+        prompt_template: reviewer_codex_native_review.md.erb
+        timeout_sec: 5400
   commands:
     test: bundle exec rake test
 ```
@@ -50,7 +55,7 @@ patrol:
 5. For each remaining finding (in order), create a dedicated `hive-patrol/...` worktree branch and run the fix agent. `max_prs_per_cycle` caps the number of PRs **opened** per scan, not the number of fix candidates: the loop keeps attempting candidates until that many PRs have actually opened, so a failed validation does not waste the budget on an otherwise-fixable later finding.
 6. Run configured validation commands in the fix worktree.
 7. Open a PR only when validation passed and the diff is not blocked by the secret scanner.
-8. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. Patrol tasks use `patrol.review.reviewers` instead of the normal `review.reviewers`; fresh projects default that list to Codex CE code review only, with Claude CE code review as an init-time option.
+8. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. Patrol tasks use `patrol.review.reviewers` instead of the normal `review.reviewers`; fresh projects default that list to `codex-native-review` (`kind: codex_review`), with Codex/Claude CE `ce-code-review` entries as init-time opt-ins.
 9. Update `.hive-state/patrol/state.json` with `last_run_at` and `last_scanned_sha`.
 
 `--dry-run` stops after map + review + candidate selection. It updates scan state but does not create fix worktrees, push branches, or open PRs.

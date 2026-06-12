@@ -33,6 +33,39 @@ class AgentLimitTest < Minitest::Test
            "an informational plan-inclusion notice must not read as a usage wall"
   end
 
+  # The promo footer persists for the WHOLE session, so this exact pane is
+  # what the mid-run sentinel poll sees on a healthy, working agent.
+  def test_does_not_classify_a_healthy_ready_pane_with_promo_footer
+    pane = <<~TEXT
+       ▐▛███▜▌   Claude Code v2.1.170
+      ▝▜█████▛▘  Fable 5 with high effort · Claude Max
+        ▘▘ ▝▝    /tmp/repos/some-project
+      ❯
+        project main ? ❯                              ● high · /effort
+       ▎ Included in your plan limits until Jun 22, then switch to usage credits to continue.
+    TEXT
+
+    refute Hive::AgentLimit.limit_reached?(pane),
+           "a ready pane with informational footer copy must never read as a wall"
+  end
+
+  def test_detects_the_real_menu_even_with_promo_footer_present
+    pane = <<~TEXT
+      ▎ Included in your plan limits until Jun 22, then switch to usage credits to continue.
+      What do you want to do?
+      ❯ 1. Stop and wait for limit to reset
+        2. Add funds to continue with usage credits
+    TEXT
+
+    assert Hive::AgentLimit.limit_reached?(pane),
+           "the genuine limit menu must be detected even alongside benign chrome"
+  end
+
+  def test_benign_status_hints_do_not_trip_detection
+    refute Hive::AgentLimit.limit_reached?("Run /status to see usage limits and account info")
+    refute Hive::AgentLimit.limit_reached?("Your usage limits reset on July 1")
+  end
+
   def test_detects_genuine_usage_credit_exhaustion
     assert Hive::AgentLimit.limit_reached?("You are out of usage credits."),
            "real credit exhaustion must still be detected"

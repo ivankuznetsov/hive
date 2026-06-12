@@ -48,6 +48,22 @@ overridable with your own device-flow-enabled app. To pre-pin ownership
 instead of first-login claiming, set `web.github.owner` in the bind-mounted
 `config.yml`.
 
+## Updating
+
+Each release publishes `ghcr.io/ivankuznetsov/hivebox:<version>` and moves
+`:latest`. A running box updates with:
+
+```sh
+docker pull ghcr.io/ivankuznetsov/hivebox:latest
+docker rm -f hivebox
+curl -fsSL https://hivecli.sh/box | sh   # or docker run with your usual flags
+```
+
+Everything that matters — ownership, agent logins, repos, pipeline state,
+session secret — lives on the `/data` mount and survives the container
+swap. Pin `HIVEBOX_IMAGE=ghcr.io/ivankuznetsov/hivebox:<version>` to stay
+on an exact version.
+
 Terminate TLS at a reverse proxy or tunnel such as Caddy, Cloudflare Tunnel,
 or Tailscale. hivebox serves plain HTTP inside the container, and live
 updates work on whatever origin you browse it at (Action Cable accepts

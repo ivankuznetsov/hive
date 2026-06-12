@@ -14,16 +14,27 @@ module Hive
     RETRY_COOLDOWN_SEC = 3600
     RETRY_COOLDOWN_ENV = "HIVE_LIMITS_RETRY_COOLDOWN_SEC".freeze
 
+    # Lines that merely MENTION limits without being a wall. Claude Code's
+    # chrome (banner, footer, hint bar) carries informational copy that
+    # changes between releases — e.g. the plan-inclusion promo "Included in
+    # your plan limits until Jun 22, then switch to usage credits to
+    # continue.", or hints like "/status to see usage limits". These lines
+    # persist in the pane for the WHOLE session, so matching them does not
+    # just break launches — it kills healthy mid-run sessions. They are
+    # filtered out line-by-line BEFORE the limit patterns run.
+    BENIGN_PATTERNS = [
+      /included in your plan/i,
+      /plan limits? until/i,
+      /to see usage limits?/i,
+      /usage limits? (?:reset|renew)s? (?:on|at|in)/i,
+      # Box-drawing / chrome-only lines can never be a limit sentence.
+      /\A[\s╭╮╰╯─│▐▛▜▝▘▎●❯>·]+\z/
+    ].freeze
+
     LIMIT_PATTERNS = [
       /stop and wait for limit to reset/i,
       /add funds to continue with usage credits/i,
       /switch to team plan/i,
-      # Deliberately NOT a bare /usage credits/i: Claude Code's startup
-      # banner shows an informational "Included in your plan limits until
-      # <date>, then switch to usage credits to continue." promo line to
-      # every subscriber — a bare match classified EVERY healthy launch as
-      # limits_reached. Genuine walls phrase an action or exhaustion around
-      # the words, covered by the patterns above and below.
       /(?:out of|no remaining|purchase(?:\s+more)?) usage credits/i,
       /insufficient[_\s-]*quota/i,
       /quota (?:exhausted|exceeded|reached)/i,
@@ -40,11 +51,23 @@ module Hive
 
     module_function
 
+    # Line-based with a benign filter, and biased toward false NEGATIVES:
+    # a missed wall degrades to a clean timeout marker the healer retries,
+    # while a false positive kills healthy sessions on every surface (the
+    # plan-inclusion banner did exactly that). Provider chrome copy changes
+    # without notice — never classify on text that can sit in a healthy
+    # pane; see BENIGN_PATTERNS and the launcher's readiness-wins ordering.
     def limit_reached?(text)
       normalized = normalize(text)
       return false if normalized.empty?
 
-      LIMIT_PATTERNS.any? { |pattern| normalized.match?(pattern) }
+      normalized.each_line.any? do |line|
+        stripped = line.strip
+        next false if stripped.empty?
+        next false if BENIGN_PATTERNS.any? { |pattern| stripped.match?(pattern) }
+
+        LIMIT_PATTERNS.any? { |pattern| stripped.match?(pattern) }
+      end
     end
 
     def error_message(text, agent: nil)

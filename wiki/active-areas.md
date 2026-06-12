@@ -3,7 +3,7 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-11
 tags: [roadmap, status]
 ---
 
@@ -13,18 +13,15 @@ tags: [roadmap, status]
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` replaces the dead `which` delegators. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 
-Recent history inspected on 2026-05-25:
+Recent release history inspected on 2026-06-11:
 
 | Commit | Area | Notes |
 |--------|------|-------|
-| `ea025846` | Daemon liveness | Propagates `live_task_lock` through `StatusConsumer`, `StaleAgentHealer`, and dispatcher capacity accounting so externally-running tasks count during the pre-Claude PID window. |
-| `0419b880` | Coverage | Restores strict 100% default coverage on current main and keeps CI explicit with `HIVE_COVERAGE_MIN_LINE=100`. |
-| `7e5989cd` | Runtime status/open-pr | Tightens marker parsing, live-lock status display, and merged-PR recovery `headRefOid` matching. |
-| `4b3d934d` | Token usage | Records and surfaces agent token usage through `UsageDB`, usage extractors, TUI footer, and token matrix. |
-| `3cd6ebc1` | Bot eval | Adds the opt-in Telegram bot evaluation harness under `test/eval/` and `bin/hive-eval`. |
-| `80d35a0a` | Claude launch mode | Adds project-global `claude.mode` and `Hive::ClaudeLauncher` for every Claude-backed stage. |
-
-Working tree at refresh time is intentionally not clean: uncommitted source edits add `claude.permission_mode` defaults, validation, `hive init` prompting, and propagation through `Hive::ClaudeLauncher`, `Hive::Agent`, reviewer spawns, rebase conflict spawns, and bot Codex conversations. Existing wiki edits already document part of that permission-mode surface; this refresh updates adjacent architecture/module pages.
+| `6b9f14bb` | Wiki refresh | Documents v0.2.3 release prep plus the Claude/tmux orphan-sweep contract across release, agent, brainstorm, testing, and gaps pages. |
+| `1c3baa8a` | Release | Tags v0.2.3 from `main`; the release prep commit sets `Hive::VERSION` and the lockfile path gem to `0.2.3` and points public Linux installer snippets at `v0.2.3`. |
+| `024b29b0` | Claude/tmux cleanup | Replaces blanket orphan-sweep `pkill -f` with `pgrep` plus per-PID `TERM`, skipping matched `tmux` server commands and logging killed/skipped rows. |
+| `903eb7dc` | Provider limits | Hardens Claude plan-inclusion banner handling so ordinary plan/usage copy no longer triggers `limits_reached`. |
+| `b2e568ba` | Patrol review cost | Adds the native `codex review` reviewer path for patrol PRs while keeping the fuller review path for human PRs. |
 
 ## What exists
 
@@ -38,7 +35,7 @@ Working tree at refresh time is intentionally not clean: uncommitted source edit
 | Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. `hive bot install` adds an opt-in reboot-survivable per-user service (systemd-user/launchd) that runs `hive bot start --foreground` with no inline token; torn down by `hive uninstall`. |
 | Shared service installer | `lib/hive/commands/service_installer/{base,outcome}.rb`, `lib/hive/commands/{daemon,bot}/service_installer.rb`, `schemas/hive-{bot,daemon}-install.v1.json`, `docs/solutions/…cross-platform-service-installer-base…` | `ServiceInstaller::Base` extracted from the daemon installer (daemon behavior byte-identical) and subclassed by daemon + bot, returning a `ServiceInstaller::Outcome` value object. Content-comparison drift detection (`--force` to overwrite), `unsupported` outcome on hosts with no service manager, exit codes 0/64/70, and a read-only `service_state` probe surfaced as `service_installed`/`service_enabled`/`unit_path` in both `bot`/`daemon status --json`. |
 | Testing and eval | `test/unit/`, `test/integration/`, `test/e2e/`, `test/eval/`, `Rakefile`, `bin/hive-eval` | Default `bundle exec rake test`; strict `bundle exec rake coverage`; opt-in e2e and Telegram bot eval layers. |
-| Release/install | `install.sh`, `install.md`, `packaging/`, `.github/workflows/install-smoke.yml` | v0.2.0 release prep is gem-based across Homebrew, AUR, and `install.sh`; update/uninstall, release artifact verification, daemon service install JSON envelopes, and remaining tag-trust/macOS x86_64 follow-ups are documented in [[operating]] and [[gaps]]. |
+| Release/install | `install.sh`, `install.md`, `packaging/`, `.github/workflows/install-smoke.yml` | v0.2.3 release prep is gem-based across Homebrew, AUR, and `install.sh`; the v0.2.3 hotfix release notes cover the Claude/tmux orphan-sweep fix, while update/uninstall, release artifact verification, daemon service install JSON envelopes, and remaining tag-trust/macOS x86_64 follow-ups are documented in [[operating]] and [[gaps]]. |
 | Docs/wiki | `README.md`, `docs/notes/`, `wiki/`, `.llm-wiki/` | Managed llm-wiki context is installed for Codex/Claude/Pi; refresh automation is Codex-owned by `.llm-wiki/config.json`. |
 
 ## Phase 1 deferred work

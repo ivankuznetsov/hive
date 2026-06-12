@@ -63,11 +63,12 @@ module Hive
           pr-review-toolkit
         ].freeze
         PATROL_REVIEWER_NAMES = %w[
+          codex-native-review
           codex-ce-code-review
           claude-ce-code-review
         ].freeze
         DEFAULT_PATROL_REVIEWER_NAMES = %w[
-          codex-ce-code-review
+          codex-native-review
         ].freeze
 
         # The effective budget/timeout keys after dropping the deprecated
@@ -216,7 +217,7 @@ module Hive
             "claude_effort=#{DEFAULT_CLAUDE_EFFORT}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
-            "patrol_reviewers=codex, " \
+            "patrol_reviewers=codex-native-review, " \
             "patrol_mode=#{DEFAULT_PATROL_MODE}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled, " \
             "babysitter=enabled, daemon_autostart=disabled"
@@ -397,7 +398,8 @@ module Hive
 
         def prompt_patrol_reviewers
           @output.puts ""
-          @output.puts "Patrol PR review agents — blank = codex only; add Claude for broader patrol PR review:"
+          @output.puts "Patrol PR review agents — blank = codex native review (single cheap pass); " \
+                       "add ce-code-review / Claude for broader patrol PR review:"
           PATROL_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
           loop do
             @output.print "  > "
@@ -416,7 +418,7 @@ module Hive
           resolve_reviewer_tokens_from(
             answer,
             choices: PATROL_REVIEWER_NAMES,
-            empty_message: "input had no patrol reviewer tokens; type a name/index list, or blank for codex only"
+            empty_message: "input had no patrol reviewer tokens; type a name/index list, or blank for codex native review"
           )
         end
 

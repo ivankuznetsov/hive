@@ -131,17 +131,25 @@ Each pending request is one JSON file:
 
 ```yaml
 schema: hive-dispatch-request
-schema_version: 1
+schema_version: 2
 request_id: <hex16>
 created_at: <UTC-ISO8601>
 project: <registered project name>
 slug: <task slug>
 argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer|...
+requestor: bot|healer
 chat_id:
 update_id:
 trigger:
 ```
+
+The current strict wire contract is `hive-dispatch-request.v2`: v2 adds the
+closed `requestor: healer` producer used by `StaleAgentHealer` while preserving
+`bot` for Telegram and hivebox web (web still writes through
+`Hive::Bot::DispatchRequestWriter`). The daemon rejects any file whose
+`schema_version` does not equal `DispatchRequestQueue::SCHEMA_VERSION` with
+`unknown_schema_version`; older schema files remain in `schemas/` for pinned
+validators, not for mixed-version live queue operation.
 
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,

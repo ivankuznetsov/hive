@@ -111,6 +111,11 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   Server-side, the polled `TasksController#log` path reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
+  The Diff route has the same bounded-subprocess discipline: it runs
+  `git diff --` in its own process group, enforces
+  `HIVEBOX_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
+  tempfile, and renders at most the first 512 KiB with an explicit truncation
+  notice.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry.
@@ -120,8 +125,12 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   notice when GitHub is unreachable or the grant was revoked). Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
-  failure or timeout the partial target is removed so retry starts clean. Every
-  registration runs a post-clone/post-existing-dir origin normalization pass:
+  failure or timeout the partial target is removed so retry starts clean. A
+  pre-existing directory is treated as a local checkout to re-init; a
+  pre-existing non-directory target (file/symlink/etc.) is a 422 refusal, and
+  `clone!` also refuses any existing target so its failure-path `rm_rf` only
+  deletes a partial clone it created. Every registration runs a
+  post-clone/post-existing-dir origin normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
   become `https://github.com/owner/repo.git`. The box can only push with
@@ -138,7 +147,9 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   `@userinfobot`, sending `/start` before the round-trip test, the
   no-webhook/long-polling model, and BotFather `/revoke` token rotation;
   getMe-validated token save, allowlist, supervisor SIGHUP, round-trip test
-  message.
+  message. Chat IDs are parsed with strict `Integer(..., exception: false)`
+  before any Telegram network call or config/env write: blank input and
+  handles such as `@mychannel` render 422 and persist nothing.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `TasksController#drop` → `Hive::Web::Dispatcher#drop` →
@@ -178,8 +189,9 @@ against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
-pins the Telegram first-run guide shape: open while unconfigured,
-BotFather/userinfobot links, and the three setup steps.
+pins the Telegram first-run guide shape and strict chat-ID validation, repo
+clone target refusal for non-directories, plain-vs-deep health semantics, and
+the oversized diff cap/truncation notice.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
@@ -209,7 +221,10 @@ secret. The image sets git's system credential helper for `https://github.com`
 to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
 credentials for repos under `/data/repos`. The supervisor still spawns
 `hive web --bind 0.0.0.0` — unchanged
-interface, now exec-ing Rails. The healthcheck hits the Rails `/health`.
+interface, now exec-ing Rails. Plain `/health` is unauthenticated web-tier
+liveness; the Docker `HEALTHCHECK` hits `/health?deep=1`, which also verifies
+the daemon pidfile through `Hive::PidFile` semantics and returns 503 when the
+daemon child is down or stale.
 `/data` remains the persistence boundary; the sqlite files for
 cable/cache/queue live under `/data/state/hive/web-storage`.
 

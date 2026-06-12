@@ -466,6 +466,27 @@ module Hive
                 claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
                 live_task_lock: !live_holder.nil?
               }
+            # A mid-scan stage-move (atomic rename of <stage>/<slug> out from
+            # under us) makes File.mtime(entry) at :433 raise ENOENT even though
+            # the :423 File.directory? guard already passed. We swallow that and
+            # `next`: the task resurfaces under its new stage in this same scan,
+            # and drop_transient_stage_moves prunes any stale duplicate.
+            #
+            # The `raise if File.directory?(entry)` re-check preserves the
+            # corrupted-but-present -> Error path. If the folder still exists at
+            # rescue time, the ENOENT came from genuine in-folder corruption
+            # (e.g. a state file removed mid-read), NOT a stage move, so we let
+            # it propagate (exit-70). This contract assumes EVERY state-file
+            # mutation is an atomic rename (see Markers.write_atomic): a future
+            # non-atomic writer could leave a surviving folder with a
+            # transiently-missing file and reintroduce a process-killing crash on
+            # this poll-heavy surface. Pinned by
+            # test_collect_rows_reraises_enoent_when_folder_survives.
+            #
+            # Only Errno::ENOENT is rescued: local same-device .hive-state
+            # renames always yield ENOENT. Other vanish errnos (ENOTDIR from a
+            # path component flipping to a file, ESTALE from an NFS handle) are
+            # deliberately NOT caught and propagate as exit-70.
             rescue Errno::ENOENT
               raise if File.directory?(entry)
 
@@ -480,6 +501,14 @@ module Hive
         Dir[File.join(stage_dir, "*")]
       end
 
+      # Prune the stale half of a stage-move duplicate: when one slug shows up in
+      # two stages because a rename landed mid-scan, drop the row whose folder no
+      # longer exists. The predicate keys on slug + folder existence, NOT task
+      # identity (inode / meta.yml id): a <stage>/<slug> path torn down and
+      # recreated by a *different* task inside one scan window could momentarily
+      # keep a row whose id/display_name no longer match the folder. That is
+      # astronomically narrow under atomic renames and self-heals on the next
+      # poll, so the slug-path identity assumption is intentional.
       def drop_transient_stage_moves(rows)
         duplicated_slugs = rows.group_by { |row| row[:slug] }.select { |_slug, group| group.size > 1 }
         return rows if duplicated_slugs.empty?

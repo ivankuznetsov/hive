@@ -30,17 +30,19 @@ tags: [config, yaml, validation]
   # nothing reads it and fresh `hive init` no longer renders it.
   "budget_usd" => {
     "brainstorm" => 50, "plan" => 100,
-    "execute_implementation" => 500, "open_pr" => 50, "finalize" => 50,
+    "execute_implementation" => 500, "open_pr" => 50, "artifacts" => 100,
+    "finalize" => 50,
     "review_ci" => 100, "review_triage" => 75,
-    "review_fix" => 500, "review_browser" => 100
+    "review_fix" => 500, "review_browser" => 100, "patrol" => 100
   },
   "timeout_sec" => {
     "brainstorm" => 1800, "plan" => 3600,
-    "execute_implementation" => 14400, "pr" => 1800,
+    "execute_implementation" => 14400, "open_pr" => 1800,
+    "artifacts" => 3600, "finalize" => 1800,
     "review_ci" => 3600, "review_triage" => 1800,
-    "review_fix" => 14400, "review_browser" => 3600
+    "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600
   },
-  # Stage-level agent for the three single-agent stages (ADR-023). 6-review
+  # Stage-level agent for single-agent stages (ADR-023). 6-review
   # keeps its own per-role agent fields under review.{ci,triage,fix,
   # browser_test}.agent. Runtime fallback is `cfg.dig("<stage>", "agent")
   # || "claude"` (see Hive::Stages::Base.stage_profile in
@@ -66,7 +68,7 @@ tags: [config, yaml, validation]
     "browser_test" => { "enabled" => false, "agent" => "claude",
                         "prompt_template" => "browser_test_prompt.md.erb", "max_attempts" => 2 },
     "max_passes"        => 2,
-    "max_wall_clock_sec" => 5400
+    "max_wall_clock_sec" => 14400
   },
   "babysitter" => {
     "enabled" => false,
@@ -94,7 +96,7 @@ tags: [config, yaml, validation]
     "review" => {
       "max_context_files" => 24,
       "max_owned_files" => 12,
-      "reviewers" => [ { "name" => "codex-ce-code-review", "agent" => "codex", ... } ]
+      "reviewers" => [ { "name" => "codex-native-review", "kind" => "codex_review", "agent" => "codex", ... } ]
     }
   },
   "bot" => {
@@ -116,7 +118,7 @@ tags: [config, yaml, validation]
 }
 ```
 
-`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the narrower patrol list, Codex CE code review only; fresh init can optionally add Claude CE code review for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
+`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
 **Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt* (which writes the chosen mode — `medium` unless overridden — into `templates/project_config.yml.erb`), **never** a config-resolution default — the `DEFAULT_PATROL_MODE` constant (`"medium"`) exists solely for that prompt. `medium`'s steady `timer`/4h cadence is the default because `low`'s `new_commits` trigger fires on **every** commit, which is costlier on a high-velocity repo than a 4h timer; with the cheap native codex-review reviewer the per-cycle review cost is low, so cadence dominates and `medium` wins. The explicit modes are `ultrapatrol` (`trigger: timer`, `poll_interval_sec: 1800`, `enabled: true`), `high` (`timer`, `7200`, `true`), `medium` (`timer`, `14400`, `true`), `low` (`new_commits`, `enabled: true`, leaving the baseline `poll_interval_sec: 600` SHA-check cadence), and `off` (`enabled: false`). The mode never changes `max_findings_per_feature`, `max_prs_per_cycle`, or `min_confidence_to_fix`. Explicit granular knobs (e.g. an explicit `enabled: true` with no `mode:`) always win over a set mode and survive the deep-merge, so legacy configs that carry `enabled`, `trigger`, and `poll_interval_sec` keep those values until the owner replaces them with the single mode key.
 
@@ -201,7 +203,7 @@ effort choices.
 
 `agents.<name>.{bin, env_override, min_version}` in per-project config now actually take effect (LFG-5). `Hive::AgentProfiles.lookup(name, cfg: cfg)` overlays `cfg.dig("agents", name)` onto the registry profile via `AgentProfile#with_overrides`, returning a new frozen profile. Unknown override keys raise `Hive::ConfigError`. Every spawn site in `lib/hive/stages/review.rb`, `review/ci_fix.rb`, `review/triage.rb`, `review/browser_test.rb`, and `reviewers/agent.rb` threads `cfg` into the lookup. Legacy callers passing `cfg: nil` get the registry profile unchanged.
 
-`timeout_sec.review_ci` (default 600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
+`timeout_sec.review_ci` (default 3600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
 
 ## Stage runners reach into config like this
 

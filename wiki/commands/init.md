@@ -80,7 +80,7 @@ Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g
 The prompt's choice list is rendered in a documented stable order:
 - **Agent profiles**: `claude`, `codex`, `pi` — the order in which `lib/hive/agent_profiles.rb` requires them at boot. `Hive::AgentProfiles.registered_names` returns them in this order.
 - **Default reviewers**: `claude-ce-code-review`, `codex-ce-code-review`, `pr-review-toolkit` — the order shipped in `templates/project_config.yml.erb` and surfaced via `Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES`.
-- **Patrol reviewers**: `codex-ce-code-review`, `claude-ce-code-review` — Codex is the default; Claude is the only optional patrol reviewer.
+- **Patrol reviewers**: `codex-native-review`, `codex-ce-code-review`, `claude-ce-code-review` — native Codex review is index 1 and the blank/default; the CE reviewers are optional broader patrol reviewers.
 
 Reordering either is a **breaking change for scripted automation** that uses index answers — index `1` would silently shift to a different value. Prefer names in scripts.
 

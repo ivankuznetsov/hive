@@ -2,6 +2,28 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.0
+
+Hive in a box: one Docker container with a web UI — drop ideas from any browser and get reviewed PRs. First release that publishes the `ghcr.io/ivankuznetsov/hivebox` image.
+
+### hivebox (alpha)
+
+- **One-command install**: `curl -fsSL hivecli.sh/box.sh | sh` (Windows: `box.ps1`). Runs hive + a Rails web UI in a single container; all state (agent logins, config, repos, ownership) lives in a bind-mounted data dir, so the container is disposable and updating is pull + recreate. Image is multi-arch (amd64/arm64), published per release after a pre-push boot smoke, with an arm64/macOS (colima) smoke job.
+- **Web UI**: idea composer with image attachments, live task grid (Turbo morph push updates — no reload flicker, scroll position preserved), task pages with artifacts/live log/diff, brainstorm Q&A answering, Approve / Diff / Drop / Recover actions, Repos page (clone via gh + the full `hive init` questionnaire), Agents page (claude/codex/gh logins), Telegram setup with real getMe validation and a test-message round trip (plus `/start` now replies and the bot ships a command menu).
+- **Sign-in**: GitHub OAuth **device flow** — no client secret, no callback URL. An unclaimed box is claimed by the first successful login (taken under the config lock); everyone else is refused. Install scripts and compose/README examples bind 127.0.0.1 until ownership is pinned. The GitHub token stays in the session only — never persisted.
+- **Ops**: container healthcheck hits `/health?deep=1` and fails when the daemon child is down; log tails and diffs are byte-capped with timeouts; clones run with a deadline and clean up only what they created; registered repos get ssh→https origin rewrite so the headless daemon can push.
+
+### Pipeline
+
+- **Claude session-limit wall** ("You've hit your session limit · resets …") now classifies as `limits_reached` with a retry-after marker the daemon heals automatically, instead of stranding the task as a plain error; the healthy-pane "Approaching session limit" warning is explicitly benign.
+- **Stale-agent healer** re-enqueues a plan rerun through the dispatch queue for every 3-plan heal (including limits), instead of leaving an unhealable empty plan.
+- **Schemas**: `hive-dispatch-request` v2 (requestor enum gains `healer`), `hive-drop` v2; a schema-identity test pins filename ↔ `$id` ↔ title ↔ `SCHEMA_VERSIONS` for every exported schema.
+
+### CI
+
+- Golden-path E2E: the full idea→PR pipeline runs in CI against a staged agent, through the real web UI, daemon, and git worktrees.
+- Windows PowerShell installer harness; release workflow builds, smokes, and publishes the hivebox image.
+
 ## 0.2.4
 
 Hive-launched claude sessions stop silently billing the operator's interactive model.

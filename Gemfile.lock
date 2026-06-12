@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    hive-cli (0.2.4)
+    hive-cli (0.3.0)
       bubbletea (= 0.1.4)
       faraday (>= 2.14.2, < 3.0)
       faraday-multipart (~> 1.0)

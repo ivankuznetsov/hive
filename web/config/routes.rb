@@ -39,11 +39,11 @@ Rails.application.routes.draw do
 
   get  "agents" => "agents#index", as: :agents
   post "agents/:agent/login" => "agents#start_login", as: :agent_login,
-       constraints: { agent: /claude|codex/ }
+       constraints: { agent: /claude|codex|gh/ }
   get  "agents/:agent/login/:session_id" => "agents#login_status", as: :agent_login_status,
-       constraints: { agent: /claude|codex/ }
+       constraints: { agent: /claude|codex|gh/ }
   post "agents/:agent/login/:session_id/complete" => "agents#complete_login", as: :agent_login_complete,
-       constraints: { agent: /claude|codex/ }
+       constraints: { agent: /claude|codex|gh/ }
   post "agents/pi_token" => "agents#save_pi_token", as: :agent_pi_token
 
   get  "telegram" => "telegram#show", as: :telegram

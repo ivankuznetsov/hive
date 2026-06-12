@@ -40,8 +40,17 @@ module Hive
         @http = http
       end
 
+      # Sign-in needs only a client_id to START — an unset owner means the
+      # box is CLAIMABLE: the first successful device-flow login writes
+      # itself in as owner (Home Assistant's first-user-is-admin pattern;
+      # see SessionsController#admit!). The mother-grade install path has
+      # no config.yml editing step.
       def configured?
-        !client_id.to_s.empty? && !owner.to_s.empty?
+        !client_id.to_s.empty?
+      end
+
+      def claimable?
+        owner.to_s.strip.empty?
       end
 
       # Begin a device authorization. Returns the GitHub payload Hash:

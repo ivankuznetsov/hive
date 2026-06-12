@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-09
+updated: 2026-06-12
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -39,6 +39,7 @@ hive bot install [--force] [--json]
 
 | Slash command | Behavior |
 |--------------|----------|
+| `/start` | Telegram's automatic first-contact command. Replies with a short "Connected" welcome and concrete next steps (`/status`, `/idea`, `/help`) instead of falling through to the unknown-command hint. It does not dispatch workflow state. |
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
@@ -47,7 +48,7 @@ hive bot install [--force] [--json]
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
 | `/details <slug>` | Dispatches `hive status --diagnose <slug> --project <project> --stage <stage> --json` — same payload as the inline "Show details" button. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
-| `/help` | Lists the supported command set. |
+| `/help` | Lists the typeable workflow command set. |
 
 Free text outside an active answer conversation is rejected with a
 `/help` hint unless it is a reply-to reattach message whose quoted text
@@ -142,7 +143,9 @@ command list does not change with config. A network failure during
 registration is logged as `:send_failure` with
 `source: "set_my_commands"` and does not block `poll_loop` from
 starting. The command list and descriptions live in
-`Hive::Bot::Supervisor::BOT_COMMANDS`.
+`Hive::Bot::Supervisor::BOT_COMMANDS`. `/start` is handled separately by
+the router for Telegram's first-contact update and is not part of that
+registered quick-actions menu.
 
 ## Inline actions
 

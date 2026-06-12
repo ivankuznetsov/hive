@@ -27,6 +27,32 @@ class AgentsAuthLoginTest < Minitest::Test
     FileUtils.chmod(0o755, path)
   end
 
+  def install_fake_gh(bin_dir)
+    path = File.join(bin_dir, "gh")
+    File.write(path, <<~SH)
+      #!/usr/bin/env bash
+      # Mimic `gh auth login --web`: one-time code travels operator-ward,
+      # then the CLI blocks on a bare Enter before polling GitHub.
+      echo "! First copy your one-time code: ABCD-1234"
+      echo "Press Enter to open https://github.com/login/device in your browser..."
+      read -r _
+      echo "Logged in as tester"
+      exit 0
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
+  def with_fake_gh
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      install_fake_gh(bin_dir)
+      with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        yield
+      end
+    end
+  end
+
   # Explicit wait (no fixed sleep): poll until the block is truthy or raise.
   def wait_until(timeout: 5.0)
     deadline = monotonic + timeout
@@ -51,6 +77,25 @@ class AgentsAuthLoginTest < Minitest::Test
       with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
         yield
       end
+    end
+  end
+
+  def test_gh_login_auto_answers_the_press_enter_prompt
+    with_fake_gh do
+      auth = Hive::Web::AgentsAuth.new
+      session = auth.start("gh")
+
+      url = wait_until { auth.session(session.id).url }
+      assert_match %r{github\.com/login/device}, url,
+                   "the device URL must surface so the operator can open it on a phone"
+
+      # NO complete() call: the relay must answer gh's bare-Enter prompt
+      # itself — the one-time code travels operator-ward, nothing pastes back.
+      wait_until { auth.session(session.id).done }
+      assert_nil auth.session(session.id).error
+      assert_includes auth.output_for(session.id), "ABCD-1234",
+                      "the one-time code must reach the relayed output"
+      assert_includes auth.output_for(session.id), "Logged in as tester"
     end
   end
 

@@ -103,6 +103,48 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_match(/expired/i, response.body)
   end
 
+  test "a fresh box is claimed by its first successful login" do
+    configure_owner!(owner: "")
+    install_auth(login: "firstcomer")
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_redirected_to "/", "the first login claims an ownerless box"
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_equal "firstcomer", config.dig("web", "github", "owner"),
+                 "the claim must be persisted — it IS the box's auth gate from now on"
+
+    get "/"
+    assert_response :success, "the claimer is the owner; their session must work"
+  end
+
+  test "a claimed box refuses every later non-owner login" do
+    configure_owner!(owner: "")
+    install_auth(login: "firstcomer")
+    begin_device_flow
+    get "/auth/github/wait"
+    assert_redirected_to "/"
+
+    delete "/logout" rescue post "/logout"
+    install_auth(login: "secondcomer")
+    begin_device_flow
+    get "/auth/github/wait"
+
+    assert_response :forbidden
+    assert_match "not the configured owner", response.body,
+                 "claiming is once — a claimed box is gated exactly like a configured one"
+  end
+
+  test "the login page explains claiming on a fresh box" do
+    configure_owner!(owner: "")
+    get "/login"
+    assert_response :success
+    assert_match "first GitHub sign-in becomes its owner", response.body
+    assert_select "form[action='/auth/github']", 1,
+                  "the claim path must be one button, not a config-editing instruction"
+  end
+
   test "non-owner login is denied (U2)" do
     install_auth(login: "mallory")
     begin_device_flow

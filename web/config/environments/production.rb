@@ -91,8 +91,13 @@ Rails.application.configure do
   # Skip DNS rebinding protection for the default health check endpoint.
   # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
 
-  # Turbo Streams connect over Action Cable on the box's own origin, which
-  # is only known at deploy time (HIVEBOX_ORIGIN comes from web.origin in
-  # hive's config.yml via `hive web`).
+  # Turbo Streams connect over Action Cable. Same-origin-as-host covers the
+  # normal case with ZERO config — browse the box at any address and the
+  # Origin header matches the Host header (also true behind proxies that
+  # forward Host). web.origin → HIVEBOX_ORIGIN remains as an explicit
+  # additional allow for exotic setups where the two genuinely differ;
+  # without same-origin, an unset origin silently dropped every live
+  # update on any non-localhost URL — a trap on the install path.
+  config.action_cable.allow_same_origin_as_host = true
   config.action_cable.allowed_request_origins = [ ENV["HIVEBOX_ORIGIN"] ].compact
 end

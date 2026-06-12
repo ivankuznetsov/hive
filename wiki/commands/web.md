@@ -36,6 +36,10 @@ not package the Rails app (`test/unit/gemspec_test.rb` pins that).
 ## Auth
 
 GitHub **device flow** (RFC 8628, see [[decisions]] ADR-036), owner-only.
+An ownerless box is CLAIMABLE: the first successful device-flow login writes
+itself into `web.github.owner` (config-lock-guarded so concurrent first
+logins race safely; the claim is logged loudly) — the install path has no
+config-editing step.
 `POST /auth/github` starts the flow with scope `repo`; the wait page polls at
 GitHub's interval (one poll per render, `slow_down`-aware). On grant the app
 keeps the login AND the token in the encrypted Rails session — the token
@@ -78,10 +82,14 @@ GitHub.
   Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
   described cards in a bottom Advanced section, confirm-gated), per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
-  BrainstormAnswerWriter), artifacts rendered as sanitized markdown
+  BrainstormAnswerWriter; the forms are not `data-turbo-permanent`, and the
+  answers controller snapshots/restores typed text plus caret across morphs,
+  keyed by textarea name, so a new round can replace the old form without
+  carrying stale drafts forward), artifacts rendered as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
-  sanitized after; leading YAML front matter and HTML comments — i.e. stage
-  markers — dropped, GitHub-style). Artifact summaries are UI chrome:
+  sanitized after; leading YAML front matter and standalone
+  `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and
+  fenced examples of markers remain visible as escaped text). Artifact summaries are UI chrome:
   filename-style tabs in muted monospace, while rendered markdown bodies sit
   in a bordered document panel so the file label and document headings do not
   visually compete. Open/closed choices survive pushed morphs (a Stimulus
@@ -110,7 +118,9 @@ GitHub.
   no keys and no agent for a headless daemon). The Docker image wires git's
   github.com https credential helper to `gh auth git-credential`.
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
-  meta-refresh; pi token form.
+  meta-refresh; pi token form. `gh` joins the relay (login supplies git push
+  credentials via the image's credential helper); its `--web` flow blocks on
+  a bare Enter rather than a paste-back code, which the relay auto-answers.
 - **Telegram** — first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
@@ -160,7 +170,8 @@ sanctioned JS exception), Turbo Stream live row arrival without reload, grid
 project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, both approve
-paths (typed refusal page + confirmed force), log-tail
+paths (typed refusal page + confirmed force), Q&A round replacement without a
+lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, and artifact
 open-state preservation across pushed morphs with live content refresh. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own

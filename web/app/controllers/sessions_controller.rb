@@ -19,11 +19,12 @@ class SessionsController < ApplicationController
     # Surface a misconfigured box on the page itself — a sign-in button that
     # errors only after the click is a broken first-run.
     @configured = github_auth.configured?
+    @claimable = @configured && github_auth.claimable?
   end
 
   def create
     auth = github_auth
-    raise Hive::Error, "GitHub sign-in is not configured: set web.github.owner in config.yml" unless auth.configured?
+    raise Hive::Error, "GitHub sign-in is not configured: web.github.client_id is empty" unless auth.configured?
 
     device = auth.start_device_flow(scope: DEVICE_SCOPE)
     now = Time.now.to_i
@@ -97,6 +98,7 @@ class SessionsController < ApplicationController
 
   def admit!(result)
     login = result[:login]
+    claim_ownership!(login) if github_auth.claimable?
     unless github_auth.owner?(login)
       return render "errors/show", status: :forbidden,
                     locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
@@ -108,6 +110,26 @@ class SessionsController < ApplicationController
     session[:github_login] = login
     session[:github_token] = result[:token]
     redirect_to root_path
+  end
+
+  # First successful login on an ownerless box claims it (the install path
+  # has no config-editing step). The re-check inside the config lock closes
+  # the race where two browsers finish the device flow simultaneously —
+  # exactly one login wins; the loser falls through to the owner? 403.
+  # Claiming is loud: it is the box's single most security-relevant event.
+  def claim_ownership!(login)
+    claimed = Hive::Config.update_global_config! do |data|
+      web = (data["web"] ||= {})
+      github = (web["github"] ||= {})
+      if github["owner"].to_s.strip.empty?
+        github["owner"] = login
+        true
+      else
+        false
+      end
+    end
+    Rails.logger.warn("hivebox CLAIMED by GitHub user #{login.inspect} — web.github.owner written") if claimed
+    @github_auth = nil # reload so owner? sees the claim
   end
 
   def github_auth

@@ -70,12 +70,15 @@ module AuthTestHelper
     follow_redirect! if response.redirect?
   end
 
+  # owner: "" writes a CLAIMABLE box (the key is omitted — the config
+  # validator rejects empty strings; claimable means absent).
   def configure_owner!(owner: "alice")
     path = File.join(ENV["HIVE_HOME"], "config.yml")
     data = File.exist?(path) ? YAML.safe_load_file(path) : {}
     data ||= {}
-    data["web"] = { "origin" => "http://www.example.com",
-                    "github" => { "owner" => owner, "client_id" => "client" } }
+    github = { "client_id" => "client" }
+    github["owner"] = owner unless owner.to_s.strip.empty?
+    data["web"] = { "origin" => "http://www.example.com", "github" => github }
     File.write(path, data.to_yaml)
   end
 end

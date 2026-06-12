@@ -3,7 +3,7 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, lib/hive/web/dispatcher.rb, web/app/controllers/tasks_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [command, task, cleanup, json, tui, web]
 ---
 

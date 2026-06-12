@@ -1,6 +1,27 @@
 # hivebox Docker
 
-Build and run locally:
+## Install (golden path)
+
+One command on any machine with Docker:
+
+```sh
+curl -fsSL https://hivecli.sh/box | sh
+```
+
+(the script is `packaging/docker/install-box.sh`; it pulls
+`ghcr.io/ivankuznetsov/hivebox:latest`, starts the container with a
+persistent `~/hivebox-data` mount, and prints the URL). Then open
+http://localhost:4567 and click **Continue with GitHub** — you'll type a
+short code at github.com/login/device from any browser or phone. **The
+first sign-in claims the box as its owner**; every later login by anyone
+else is refused. No OAuth app, no client secret, no config files.
+
+First-run checklist, all in the UI: connect Claude (and Codex) on the
+Agents page, connect **gh** there too (it supplies git push credentials
+for the daemon), optionally connect Telegram, then add your first
+repository on the Repos page.
+
+Build and run from source instead:
 
 ```sh
 docker build -f packaging/docker/Dockerfile -t hivebox .
@@ -10,17 +31,19 @@ docker run --rm -p 4567:4567 -v "$PWD/hivebox-data:/data" hivebox
 `/data` is the box. It contains `$HOME`, Hive config/state/cache, agent auth
 directories, cloned repos under `/data/repos`, logs, and the generated web
 session secret. Recreate the container against the same bind mount to keep
-agent logins and project state.
+agent logins, ownership, and project state.
 
-Sign-in uses the GitHub OAuth **device flow**: set `web.github.owner` (your
-GitHub login) in the bind-mounted `config.yml`, click "Continue with GitHub",
-and enter the shown code at github.com/login/device from any browser. There is
-no callback URL and no client secret to configure; the default
-`web.github.client_id` is the shared hivebox OAuth app, overridable with your
-own device-flow-enabled app.
+Sign-in uses the GitHub OAuth **device flow** — no callback URL and no client
+secret; the default `web.github.client_id` is the shared hivebox OAuth app,
+overridable with your own device-flow-enabled app. To pre-pin ownership
+instead of first-login claiming, set `web.github.owner` in the bind-mounted
+`config.yml`.
 
-Terminate TLS at a reverse proxy or tunnel such as Caddy, Cloudflare Tunnel, or
-Tailscale. hivebox serves plain HTTP inside the container.
+Terminate TLS at a reverse proxy or tunnel such as Caddy, Cloudflare Tunnel,
+or Tailscale. hivebox serves plain HTTP inside the container, and live
+updates work on whatever origin you browse it at (Action Cable accepts
+same-origin-as-host; `web.origin` is only needed when origin and host
+genuinely differ).
 
 The supported operator surface is the authenticated web UI — a Rails 8 +
 Turbo app served by `hive web` inside the container (live status over Turbo

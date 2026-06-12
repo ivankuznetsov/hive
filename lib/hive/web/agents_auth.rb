@@ -24,7 +24,12 @@ module Hive
       URL_SETTLED_RE = %r{https?://[^\s<>"']+(?=\s)}.freeze
       AGENT_COMMANDS = {
         "claude" => %w[claude setup-token],
-        "codex" => %w[codex login]
+        "codex" => %w[codex login],
+        # gh is not a pipeline agent, but its login IS first-run setup: git's
+        # https credential helper reads it for every push the daemon makes.
+        # The flags pin the prompts away (host, protocol, no ssh key upload)
+        # so the relay only has to handle the device-code screen.
+        "gh" => %w[gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key]
       }.freeze
 
       # Hard ceiling on in-flight login attempts. Each holds a PTY (2 fds + a
@@ -43,6 +48,7 @@ module Hive
       COMPLETE_WAIT_SEC = 8
 
       Session = Struct.new(:id, :agent, :pid, :pgid, :io, :reader, :output, :url, :done, :error,
+                           :auto_continued,
                            keyword_init: true)
 
       def initialize
@@ -51,9 +57,17 @@ module Hive
       end
 
       def statuses
-        %w[claude codex pi].to_h do |agent|
+        agents = %w[claude codex pi].to_h do |agent|
           [ agent, { "logged_in" => Hive::AgentProfiles.logged_in?(agent) } ]
         end
+        # Not an agent profile, but part of the same first-run checklist:
+        # the daemon's pushes authenticate through gh's credential helper.
+        agents["gh"] = { "logged_in" => gh_logged_in? }
+        agents
+      end
+
+      def gh_logged_in?
+        system("gh", "auth", "status", out: File::NULL, err: File::NULL) ? true : false
       end
 
       def start(agent)
@@ -267,6 +281,19 @@ module Hive
 
           @mutex.synchronize do
             session.output << chunk
+            # gh's --web flow blocks on a bare Enter ("Press Enter to open
+            # https://github.com/login/device in your browser") before it
+            # starts polling — there is no code to paste BACK (the one-time
+            # code travels operator-ward). Answer the prompt for them.
+            if session.agent == "gh" && !session.auto_continued &&
+               session.output.include?("Press Enter")
+              session.auto_continued = true
+              begin
+                session.io.write("\n")
+              rescue IOError, Errno::EIO
+                # Child already exiting — the reader loop will surface it.
+              end
+            end
             next if settled # URL locked in — just relay from here on
 
             tail << chunk

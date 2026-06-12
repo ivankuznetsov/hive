@@ -9,6 +9,13 @@ tags: [dependencies, gems, runtime]
 
 **TLDR**: The `hive-cli` gem has eight direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
 
+`hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
+to pull those constraints into Bundler, then adds development/test-only
+tools. Commit `c7d8aa4f` changed the local path gem entry in
+`Gemfile.lock` from `hive-cli (0.2.3)` to `hive-cli (0.2.4)` to match
+`Hive::VERSION`; it did not change third-party gem constraints or
+resolved third-party versions.
+
 ## Runtime gems
 
 | Gem | Version | Purpose |

@@ -19,7 +19,9 @@ Recent release/dependency history inspected on 2026-06-12:
 |--------|------|-------|
 | `64b11b41` | Release | Prepares v0.3.0: sets `Hive::VERSION` and the lockfile path gem to `0.3.0`, points public Linux installer snippets at `v0.3.0`, and adds release notes for hivebox alpha, the first GHCR hivebox image release, session-limit healing, dispatch-request/drop schema v2, golden-path E2E, and Windows installer harness coverage. |
 | `2e307a19` | Dependency lockfile | Relocks the root bundle after the earlier `rack-test` manifest removal; root `Gemfile.lock` no longer lists `rack-test` as a resolved gem or top-level dependency. |
+| `416c8a9c` | Wiki refresh | Documents the patrol native `codex review` reviewer default and associated init/config/review page drift. |
 | `c7d8aa4f` | Release | Tags v0.2.4 from `main`; the release prep commit sets `Hive::VERSION` and the lockfile path gem to `0.2.4`, points public Linux installer snippets at `v0.2.4`, and adds release notes for `claude.model` / `claude.effort` pins. |
+| `d9f9887d` | Claude launch config | Adds project-global `claude.model` / `claude.effort` pins for both headless and tmux Hive-launched Claude sessions, with `hive init` prompts and schema/test coverage. |
 | `6b9f14bb` | Wiki refresh | Documents v0.2.3 release prep plus the Claude/tmux orphan-sweep contract across release, agent, brainstorm, testing, and gaps pages. |
 | `1c3baa8a` | Release | Tags v0.2.3 from `main`; the release prep commit sets `Hive::VERSION` and the lockfile path gem to `0.2.3` and points public Linux installer snippets at `v0.2.3`. |
 | `024b29b0` | Claude/tmux cleanup | Replaces blanket orphan-sweep `pkill -f` with `pgrep` plus per-PID `TERM`, skipping matched `tmux` server commands and logging killed/skipped rows. |

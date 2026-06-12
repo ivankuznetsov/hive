@@ -14,7 +14,9 @@ $Data  = if ($env:HIVEBOX_DATA)  { $env:HIVEBOX_DATA }  else { Join-Path $HOME "
 $Bind  = if ($env:HIVEBOX_BIND)  { $env:HIVEBOX_BIND }  else { "127.0.0.1" }
 
 function Fail($Message) {
-    Write-Error "hivebox install: $Message"
+    # Write-Host, not Write-Error: error records emitted while `exit`
+    # unwinds are droppable by the host and invisible to file/pipe capture.
+    Write-Host "hivebox install: $Message"
     exit 1
 }
 

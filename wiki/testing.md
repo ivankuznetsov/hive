@@ -131,7 +131,7 @@ command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, replay path safety, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle for daemon subprocesses, and explicitly runs `web/test/e2e/golden_path_e2e.rb`.
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle for daemon subprocesses, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
 
 The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
 boots a fresh container on a random host port, polls `/health`, asserts the
@@ -141,10 +141,14 @@ runs that smoke on Linux for every push/PR; `.github/workflows/release.yml`
 runs the same smoke against the amd64 image before any GHCR push, then pulls
 the published arm64 image on `macos-15` under Colima and smokes it again. The
 Windows CI surface is `packaging/docker/test-install-box.ps1`: real PowerShell
-syntax and `$LASTEXITCODE` behavior with a stubbed Docker CLI for
-missing-Docker diagnostics, happy-path pull/run argv including the default
-`127.0.0.1:4567:4567` bind, and existing-container refusal. These tests do not exercise real GitHub, Claude, Codex, or Telegram
-provider credentials inside a running box.
+syntax, `$LASTEXITCODE` behavior, and failure-output capture with a stubbed
+Docker CLI for missing-Docker diagnostics, happy-path pull/run argv including
+the default `127.0.0.1:4567:4567` bind, and existing-container refusal. The
+harness invokes `install-box.ps1` inside child `pwsh` and redirects all streams
+to a temp file that the parent reads after exit, because `exit` inside the
+installer tears down piped capture before `Out-String` flushes on failure paths.
+These tests do not exercise real GitHub, Claude, Codex, or Telegram provider
+credentials inside a running box.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
@@ -226,7 +230,10 @@ stage-aware fake claude (`web/test/e2e/support/claude`, keyed on cwd
 because a daemon launches every stage with the same binary), the Q&A
 answered in the browser, ending at the network-free boundary "Ready to
 open PR" with a real commit in a real worktree. Failure artifacts (daemon
-event log, task files, agent logs) land in `/tmp/golden-e2e-debug`. The
+event log, daemon stdout, daemon PID liveness, HIVE_HOME log inventory,
+task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
+The daemon is preflighted with the exact spawn env via `bin/hive --version`
+before `Process.spawn`, so CI boot failures surface synchronously. The
 Telegram leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now
 asserts the /start welcome ahead of the idea flow.
 

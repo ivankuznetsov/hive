@@ -224,8 +224,14 @@ class GoldenPathE2E < ApplicationSystemTestCase
       # would land them in the operator's real ~/Dev.
       "HIVE_WORKTREE_BASE" => File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees"),
       "PATH" => "#{SUPPORT}:#{ENV["PATH"]}",
-      # The web app's bundler env must not leak into the gem's process.
+      # The web app's bundler env must not leak into the gem's process —
+      # on CI, ruby/setup-ruby exports BUNDLE_PATH pointing at web/vendor,
+      # which makes the ROOT bundle's gems "not found". nil DELETES the
+      # inherited key; GOLDEN_E2E_BUNDLE_PATH lets CI point at wherever it
+      # installed the root bundle.
       "BUNDLE_GEMFILE" => File.join(REPO_ROOT, "Gemfile"),
+      "BUNDLE_PATH" => ENV["GOLDEN_E2E_BUNDLE_PATH"],
+      "BUNDLE_APP_CONFIG" => nil, "BUNDLE_DEPLOYMENT" => nil, "BUNDLE_FROZEN" => nil,
       "RUBYOPT" => nil, "RUBYLIB" => nil
     }
     # Fail fast with the REAL error: on CI a broken spawn env produced a

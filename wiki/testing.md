@@ -130,13 +130,20 @@ command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, replay path safety, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job.
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle for daemon subprocesses, and explicitly runs `web/test/e2e/golden_path_e2e.rb`.
 
-The opt-in Dockerized hivebox smoke covers the packaged web surface. It skips unless `HIVEBOX_URL` is set, checks
-that a fresh box redirects to `/login` and shows the GitHub login link, and
-leaves the authenticated setup surface assertions skipped because real GitHub,
-Claude, Codex, and Telegram provider screens/tokens are intentionally not
-stubbed.
+The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
+boots a fresh container on a random host port, polls `/health`, asserts the
+ownerless `/login` page is claimable, and verifies unauthenticated `/` is
+owner-gated with a 302. `.github/workflows/ci.yml` builds a local image and
+runs that smoke on Linux for every push/PR; `.github/workflows/release.yml`
+runs the same smoke against the amd64 image before any GHCR push, then pulls
+the published arm64 image on `macos-15` under Colima and smokes it again. The
+Windows CI surface is `packaging/docker/test-install-box.ps1`: real PowerShell
+syntax and `$LASTEXITCODE` behavior with a stubbed Docker CLI for
+missing-Docker diagnostics, happy-path pull/run argv, and existing-container
+refusal. These tests do not exercise real GitHub, Claude, Codex, or Telegram
+provider credentials inside a running box.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 

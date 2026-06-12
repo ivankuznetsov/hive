@@ -203,7 +203,15 @@ claim reminder. The PowerShell variant uses Docker Desktop-oriented diagnostics
 and avoids requiring `sh` or Git Bash volume-path translation.
 `.github/workflows/release.yml` publishes the matching multi-arch GHCR image as
 `ghcr.io/<owner>/hivebox:<version>` and `ghcr.io/<owner>/hivebox:latest` after
-`release-finalize` succeeds.
+`release-finalize` succeeds. Image publishing is smoke-gated by
+`packaging/docker/smoke.sh`: CI builds a local Linux image and boots it; the
+release job boots the amd64 image before pushing tags; and a post-publish
+`macos-15` job pulls the arm64 registry image under Colima to verify the
+Docker-on-Mac layer. The smoke is intentionally front-door only (`/health`,
+claimable `/login`, owner-gated `/`). The Windows workflow cannot run Linux
+containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
+`packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the
+installer's diagnostics and pull/run argv shape.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

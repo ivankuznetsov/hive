@@ -26,6 +26,10 @@ module ActiveSupport
       FileUtils.mkdir_p(dir)
       unless File.directory?(File.join(dir, ".git"))
         system("git", "init", "-q", dir, exception: true)
+        # Repo-level identity: CI runners have no global git user, and
+        # Init's bootstrap commits inside .hive-state need an author.
+        system("git", "-C", dir, "config", "user.email", "test@example.com", exception: true)
+        system("git", "-C", dir, "config", "user.name", "Hive Test", exception: true)
         File.write(File.join(dir, "README.md"), "# #{name}\n")
         system("git", "-C", dir, "add", ".", exception: true)
         system("git", "-C", dir, "-c", "user.email=test@example.com", "-c", "user.name=Test",

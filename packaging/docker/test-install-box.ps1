@@ -18,7 +18,9 @@ function Assert-Case($name, $ok, $detail) {
 
 function Invoke-Installer($extraPath, $stubLog) {
     $sysDirs = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
-    $psHome = Split-Path -Parent (Get-Command pwsh).Source
+    # $PSHOME, not Get-Command: with ErrorActionPreference=Stop a lookup
+    # miss is a terminating WriteError on hosted runners.
+    $psHome = $PSHOME
     $pathValue = if ($extraPath) { "$extraPath;$psHome;$sysDirs" } else { "$psHome;$sysDirs" }
     $out = & pwsh -NoProfile -Command "
         `$env:Path = '$pathValue'

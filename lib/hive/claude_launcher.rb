@@ -201,7 +201,8 @@ module Hive
           add_dirs: add_dirs,
           profile: profile,
           allowed_tools: allowed_tools,
-          permission_mode: permission_mode
+          permission_mode: permission_mode,
+          cli_flags: cfg ? Hive::Config.claude_cli_flags(cfg) : []
         )
         # (Re)establish the shared claude session. Reused as the handle's
         # `reestablish` closure so a reviewer that finds the session dead
@@ -427,7 +428,7 @@ module Hive
     end
 
     def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
-                        allowed_tools: DEFAULT_ALLOWED_TOOLS)
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS, cli_flags: [])
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
@@ -435,6 +436,10 @@ module Hive
       ]
       Array(add_dirs).each { |dir| command.concat([ "--add-dir", dir ]) }
       command.concat(profile.permission_flags(permission_mode))
+      # claude.model / claude.effort from config — without them every
+      # pipeline run inherits the operator's interactive default (often
+      # their most expensive model).
+      command.concat(Array(cli_flags))
       command.concat([
         "--allowedTools", allowed_tools,
         "--bin", profile.bin

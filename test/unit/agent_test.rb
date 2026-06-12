@@ -139,6 +139,20 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_cli_flags_ride_the_headless_argv
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "test",
+                              max_budget_usd: 1, timeout_sec: 5,
+                              cli_flags: [ "--model", "sonnet", "--effort", "medium" ])
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--model sonnet], cmd.each_cons(2).find { |a, _| a == "--model" },
+                   "config model pins must reach the headless claude argv"
+      assert_equal %w[--effort medium], cmd.each_cons(2).find { |a, _| a == "--effort" }
+    end
+  end
+
   def test_args_include_dangerous_flag_and_add_dir
     with_tmp_dir do |dir|
       task = make_task(dir)

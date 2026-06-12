@@ -552,6 +552,14 @@ module Hive
           @planning_agent = answers.fetch("planning_agent")
           @claude_mode = answers.fetch("claude_mode")
           @claude_permission_mode = answers.fetch("claude_permission_mode")
+          # Strict fetch like every other answer key (both the TTY prompts
+          # and the web InitSetup always supply them); blank model falls
+          # back to the tracking alias, and "default" effort renders as a
+          # commented hint — the launcher omits the flag for it anyway.
+          @claude_model = answers.fetch("claude_model")
+                                 .to_s.strip.then { |v| v.empty? ? Hive::Commands::Init::Prompts::DEFAULT_CLAUDE_MODEL : v }
+          @claude_effort = answers.fetch("claude_effort")
+                                  .to_s.strip.then { |v| v.empty? || v == "default" ? nil : v }
           @development_agent = answers.fetch("development_agent")
           @enabled_reviewers = answers.fetch("enabled_reviewers")
           @patrol_reviewers = answers.fetch("patrol_reviewers")
@@ -565,7 +573,8 @@ module Hive
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
-                    :planning_agent, :claude_mode, :claude_permission_mode, :development_agent,
+                    :planning_agent, :claude_mode, :claude_permission_mode,
+                    :claude_model, :claude_effort, :development_agent,
                     :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :budgets, :timeouts,
                     :daemon_enabled, :babysitter_enabled, :daemon_autostart
 

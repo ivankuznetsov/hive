@@ -14,7 +14,18 @@ module Hive
       "project_name" => nil,
       "claude" => {
         "mode" => "tmux",
-        "permission_mode" => "bypassPermissions"
+        "permission_mode" => "bypassPermissions",
+        # Model + reasoning effort for hive-launched claude sessions.
+        # "default" is a live Claude Code alias tracking ITS recommended
+        # model (Opus-class today) — no hardcoded model name, and pipeline
+        # runs stop inheriting the operator's interactive (often pricier)
+        # selection. "inherit" (or blank) omits the flag entirely. Any other
+        # value passes through verbatim — model aliases and effort tiers are
+        # Claude Code's vocabulary and change without notice.
+        "model" => "default",
+        # "default" omits --effort: the session keeps Claude Code's own
+        # default tier (high today).
+        "effort" => "default"
       },
       # Budget and timeout caps are GENEROUS sanity caps for runaway agents,
       # not cost targets. Most tasks finish well within them; a stuck loop
@@ -524,6 +535,21 @@ module Hive
       else
         raise ConfigError, "claude.mode must be one of #{CLAUDE_MODES.inspect}; got #{raw.inspect}"
       end
+    end
+
+    # argv fragment for hive-launched claude: ["--model", m, "--effort", e].
+    # Shared by the tmux wrapper and the headless Agent path. Semantics:
+    # model "inherit"/blank omits the flag (operator's interactive default
+    # applies); anything else — including the live alias "default" — passes
+    # through. effort "default"/"inherit"/blank omits the flag (Claude
+    # Code's own tier applies); low/medium/high pass through.
+    def claude_cli_flags(cfg)
+      flags = []
+      model = (cfg.dig("claude", "model") || DEFAULTS.dig("claude", "model")).to_s.strip
+      effort = (cfg.dig("claude", "effort") || DEFAULTS.dig("claude", "effort")).to_s.strip
+      flags.concat([ "--model", model ]) unless model.empty? || model == "inherit"
+      flags.concat([ "--effort", effort ]) unless effort.empty? || [ "default", "inherit" ].include?(effort)
+      flags
     end
 
     def claude_permission_mode(cfg)

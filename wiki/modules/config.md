@@ -176,6 +176,16 @@ language array is accepted and means "do not filter language". See
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 
+`claude.model` / `claude.effort` pin hive-launched claude sessions:
+`model: default` (the default) uses Claude Code's live alias for ITS
+recommended model — no hardcoded name, no inheriting the operator's
+interactive selection; `inherit` omits the flag; aliases/full names pass
+through. `effort: default` omits `--effort` (Claude Code's own tier);
+low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
+the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
+The init JSON envelope carries `claude_model` and `claude_effort` as
+required answer keys.
+
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 
 `describe_source(path)` annotates error messages with `"(defaults; no file present)"` when the candidate config file does not exist, so the user is pointed at the right path even when the failure comes from an injected reviewers list rather than a real file.

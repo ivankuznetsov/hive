@@ -423,7 +423,11 @@ module Hive
           warn_isolation_reduced(task, profile, add_dirs)
         end
 
-        permission_mode ||= Hive::Config.claude_permission_mode(cfg) if cfg && profile.name == :claude
+        cli_flags = []
+        if cfg && profile.name == :claude
+          permission_mode ||= Hive::Config.claude_permission_mode(cfg)
+          cli_flags = Hive::Config.claude_cli_flags(cfg)
+        end
 
         started_at = Time.now.utc.iso8601
         result = Hive::Agent.new(
@@ -437,7 +441,8 @@ module Hive
           profile: profile,
           expected_output: expected_output,
           status_mode: status_mode,
-          permission_mode: permission_mode
+          permission_mode: permission_mode,
+          cli_flags: cli_flags
         ).run!
         record_usage(task, profile, result, started_at)
         result

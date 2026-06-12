@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-06-07
+updated: 2026-06-11
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -48,13 +48,13 @@ Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceedin
 
 ## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)
 
-Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is launched with `Process.spawn(pgroup: true)` and its combined stdout+stderr is **streamed** through a reader thread with a 256 KB byte-cap applied during read (so a runaway CI cannot OOM the host before the cap kicks in). A per-process timeout from `cfg.timeout_sec.review_ci` (default 600s) bounds wall time: on expiry the pgid is TERM'd, given a 3s grace, then KILL'd, and the resulting `CommandError` falls through the existing `:error` path. On red exit, the captured log is ANSI-stripped, tail-truncated to the configured line cap, and fed to a fix agent through the per-spawn `<user_supplied>` nonce wrapper. Re-runs CI. Up to `review.ci.max_attempts` (default 3); cap reached → `:stale` → runner writes `reviews/ci-blocked.md` and sets `REVIEW_CI_STALE`. Reviewers do NOT run on red CI.
+Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is launched with `Process.spawn(pgroup: true)` and its combined stdout+stderr is **streamed** through a reader thread with a 256 KB byte-cap applied during read (so a runaway CI cannot OOM the host before the cap kicks in). A per-process timeout from `cfg.timeout_sec.review_ci` (default 3600s) bounds wall time: on expiry the pgid is TERM'd, given a 3s grace, then KILL'd, and the resulting `CommandError` falls through the existing `:error` path. On red exit, the captured log is ANSI-stripped, tail-truncated to the configured line cap, and fed to a fix agent through the per-spawn `<user_supplied>` nonce wrapper. Re-runs CI. Up to `review.ci.max_attempts` (default 3); cap reached → `:stale` → runner writes `reviews/ci-blocked.md` and sets `REVIEW_CI_STALE`. Reviewers do NOT run on red CI.
 
 `review.ci.command` is project-specific by design — hive doesn't ship a Rubocop/Brakeman driver because that would couple the orchestrator to one ecosystem. The user owns the contract; hive shells out and parses exit code + last-N lines.
 
-## Phase 2 — reviewers (`Hive::Reviewers::Agent`)
+## Phase 2 — reviewers (`Hive::Reviewers`)
 
-For each selected reviewer spec, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`. Normal tasks select specs from `cfg.review.reviewers`; synthetic patrol handoff tasks whose `task.md` frontmatter carries `source: patrol` select specs from `cfg.patrol.review.reviewers` instead, so patrol PRs can use the narrower Codex-only default without changing the normal feature-review policy. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists (probed via the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy the check), falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings. When `cfg.default_branch` is unset AND `Hive::GitOps#origin_default_branch` returns nil (no origin/HEAD symref and neither `origin/main` nor `origin/master` exist), review preflight refuses to fall back to the worktree's current branch (which in a `git worktree add` is the task branch — diffing the task against itself produces zero or phantom findings) and exits 1 with the two remediation paths named: set `default_branch` in `.hive-state/config.yml`, or run `git remote set-head origin --auto` so origin/HEAD points at the project default.
+For each selected reviewer spec, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run the selected adapter, and write `reviews/<output_basename>-<NN>.md`. `kind: "agent"` uses `Hive::Reviewers::Agent` and `Hive::Agent.run!` with the spec's profile; `kind: "codex_review"` uses `Hive::Reviewers::CodexReview`, which runs native `codex review --title <title> <prompt>` and captures valid High/Medium/Nit output into the findings file. Normal tasks select specs from `cfg.review.reviewers`; synthetic patrol handoff tasks whose `task.md` frontmatter carries `source: patrol` select specs from `cfg.patrol.review.reviewers` instead, so patrol PRs can use the cheap `codex-native-review` default without changing the normal feature-review policy. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists (probed via the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy the check), falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings. When `cfg.default_branch` is unset AND `Hive::GitOps#origin_default_branch` returns nil (no origin/HEAD symref and neither `origin/main` nor `origin/master` exist), review preflight refuses to fall back to the worktree's current branch (which in a `git worktree add` is the task branch — diffing the task against itself produces zero or phantom findings) and exits 1 with the two remediation paths named: set `default_branch` in `.hive-state/config.yml`, or run `git remote set-head origin --auto` so origin/HEAD points at the project default.
 
 The patrol selector is deliberately frontmatter-based and fail-soft:
 `reviewer_specs_for` reads YAML only when `task.md` starts with a
@@ -172,7 +172,7 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 - `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap.
 - `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` — phase-level unit coverage.
 - `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, and patrol-task selection of `patrol.review.reviewers`.
-- `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb` — adapter dispatch + agent-kind reviewer.
+- `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior.
 - `test/unit/metrics_test.rb`, `test/integration/metrics_command_test.rb` — `hive metrics rollback-rate` against trailered fixture commits.
 
 ## Backlinks

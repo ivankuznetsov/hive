@@ -18,7 +18,7 @@ import sys
 
 from telethon.sync import TelegramClient
 
-from _drive import drive, drive_voice, drive_voice_answer
+from _drive import drive, drive_start, drive_voice, drive_voice_answer
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]

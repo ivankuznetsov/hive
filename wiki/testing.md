@@ -181,7 +181,7 @@ Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtu
 
 Per the user's CLAUDE.md rule: never pass non-Ruby files to rubocop.
 
-## ## hivebox golden-path E2E
+## Hivebox Golden-Path E2E
 
 `web/test/e2e/golden_path_e2e.rb` (deliberately not `*_test.rb` — the
 default suites skip it; run `cd web && bin/rails test
@@ -197,7 +197,7 @@ event log, task files, agent logs) land in `/tmp/golden-e2e-debug`. The
 Telegram leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now
 asserts the /start welcome ahead of the idea flow.
 
-Backlinks
+## Backlinks
 
 - [[architecture]]
 - [[modules/agent]]

@@ -245,6 +245,19 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+      # Build-test-THEN-push: the amd64 image boots and passes the
+      # golden-path front-door smoke before any tag reaches the registry.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: hivebox-prepush:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke the image before publishing (linux/amd64)
+        run: packaging/docker/smoke.sh hivebox-prepush:smoke
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -256,6 +269,30 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/hivebox:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The mac experience is Docker Desktop running the SAME linux image — what
+  # can differ per-OS is the VM layer (bind mounts, port forwarding, arm64).
+  # Verify the published arm64 image on a real macOS arm host via colima
+  # (hosted runners have no Docker Desktop). Post-publish by necessity:
+  # multi-arch manifests only exist in the registry.
+  hivebox-smoke-macos:
+    name: hivebox image smoke (macOS arm64, colima)
+    runs-on: macos-15
+    needs: hivebox-image
+    permissions:
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install and start colima
+        run: |
+          brew install colima docker
+          colima start --cpu 2 --memory 4
+      - name: Log in to ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Smoke the published image (arm64 pulled native)
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          packaging/docker/smoke.sh "ghcr.io/${{ github.repository_owner }}/hivebox:${version}"
 
   aur-publish:
     name: Publish AUR hive-bin

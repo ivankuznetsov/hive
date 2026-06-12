@@ -19,7 +19,7 @@ module Hive
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
-                   permission_mode: nil)
+                   permission_mode: nil, cli_flags: [])
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -41,6 +41,7 @@ module Hive
       end
       @status_mode = status_mode
       @permission_mode = permission_mode
+      @cli_flags = Array(cli_flags)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -266,6 +267,8 @@ module Hive
       if @profile.budget_flag && @max_budget_usd
         cmd << @profile.budget_flag << @max_budget_usd.to_s
       end
+      # Per-run CLI extras (claude model/effort pins from config).
+      cmd.concat(@cli_flags)
       cmd.concat(@profile.output_format_flags)
       cmd << (prompt_via_stdin? ? "-" : @prompt)
       cmd

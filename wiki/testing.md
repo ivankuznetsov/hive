@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [test, minitest, fixtures]
 ---
 
@@ -65,10 +65,10 @@ task default: :test
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
 | `gh_test.rb` | `Hive::Gh` — PR frontmatter parsing, secret-scan fetch-failure semantics, open/merged PR lookup, `pr_state` success/error parsing, `PushResult`, subprocess timeout/termination, `mergeStateStatus` request shape for open PR listing, and failing-job log clipping. |
 | `agent_limit_test.rb` | `Hive::AgentLimit` — provider-limit classifier for Claude usage-credit menus and common quota/rate-limit API errors, with false-positive guards for source line numbers and ordinary "missing rate limit" findings. |
-| `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check, and provider-limit classification before generic exit-code / expected-output failures. |
+| `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check, configured Claude model/effort `cli_flags` reaching the headless argv, and provider-limit classification before generic exit-code / expected-output failures. |
 | `wiki_log_test.rb` | `Hive::WikiLog` — fragment sorting, generated-block idempotency, stale detection for compiled `wiki/log.md`, and dropping template prose that is not a real legacy `##` entry. |
 | `cli_test.rb` | `Hive::CLI` — command delegation and option threading for the Thor surface, including `hive generate-name` lookup scoping and internal archive recovery flags. |
-| `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers and expected-output waits, provider-limit menu classification, signal cleanup, and wrapper argv policy. |
+| `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers and expected-output waits, provider-limit menu classification, signal cleanup, and wrapper argv policy including model/effort pins. |
 | `stages/brainstorm_tmux_sentinel_test.rb` | Claude/tmux sentinel and cleanup behavior — readiness/sentinel delegation, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
 | `tmux_runner_test.rb` | `Hive::TmuxRunner` — detached session startup, environment propagation, prompt injection via tmux buffers, typed tmux failure/timeout classes, bounded pane-tail capture, PID lookup, idempotent teardown, and a lightweight fake-tmux timeout harness so setup commands cannot consume the timeout budget before the intentionally hanging `send-keys` call. |
@@ -88,7 +88,7 @@ task default: :test
 
 | File | Covers |
 |------|--------|
-| `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
+| `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
@@ -142,6 +142,11 @@ Run shape:
 - `hive new project "Dogfood..."`, then `hive brainstorm <slug> --project project --json`, launched real Claude through tmux and returned `marker_after: waiting`.
 - After filling `A1`, `hive brainstorm <slug> --from 2-brainstorm --project project --json` returned `marker_after: complete`.
 - `events.jsonl` recorded `round_waiting` then `round_complete`; `hive status --json` reported `marker: complete`, `action: ready_to_plan`, and `claude_pid: null`; both private tmux sockets were gone after cleanup.
+
+That smoke predates the 2026-06-12 `claude.model` / `claude.effort`
+argv pins, so it proves tmux-mode launch/cleanup but not the new
+`--model default` or `--effort <level>` behavior against a live Claude
+Code binary.
 
 ## Eval suite (`test/eval/`)
 

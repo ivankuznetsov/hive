@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [gap, todo]
 ---
 
@@ -20,8 +20,8 @@ tags: [gap, todo]
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
 | `lib/hive/tui/**` | ✓ [[commands/tui]], [[architecture]], and [[token-usage]] cover the MVU/TUI surfaces. |
-| `lib/hive/agent.rb`, `lib/hive/agent_limit.rb`, `lib/hive/claude_launcher.rb`, `lib/hive/agent_profile*.rb`, `lib/hive/agent_profiles/**` | ✓ [[modules/agent]], [[modules/agent_profile]], [[stages/index]], [[stages/brainstorm]], [[token-usage]] |
-| `lib/hive/config.rb`, `templates/project_config.yml.erb` | ✓ [[modules/config]], [[commands/init]], [[state-model]] |
+| `lib/hive/agent.rb`, `lib/hive/agent_limit.rb`, `lib/hive/claude_launcher.rb`, `lib/hive/scripts/interactive_claude_wrapper.sh`, `lib/hive/agent_profile*.rb`, `lib/hive/agent_profiles/**` | ✓ [[modules/agent]], [[modules/agent_profile]], [[stages/index]], [[stages/brainstorm]], [[token-usage]] |
+| `lib/hive/config.rb`, `templates/project_config.yml.erb` | ✓ [[modules/config]], [[commands/init]], [[state-model]] cover config defaults/validation plus init-rendered `claude.model` / `claude.effort` pins. |
 | `Gemfile`, `hive.gemspec`, `Gemfile.lock` | ✓ [[dependencies]] covers runtime gem constraints, development/test gems, Ruby/Bundler lockfile metadata, the local path gem version, and external CLI dependencies. |
 | `lib/hive/task_action.rb`, status/recovery helpers | ✓ [[modules/task_action]], [[commands/status]], [[modules/execute_waiting_action]], [[modules/diagnosis_agent]] |
 | `lib/hive/gh.rb` | ✓ [[modules/gh]] covers the shared GitHub CLI helper surface; [[dependencies]], stage pages, [[commands/stage_action]], and [[modules/babysitter]] cover its command-level consumers. |
@@ -30,7 +30,7 @@ tags: [gap, todo]
 | `openclaw/skills/hive/SKILL.md`, `openclaw/README.md` | ✓ [[commands]], [[operating]], and [[commands/wiki]] cover the single ClawHub `hive-cli` skill, `/hive` slash-command dispatch, guided setup, wiki changelog verification, and publish-shape constraints. |
 | `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e` | ✓ [[testing]] and [[e2e]] |
 
-Uncertainty: this table was refreshed manually from targeted source, dependency-manifest, and wiki reads on 2026-06-11. It verifies domain coverage, not exact one-to-one file coverage or installed release-bundle behavior. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
+Uncertainty: this table was refreshed manually from targeted source, dependency-manifest, and wiki reads on 2026-06-12. It verifies domain coverage, not exact one-to-one file coverage or installed release-bundle behavior. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 
 ## Open questions about the codebase
 
@@ -44,7 +44,7 @@ Uncertainty: this table was refreshed manually from targeted source, dependency-
 8. **R2 misdiagnosis artifact validation** — e2e artifacts exist, but the "fresh agent course-corrects from a wrong first diagnosis" case needs the first organic failure or a third-party synthetic failure.
 9. **Codex and Pi token usage payloads need real-stream refinement.** [[token-usage]] ships zero-fill extractors for missing or unrecognized usage payloads so hive-driven spawns still record rows, but the exact non-zero JSON shapes should be updated after one captured Codex and one captured Pi spawn.
 10. **`live_task_lock` daemon behavior is unit-pinned but not live-smoked.** PR #151 adds StatusConsumer parsing, stale-healer skips, and dispatcher capacity accounting for rows whose only liveness signal is a verified task `.lock`. Unit tests cover the contracts; no live daemon restart/rebase smoke artifact was found in-tree.
-11. **`claude.permission_mode` should be live-checked against current Claude Code.** Config, init prompts, tmux wrapper docs, and headless argv tests now cover the supported values, but there is no recorded live run proving every accepted mode still matches the installed Claude CLI's current behavior.
+11. **Claude launch flags should be live-checked against current Claude Code.** Config, init prompts/schema, tmux wrapper docs, and headless/tmux argv tests now cover `claude.permission_mode` plus the new `claude.model` / `claude.effort` pins. There is still no recorded live run proving every accepted permission mode, `--model default`, and explicit `--effort low|medium|high` still match the installed Claude CLI's current behavior.
 12. **Local git index health affected the 2026-06-01 wiki refresh.** `git status --short` failed with `fatal: unable to read 7afa1ea39e410defd0219acecd295e3108f5f93a`; `git ls-files -s` mapped that blob to `plugins/zoom/CONTRIBUTING.md`. The index also staged deletions for several wiki pages while the files still existed in the working tree. This refresh verified the committed docs change via `git show HEAD` and direct source reads, but a normal clean-tree check remains unresolved in this checkout.
 13. **PR #244 final verification remains before merge.** The 2026-06-03 repair adds focused coverage for queue claim sidecars, recovery-sequence continuations, and the unbounded timeout default, but the branch still needs its final focused test/rubocop pass, `/ce-code-review`, and hosted CI before merge.
 14. **`Markers.current` can mis-read example markers embedded in a tmux-pane-capture `task.md`.** `MARKER_RE` in `lib/hive/markers.rb` scans the *entire* state file and `current` returns the *last* match (and `set` -> `replace_last_marker` rewrites the last match). In tmux-mode stages, `task.md` is a pane capture that includes the stage prompt, whose instructions contain literal example markers (e.g. ``the hive runner sets `<!-- REVIEW_COMPLETE pass=1 browser=skipped -->` after...``). Normally the real terminal marker is appended after the capture, so `current` returns it. But the documented manual re-review recovery (`markers.rb:21` - "hand-edit `task.md` and delete the marker comment") removes that trailing marker, after which `current` falls back to an embedded *example* marker and mis-classifies the task - e.g. a reset 6-review task reads as `review_complete`, so the daemon dispatches `hive artifacts` (advance) instead of re-reviewing, and `hive run` short-circuits "already complete". Observed 2026-05-26 forcing a re-review on writero tasks; worked around by appending an authoritative `<!-- EXECUTE_COMPLETE -->` at EOF. Fix options: anchor markers to a sentinel region / dedicated trailing block, strip prompt bodies from the state file, or have `current`/`set` only honor markers outside fenced/quoted prompt content. See [[modules/markers]].

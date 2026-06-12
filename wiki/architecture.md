@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-12
 tags: [architecture, overview]
 ---
 
@@ -70,10 +70,21 @@ Inbox/Done are the two non-working stages: capture-only and archive-only.
 
 Headless agent spawns are profile-driven. `Hive::Agent#build_cmd`
 starts with the selected `AgentProfile` binary/headless flag, then adds
-profile-specific permission, add-dir, budget, and output-format flags.
-Claude, Codex, and Pi therefore share one subprocess wrapper while
-keeping their CLI-specific argv and status-detection contracts in
-`lib/hive/agent_profiles/`.
+profile-specific permission, add-dir, budget, per-run CLI extras, and
+output-format flags. Claude, Codex, and Pi therefore share one subprocess
+wrapper while keeping their CLI-specific argv and status-detection
+contracts in `lib/hive/agent_profiles/`.
+
+Claude-backed stages add one config-specific layer on top of the profile:
+`Hive::Config.claude_cli_flags(cfg)` turns `claude.model` and
+`claude.effort` into an argv fragment used by both headless
+`Hive::Agent` and tmux `Hive::ClaudeLauncher` sessions. Fresh projects
+default `claude.model` to `default`, so Hive passes Claude Code's live
+recommended-model alias instead of inheriting the operator's interactive
+selection. `model: inherit` (or blank) omits `--model`; aliases/full
+model names pass through. `effort: default`, `inherit`, or blank omits
+`--effort`; other explicit values pass through, with fresh init offering
+`low`, `medium`, and `high`.
 
 Fresh project setup separates reviewer policy by source. Normal feature
 PRs use `review.reviewers`, populated by `hive init` from the normal
@@ -90,6 +101,8 @@ claude -p
   --dangerously-skip-permissions
   [--add-dir <dir> ...]
   --max-budget-usd <stage_budget>
+  [--model <claude.model>]
+  [--effort <claude.effort>]
   --output-format stream-json
   --include-partial-messages
   --verbose

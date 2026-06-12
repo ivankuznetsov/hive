@@ -762,6 +762,32 @@ class ClaudeLauncherTest < Minitest::Test
     assert_match(/terminated before becoming ready/, err.message)
   end
 
+def test_wrapper_command_carries_model_and_effort_pins
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "bypassPermissions",
+      cli_flags: [ "--model", "sonnet", "--effort", "medium" ]
+    )
+
+    assert_equal %w[--model sonnet], command.each_cons(2).find { |a, _| a == "--model" },
+                 "the configured model pin must reach the wrapper argv"
+    assert_equal %w[--effort medium], command.each_cons(2).find { |a, _| a == "--effort" }
+  end
+
+  def test_wrapper_command_omits_pins_when_unconfigured
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "bypassPermissions"
+    )
+
+    refute_includes command, "--model", "no pin configured -> claude inherits the operator default"
+    refute_includes command, "--effort"
+  end
+
   # Readiness-wins contract: the limit menu is only classified AFTER the
   # ready wait exhausts (no fail-fast inside the loop — banner/footer copy
   # in a still-booting pane must never kill a launch). The clock is stubbed

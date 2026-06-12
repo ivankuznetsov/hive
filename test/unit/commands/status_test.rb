@@ -219,6 +219,13 @@ class CommandsStatusTest < Minitest::Test
       assert_equal 1, race_rows.size
       assert_equal "9-done", race_rows.first.fetch(:stage)
       refute_equal Hive::Schemas::TaskActionKind::ERROR, race_rows.first.fetch(:action_key)
+      # Enforce — not just document — that the mid-read vanish actually fired.
+      # The double's rename is timed by a `to_path` coercion count; if a
+      # collect_rows refactor shifts that count the double silently stops
+      # renaming and this test would pass vacuously. Assert it fired.
+      assert cmd.vanish_double.renamed?,
+             "vanish double never renamed: its to_path coercion-count trigger " \
+             "has drifted, so this test is no longer exercising the race"
     end
   end
 
@@ -246,6 +253,67 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "9-done", race_rows.first.fetch(:stage)
       refute_equal Hive::Schemas::TaskActionKind::ERROR, race_rows.first.fetch(:action_key)
     end
+  end
+
+  def test_collect_rows_reraises_enoent_when_folder_survives
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "corrupt-race-260611-abcd"
+      folder = create_finalize_ready_task(hive_state, slug)
+
+      # Force an ENOENT from the in-folder mtime read while the folder itself
+      # survives on disk — the "corrupted-but-present" case (a state read
+      # failing inside a folder that did NOT move stages). collect_rows'
+      # `rescue Errno::ENOENT; raise if File.directory?(entry)` guard must
+      # RE-RAISE this rather than swallow it; a refactor that turned the
+      # `raise if` into an unconditional `next` would silently start hiding
+      # genuine filesystem corruption, and only this test would catch it.
+      original = File.singleton_class.instance_method(:mtime)
+      File.define_singleton_method(:mtime) do |path|
+        raise Errno::ENOENT, path.to_s if File.basename(path.to_s) == slug
+
+        original.bind(File).call(path)
+      end
+      begin
+        error = assert_raises(Errno::ENOENT) do
+          Hive::Commands::Status.new.send(:collect_rows, hive_state)
+        end
+        assert_match(slug, error.message)
+        assert File.directory?(folder), "folder must survive — that is what forces the re-raise"
+      ensure
+        File.singleton_class.define_method(:mtime, original)
+      end
+    end
+  end
+
+  def test_drop_transient_stage_moves_leaves_unique_slug_rows_untouched
+    # The `return rows if duplicated_slugs.empty?` early-exit must hand back the
+    # exact same array — no rejection pass — when no slug collides, even if some
+    # folders happen not to exist on disk. assert_same pins the branch precisely:
+    # the reject fallthrough would return a *new* array.
+    cmd = Hive::Commands::Status.new
+    rows = [
+      { slug: "alpha-260611-abcd", folder: "/nonexistent/4-execute/alpha-260611-abcd" },
+      { slug: "beta-260611-abcd", folder: "/nonexistent/6-review/beta-260611-abcd" }
+    ]
+
+    assert_same rows, cmd.send(:drop_transient_stage_moves, rows)
+  end
+
+  def test_drop_transient_stage_moves_returns_zero_rows_when_both_duplicate_folders_vanish
+    # Double-race: a slug is duplicated across two stages but BOTH folders are
+    # already gone by the time we dedup (old folder renamed away, new folder also
+    # removed). drop_transient_stage_moves rejects both -> zero rows, no error.
+    # This is the plan's accepted "vanish-to-zero" Risk; lock it so a future
+    # change can't turn it into a crash or a resurrected stale row.
+    cmd = Hive::Commands::Status.new
+    slug = "double-race-260611-abcd"
+    rows = [
+      { slug: slug, folder: "/nonexistent/8-finalize/#{slug}" },
+      { slug: slug, folder: "/nonexistent/9-done/#{slug}" }
+    ]
+
+    assert_empty cmd.send(:drop_transient_stage_moves, rows)
   end
 
   def test_json_payload_never_emits_transient_duplicate_for_stage_move_race
@@ -287,9 +355,13 @@ class CommandsStatusTest < Minitest::Test
         status_project(project_root, hive_state)
       ]).fetch("projects").first.fetch("tasks").select { |task| task.fetch("slug") == slug }
       execute = tasks.find { |task| task.fetch("stage") == "4-execute" }
+      review = tasks.find { |task| task.fetch("stage") == "6-review" }
 
       assert_equal [ "4-execute", "6-review" ], tasks.map { |task| task.fetch("stage") }.sort
       assert_equal "hive findings #{slug} --stage 4-execute", execute.fetch("suggested_command")
+      # Symmetric guard on the higher-stage survivor: :review_complete routes to
+      # the `artifacts` workflow verb, which carries --from for idempotency.
+      assert_equal "hive artifacts #{slug} --from 6-review", review.fetch("suggested_command")
     end
   end
 
@@ -770,13 +842,24 @@ class CommandsStatusTest < Minitest::Test
   end
 
   class StatusRaceCommand < Hive::Commands::Status
+    # The double created for the vanish-during-read mode, so tests can assert it
+    # actually fired (see VanishAfterDirectoryCheckPath#renamed?). nil in the
+    # rename-before-stage mode.
+    attr_reader :vanish_double
+
     def initialize(old_folder:, new_folder:, rename_before_stage: nil, vanish_during_read_stage: nil)
       super()
+      unless rename_before_stage.nil? ^ vanish_during_read_stage.nil?
+        raise ArgumentError,
+              "pass exactly one of rename_before_stage: or vanish_during_read_stage:"
+      end
+
       @old_folder = old_folder
       @new_folder = new_folder
       @rename_before_stage = rename_before_stage
       @vanish_during_read_stage = vanish_during_read_stage
       @renamed = false
+      @vanish_double = nil
     end
 
     def stage_task_entries(stage_dir)
@@ -786,7 +869,11 @@ class CommandsStatusTest < Minitest::Test
       return entries unless stage == @vanish_during_read_stage
 
       entries.map do |entry|
-        entry == @old_folder ? VanishAfterDirectoryCheckPath.new(entry, @new_folder) : entry
+        if entry == @old_folder
+          @vanish_double = VanishAfterDirectoryCheckPath.new(entry, @new_folder)
+        else
+          entry
+        end
       end
     end
 
@@ -803,13 +890,21 @@ class CommandsStatusTest < Minitest::Test
 
   # Coerces to a path string but vanishes the folder mid-read to reproduce the
   # stage-move race. The vanish is timed by the production coercion sequence in
-  # collect_rows: the first `to_path` is the `File.directory?(entry)` existence
-  # guard (call 1, folder still present), and a later coercion during the row
-  # build (call 2+) triggers the rename. If a future Ruby or a refactor at
-  # status.rb's row loop changes how many times File.* coerces the argument,
-  # revisit this `@calls > 1` threshold. Only `to_path` participates in the
-  # rename dance; `to_s` is an inert fallback for inspection/logging and never
-  # triggers the vanish (omitting `to_str` is deliberate for the same reason).
+  # collect_rows, where `File.*` coerce the argument via the `to_path` protocol
+  # (not `to_str`):
+  #   - call 1 is the `File.directory?(entry)` existence guard (status.rb:423,
+  #     folder still present, so the row loop is entered);
+  #   - call 2 is `File.basename(entry)` slug extraction (status.rb:425), and
+  #     `@calls > 1` fires the rename there;
+  #   - the ENOENT then surfaces at the next read of the now-renamed folder,
+  #     `File.mtime(entry)` (status.rb:433) — the `rows << { … }` hash literal
+  #     never coerces `entry`.
+  # If a future Ruby or a refactor at status.rb's row loop changes how many
+  # times `File.*` coerces the argument, revisit this `@calls > 1` threshold;
+  # StatusRaceCommand#vanish_double + #renamed? let the test fail loudly if the
+  # rename silently stops firing. Only `to_path` participates in the rename
+  # dance; `to_s` is an inert fallback for inspection/logging and never triggers
+  # the vanish (omitting `to_str` is deliberate for the same reason).
   class VanishAfterDirectoryCheckPath
     def initialize(path, new_path)
       @path = path
@@ -826,6 +921,12 @@ class CommandsStatusTest < Minitest::Test
 
     def to_s
       @path
+    end
+
+    # True once the mid-read rename has actually fired. Lets tests enforce the
+    # coercion-count timing rather than merely document it.
+    def renamed?
+      @renamed
     end
 
     private

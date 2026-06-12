@@ -176,3 +176,13 @@ recorder's own foreground daemon over the pidfile. Open questions:
 On a real run the display-name agent named the task "Agent Work In
 Progress" — an activity description, not a name. The prompt should pin
 "a short noun-phrase name for the TASK" with an example or two.
+
+## release.yml macOS hivebox smoke fails at colima VZ start (2026-06-12)
+
+The post-publish `hivebox image smoke (macOS arm64, colima)` job died at
+`colima start` — lima's VZ vm exits immediately on the hosted macos
+runner (nested-virt availability is pool-dependent). The image itself is
+fine (multi-arch manifest verified; local container smoke green incl.
+`/health?deep=1`). Candidate fix: `colima start --vm-type qemu` fallback
+or retry-with-qemu; the job is verification-only and does not gate the
+publish.

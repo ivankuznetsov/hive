@@ -1,9 +1,9 @@
 ---
 title: Hive::Agent
 type: module
-source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb
+source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [agent, claude, subprocess]
 ---
 
@@ -23,7 +23,8 @@ Hive::Agent.new(
   profile: nil,         # AgentProfile; defaults to claude profile
   expected_output: nil, # used by :output_file_exists profiles
   status_mode: nil,     # per-spawn override
-  permission_mode: nil  # Claude-only override; nil uses profile default/config caller
+  permission_mode: nil, # Claude-only override; nil uses profile default/config caller
+  cli_flags: []         # per-run argv extras, currently Claude model/effort pins
 )
 ```
 
@@ -57,6 +58,7 @@ hardcoded Claude template:
   <permission flags>
   [<profile.add_dir_flag> <dir> ...]
   [<profile.budget_flag> <amount>]
+  [<cli_flags...>]
   <profile.output_format_flags...>
   <prompt>
 ```
@@ -68,6 +70,8 @@ claude -p
   --dangerously-skip-permissions
   [--add-dir <dir> ...]
   --max-budget-usd <amount>
+  [--model <claude.model>]
+  [--effort <claude.effort>]
   --output-format stream-json
   --include-partial-messages
   --verbose
@@ -89,6 +93,17 @@ skip flag for backward-compatible headless behavior. Any other Claude
 permission mode is emitted as `--permission-mode <mode>`; current config
 validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `dontAsk`, and `plan`.
+
+Claude model/effort flags are config-derived rather than profile-derived.
+When `Stages::Base.spawn_agent` receives `cfg:` and the selected profile is
+Claude, it passes `Hive::Config.claude_cli_flags(cfg)` into `cli_flags`.
+That means `claude.model: default` reaches the headless argv as
+`--model default`; `model: inherit` or blank omits `--model`; and
+`claude.effort` reaches argv for any explicit non-default/non-inherit
+value (fresh init offers `low`, `medium`, and `high`).
+`Hive::ClaudeLauncher.wrapper_command` uses the same flag fragment for
+tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
+`--effort` without shell re-parsing.
 
 ## `spawn_and_wait` (the long part)
 
@@ -133,7 +148,8 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 ## Tests
 
-- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv.
+- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv and model/effort `cli_flags` reaching the headless command.
+- `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns.
 
 ## Backlinks

@@ -8,9 +8,11 @@ last picked interactively (dogfooding found pipeline runs silently
 billing Fable). `inherit` restores the old behavior; any alias/full name
 passes through (`sonnet` = budget pick). `claude.effort` defaults to
 Claude Code's own tier (high today) by omitting the flag; low/medium/high
-pass through. Selected during init on BOTH surfaces: new TTY prompts
-(scripted-answer order gains two slots after permission mode) and the web
-setup questionnaire. Flags ride `Hive::Config.claude_cli_flags` into the
-tmux wrapper and the headless Agent argv. The task page's Reject/Force
-approve moved into a described Advanced section at the page bottom.
-See [[modules/config]], [[commands/init]], [[commands/web]].
+pass through. Selected during `hive init`: new TTY prompts and the
+non-TTY defaults add two answer slots after permission mode, and the
+`hive-init.v1` `answers` object carries required `claude_model` /
+`claude_effort` keys. Flags ride `Hive::Config.claude_cli_flags` into the
+tmux wrapper and the headless Agent argv. This cherry-pick is gem-side
+only; branch-side web questionnaire and task-page changes are not present
+in this checkout. See [[modules/config]], [[commands/init]], and
+[[modules/agent]].

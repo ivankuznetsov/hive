@@ -86,6 +86,27 @@ class InitPromptsTest < Minitest::Test
     answers.map { |a| "#{a}\n" }.join
   end
 
+  def test_claude_effort_accepts_numeric_and_named_choices
+    choices = Hive::Commands::Init::Prompts::CLAUDE_EFFORT_CHOICES
+    prompts, _output = make_prompts(interactive_input(claude_effort: "2", confirm: "y"))
+    assert_equal choices[1], prompts.collect["claude_effort"],
+                 "a numeric pick must map to the listed choice"
+
+    prompts, _output = make_prompts(interactive_input(claude_effort: "HIGH", confirm: "y"))
+    assert_equal "high", prompts.collect["claude_effort"],
+                 "a named pick must match case-insensitively"
+  end
+
+  def test_claude_effort_reprompts_on_unknown_answer
+    prompts, output = make_prompts(
+      interactive_input(claude_effort: "turbo\nmedium", confirm: "y")
+    )
+    assert_equal "medium", prompts.collect["claude_effort"],
+                 "the loop must accept the corrected answer"
+    assert_match(/unknown effort "turbo"/, output.string,
+                 "the reprompt must teach the valid set")
+  end
+
   # --- non-TTY: short-circuit to defaults ----------------------------------
 
   def test_non_tty_returns_recommended_defaults

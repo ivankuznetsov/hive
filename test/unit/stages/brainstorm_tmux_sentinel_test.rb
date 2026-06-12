@@ -161,6 +161,32 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
   end
 
+  def test_orphan_sweep_logs_already_dead_pids_as_skipped
+    with_tmp_task_folder do |task|
+      original = Open3.singleton_class.instance_method(:capture3)
+      ok = fake_status(success: true, exitstatus: 0)
+      matches = "4242 /opt/claude-code/bin/claude --add-dir #{task.folder}\n"
+      Open3.define_singleton_method(:capture3) do |*args|
+        raise "unexpected command: #{args.inspect}" unless args.first == "pgrep"
+
+        [ matches, "", ok ]
+      end
+
+      with_replaced_singleton_method(Process, :kill, lambda { |_sig, _pid|
+        raise Errno::ESRCH
+      }) do
+        Hive::ClaudeLauncher.sweep_orphan_processes(task)
+      end
+
+      log = File.read(Hive::ClaudeLauncher.orphan_sweep_log_path(task))
+      assert_includes log, "Errno::ESRCH",
+                      "a pid that died between pgrep and kill is a skip, not a crash"
+      assert_includes log, "killed=0"
+    ensure
+      Open3.singleton_class.send(:define_method, :capture3, original) if original
+    end
+  end
+
   def test_orphan_sweep_logs_warning_when_pgrep_fails
     with_tmp_task_folder do |task|
       original = Open3.singleton_class.instance_method(:capture3)

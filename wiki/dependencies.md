@@ -118,7 +118,7 @@ These are not gems but the CLI tools the runtime invokes:
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.2.4)`.
+2.7.2, and the current local path gem as `hive-cli (0.3.0)`.
 
 ## Backlinks
 

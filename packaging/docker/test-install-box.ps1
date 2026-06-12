@@ -22,14 +22,21 @@ function Invoke-Installer($extraPath, $stubLog) {
     # case-insensitive, so the local must NOT be called $psHome.
     $psDir = $PSHOME
     $pathValue = if ($extraPath) { "$extraPath;$psDir;$sysDirs" } else { "$psDir;$sysDirs" }
-    $out = & pwsh -NoProfile -Command "
+    # Capture to a FILE: `exit` inside the called installer tears down the
+    # child pipeline before `| Out-String` can flush, so piped capture
+    # returns empty output on every failure path.
+    $outFile = Join-Path ([IO.Path]::GetTempPath()) ("hb-out-" + [guid]::NewGuid() + ".txt")
+    & pwsh -NoProfile -Command "
         `$env:Path = '$pathValue'
         `$env:DOCKER_STUB_LOG = '$stubLog'
         `$env:HIVEBOX_DATA = Join-Path ([IO.Path]::GetTempPath()) ('hbdata-' + [guid]::NewGuid())
-        & '$installer' 2>&1 | Out-String
+        & '$installer' *> '$outFile'
         exit `$LASTEXITCODE
     "
-    return @{ Output = ($out | Out-String); Code = $LASTEXITCODE }
+    $code = $LASTEXITCODE
+    $output = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { "" }
+    Remove-Item $outFile -ErrorAction SilentlyContinue
+    return @{ Output = "$output"; Code = $code }
 }
 
 # --- Case 1: docker present but unreachable → friendly failure, exit 1 -----

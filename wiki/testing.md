@@ -1,13 +1,13 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, .rubocop.yml
+source: test/, Rakefile, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
 updated: 2026-06-12
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, and `test/eval/` evaluates the Telegram bot signal contract.
+**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, and bundler-audit on top.
 
 ## Run all
 
@@ -193,6 +193,26 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtures are not Ruby).
 
 Per the user's CLAUDE.md rule: never pass non-Ruby files to rubocop.
+
+## Static Analysis
+
+CI has dedicated `rubocop`, `brakeman`, and `bundler-audit` jobs in
+`.github/workflows/ci.yml`. The Brakeman job runs:
+
+```bash
+bundle exec brakeman --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
+```
+
+`config/brakeman.ignore` is the root ignore file for scanner false positives.
+Each entry carries a rationale for the trust boundary Brakeman cannot see,
+such as argv-form subprocess calls, integer coercion before shell use, or
+registry-laundered filesystem paths. Commit `83f0a800` added the current
+task-log-path ignore: `TasksController#latest_log` receives the project through
+`ApplicationController#find_project!`, which resolves only registered project
+entries before exposing `hive_state_path`; the route constrains `:slug`, and
+the log path still applies `File.basename(params[:slug])` before joining under
+that registry-derived log root. See [[commands/web]] for the task log-tail
+surface.
 
 ## Hivebox Golden-Path E2E
 

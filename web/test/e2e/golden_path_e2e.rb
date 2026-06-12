@@ -1,4 +1,5 @@
 require "application_system_test_case"
+require "open3"
 
 # The hivebox golden path, end to end, in a real browser — deliberately NOT
 # named *_test.rb so the default suites skip it; run it explicitly:
@@ -64,6 +65,11 @@ class GoldenPathE2E < ApplicationSystemTestCase
         puts "===== daemon stdout ====="
         puts File.read(@daemon_log)
       end
+      if @daemon_pid
+        alive = (Process.kill(0, @daemon_pid) && true rescue false)
+        puts "===== daemon pid #{@daemon_pid} alive=#{alive} ====="
+      end
+      puts "===== HIVE_HOME/logs: #{Dir[File.join(ENV["HIVE_HOME"], "logs", "*")].inspect} ====="
       debug_dir = "/tmp/golden-e2e-debug"
       FileUtils.rm_rf(debug_dir)
       FileUtils.mkdir_p(debug_dir)
@@ -222,6 +228,15 @@ class GoldenPathE2E < ApplicationSystemTestCase
       "BUNDLE_GEMFILE" => File.join(REPO_ROOT, "Gemfile"),
       "RUBYOPT" => nil, "RUBYLIB" => nil
     }
+    # Fail fast with the REAL error: on CI a broken spawn env produced a
+    # daemon that died silently before its first log line, leaving an
+    # undiagnosable timeout 90s later.
+    probe_out, probe_err, probe = Open3.capture3(env, "bundle", "exec", "ruby", "-Ilib",
+                                                 "bin/hive", "--version", chdir: REPO_ROOT)
+    unless probe.success?
+      raise "daemon env probe failed (#{probe.exitstatus}): #{probe_err.strip}\n#{probe_out.strip}"
+    end
+
     @daemon_log = ENV.fetch("GOLDEN_E2E_DAEMON_LOG", File.join(ENV["HIVE_TEST_HOME_ROOT"], "golden-daemon.log"))
     @daemon_pid = Process.spawn(env, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
                                 "daemon", "start", "--foreground",

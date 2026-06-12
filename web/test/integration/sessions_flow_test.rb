@@ -103,6 +103,23 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_match(/expired/i, response.body)
   end
 
+  test "an owner change evicts existing sessions" do
+    configure_owner!(owner: "alice")
+    install_auth(login: "alice")
+    begin_device_flow
+    get "/auth/github/wait"
+    assert_redirected_to "/"
+    get "/"
+    assert_response :success
+
+    # The box changes hands (config edit / re-claim): alice's session must
+    # die with her ownership — it holds a repo-scoped token.
+    configure_owner!(owner: "bob")
+    get "/"
+    assert_redirected_to "/login"
+    assert_nil session[:github_token], "the evicted session must not keep the grant"
+  end
+
   test "a fresh box is claimed by its first successful login" do
     configure_owner!(owner: "")
     install_auth(login: "firstcomer")

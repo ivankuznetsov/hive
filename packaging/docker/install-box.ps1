@@ -9,6 +9,9 @@ $Image = if ($env:HIVEBOX_IMAGE) { $env:HIVEBOX_IMAGE } else { "ghcr.io/ivankuzn
 $Name  = if ($env:HIVEBOX_NAME)  { $env:HIVEBOX_NAME }  else { "hivebox" }
 $Port  = if ($env:HIVEBOX_PORT)  { $env:HIVEBOX_PORT }  else { "4567" }
 $Data  = if ($env:HIVEBOX_DATA)  { $env:HIVEBOX_DATA }  else { Join-Path $HOME "hivebox-data" }
+# Localhost by default: a fresh box is claimable by its FIRST login — do
+# not publish it to network peers before the owner signs in.
+$Bind  = if ($env:HIVEBOX_BIND)  { $env:HIVEBOX_BIND }  else { "127.0.0.1" }
 
 function Fail($Message) {
     Write-Error "hivebox install: $Message"
@@ -31,7 +34,7 @@ if ($existing) {
 New-Item -ItemType Directory -Force -Path $Data | Out-Null
 docker pull $Image
 if ($LASTEXITCODE -ne 0) { Fail "docker pull failed." }
-docker run -d --name $Name --restart unless-stopped -p "${Port}:4567" -v "${Data}:/data" $Image | Out-Null
+docker run -d --name $Name --restart unless-stopped -p "${Bind}:${Port}:4567" -v "${Data}:/data" $Image | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "docker run failed." }
 
 Write-Host ""

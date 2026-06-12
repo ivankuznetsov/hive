@@ -48,4 +48,71 @@ class WebCommandTest < Minitest::Test
       assert_empty err, "an https origin implies a fronting proxy — no warning"
     end
   end
+  # Drive the full "app found" path with a stub Rails app: db:prepare
+  # failure raises typed guidance (never a raw backtrace looping under the
+  # container supervisor), and a passing prepare reaches Kernel.exec with
+  # the bind/port argv.
+  class ExecCaught < StandardError
+    attr_reader :env, :argv
+
+    def initialize(env, argv)
+      @env = env
+      @argv = argv
+      super("exec")
+    end
+  end
+
+  def with_stub_rails_app(prepare_exit:)
+    Dir.mktmpdir("hive-webapp") do |dir|
+      FileUtils.mkdir_p(File.join(dir, "config"))
+      File.write(File.join(dir, "config", "application.rb"), "# rails app marker")
+      FileUtils.mkdir_p(File.join(dir, "bin"))
+      File.write(File.join(dir, "bin", "rails"), <<~SH)
+        #!/usr/bin/env bash
+        [ "$1" = "db:prepare" ] && exit #{prepare_exit}
+        exit 0
+      SH
+      FileUtils.chmod(0o755, File.join(dir, "bin", "rails"))
+      with_env("HIVEBOX_WEB_APP_DIR" => dir) do
+        yield dir
+      end
+    end
+  end
+
+  def test_db_prepare_failure_raises_typed_guidance
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 1) do
+        error = assert_raises(Hive::Error) do
+          capture_io { Hive::Commands::Web.new.call }
+        end
+        assert_match(/db:prepare failed/, error.message)
+        assert_match(/writable/, error.message, "the message must point at the /data mount")
+      end
+    end
+  end
+
+  def test_successful_boot_reaches_exec_with_bind_and_port
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 0) do
+        original = Kernel.method(:exec)
+        Kernel.define_singleton_method(:exec) do |env, *argv|
+          raise ExecCaught.new(env, argv)
+        end
+
+        caught = nil
+        begin
+          capture_io { Hive::Commands::Web.new.call }
+        rescue ExecCaught => e
+          caught = e
+        ensure
+          Kernel.define_singleton_method(:exec, original)
+        end
+
+        refute_nil caught, "the command must end in Kernel.exec of the rails server"
+        assert_equal %w[bin/rails server -b], caught.argv[0..2]
+        assert caught.env.key?("SECRET_KEY_BASE"), "the persisted session secret must reach Rails"
+        assert caught.env.key?("HIVEBOX_STORAGE_DIR")
+      end
+    end
+  end
 end

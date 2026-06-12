@@ -440,4 +440,14 @@ class WebSupervisorTest < Minitest::Test
       sleep 0.02
     end
   end
+  def test_signal_group_treats_a_vanished_pid_as_a_no_op
+    # pgroup: true → the reaped child WAS its group's leader, so the group
+    # is deterministically gone. (No global Process.kill stubbing: the
+    # suite runs tests concurrently and a leaked stub breaks neighbors.)
+    pid = Process.spawn("true", pgroup: true)
+    Process.wait(pid)
+    supervisor = Hive::Web::Supervisor.new
+    assert_nil supervisor.send(:signal_group, pid, "TERM"),
+               "a child that died before the signal is a clean no-op, not a crash"
+  end
 end

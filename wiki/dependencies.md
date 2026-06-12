@@ -71,10 +71,11 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 | `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |
 
 Commit `b0a31edf` removed the root `rack-test` declaration from `Gemfile`,
-and `hive.gemspec` does not declare it. Current `Gemfile.lock` still lists
-`rack-test (~> 2.2)` under top-level `DEPENDENCIES`; `bundle check`
-passes, but this refresh did not rewrite the lockfile. The cleanup question
-is tracked in [[gaps]].
+and `hive.gemspec` does not declare it. Commit `2e307a19` relocked the root
+bundle, so `Gemfile.lock` no longer resolves `rack-test` in its root `GEM`
+section and no longer lists `rack-test (~> 2.2)` under top-level
+`DEPENDENCIES`. The separate web bundle still resolves `rack-test`
+transitively through Rails/Capybara for upload integration tests.
 
 ## Standard library reliance
 
@@ -117,7 +118,7 @@ These are not gems but the CLI tools the runtime invokes:
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.2.3)`.
+2.7.2, and the current local path gem as `hive-cli (0.2.4)`.
 
 ## Backlinks
 

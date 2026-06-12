@@ -9,6 +9,11 @@ IMAGE="${HIVEBOX_IMAGE:-ghcr.io/ivankuznetsov/hivebox:latest}"
 NAME="${HIVEBOX_NAME:-hivebox}"
 PORT="${HIVEBOX_PORT:-4567}"
 DATA="${HIVEBOX_DATA:-$HOME/hivebox-data}"
+# Localhost by default: a fresh box is CLAIMABLE — its first GitHub login
+# becomes the owner — so it must not be reachable by network peers before
+# the intended owner has signed in. Set HIVEBOX_BIND=0.0.0.0 to expose it
+# AFTER claiming (or front it with a tunnel/proxy).
+BIND="${HIVEBOX_BIND:-127.0.0.1}"
 
 die() {
   printf 'hivebox install: %s\n' "$1" >&2
@@ -31,7 +36,7 @@ fi
 mkdir -p "$DATA"
 docker pull "$IMAGE"
 docker run -d --name "$NAME" --restart unless-stopped \
-  -p "${PORT}:4567" -v "${DATA}:/data" "$IMAGE" >/dev/null
+  -p "${BIND}:${PORT}:4567" -v "${DATA}:/data" "$IMAGE" >/dev/null
 
 printf '\nhivebox is running.\n\n'
 printf '  Open:  http://localhost:%s\n' "$PORT"

@@ -18,10 +18,10 @@ function Assert-Case($name, $ok, $detail) {
 
 function Invoke-Installer($extraPath, $stubLog) {
     $sysDirs = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
-    # $PSHOME, not Get-Command: with ErrorActionPreference=Stop a lookup
-    # miss is a terminating WriteError on hosted runners.
-    $psHome = $PSHOME
-    $pathValue = if ($extraPath) { "$extraPath;$psHome;$sysDirs" } else { "$psHome;$sysDirs" }
+    # $PSHOME (read-only) holds the pwsh install dir; PS variable names are
+    # case-insensitive, so the local must NOT be called $psHome.
+    $psDir = $PSHOME
+    $pathValue = if ($extraPath) { "$extraPath;$psDir;$sysDirs" } else { "$psDir;$sysDirs" }
     $out = & pwsh -NoProfile -Command "
         `$env:Path = '$pathValue'
         `$env:DOCKER_STUB_LOG = '$stubLog'
@@ -58,7 +58,7 @@ $argv = if (Test-Path $stubLog) { Get-Content $stubLog -Raw } else { "" }
 Assert-Case "happy path runs the container and prints the URL" `
     (($r.Code -eq 0) -and ($r.Output -match "hivebox is running") -and
      ($argv -match "pull ghcr.io/ivankuznetsov/hivebox:latest") -and
-     ($argv -match "run -d --name hivebox --restart unless-stopped -p 4567:4567 -v ") -and
+     ($argv -match "run -d --name hivebox --restart unless-stopped -p 127.0.0.1:4567:4567 -v ") -and
      ($argv -match ":/data ghcr.io/ivankuznetsov/hivebox:latest")) `
     "exit=$($r.Code) output=$($r.Output) argv=$argv"
 

@@ -1,4 +1,8 @@
 class ApplicationController < ActionController::Base
+  # Rails 8 enables forgery protection by default; explicit so static
+  # scanners (and readers) see the contract without chasing framework
+  # defaults.
+  protect_from_forgery with: :exception
   # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
   allow_browser versions: :modern
 
@@ -33,7 +37,19 @@ class ApplicationController < ActionController::Base
   end
 
   def require_login
-    redirect_to login_path unless current_login
+    return redirect_to login_path unless current_login
+
+    # Sessions must track the CURRENT owner, not the owner at sign-in time:
+    # rotating web.github.owner (or re-claiming a box) would otherwise leave
+    # old sessions alive with repo-scoped credentials. The dev/test seam
+    # signs in arbitrary logins, so it is exempt only where real GitHub auth
+    # is (local envs).
+    auth = Hive::Web::GithubAuth.new(config: Hive::Config.load_global_web)
+    return if auth.owner?(current_login)
+    return if Rails.env.local? && session[:github_token].blank?
+
+    reset_session
+    redirect_to login_path, alert: "Signed out: this box's owner changed."
   end
 
   def registered_projects

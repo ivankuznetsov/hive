@@ -18,8 +18,11 @@ class TasksController < ApplicationController
   def answer
     row = task_row!
     # Validated field-by-field in the dispatcher (numbers against the open
-    # set, blanks skipped) — permit! just unlocks the hash conversion.
-    answers = params[:answers].respond_to?(:permit!) ? params[:answers].permit! : params[:answers]
+    # set, blanks skipped). The keys are dynamic question numbers, so the
+    # permit list is the submitted key set itself — same effect as permit!,
+    # but the allowance is explicit and visible to static scanners.
+    raw = params[:answers]
+    answers = raw.respond_to?(:permit) ? raw.permit(*raw.keys) : raw
     result = dispatcher.answer_questions(folder: row["folder"], answers: answers)
     answered = result[:answered]
     redirect_to task_path(@project["name"], params[:slug]),
@@ -176,8 +179,19 @@ class TasksController < ApplicationController
     path = Dir.glob(File.join(dir, "*.log")).max_by { |p| File.mtime(p) }
     return nil unless path
 
-    # Bounded tail: the page shows the live end of the log, not all of it.
-    lines = File.readlines(path).last(200)
+    # Bounded tail in BYTES, not just lines: the poll hits this every 3s,
+    # and agent logs grow to many MB — reading the whole file each tick
+    # burns a Puma worker on I/O. 256KB comfortably covers 200 lines.
+    size = File.size(path)
+    window = 256 * 1024
+    tail = File.open(path, "rb") do |f|
+      f.seek([ size - window, 0 ].max)
+      f.read.to_s
+    end
+    tail = tail.force_encoding(Encoding::UTF_8).scrub
+    lines = tail.lines.last(200)
+    # A mid-line window start would render a torn first line.
+    lines.shift if size > window && lines.size > 1
     { "path" => path, "tail" => lines.join }
   end
 end

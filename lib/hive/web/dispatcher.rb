@@ -140,12 +140,19 @@ module Hive
         end
         argv = [ "hive", verb, slug, "--project", project ]
         argv += [ "--from", stage ] if stage
-        request_id = Hive::Bot::DispatchRequestWriter.write!(
-          project: project,
-          slug: slug,
-          argv: argv,
-          trigger: "web"
-        )
+        begin
+          request_id = Hive::Bot::DispatchRequestWriter.write!(
+            project: project,
+            slug: slug,
+            argv: argv,
+            trigger: "web"
+          )
+        rescue ArgumentError => e
+          # The queue's argv/slug grammar is stricter than the registry's
+          # project-name rules — a name the web can render may still be
+          # unqueueable. A typed error beats a 500 from the writer.
+          raise Hive::Error, "cannot queue this dispatch: #{e.message}"
+        end
         { ok: true, request_id: request_id, argv: argv }
       end
 

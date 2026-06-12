@@ -205,7 +205,10 @@ module Hive
                       state_file: row.state_file,
                       attempts: attempts,
                       max_attempts: @error_auto_recovery_limit)
-        requeue_plan_rerun(row) if heal_label == "terminal_agent_loss" && row.stage.to_s == "3-plan"
+        # Every 3-plan heal needs the explicit requeue — limits_reached
+        # cooldown heals leave the same markerless empty plan.md as agent
+        # loss does (PR review P2 #7).
+        requeue_plan_rerun(row) if row.stage.to_s == "3-plan"
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,

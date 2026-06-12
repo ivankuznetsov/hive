@@ -233,4 +233,26 @@ class StatusFeedTest < Minitest::Test
       feed&.stop
     end
   end
+  def test_initial_snapshot_failure_publishes_empty_and_recovers
+    calls = 0
+    status = Object.new
+    status.define_singleton_method(:json_payload) do |*|
+      calls += 1
+      raise "boom" if calls == 1
+
+      { "projects" => [ { "name" => "p", "tasks" => [] } ] }
+    end
+
+    feed = Hive::Web::StatusFeed.new(interval: 0.02, status_command: status)
+    _out, err = capture_io do
+      first = nil
+      feed.each_snapshot { |snap, _json| first = snap; break }
+      assert_equal [], first.fetch("projects"),
+                   "a failing FIRST snapshot must degrade to an empty grid, not crash the poller"
+    end
+    assert_match(/initial status snapshot failed/, err,
+                 "the degradation must be observable")
+  ensure
+    feed&.stop
+  end
 end

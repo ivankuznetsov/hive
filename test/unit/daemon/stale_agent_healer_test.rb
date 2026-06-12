@@ -942,6 +942,26 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_limits_cooldown_heal_on_plan_stage_also_requeues
+    with_marker_file do |state_file|
+      retry_at = (NOW - 60).utc.iso8601
+      File.write(state_file,
+                 "# t\n\n<!-- ERROR reason=limits_reached retry_after=#{retry_at} marker_id=lm1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil, mtime: NOW - 5151, stage: "3-plan", marker: "error",
+        marker_attrs: { "reason" => "limits_reached", "retry_after" => retry_at, "marker_id" => "lm1" },
+        action: "error", live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert(@logger.events.any? { |name, _| name == :marker_healed })
+      refute_empty @request_queue.requests,
+                   "a limits cooldown heal leaves the same markerless empty plan.md as "                    "agent loss — without the requeue the task strands identically"
+    end
+  end
+
   def test_requeue_failure_after_a_successful_clear_logs_its_own_event
     failing_queue = Class.new do
       def write_request!(**)

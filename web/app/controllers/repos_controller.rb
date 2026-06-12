@@ -1,4 +1,5 @@
 require "open3"
+require "tempfile"
 
 class ReposController < ApplicationController
   # Accepted clone sources: a github.com https/ssh URL or `owner/repo`
@@ -67,14 +68,42 @@ class ReposController < ApplicationController
     Hive::Commands::Init.new(target, force: true, json: false, prompts: setup).call
   end
 
+  # A hung clone (slow network, wedged gh) would otherwise hold a Puma
+  # worker forever; the box has few. Env-overridable for tests.
+  CLONE_TIMEOUT_SEC = Integer(ENV.fetch("HIVEBOX_CLONE_TIMEOUT_SEC", 180))
+
   # Clone via `gh` with the operator's device-flow token in GH_TOKEN, so
   # private repos clone with the session grant — the box needs no separate
   # `gh auth login` for repos the operator owns. Falls back to the box's own
   # gh auth when no session token exists (e.g. token-less curl admin).
+  # Runs in its own process group with a hard deadline; a timed-out or
+  # failed clone removes the partial target so a retry starts clean.
   def clone!(url, target)
     env = session[:github_token] ? { "GH_TOKEN" => session[:github_token] } : {}
-    out, err, status = Open3.capture3(env, "gh", "repo", "clone", url, target)
-    raise Hive::Error, "clone failed: #{[ out, err ].join("\n").strip}" unless status.success?
+    log = Tempfile.create("hivebox-clone")
+    pid = Process.spawn(env, "gh", "repo", "clone", url, target,
+                        pgroup: true, out: log.path, err: log.path)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + CLONE_TIMEOUT_SEC
+    status = nil
+    loop do
+      _, status = Process.waitpid2(pid, Process::WNOHANG)
+      break if status
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        Process.kill("KILL", -pid) rescue nil
+        Process.waitpid2(pid) rescue nil
+        FileUtils.rm_rf(target)
+        raise Hive::Error, "clone timed out after #{CLONE_TIMEOUT_SEC}s — "                            "check the network and try again"
+      end
+      sleep 0.2
+    end
+    return if status.success?
+
+    FileUtils.rm_rf(target)
+    raise Hive::Error, "clone failed: #{File.read(log.path).strip}"
+  ensure
+    log&.close
+    File.unlink(log.path) if log && File.exist?(log.path)
   end
 
   # Registered repos must push over https: at push time git's credential

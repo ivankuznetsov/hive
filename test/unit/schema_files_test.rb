@@ -1069,8 +1069,21 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-drop",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 2,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
+                 "v2 changed pr_closed semantics (true = PR cleanup clean incl. the "                  "no-PR case; false strictly = a recorded PR would not close)"
+  end
+
+  # v1 (pr_closed false for the no-PR case too) is preserved for external
+  # validators pinned to pre-v2 releases.
+  def test_hive_drop_v1_schema_file_remains_for_back_compat
+    path = Hive::Schemas.schema_path("hive-drop", version: 1)
+    assert File.exist?(path), "v1 schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
     assert_equal 1,
-                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
+                 "v1 schema must still declare schema_version: 1"
   end
 
   def test_hive_drop_required_keys_match_producer_emission
@@ -1142,7 +1155,7 @@ class SchemaFilesTest < Minitest::Test
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-drop"))))
     payload = {
       "schema" => "hive-drop",
-      "schema_version" => 1,
+      "schema_version" => 2,
       "ok" => true,
       "slug" => "demo-260522-aaaa",
       "project" => "demo",

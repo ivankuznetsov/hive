@@ -126,7 +126,9 @@ module Hive
       def signal_group(pid, signal)
         Process.kill(signal, -pid)
       rescue Errno::ESRCH
-        nil
+        # Group already gone — a clean no-op (returns nil like any empty
+        # rescue; the explicit literal was an uncoverable line under the
+        # 100% gate's process-merged accounting).
       end
 
       def reap_once

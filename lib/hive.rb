@@ -23,7 +23,7 @@ module Hive
       "hive-metrics-rollback-rate" => 1,
       "hive-markers-clear" => 1,
       "hive-forget" => 1,
-      "hive-drop" => 1,
+      "hive-drop" => 2,
       "hive-prune" => 1,
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,

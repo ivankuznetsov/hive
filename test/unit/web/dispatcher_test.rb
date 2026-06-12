@@ -98,6 +98,31 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  def test_answer_questions_requires_an_awaiting_brainstorm
+    Dir.mktmpdir("no-brainstorm") do |dir|
+      error = assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.answer_questions(folder: dir, answers: { "1" => "x" })
+      end
+      assert_match(/awaits a brainstorm/, error.message,
+                   "answers against a folder with no brainstorm.md must refuse, not 500")
+    end
+  end
+
+  def test_new_idea_lands_in_the_inbox
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+
+        capture_io { Hive::Web::Dispatcher.new.new_idea(project: project, text: "from the web composer") }
+
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
+        assert_equal 1, inbox.size, "the composer's idea must land as a 1-inbox task"
+        assert_includes File.read(File.join(inbox.first, "idea.md")), "from the web composer"
+      end
+    end
+  end
+
   def test_drop_hard_deletes_the_task_folder
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -248,6 +273,18 @@ Already answered
 
       assert_equal [ "hive", "review", "demo-task", "--project", "demo", "--from", "5-open-pr" ], result[:argv],
                    "ready_for_review must map to the `review` verb (a STAGE_VERB_BY_ACTION typo would fail here)"
+    end
+  end
+
+  def test_dispatch_surfaces_queue_grammar_rejections_as_typed_errors
+    with_tmp_global_config do
+      # "x" passes the route constraint upstream of nothing here — but the
+      # QUEUE's slug grammar requires two characters, so the writer raises
+      # ArgumentError; the operator must get a typed 422, not a 500.
+      error = assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.dispatch(slug: "x", project: "p", action: "ready_to_plan")
+      end
+      assert_match(/cannot queue this dispatch/, error.message)
     end
   end
 

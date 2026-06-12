@@ -23,7 +23,7 @@ metadata:
 
 Hive turns a repository into a folder-based coding-agent pipeline: ideas become tasks, tasks move through brainstorm, plan, develop, review, artifacts, and finalize stages, and the daemon keeps enrolled projects moving in the background.
 
-Use this skill when the user wants to install Hive from OpenClaw, initialize the current project, create a task, inspect status, move a task through plan/develop/review, run diagnostics, compile wiki changelog fragments, or administer Hive's daemon, bot, markers, metrics, and task registry.
+Use this skill when the user wants to install Hive from OpenClaw, initialize the current project, create a task, inspect status, move a task through plan/develop/review, run diagnostics, start the Hivebox web UI, compile wiki changelog fragments, or administer Hive's daemon, bot, markers, metrics, and task registry.
 
 ## Install From ClawHub
 
@@ -45,6 +45,7 @@ That listing installs the `/hive` slash command. First run should normally be:
 - `/hive status --json` shows the task board and next actions.
 - `/hive new . "build this feature"` creates a new Hive task in the current project.
 - `/hive plan <task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>` advance a task through the main coding workflow.
+- `/hive web` starts the Hivebox browser surface when a user wants the local web UI.
 - `/hive wiki compile-log --check` verifies that `wiki/log.md` matches the fragments in `wiki/log.d/`.
 - `/hive doctor` checks local runtime and skill configuration.
 

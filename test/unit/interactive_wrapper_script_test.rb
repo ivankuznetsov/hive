@@ -47,6 +47,30 @@ class InteractiveWrapperScriptTest < Minitest::Test
     end
   end
 
+  # The case-arm passthrough is the layer the Ruby-side argv tests cannot
+  # see: a typo'd pattern makes the script reject its OWN argv (usage, exit
+  # 64) and every tmux claude launch fails while the suite stays green.
+  def test_model_and_effort_flags_pass_through_to_claude
+    Dir.mktmpdir("hive-wrapper") do |dir|
+      log_dir = File.join(dir, "logs")
+      FileUtils.mkdir_p(log_dir)
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir },
+        SCRIPT,
+        "--cwd", dir,
+        "--model", "sonnet",
+        "--effort", "low",
+        "--bin", FAKE_BIN
+      )
+
+      assert status.success?, err
+      argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_equal [ "--model", "sonnet", "--effort", "low" ], argv_args(argv_log),
+                   "the wrapper must forward the model/effort pins to claude in order"
+    end
+  end
+
   def test_missing_required_cwd_exits_nonzero
     _out, err, status = Open3.capture3(SCRIPT, "--bin", FAKE_BIN)
 

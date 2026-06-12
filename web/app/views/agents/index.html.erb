@@ -1,0 +1,64 @@
+<% content_for(:title, "hivebox — agents") %>
+<h1>Agents</h1>
+<p class="muted">Authenticate the coding agents the pipeline runs. Credentials persist on the box's <code>/data</code> mount.</p>
+
+<div class="agent-cards">
+  <% @statuses.each do |agent, status| %>
+    <% logged_in = status["logged_in"] %>
+    <div class="card agent-card">
+      <h3><%= agent %></h3>
+      <p class="agent-state">
+        <span class="status-dot <%= logged_in ? "status-dot-running" : "status-dot-idle" %>"></span>
+        <%= logged_in ? "Logged in" : "Not logged in" %>
+      </p>
+      <% if %w[claude codex gh].include?(agent.to_s) %>
+        <%= button_to logged_in ? "Log in again" : "Start login",
+              agent_login_path(agent), class: logged_in ? "btn-ghost btn-sm" : "btn-secondary btn-sm",
+              data: { turbo_submits_with: "Starting…" } %>
+      <% else %>
+        <p class="faint">Uses the token form below.</p>
+      <% end %>
+    </div>
+  <% end %>
+</div>
+
+<% if defined?(@login_session) && @login_session %>
+  <%# The poll controller refreshes via frame.reload(), which re-fetches the
+      frame's OWN src — without one, reload() is a silent no-op and the
+      operator would wait on "Waiting for the login URL…" forever. %>
+  <%= turbo_frame_tag "agent-login",
+        src: (@session_url ? nil : agent_login_status_path(@login_session.agent, @login_session.id)),
+        data: ({ controller: "poll", poll_interval_value: 2000 } unless @session_url) do %>
+    <div class="card">
+      <h2><%= @login_session.agent %> login</h2>
+      <% if @session_url %>
+        <p>Open the provider page and authorize:</p>
+        <p><%= link_to @session_url, @session_url, target: "_blank", rel: "noopener" %></p>
+        <%= form_with url: agent_login_complete_path(@login_session.agent, @login_session.id), class: "form-grid" do |f| %>
+          <div class="form-row">
+            <%= f.label :code, "Paste the code (or full callback URL) the provider returned" %>
+            <%= f.text_field :code, required: true %>
+          </div>
+          <p><%= f.submit "Complete login", data: { turbo_submits_with: "Completing…" } %></p>
+        <% end %>
+      <% else %>
+        <p class="muted">Waiting for the login URL from the CLI…</p>
+      <% end %>
+      <% if @session_output.present? %>
+        <details class="login-output">
+          <summary class="muted">CLI output</summary>
+          <pre><%= @session_output %></pre>
+        </details>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>
+
+<h2>Pi token</h2>
+<%= form_with url: agent_pi_token_path, class: "form-grid" do |f| %>
+  <div class="form-row">
+    <%= f.label :token_json, "Paste the pi auth JSON" %>
+    <%= f.text_area :token_json, placeholder: '{"provider":"…"}', required: true %>
+  </div>
+  <p><%= f.submit "Save token", data: { turbo_submits_with: "Saving…" } %></p>
+<% end %>

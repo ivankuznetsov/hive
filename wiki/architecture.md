@@ -7,13 +7,13 @@ updated: 2026-06-12
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
 ```
 bin/hive                          Thor entry; rescues Hive::Error -> exit
-  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot / tui)
+  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot / web / tui)
        └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot · TUI helpers
             └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Artifacts · Finalize · Done
                  ├─ Stages::Base      template render + AgentProfile spawn helpers
@@ -241,14 +241,45 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
+## Hivebox web pipeline
+
+`hive web` serves a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
+original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
+(ADR-036): a configured `web.github.owner` gates entry, while an ownerless
+fresh box is claimable and the first successful login writes
+`web.github.owner` under the global config lock. Owner-gated requests re-check
+the current owner on every request and evict old sessions when
+`web.github.owner` changes, so a repo-scoped session token cannot survive an
+ownership rotation. Reads render
+`Commands::Status#json_payload` snapshots; live updates flow over Turbo
+Streams, with production Action Cable accepting same-origin-as-host and
+`HIVEBOX_ORIGIN` only as an extra allow for split-origin deployments:
+`StatusBroadcaster` (self-healing subscriber loop) bridges
+`Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
+broadcast of the projects frame over solid_cable. Mutations reuse gem
+primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
+Advanced hard deletes, daemon dispatch queue for stage runs, the bot's
+`RecoverySequence` for task-page Retry recovery (`markers clear` plus the
+stage rerun as one queued request sequence), `BrainstormAnswerWriter` for Q&A
+answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
+idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
+and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
+pushes use token-backed credentials; the Agents page can run the `gh` PTY
+login relay so the image's `gh auth git-credential` helper supplies those
+push credentials without docker-exec setup. The container supervisor (tini →
+`Hive::Web::Supervisor`) runs daemon + web + optional bot, restarts crashed or
+signal-killed children with backoff, survives malformed config, and
+SIGHUP-reloads the bot set. Details: [[commands/web]].
+
 ## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
 
 For state-mutating workflow verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`,
-`markers clear`) there is exactly ONE writer: the daemon. The bot
-and any future external caller (TUI, web UI) are producers that
-write file-backed JSON requests; the daemon's tick loop is the
-only thing that calls `Process.spawn` on those verbs.
+`markers clear`) there is exactly ONE subprocess dispatcher: the daemon.
+The Telegram bot and hivebox web write file-backed JSON requests; the daemon's
+own healer also uses the same queue for the `3-plan` terminal-error rerun.
+The daemon's tick loop is the only thing that calls `Process.spawn` on those
+verbs.
 
 ```
 operator → /done in Telegram

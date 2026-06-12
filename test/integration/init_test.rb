@@ -928,4 +928,28 @@ class InitTest < Minitest::Test
       end
     end
   end
+  def test_init_renders_model_and_effort_pins_through_to_cli_flags
+    answers_stub = Object.new
+    answers_stub.define_singleton_method(:collect) do
+      input = StringIO.new
+      input.define_singleton_method(:tty?) { false }
+      defaults = Hive::Commands::Init::Prompts.new(
+        input: input, output: StringIO.new, summary_io: StringIO.new
+      ).collect
+      defaults.merge("claude_model" => "sonnet", "claude_effort" => "low")
+    end
+
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir, prompts: answers_stub).call }
+
+        cfg = Hive::Config.load(dir)
+        assert_equal "sonnet", cfg.dig("claude", "model"), "the chosen model must land in the project config"
+        assert_equal "low", cfg.dig("claude", "effort"), "the chosen effort must render as valid YAML"
+        assert_equal [ "--model", "sonnet", "--effort", "low" ],
+                     Hive::Config.claude_cli_flags(cfg),
+                     "the rendered config must resolve to the launch flags"
+      end
+    end
+  end
 end

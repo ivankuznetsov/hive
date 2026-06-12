@@ -18,7 +18,7 @@ import sys
 
 from telethon.sync import TelegramClient
 
-from _drive import drive, drive_voice, drive_voice_answer
+from _drive import drive, drive_start, drive_voice, drive_voice_answer
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
@@ -60,6 +60,11 @@ def main():
                 return result
             return drive_voice_answer(client, BOT, VOICE_ANSWER_SLUG, VOICE_FIXTURE,
                                       VOICE_ANSWER_EXPECT, answer_path=VOICE_ANSWER_PATH)
+        # First-contact welcome rides ahead of the idea flow: /start is the
+        # first thing every real operator's Telegram sends the bot.
+        start_result = drive_start(client, BOT)
+        if start_result != 0:
+            return start_result
         return drive(client, BOT, PROJECT)
     finally:
         client.disconnect()

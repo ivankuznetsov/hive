@@ -1,0 +1,49 @@
+<% content_for(:title, "hivebox — telegram") %>
+<h1>Telegram</h1>
+<p class="muted">Connect the hive bot so you can drive the pipeline from Telegram. The token is validated against the real API before anything is saved.</p>
+
+<%# Open while unconfigured, tucked away once the bot works. %>
+<details class="setup-guide" <%= "open" unless @bot["enabled"] %>>
+  <summary>First time? Three steps</summary>
+  <ol class="setup-steps">
+    <li>
+      <strong>Create your bot.</strong> In Telegram, message
+      <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>,
+      send <code>/newbot</code>, pick a display name, then a username ending in
+      "bot". BotFather replies with a token like <code>123456:ABC…</code> —
+      paste it below. Keep it secret; if it ever leaks, send BotFather
+      <code>/revoke</code> and save the new one here.
+    </li>
+    <li>
+      <strong>Find your chat ID.</strong> Message
+      <a href="https://t.me/userinfobot" target="_blank" rel="noopener">@userinfobot</a>
+      — it replies with your numeric ID (like <code>123456789</code>). Put that
+      number in the allowlist; only listed chats can drive the pipeline.
+    </li>
+    <li>
+      <strong>Say hello.</strong> Open your new bot's chat and send
+      <code>/start</code> (Telegram only lets bots message people who messaged
+      them first). Then save below and hit "Send test message" — the reply
+      should land in Telegram.
+    </li>
+  </ol>
+  <p class="muted">No webhook, public URL, or tunnel — the bot long-polls
+  Telegram from inside the box.</p>
+</details>
+
+<%= form_with url: update_telegram_path, class: "form-grid" do |f| %>
+  <div class="form-row">
+    <%= f.label :token, "Bot token" %>
+    <%= f.password_field :token, required: true, placeholder: @bot["enabled"] ? "Saved — enter a new token to rotate" : "123456:ABC…" %>
+  </div>
+  <div class="form-row">
+    <%= f.label :chat_ids, "Allowed chat IDs (comma or space separated)" %>
+    <%= f.text_field :chat_ids, value: Array(@bot["chat_id_allowlist"]).join(", ") %>
+  </div>
+  <p><%= f.submit "Validate and save", data: { turbo_submits_with: "Validating…" } %></p>
+<% end %>
+
+<h2>Round trip</h2>
+<p class="muted">Sends a real message to every allowed chat with the saved token.</p>
+<%= button_to "Send test message", test_telegram_path, class: "btn-secondary",
+      data: { turbo_submits_with: "Sending…" } %>

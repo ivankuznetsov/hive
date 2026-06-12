@@ -310,6 +310,19 @@ module Hive
         "check" => true,
         "auto" => true
       },
+      "web" => {
+        "bind" => "127.0.0.1",
+        "port" => 4567,
+        "origin" => "http://127.0.0.1:4567",
+        "github" => {
+          "owner" => nil,
+          # The shared hivebox OAuth app (device flow only — public by
+          # design, no client secret exists). Operators can override with
+          # their own app's client_id; "Enable Device Flow" must be checked.
+          "client_id" => "Ov23liYChIkP5PU4bvo1"
+        },
+        "session_secret_file" => nil
+      },
       # Experimental PR babysitter. This is intentionally separate
       # from the pipeline daemon: it polls open GitHub PRs and asks a
       # development agent to keep them mergeable.
@@ -542,7 +555,9 @@ module Hive
     # model "inherit"/blank omits the flag (operator's interactive default
     # applies); anything else — including the live alias "default" — passes
     # through. effort "default"/"inherit"/blank omits the flag (Claude
-    # Code's own tier applies); low/medium/high pass through.
+    # Code's own tier applies); any other tier Claude Code accepts passes
+    # through verbatim (low/medium/high/xhigh/max as of CC 2.1.x — the init
+    # questionnaire offers the common three, the config key is open).
     def claude_cli_flags(cfg)
       flags = []
       model = (cfg.dig("claude", "model") || DEFAULTS.dig("claude", "model")).to_s.strip
@@ -873,6 +888,30 @@ module Hive
       merged
     end
 
+    def load_global_web
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["web"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "web in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(global_web_defaults, override)
+      validate_web_config!({ "web" => merged }, path)
+      merged
+    end
+
+    def global_web_defaults
+      defaults = deep_dup(DEFAULTS["web"])
+      defaults["session_secret_file"] = File.join(Hive::Paths.state_home, ".web.session_secret")
+      defaults
+    end
+
     def validate_update!(merged, path)
       %w[check auto].each do |key|
         value = merged[key]
@@ -1120,6 +1159,7 @@ module Hive
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
+      validate_web_config!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
@@ -1146,6 +1186,7 @@ module Hive
       review
       agents
       daemon
+      web
       babysitter
       patrol
       bot
@@ -1613,6 +1654,49 @@ module Hive
       end
 
       validate_daemon_verb_timeouts!(daemon, source_path)
+    end
+
+    def validate_web_config!(cfg, source_path)
+      web = cfg["web"]
+      return if web.nil?
+
+      bind = web["bind"]
+      unless bind.is_a?(String) && !bind.strip.empty?
+        raise ConfigError,
+              "web.bind in #{describe_source(source_path)} must be a non-empty String"
+      end
+
+      port = web["port"]
+      unless port.is_a?(Integer) && port.between?(1, 65_535)
+        raise ConfigError,
+              "web.port in #{describe_source(source_path)} must be an integer between 1 and 65535"
+      end
+
+      origin = web["origin"]
+      unless origin.is_a?(String) && origin.match?(%r{\Ahttps?://})
+        raise ConfigError,
+              "web.origin in #{describe_source(source_path)} must be an http(s) URL"
+      end
+
+      github = web["github"]
+      unless github.is_a?(Hash)
+        raise ConfigError,
+              "web.github in #{describe_source(source_path)} must be a Hash"
+      end
+
+      %w[owner client_id].each do |key|
+        value = github[key]
+        next if value.nil? || (value.is_a?(String) && !value.strip.empty?)
+
+        raise ConfigError,
+              "web.github.#{key} in #{describe_source(source_path)} must be a non-empty String when set"
+      end
+
+      secret_file = web["session_secret_file"]
+      return if secret_file.nil? || (secret_file.is_a?(String) && !secret_file.strip.empty?)
+
+      raise ConfigError,
+            "web.session_secret_file in #{describe_source(source_path)} must be a non-empty String when set"
     end
 
     # R-02: `daemon.child_verb_timeouts` is an optional map of hive verb

@@ -276,6 +276,48 @@ class HiveCliTest < Minitest::Test
     assert_match(/--force only applies to `install`/, err)
   end
 
+  # P3: `hive web --json` previously accepted the global --json and silently
+  # ignored it. Mirror `hive tui`'s rejection: emit a structured error
+  # envelope and exit with EX_USAGE rather than booting a long-lived server.
+  def test_web_rejects_json_with_usage_error
+    out, _err, status = with_captured_exit { Hive::CLI.start([ "web", "--json" ]) }
+
+    assert_equal Hive::ExitCodes::USAGE, status, "hive web --json must exit EX_USAGE, not start a server"
+    payload = JSON.parse(out)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "invalid_task_path", payload.fetch("error_kind")
+    assert_match(/no JSON output/, payload.fetch("message"))
+  end
+
+  # The non-JSON `hive web` path boots the long-lived server via
+  # Commands::Web.new(...).call. A unit test can't run Puma, so swap
+  # Commands::Web for a recorder class for the duration of the call (the same
+  # constant-swap technique web_command_test.rb uses for Puma::Server). This
+  # proves the CLI wires bind/port through to the command and invokes #call,
+  # without booting a socket.
+  def test_web_wires_bind_and_port_into_the_web_command
+    require "hive/commands/web"
+    captured = []
+    recorder = Class.new do
+      define_method(:initialize) { |bind:, port:| captured << { bind: bind, port: port } }
+      define_method(:call) { captured << :called }
+    end
+
+    original = Hive::Commands.const_get(:Web)
+    Hive::Commands.send(:remove_const, :Web)
+    Hive::Commands.const_set(:Web, recorder)
+    begin
+      capture_io { Hive::CLI.start([ "web", "--bind", "0.0.0.0", "--port", "9123" ]) }
+    ensure
+      Hive::Commands.send(:remove_const, :Web)
+      Hive::Commands.const_set(:Web, original)
+    end
+
+    assert_equal({ bind: "0.0.0.0", port: 9123 }, captured.first,
+                 "the --bind/--port flags must reach the web command")
+    assert_equal :called, captured.last, "hive web must invoke the web command's #call"
+  end
+
   def test_daemon_argv_errors_emit_json_envelopes_before_raising
     out, _err, status = with_captured_exit { Hive::CLI.start([ "daemon", "--json" ]) }
     payload = JSON.parse(out)

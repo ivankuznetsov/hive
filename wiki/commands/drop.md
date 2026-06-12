@@ -1,10 +1,10 @@
 ---
 title: hive drop
 type: command
-source: lib/hive/commands/drop.rb
+source: lib/hive/commands/drop.rb, lib/hive/web/dispatcher.rb, web/app/controllers/tasks_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-05-22
-tags: [command, task, cleanup, json, tui]
+updated: 2026-06-12
+tags: [command, task, cleanup, json, tui, web]
 ---
 
 **TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]` hard-deletes an active task. It kills any recorded agent process, closes the draft PR best-effort, removes the task's worktree and branch, deletes the task folder from every active stage, removes per-slug logs, and records an audit commit on `hive/state`. There is no dropped bucket, archive, undo, reason prompt, or confirmation.
@@ -39,7 +39,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
 
-When `gh` is not installed on PATH, draft-PR close is skipped silently (warning on stderr, `pr_closed: false`, exit 0). Drop does not require `gh`.
+When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
 
 ## Steps Performed
 
@@ -59,12 +59,12 @@ Re-running after an interrupted cleanup converges: already-missing processes, fo
 
 ## JSON Contract
 
-Success emits `schema = "hive-drop"`, version 1:
+Success emits `schema = "hive-drop"`, current version 2:
 
 ```json
 {
   "schema": "hive-drop",
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "slug": "my-task-260522-abcd",
   "project": "demo",
@@ -80,7 +80,7 @@ Success emits `schema = "hive-drop"`, version 1:
 }
 ```
 
-Errors use `Hive::Schemas::ErrorEnvelope.build` under the same `hive-drop` schema. External consumers validate against `schemas/hive-drop.v1.json`; resolve via `Hive::Schemas.schema_path("hive-drop")`.
+Errors use `Hive::Schemas::ErrorEnvelope.build` under the same `hive-drop` schema. External consumers should resolve the current file via `Hive::Schemas.schema_path("hive-drop")`, which now points at v2; `Hive::Schemas.schema_path("hive-drop", version: 1)` remains available for pinned v1 validators.
 
 ## TUI Binding
 
@@ -92,7 +92,23 @@ hive drop <slug> --project <project> --from <stage> --json
 
 Lowercase `x` is intentionally unbound. The archived-row and empty-grid cases flash a refusal and do not spawn the command.
 
+## Web Binding
+
+In [[commands/web]], the task page's Advanced section posts its Drop card to:
+
+```
+POST /tasks/:project/:slug/drop
+```
+
+`TasksController#drop` calls `Hive::Web::Dispatcher#drop`, which constructs the
+same `Hive::Commands::Drop` command in-process with `project:` and the rendered
+row stage as `from:`. The `from` parameter is load-bearing: a stale page whose
+task already moved to another stage raises `Hive::WrongStage`, which the Rails
+error handler renders as 422, leaving the moved task intact. On success the page
+redirects to the status grid because the detail page no longer has a task to
+show.
+
 ## Backlinks
 
-- [[cli]] · [[commands/tui]] · [[commands/status]]
+- [[cli]] · [[commands/tui]] · [[commands/status]] · [[commands/web]]
 - [[modules/git_ops]] · [[modules/worktree]] · [[modules/lock]]

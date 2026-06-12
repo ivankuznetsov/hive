@@ -33,6 +33,61 @@ jobs:
           HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
+  web:
+    name: hivebox web (Rails tests + system)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: web
+      - name: Install Playwright chromium for Capybara system tests
+        run: |
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Rails integration tests
+        run: bin/rails test
+      - name: Rails system tests (Capybara + Playwright)
+        run: bin/rails test:system
+      - name: Install the gem bundle (the golden-path E2E spawns a real daemon)
+        working-directory: .
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+          BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
+          BUNDLE_DEPLOYMENT: ""
+          BUNDLE_FROZEN: ""
+        run: bundle install --jobs 4
+      - name: hivebox golden-path E2E (claim → idea → Q&A → daemon → PR gate)
+        env:
+          GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
+        run: bin/rails test test/e2e/golden_path_e2e.rb
+      - name: rubocop (web)
+        run: bin/rubocop --format github
+
+  # Hosted Windows runners cannot run Linux containers (Windows-container
+  # mode only, no WSL2) — the per-OS surface that CAN break is our
+  # PowerShell installer. Run it on real Windows PowerShell with a stubbed
+  # docker: failure copy, $LASTEXITCODE handling, argv shape.
+  hivebox-installer-windows:
+    name: hivebox installer (Windows PowerShell)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Syntax-check both installers
+        shell: pwsh
+        run: |
+          $err = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("packaging/docker/install-box.ps1", [ref]$null, [ref]$err)
+          if ($err) { $err; exit 1 }
+      - name: Exercise install-box.ps1 against a stubbed docker
+        shell: pwsh
+        run: packaging/docker/test-install-box.ps1
+
   rubocop:
     name: rubocop (37signals omakase)
     runs-on: ubuntu-latest

@@ -22,6 +22,7 @@ module Hive
         slash_details
         slash_done
         slash_help
+        slash_start
         callback_approve
         callback_reject
         callback_autofix
@@ -130,6 +131,10 @@ module Hive
         when %r{\A/details\b} then :slash_details
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
+        # Telegram sends /start automatically on first contact with a bot —
+        # the universal hello. Falling through to "I did not understand
+        # that" greeted every new operator with a shrug.
+        when %r{\A/start\b} then :slash_start
         else
           if answer_context(update)
             return :answer_voice if update.respond_to?(:voice?) && update.voice?
@@ -280,6 +285,7 @@ module Hive
         when :slash_details then @slash_handlers.details(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
+        when :slash_start then @slash_handlers.start(update)
         when :idea_voice then @slash_handlers.voice(update)
         when :answer_voice then answer_voice(update)
         when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)

@@ -78,6 +78,20 @@ class AgentLimitTest < Minitest::Test
     assert Hive::AgentLimit.limit_reached?("insufficient_quota")
   end
 
+  def test_detects_the_claude_session_limit_wall
+    # The exact message a headless `claude -p` run returns when the
+    # subscription session window is exhausted (api_error_status=429);
+    # missing it strands the task with a plain exit_code error marker
+    # instead of a self-healing limits_reached one.
+    assert Hive::AgentLimit.limit_reached?("You've hit your session limit \u00b7 resets 8pm (Europe/London)"),
+           "the session-limit wall must classify as limits_reached"
+  end
+
+  def test_approaching_session_limit_warning_is_benign
+    refute Hive::AgentLimit.limit_reached?("Approaching session limit \u00b7 run /compact to continue"),
+           "the healthy-pane warning must not kill a running session"
+  end
+
   def test_does_not_classify_unrelated_errors_as_limits
     refute Hive::AgentLimit.limit_reached?("tmux session terminated before writing expected output")
     refute Hive::AgentLimit.limit_reached?("exit_code=1")

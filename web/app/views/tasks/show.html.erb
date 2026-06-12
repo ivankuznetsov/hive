@@ -1,0 +1,90 @@
+<% content_for(:title, "hivebox — #{task_title(@row)}") %>
+
+<div class="task-header">
+  <h1><%= task_title(@row) %></h1>
+</div>
+<p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
+
+<%# Live by PUSH, not poll: the page subscribes to the status channel and
+    morph-refreshes when StatusBroadcaster signals a change — answers
+    recorded → agent resumes → next round's questions or a passable gate
+    appear instantly. Morphing (vs replace) plus the data-turbo-permanent
+    Q&A form means typing is never disturbed. %>
+<% content_for(:head) do %>
+  <meta name="turbo-refresh-method" content="morph">
+  <meta name="turbo-refresh-scroll" content="preserve">
+<% end %>
+<%= turbo_stream_from StatusBroadcaster::CHANNEL %>
+<%= render "tasks/state" %>
+
+<% if @files.any? %>
+  <h2>Artifacts</h2>
+  <%# The controller re-applies the operator's open/closed choices after each
+      pushed morph; content stays live (agents keep writing these files). %>
+  <div data-controller="artifacts">
+    <% @files.each_with_index do |(name, content), i| %>
+      <details class="artifact" data-artifact-name="<%= name %>" <%= "open" if i.zero? %>>
+        <summary><%= name %></summary>
+        <div class="artifact-body">
+          <% if name.end_with?(".md") %>
+            <div class="markdown"><%= render_markdown(content) %></div>
+          <% else %>
+            <pre><%= content %></pre>
+          <% end %>
+        </div>
+      </details>
+    <% end %>
+  </div>
+<% end %>
+
+<% if @log %>
+  <h2>Log</h2>
+  <%# data-turbo-permanent: page morphs must never touch the frame — Turbo
+      would otherwise RELOAD a [src][refresh=morph] frame on every pushed
+      refresh, bypassing the poll controller's human-always-wins gates and
+      yanking content while the operator reads history. Its own gated poll
+      owns freshness. refresh="morph": the poll's reload PATCHES the pane
+      instead of replacing its children, so an unchanged tail repaints
+      nothing (no blink) and a grown tail appends — until the 200-line tail
+      window saturates, after which each reload rewrites the window. The
+      poll follows tail -f semantics (see the poll controller): pinned to
+      the bottom while following, paused while scrolled up to read. %>
+  <%= turbo_frame_tag "task-log", src: task_log_path(@project["name"], @row["slug"]),
+        refresh: "morph",
+        data: { controller: "poll", poll_interval_value: 3000, turbo_permanent: true } do %>
+    <div class="log-pane"><pre>Loading log…</pre></div>
+  <% end %>
+<% end %>
+
+<details class="advanced">
+  <summary>Advanced</summary>
+  <div class="advanced-item">
+    <div>
+      <p class="advanced-title">Send back a stage</p>
+      <p class="muted">Move this task to the previous gate. Artifacts are kept — the prior stage resumes where it left off.</p>
+    </div>
+    <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
+          params: { from: @row["stage"] }, class: "btn-danger",
+          data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
+  </div>
+  <% unless stage_passable?(@row) %>
+    <div class="advanced-item">
+      <div>
+        <p class="advanced-title">Force approve</p>
+        <p class="muted">Advance to the next stage even though this one isn't marked complete — the next agent runs with whatever exists now (e.g. unanswered questions stay unanswered).</p>
+      </div>
+      <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
+            params: { from: @row["stage"], force: "1" }, class: "btn-secondary",
+            data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+    </div>
+  <% end %>
+  <div class="advanced-item">
+    <div>
+      <p class="advanced-title">Drop task</p>
+      <p class="muted">Permanently delete this idea — kills any running agent, removes the task folder, worktree, and branch, and closes a draft PR. The TUI's Shift+X. There is no undo.</p>
+    </div>
+    <%= button_to "Drop", task_drop_path(@project["name"], @row["slug"]),
+          params: { from: @row["stage"] }, class: "btn-danger",
+          data: { turbo_confirm: "Permanently delete #{@row["slug"]}? This cannot be undone." } %>
+  </div>
+</details>

@@ -264,6 +264,19 @@ module Hive
           )
         end
 
+        # Telegram's automatic first-contact command. A welcome with the
+        # next concrete step beats the bare command list: the operator just
+        # connected the bot from hivebox and wants proof it works.
+        def start(_update)
+          @result_class.new(
+            action: :reply,
+            text: "Connected. This bot drives your hive pipeline: it notifies you when " \
+                  "tasks need answers or approvals, and you can reply right here.\n\n" \
+                  "Try /status to see your tasks, /idea to capture a new one, " \
+                  "or /help for every command."
+          )
+        end
+
         def autofix(update)
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
           return @result_class.new(action: :reply, text: "Use /autofix <slug>.") if slug.empty?

@@ -27,6 +27,9 @@ module Hive
       /plan limits? until/i,
       /to see usage limits?/i,
       /usage limits? (?:reset|renew)s? (?:on|at|in)/i,
+      # "Approaching session limit" sits in a HEALTHY pane as a warning;
+      # only the past-tense wall ("hit your session limit") is terminal.
+      /approaching[^\n]{0,40}session limit/i,
       # Box-drawing / chrome-only lines can never be a limit sentence.
       /\A[\s╭╮╰╯─│▐▛▜▝▘▎●❯>·]+\z/
     ].freeze
@@ -39,6 +42,10 @@ module Hive
       /insufficient[_\s-]*quota/i,
       /quota (?:exhausted|exceeded|reached)/i,
       /rate limit (?:reached|exceeded|reset|hit)/i,
+      # Claude subscription wall: "You've hit your session limit · resets
+      # 8pm (Europe/London)". Verb-anchored so the healthy-pane warning
+      # "Approaching session limit" can never match.
+      /(?:hit|reached) your session limit/i,
       /rate limited/i,
       /too many requests/i,
       /\b(?:http|status|response)[:=\s-]*429\b/i,

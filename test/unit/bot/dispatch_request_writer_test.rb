@@ -32,7 +32,7 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
 
       payload = JSON.parse(File.read(files.first))
       assert_equal "hive-dispatch-request", payload["schema"]
-      assert_equal 1, payload["schema_version"]
+      assert_equal Q::SCHEMA_VERSION, payload["schema_version"]
       assert_equal request_id, payload["request_id"]
       assert_equal "2026-05-28T18:11:44.000000Z", payload["created_at"]
       assert_equal "hive", payload["project"]

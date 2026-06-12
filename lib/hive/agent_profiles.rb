@@ -53,6 +53,32 @@ module Hive
         @mutex.synchronize { @profiles.keys }
       end
 
+      def logged_in?(name, home: Dir.home)
+        # Probe the specific credential artifact each CLI writes on a
+        # successful login, NOT merely a non-empty config dir: both claude
+        # and codex create ~/.claude / ~/.codex (settings, cache, history)
+        # the first time they run, *before* any token exists, so a dir check
+        # reports a green "Logged in" on a box that has no credential.
+        case name.to_sym
+        when :claude
+          credential_present?(File.join(home, ".claude", ".credentials.json"))
+        when :codex
+          credential_present?(File.join(home, ".codex", "auth.json"))
+        when :pi
+          credential_present?(File.join(home, ".pi", "agent", "auth.json"))
+        else
+          false
+        end
+      rescue SystemCallError, ArgumentError
+        false
+      end
+
+      # True iff `path` is a regular file holding more than an empty JSON
+      # object — i.e. an actual credential, not a freshly-created `{}` stub.
+      def credential_present?(path)
+        File.file?(path) && !File.read(path).strip.match?(/\A(?:|\{\s*\})\z/m)
+      end
+
       # Test helper: clear the registry. Used by per-test setup that wants
       # a clean slate; production code never calls this.
       def reset_for_tests!

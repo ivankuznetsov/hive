@@ -139,6 +139,20 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_cli_flags_refuse_non_claude_profiles
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "test",
+                              max_budget_usd: 1, timeout_sec: 5,
+                              profile: profile,
+                              cli_flags: [ "--model", "sonnet" ])
+
+      error = assert_raises(ArgumentError) { agent.send(:build_cmd) }
+      assert_match(/claude-specific/, error.message,
+                   "handing codex --model sonnet would fail or silently mean something else")
+    end
+  end
+
   def test_cli_flags_ride_the_headless_argv
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(task: make_task(dir), prompt: "test",

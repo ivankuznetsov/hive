@@ -26,6 +26,25 @@ def wait_for(client, bot, predicate, timeout=DEFAULT_TIMEOUT_SEC, after_id=0):
     return None
 
 
+def drive_start(client, bot):
+    """Send /start (Telegram's automatic first-contact command) and assert
+    the bot replies with the welcome instead of the unknown-command shrug.
+
+    Returns 0 PASS / 1 FAIL and prints a single line.
+    """
+    baseline = max((m.id for m in client.iter_messages(bot, limit=1)), default=0)
+    client.send_message(bot, "/start")
+    reply = wait_for(client, bot, lambda m: bool(m.raw_text), after_id=baseline)
+    if not reply:
+        print("FAIL /start got no reply")
+        return 1
+    if "Connected" not in (reply.raw_text or ""):
+        print(f"FAIL /start reply lacked the welcome: {reply.raw_text!r}")
+        return 1
+    print("PASS /start welcomed with next steps")
+    return 0
+
+
 def drive(client, bot, project):
     """Send /idea, tap the project picker, assert the capture ack.
 

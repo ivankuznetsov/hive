@@ -4,6 +4,7 @@ require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
+require "hive/daemon/dispatch_request_queue"
 
 module Hive
   module Daemon
@@ -53,9 +54,10 @@ module Hive
     # Some terminal ERROR markers are also auto-retryable. `8-finalize`
     # `reason=unpushed_commits` can fail during ordinary interruptions
     # (sleep/network) even though the task state remains recoverable by
-    # rerunning finalize. Later-stage `reason=tmux_session_terminated`
-    # and `reason=agent_orphaned` markers in 7-artifacts / 8-finalize
-    # also describe a lost agent session, not a task-domain failure.
+    # rerunning finalize. `reason=tmux_session_terminated` and
+    # `reason=agent_orphaned` markers describe a lost agent session in ANY
+    # stage — not a task-domain failure — and stage reruns resume from the
+    # on-disk artifacts.
     # Clearing those specific markers lets the normal daemon dispatch
     # rerun the stage up to the configured limit (default 3) before
     # leaving the marker red for manual recovery. There is no healer-side
@@ -86,9 +88,11 @@ module Hive
 
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
-                     error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT)
+                     error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT,
+                     request_queue: Hive::Daemon::DispatchRequestQueue)
         @controller = controller
         @logger = logger
+        @request_queue = request_queue
         @grace_sec = grace_sec
         @review_error_auto_recovery_limit = review_error_auto_recovery_limit
         @error_auto_recovery_limit = error_auto_recovery_limit
@@ -201,6 +205,10 @@ module Hive
                       state_file: row.state_file,
                       attempts: attempts,
                       max_attempts: @error_auto_recovery_limit)
+        # Every 3-plan heal needs the explicit requeue — limits_reached
+        # cooldown heals leave the same markerless empty plan.md as agent
+        # loss does (PR review P2 #7).
+        requeue_plan_rerun(row) if row.stage.to_s == "3-plan"
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -208,6 +216,46 @@ module Hive
                       stage: row.stage,
                       reason: error_heal_label(row, marker_reason(row)),
                       error: "#{e.class}: #{e.message}")
+      end
+
+      # 3-plan is the one agent-loss stage where clearing the marker cannot
+      # re-dispatch by itself: the state file is the dead run's OWN artifact,
+      # so the clear leaves an empty plan.md that classifies straight back to
+      # :error (TaskAction#incomplete_plan_artifact?) — an action Policy
+      # skips, and with no marker reason left this healer can never match it
+      # again. Re-entry must be explicit: enqueue the exact rerun an operator
+      # would type. The daemon executes it like any web/bot request, so the
+      # usual concurrency gates (caps, cooldown, quarantine) still apply —
+      # which also means a request blocked longer than the queue's expiry
+      # (~10 min) is silently dropped and the row stays red until the web
+      # Retry button / bot Autofix re-enter it; acceptable, since both
+      # remain available on the markerless red row.
+      def requeue_plan_rerun(row)
+        request_id = @request_queue.write_request!(
+          project: row.project,
+          slug: row.slug,
+          argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ],
+          requestor: "healer",
+          trigger: "terminal_agent_loss"
+        )
+        @logger.event(:heal_requeued,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      request_id: request_id)
+      rescue StandardError => e
+        # Own rescue, NOT the caller's marker_heal_failed: by this point the
+        # clear already SUCCEEDED, so "heal failed, next tick retries" would
+        # be a lie — the marker is gone, this healer can never re-match the
+        # row, and no retry will come. The distinct event says exactly that
+        # and carries the manual re-entry command (the web Retry button and
+        # bot Autofix also still work on the markerless red row).
+        @logger.event(:heal_requeue_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      error: "#{e.class}: #{e.message}",
+                      remediation: "hive plan #{row.slug} --project #{row.project} --from 3-plan")
       end
 
       def auto_recoverable_error?(row, now:)
@@ -222,7 +270,16 @@ module Hive
         # ticks do NOT consume the retry budget.
         return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
 
-        %w[7-artifacts 8-finalize].include?(row.stage.to_s) &&
+        # Agent-loss reasons heal in every stage EXCEPT 6-review: a lost
+        # tmux session or orphaned agent is environmental wherever it
+        # happens (the sweep-kills-the-server bug took out parallel
+        # BRAINSTORMS), and a stage rerun resumes from on-disk artifacts —
+        # brainstorm picks its rounds back up from brainstorm.md exactly
+        # like a manual re-dispatch. 6-review stays excluded because the
+        # review tree has its own specialized heal paths (REVIEW_ERROR /
+        # review_error_signature) and generic clearing would double-handle.
+        # The retry budget (default 3) still bounds every stage.
+        row.stage.to_s != "6-review" &&
           %w[tmux_session_terminated agent_orphaned].include?(reason)
       end
 

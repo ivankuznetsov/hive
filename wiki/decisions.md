@@ -7,7 +7,109 @@ updated: 2026-06-12
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's paste-the-code agent OAuth relay, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
+
+## ADR-037: Hivebox web tier is a vanilla Rails 8 + Turbo app, replacing the Sinatra tier
+
+**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10).
+
+**Context:** The first web tier was Sinatra + hand-rolled SSE + hand-written
+DOM-reconciliation JS. It worked, but live updates needed a bespoke
+SSE limiter/heartbeat stack, the UI read as utilitarian, and every new
+surface meant more custom JS — against the owner's "native Turbo over JS"
+rule.
+
+**Decision:** The web UI is a vanilla `rails new` app (importmap, Turbo,
+Stimulus, propshaft, sqlite solid stack) in `web/`, with the gem's
+transport-agnostic classes (`GithubAuth`, `StatusFeed`, `Dispatcher`,
+`AgentsAuth`, Telegram validators, `SessionSecret`) as its only bridge to
+the pipeline. Live status flows over Turbo Streams broadcast from a
+`StatusFeed` subscriber; the only timers in JS are a frame poller (Turbo has
+no native timed refresh) and the composer's paste/upload handler. `hive web`
+execs `bin/rails server` from the app dir; the gem does not package the app
+(Docker image or source checkout only). The UI design language follows
+claude.com: warm ivory/charcoal surfaces, terracotta accent, serif display
+headings, hairline borders, calm dark mode.
+
+**Consequences:** SSE limiter, custom reconciliation JS, and the Sinatra
+route/view tree are gone (−sinatra, −rack-protection, −puma gem deps). The
+image gains a second bundle + asset precompile. Browser-level coverage moved
+to Capybara + Playwright system tests with a dev/test-only login seam.
+Authorization, device flow, and the no-new-pipeline-logic constraint are
+unchanged (ADR-036 still applies).
+
+## ADR-036: Hivebox operator sign-in uses GitHub OAuth device flow, not the callback web flow
+
+**Status:** Active (replaced the authorization-code web flow during PR #300, 2026-06-10; amended on 2026-06-12 so ownerless boxes are first-login claimable).
+
+**Context:** The web gate originally shipped as the OAuth authorization-code
+web flow: a per-operator GitHub OAuth app whose callback URL had to match
+`web.origin` exactly, plus a client secret in `HIVEBOX_GITHUB_CLIENT_SECRET`.
+For a headless box whose origin changes between localhost and a VPS/tunnel,
+that coupling was the largest first-run configuration surface — and it
+contradicted the box's own agent-auth UX, which is already device-code-style
+(ADR-035).
+
+**Decision:** `Hive::Web::GithubAuth` implements the device flow (RFC 8628):
+`POST /auth/github` requests a device/user code pair, `GET /auth/github/wait`
+shows the code and polls the token endpoint at GitHub's stated interval
+(at most one poll per page render, honoring `slow_down`). No redirect URI, no
+client secret; `web.github.client_id` defaults to the shared hivebox OAuth app
+(public by design — device flow is a public-client grant) and remains
+overridable. `web.github.owner` is optional at startup: if it is blank, the box
+is claimable and the first successful device-flow login writes its login into
+the global config under `Hive::Config.update_global_config!`; the lock block
+re-checks ownership so simultaneous first-logins produce exactly one owner and
+the loser falls through to the normal owner 403. Session renewal at the auth
+boundary and non-owner 403 semantics are unchanged after claim. Every later
+owner-gated request also re-loads the current global web config and re-checks
+`owner?(session[:github_login])`; if ownership changed, Rails resets the
+session and redirects to login so an old repo-scoped token does not remain
+usable. The tokenless local dev/test login seam stays exempt only in local
+Rails environments.
+
+**Consequences:** A fresh Docker box needs no config edit before sign-in; it
+needs only the default `web.github.client_id`, and the first operator who
+finishes the device flow becomes the owner. Operators can still pre-pin
+`web.github.owner` to avoid first-login claim. Moving the box between origins
+requires no GitHub-side changes; the secrets surface shrinks to the session
+secret. The UX cost is one extra step (entering a short code at
+github.com/login/device) — symmetrical with the agent relay. Operators
+overriding `client_id` must check "Enable Device Flow" on their app. Route
+behavior and tests: [[commands/web]].
+
+## ADR-035: Hivebox agent OAuth uses PTY paste-the-code relay, not provider-page proxying
+
+**Status:** Active (shipped with hivebox web UI work on 2026-06-04).
+
+**Context:** Hivebox needs to help an operator authenticate local agent CLIs
+inside a Dockerized `/data` home. Proxying Anthropic/OpenAI provider login pages
+through the hivebox origin would put third-party login HTML under a different
+origin, run against normal phishing defenses, and depend on redirect URI
+assumptions the CLIs do not promise to expose.
+
+**Decision:** For Claude and Codex, hivebox spawns the real CLI login command in
+a PTY (`claude setup-token`, `codex login`), captures output, extracts the first
+`http(s)://` URL, asks the operator to open that provider URL directly, and
+writes the pasted code or callback URL back to the waiting PTY. The same relay
+now covers `gh auth login` with `--hostname github.com --git-protocol https --web --skip-ssh-key`;
+`gh`'s device-flow prompt asks for a bare Enter before polling, so the relay
+auto-answers that prompt rather than asking for a paste-back code.
+For Pi, hivebox validates that the submitted token JSON is a non-empty object
+and writes it to `~/.pi/agent/auth.json` with mode `0600`. The container sets
+`HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, and `~/.config/gh`
+survive image upgrades via the `/data` bind mount.
+
+**Consequences:** Hivebox avoids becoming a login-page reverse proxy and keeps
+the credential persistence model aligned with the CLI tools themselves. The UX
+cost is that the operator must copy/paste the returned code or callback URL for
+Claude/Codex; `gh` needs only the displayed GitHub device code because the relay
+answers its Enter prompt. The Docker image's git credential helper can then use
+that `gh` auth for daemon-owned https pushes, removing the previous docker-exec
+setup step. Callback proxying to a localhost listener remains intentionally
+unimplemented until an agent CLI documents a supported callback-host override.
+The local design note is `docs/notes/hivebox-agent-oauth-relay.md`; route-level
+behavior is covered in [[commands/web]].
 
 ## ADR-033: Single-dispatcher for state-mutating `hive` verbs via file-backed request queue
 
@@ -15,9 +117,9 @@ tags: [decisions, adr]
 
 **Context:** ADR-026 made the Telegram bot a subprocess caller — it directly `Process.spawn`ed `hive run` (and friends) on its own. ADR-024 made the daemon track per-slug `state_file_mtime` baselines to suppress redundant edit-resume dispatches; that tracking relies on the daemon being the writer that observes the post-completion mtime via its own `ChildSupervisor.reap_all`. When the bot was a parallel writer of `hive run`, the daemon's `ConcurrencyController#observe_state_file_mtime` was never called for bot-driven children. The daemon's baseline went stale, and on its next tick the agent's own write to brainstorm.md looked like a "new user edit" — the daemon dispatched a redundant runner that held `Hive::Lock.with_task_lock` for 1–2 min, during which the bot rejected legitimate user answers with "Try again — another run holds the lock." Diagnosed 2026-05-28 on `explore-the-simplest-way-to-260528-2503`.
 
-**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same code path as auto-advance. The daemon's existing reap + `refresh_post_completion_mtime` then keeps the baseline current.
+**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). Hivebox web later reused the same producer path for stage-run/recovery requests, and `Hive::Daemon::StaleAgentHealer` now enqueues `3-plan` reruns as `requestor=healer`. The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same code path as auto-advance. The daemon's existing reap + `refresh_post_completion_mtime` then keeps the baseline current.
 
-The new schema `hive-dispatch-request@1` is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published at `schemas/hive-dispatch-request.v1.json` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file).
+The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). `hive-dispatch-request.v1.json` was the original bot-only contract; current code writes `hive-dispatch-request.v2.json`, whose breaking change is the `requestor` enum gaining `healer` while preserving `bot` for Telegram and hivebox web. The live queue is strict-version-matched: mismatched versions are rejected as malformed/`unknown_schema_version`, so future queue-shape changes require a coordinated producer/daemon bump plus a new schema file before emission.
 
 The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
 

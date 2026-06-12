@@ -23,7 +23,7 @@ module Hive
       "hive-metrics-rollback-rate" => 1,
       "hive-markers-clear" => 1,
       "hive-forget" => 1,
-      "hive-drop" => 1,
+      "hive-drop" => 2,
       "hive-prune" => 1,
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,
@@ -45,7 +45,7 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 1,
+      "hive-dispatch-request" => 2,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).

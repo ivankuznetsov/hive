@@ -1,13 +1,13 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-06-08
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive]
+updated: 2026-06-12
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. The workflow "data model" is the directory layout, marker grammar, and YAML schemas described below.
+**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
 
 ## Stage directory layout
 
@@ -105,7 +105,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to run `hive artifacts` into 7-artifacts (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=… reason=… -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`). Most review errors remain human-recoverable, but the daemon auto-clears no-live-lock `reason=review_agent_died` and `phase=reviewers reason=reviewer_partial_failure` when `reviews/errors-NN.md` contains only Claude/tmux `tmux_session_terminated before writing expected output file` failures, so the review can retry without operator input. Auto-clear is bounded per daemon process by failure signature (default 3); repeated identical failures stay red after the budget is exhausted. | `Stages::Review` orchestrator |
 
-`5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus `7-artifacts` / `8-finalize` `reason=tmux_session_terminated` or `reason=agent_orphaned`. `reason=limits_reached` (any stage, including the reviewers `REVIEW_ERROR` variant) also self-heals, gated on its `retry_after` cooldown stamp rather than on stage — see [[daemon]]. Separately, an `8-finalize` `ERROR reason=git_status_failed` or `reason=claude_launch_failed` stays red while the PR is open, but `PrMergeWatcher` can retire it after the PR is merged by dispatching the internal archive recovery path; `StageAction` re-confirms the marker reason and GitHub `MERGED` state before moving the folder to `9-done`.
+`5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus non-review terminal agent-loss `reason=tmux_session_terminated` / `reason=agent_orphaned` in `2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, and `8-finalize`. `reason=limits_reached` (any stage, including the reviewers `REVIEW_ERROR` variant) also self-heals, gated on its `retry_after` cooldown stamp rather than on stage. The `3-plan` terminal-error path writes a `DispatchRequestQueue` request for `hive plan <slug> --project <project> --from 3-plan` after any successful terminal `ERROR` clear there, including terminal agent-loss and elapsed `limits_reached`, because clearing the marker can leave an empty markerless `plan.md` that otherwise classifies straight back to `:error`. See [[daemon]]. Separately, an `8-finalize` `ERROR reason=git_status_failed` or `reason=claude_launch_failed` stays red while the PR is open, but `PrMergeWatcher` can retire it after the PR is merged by dispatching the internal archive recovery path; `StageAction` re-confirms the marker reason and GitHub `MERGED` state before moving the folder to `9-done`.
 
 Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New `ERROR` markers get a generated `marker_id` attr; human labels hide it, but recovery surfaces use it as the preferred `hive markers clear --match-attr marker_id=...` guard. Legacy `ERROR` rows without `marker_id` fall back to observed attrs such as `reason=exit_code,exit_code=143`. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for back-compat parsing of historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
 
@@ -117,6 +117,66 @@ Recovery from a stale or error marker is agent-callable via `hive markers clear 
 
 - **Per-task lock**: `<task folder>/.lock` — YAML payload `{pid, started_at, process_start_time, claude_pid?, slug?, stage?}`. Acquired EXCL by `Hive::Lock.acquire_task_lock` (`lib/hive/lock.rb:18`). Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat PID reuse.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
+
+## Runtime dispatch queue and web snapshots
+
+The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
+(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Producers are
+the Telegram bot, hivebox web, and the `3-plan` terminal-error healer.
+Web paths currently write through `Hive::Bot::DispatchRequestWriter`, so the
+JSON `requestor` field is commonly `bot`; `trigger` values such as `web` and
+`web_recover` distinguish the web-originated requests, while the healer writes
+`requestor=healer`.
+Each pending request is one JSON file:
+
+```yaml
+schema: hive-dispatch-request
+schema_version: 2
+request_id: <hex16>
+created_at: <UTC-ISO8601>
+project: <registered project name>
+slug: <task slug>
+argv: ["hive", "<allowlisted verb>", ...]
+requestor: bot|healer
+chat_id:
+update_id:
+trigger:
+```
+
+The current strict wire contract is `hive-dispatch-request.v2`: v2 adds the
+closed `requestor: healer` producer used by `StaleAgentHealer` while preserving
+`bot` for Telegram and hivebox web (web still writes through
+`Hive::Bot::DispatchRequestWriter`). The daemon rejects any file whose
+`schema_version` does not equal `DispatchRequestQueue::SCHEMA_VERSION` with
+`unknown_schema_version`; older schema files remain in `schemas/` for pinned
+validators, not for mixed-version live queue operation.
+
+`Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
+and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
+`plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
+Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
+renames the file to `<id>.json.claimed` and writes
+`<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
+those claim files are the at-most-once dispatch record. Multi-step recoveries
+store later argv arrays in `<request_id>.sequence` and promote the next request
+only after the previous child exits 0; non-zero/nil exits discard the sequence.
+Hivebox `recover` writes the sequence sidecar first, then the guarded
+`hive markers clear ... --json` request, and discards the sidecar if the
+request write fails so no orphaned continuation remains.
+
+Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
+is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
+Turbo Streams. `StatusFeed#snapshot` computes a fresh
+`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
+request-time reads; `StatusFeed#each_snapshot` runs one shared poller per
+process and compares snapshots with only volatile `generated_at` /
+`age_seconds` fields removed. `mtime` and `folder_mtime` deliberately remain
+part of the comparison key because task pages use those changes as the liveness
+signal for artifact/log refreshes while agents write. `StatusBroadcaster`
+publishes a status-channel refresh before rendering and replacing the
+dashboard's `projects` frame, so task pages that do not contain that frame
+still receive a morph signal even if a bad project row makes the grid partial
+raise.
 
 ## Worktree pointer
 

@@ -12,7 +12,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
   def write_request(state_home, request_id:, created_at:, argv: [ "hive", "run", "slug-x", "--json" ],
                     project: "hive", slug: "slug-x", requestor: "bot", chat_id: 42,
-                    update_id: 99, trigger: "answer_complete", schema_version: 1,
+                    update_id: 99, trigger: "answer_complete", schema_version: Q::SCHEMA_VERSION,
                     schema: "hive-dispatch-request")
     dir = Q.directory(state_home: state_home)
     filename = Q.filename_for(created_at: created_at, request_id: request_id)
@@ -111,44 +111,44 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
       # Missing request_id
       File.write(File.join(dir_path, "20260528T180000000000-A.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "", "created_at" => ts,
         "project" => good_project, "slug" => good_slug, "argv" => good_argv
       ))
       # Missing project
       File.write(File.join(dir_path, "20260528T180000000001-B.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "B", "created_at" => ts,
         "project" => "", "slug" => good_slug, "argv" => good_argv
       ))
       # Invalid project (path-traversal candidate)
       File.write(File.join(dir_path, "20260528T180000000002-B2.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "B2", "created_at" => ts,
         "project" => "../etc/passwd", "slug" => good_slug, "argv" => good_argv
       ))
       # Missing slug
       File.write(File.join(dir_path, "20260528T180000000003-C.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "C", "created_at" => ts,
         "project" => good_project, "slug" => "", "argv" => good_argv
       ))
       # Invalid slug (path-traversal candidate)
       File.write(File.join(dir_path, "20260528T180000000004-C2.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "C2", "created_at" => ts,
         "project" => good_project, "slug" => "../escape", "argv" => good_argv
       ))
       # Invalid argv type
       File.write(File.join(dir_path, "20260528T180000000005-D.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "D", "created_at" => ts,
         "project" => good_project, "slug" => good_slug,
         "argv" => "hive run #{good_slug}"
       ))
       # Bad created_at
       File.write(File.join(dir_path, "20260528T180000000006-E.json"), JSON.generate(
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "E", "created_at" => "not-a-time",
         "project" => good_project, "slug" => good_slug, "argv" => good_argv
       ))
@@ -502,7 +502,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       # Hand-craft a claimed file whose sidecar claimed_at is not a timestamp
       # -> claim_aged_out? rescues the parse and treats it as aged-out.
       payload = {
-        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "schema" => "hive-dispatch-request", "schema_version" => Q::SCHEMA_VERSION,
         "request_id" => "badts001", "created_at" => Time.utc(2026, 5, 28).iso8601,
         "project" => "hive", "slug" => "slug-x",
         "argv" => [ "hive", "run", "slug-x" ], "requestor" => "bot"

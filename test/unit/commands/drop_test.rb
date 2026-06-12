@@ -54,6 +54,19 @@ class DropCommandTest < Minitest::Test
     status.success?
   end
 
+  def test_drop_without_a_pr_reports_pr_cleanup_as_clean
+    with_drop_project do |dir, ops, project|
+      slug = "no-pr-idea-260612-aaaa"
+      create_task(dir, "1-inbox", slug, body: "# idea\n")
+      commit_hive_state(ops, "1-inbox", slug)
+
+      out, _err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+      payload = JSON.parse(out)
+      assert_equal true, payload["pr_closed"],
+                   "no PR recorded means PR cleanup is CLEAN - false is reserved for "                    "'a PR existed and could not be closed' so web notices stay honest"
+    end
+  end
+
   def test_drop_removes_execute_task_worktree_branch_logs_and_agent
     with_drop_project do |dir, ops, project|
       slug = "drop-me-260522-aaaa"

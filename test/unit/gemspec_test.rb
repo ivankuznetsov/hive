@@ -17,4 +17,16 @@ class GemspecTest < Minitest::Test
     refute_includes spec.executables, "hv"
     assert_includes spec.files, "bin/hv"
   end
+
+  # The web tier is a Rails app under web/, supported only in the Docker
+  # image or a source checkout — the gem must stay a lean CLI and not
+  # package the app or its old Sinatra-era assets.
+  def test_gem_package_excludes_the_rails_web_app
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    refute spec.files.any? { |f| f.start_with?("web/") },
+           "the Rails app must not ship inside the gem"
+    refute spec.files.any? { |f| f.start_with?("public/") },
+           "no Sinatra-era static assets should be packaged"
+  end
 end

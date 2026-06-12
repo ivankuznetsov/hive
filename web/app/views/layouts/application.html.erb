@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title><%= content_for(:title) || "hivebox" %></title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="application-name" content="hivebox">
+    <meta name="mobile-web-app-capable" content="yes">
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+
+    <%= yield :head %>
+
+    <link rel="icon" href="/icon.png" type="image/png">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icon.png">
+
+    <%# Includes all stylesheet files in app/assets/stylesheets %>
+    <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
+    <%= javascript_importmap_tags %>
+  </head>
+
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <%= link_to "hivebox", root_path, class: "brand" %>
+        <% if current_login %>
+          <nav aria-label="Primary">
+            <%= link_to "Status", root_path, class: nav_class(:status) %>
+            <%= link_to "Repos", repos_path, class: nav_class(:repos) %>
+            <%= link_to "Agents", agents_path, class: nav_class(:agents) %>
+            <%= link_to "Telegram", telegram_path, class: nav_class(:telegram) %>
+          </nav>
+          <div class="topbar-session">
+            <span class="session-login"><%= current_login %></span>
+            <%= button_to "Log out", logout_path, class: "btn btn-ghost btn-sm", form_class: "inline-form" %>
+          </div>
+        <% end %>
+      </div>
+    </header>
+    <main>
+      <% if notice %>
+        <div class="flash flash-notice" role="status"><%= notice %></div>
+      <% end %>
+      <% if alert %>
+        <div class="flash flash-alert" role="alert"><%= alert %></div>
+      <% end %>
+      <%= yield %>
+    </main>
+  </body>
+</html>

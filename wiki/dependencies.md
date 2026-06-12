@@ -1,20 +1,13 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, hive.gemspec, Gemfile.lock
+source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Eight runtime gems (`thor`, `telegram-bot-ruby`, `faraday`, `faraday-multipart`, `bubbletea`, `lipgloss`, `sqlite3`, `unicode-display_width`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
-
-`hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
-to pull those constraints into Bundler, then adds development/test-only
-tools. Commit `ad9b6204` changed the local path gem entry in
-`Gemfile.lock` from `hive-cli (0.2.2)` to `hive-cli (0.2.3)` to match
-`Hive::VERSION`; it did not change third-party gem constraints or
-resolved third-party versions.
+**TLDR**: The `hive-cli` gem has eight direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
 
 ## Runtime gems
 
@@ -36,6 +29,29 @@ OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
 `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
+## Web app bundle
+
+`web/Gemfile` is deliberately separate from the gem payload: `hive web`
+execs the Rails app from a source checkout or Docker image, and
+`test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
+
+Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3),
+propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
+jbuilder, solid_cache, solid_queue, solid_cable, bootsnap, thruster,
+image_processing, and `hive-cli` from the parent checkout. Redcarpet
+(`~> 3.6`, locked 3.6.1) was added by commit `d7ce55a9` for the task page
+markdown renderer: agent-written `.md` artifacts render with GFM
+tables/fenced code/autolinks, while raw HTML is escaped before rendering
+and the result is sanitized by Rails with an explicit allowlist. See
+[[commands/web]].
+
+Direct web development/test dependencies include `debug`,
+`bundler-audit`, `brakeman`, `rubocop-rails-omakase`, `web-console`,
+`capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
+`web/Gemfile` entry, but the web lock resolves it transitively through
+Rails/Capybara and the web integration upload tests use
+`Rack::Test::UploadedFile`.
+
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.
@@ -50,9 +66,16 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
 | `rubocop` | `~> 1.87` (locked 1.87.0) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
-| `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | 37signals/Omakase RuboCop baseline inherited by `.rubocop.yml`; pulls the Rails and performance cop bundles used by the local lint profile. |
-| `brakeman` | `~> 8.0` (locked 8.0.4) | Static security scanner. The documented local command is `bundle exec brakeman --no-pager`; `config/brakeman.ignore` carries accepted false positives. |
-| `bundler-audit` | `~> 0.9` (locked 0.9.3) | Dependency vulnerability scanner. The documented local command is `bundle exec bundler-audit check --update`; its Faraday advisory drove the `>= 2.14.2` runtime floor. |
+| `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
+| `brakeman` | `~> 8.0` (locked 8.0.4) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
+| `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |
+
+Commit `b0a31edf` removed the root `rack-test` declaration from `Gemfile`,
+and `hive.gemspec` does not declare it. Commit `2e307a19` relocked the root
+bundle, so `Gemfile.lock` no longer resolves `rack-test` in its root `GEM`
+section and no longer lists `rack-test (~> 2.2)` under top-level
+`DEPENDENCIES`. The separate web bundle still resolves `rack-test`
+transitively through Rails/Capybara for upload integration tests.
 
 ## Standard library reliance
 
@@ -81,7 +104,7 @@ These are not gems but the CLI tools the runtime invokes:
 | Tool | Min version | Used by |
 |------|-------------|---------|
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
-| `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
+| `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Hive::Web::AgentsAuth` (`gh auth status` plus the PTY relay for `gh auth login --web`), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
@@ -95,7 +118,7 @@ These are not gems but the CLI tools the runtime invokes:
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.2.3)`.
+2.7.2, and the current local path gem as `hive-cli (0.2.4)`.
 
 ## Backlinks
 

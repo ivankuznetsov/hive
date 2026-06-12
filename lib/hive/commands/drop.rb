@@ -73,6 +73,11 @@ module Hive
         else
           puts "dropped #{context.slug} from #{context.project_name} (#{context.from_stages.join(', ')})"
         end
+        # Returned (not just printed) so in-process callers — the web tier —
+        # can see partial-cleanup facts (pr_closed/branch_deleted/...) that
+        # the CLI surfaces only as stderr warnings, which a Puma worker
+        # would swallow.
+        payload
       end
 
       def resolve_context
@@ -338,7 +343,11 @@ module Hive
           frontmatter = Hive::Gh.pr_frontmatter(File.join(entry[:folder], "pr.md"))
           frontmatter["pr_url"].to_s.strip.empty? ? nil : frontmatter["pr_url"].to_s.strip
         end.uniq
-        return false if urls.empty?
+        # No PR recorded = PR cleanup is clean. `false` strictly means "a PR
+        # existed and could not be closed" — that distinction is what lets
+        # the web tier qualify its Dropped notice without false alarms on
+        # the common case (dropping an idea that never reached open-pr).
+        return true if urls.empty?
 
         comment = "task dropped (hive drop #{@target})"
         closed_any = false

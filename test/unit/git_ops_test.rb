@@ -4,6 +4,50 @@ require "hive/git_ops"
 class GitOpsTest < Minitest::Test
   include HiveTestHelper
 
+  # A project may .gitignore hive's wiki scaffolding (its own wiki/ or
+  # CLAUDE.md policy). The bootstrap commit must stage only what the repo
+  # accepts tracking — a plain add of an ignored path hard-fails the whole
+  # `hive init` ("The following paths are ignored by one of your .gitignore
+  # files"), which broke registering such repos from the web UI.
+  def test_llm_wiki_bootstrap_skips_gitignored_scaffolding
+    with_tmp_git_repo do |dir|
+      File.write(File.join(dir, ".gitignore"), "wiki/\nCLAUDE.md\nAGENTS.md\n.llm-wiki\n.claude\nraw\n")
+      run!("git", "-C", dir, "add", ".gitignore")
+      run!("git", "-C", dir, "commit", "-qm", "ignore docs scaffolding")
+      FileUtils.mkdir_p(File.join(dir, "wiki"))
+      File.write(File.join(dir, "wiki/index.md"), "# wiki")
+      File.write(File.join(dir, "CLAUDE.md"), "claude")
+      FileUtils.mkdir_p(File.join(dir, "raw/notes"))
+      File.write(File.join(dir, "raw/notes/.gitkeep"), "")
+
+      result = Hive::GitOps.new(dir).commit_llm_wiki_bootstrap!
+
+      assert_equal :nothing_to_commit, result,
+                   "fully-ignored scaffolding must be skipped, not crash init"
+      out, = Open3.capture2("git", "-C", dir, "ls-files")
+      refute_includes out.split("\n"), "wiki/index.md", "ignored paths must not be force-committed"
+    end
+  end
+
+  def test_llm_wiki_bootstrap_commits_the_non_ignored_subset
+    with_tmp_git_repo do |dir|
+      File.write(File.join(dir, ".gitignore"), "wiki/\n")
+      run!("git", "-C", dir, "add", ".gitignore")
+      run!("git", "-C", dir, "commit", "-qm", "ignore wiki only")
+      FileUtils.mkdir_p(File.join(dir, "wiki"))
+      File.write(File.join(dir, "wiki/index.md"), "# wiki")
+      File.write(File.join(dir, "CLAUDE.md"), "claude")
+
+      result = Hive::GitOps.new(dir).commit_llm_wiki_bootstrap!
+
+      assert_equal :committed, result
+      out, = Open3.capture2("git", "-C", dir, "ls-files")
+      files = out.split("\n")
+      assert_includes files, "CLAUDE.md", "non-ignored scaffolding must still be committed"
+      refute_includes files, "wiki/index.md"
+    end
+  end
+
   def test_default_branch_from_local_head
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

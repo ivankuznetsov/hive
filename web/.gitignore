@@ -1,0 +1,21 @@
+# See https://help.github.com/articles/ignoring-files for more about ignoring files.
+/.bundle
+/log/*
+/tmp/*
+!/log/.keep
+!/tmp/.keep
+/tmp/pids/*
+!/tmp/pids/.keep
+/storage/*
+!/storage/.keep
+/public/assets
+/app/assets/builds/*
+!/app/assets/builds/.keep
+/node_modules
+/config/master.key
+/config/credentials/*.key
+.env*
+# hivebox does not use Rails credentials: SECRET_KEY_BASE is injected by
+# `hive web` from the persisted session secret. Never commit either file
+# (the original master.key leaked once — rotated by removing credentials).
+/config/credentials.yml.enc

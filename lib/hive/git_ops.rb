@@ -151,12 +151,29 @@ module Hive
       existing = paths.select { |path| File.exist?(File.join(@project_root, path)) }
       return :nothing_to_commit if existing.empty?
 
-      run_git!("-C", @project_root, "add", "--", *existing)
+      # A project may deliberately .gitignore some of this scaffolding (its
+      # own wiki/ or CLAUDE.md policy). Respect that instead of failing the
+      # whole init: a plain `git add` of an ignored path hard-errors, and
+      # force-adding would commit files the repo owner explicitly excluded.
+      # The files stay on disk for hive's local use either way.
+      addable = reject_ignored(existing)
+      return :nothing_to_commit if addable.empty?
+
+      run_git!("-C", @project_root, "add", "--", *addable)
       _, _, status = Open3.capture3("git", "-C", @project_root, "diff", "--cached", "--quiet")
       return :nothing_to_commit if status.success?
 
       run_git!("-C", @project_root, "commit", "-m", "chore: initialize llm-wiki")
       :committed
+    end
+
+    # The paths the project's .gitignore excludes, dropped from `paths`.
+    # `git check-ignore` exits 0/1 for ignored/none-ignored and prints the
+    # ignored subset; on any failure nothing is filtered and the subsequent
+    # add surfaces the real error loudly.
+    def reject_ignored(paths)
+      out, _err, _status = Open3.capture3("git", "-C", @project_root, "check-ignore", "--", *paths)
+      paths - out.split("\n")
     end
 
     # Scoped add. With no `pathspecs:`, stages files under

@@ -7,7 +7,7 @@ updated: 2026-06-12
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects and bot settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, and web settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -17,12 +17,8 @@ tags: [config, yaml, validation]
   "worktree_root"     => nil,
   "default_branch"    => nil,
   "project_name"      => nil,
-  "claude"            => {
-    "mode" => "tmux",
-    "permission_mode" => "bypassPermissions",
-    "model" => "default",
-    "effort" => "default"
-  },
+  "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions",
+                           "model" => "default", "effort" => "default" },
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
   # caps for runaway agents, not cost targets. The deprecated
   # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
@@ -69,6 +65,13 @@ tags: [config, yaml, validation]
                         "prompt_template" => "browser_test_prompt.md.erb", "max_attempts" => 2 },
     "max_passes"        => 2,
     "max_wall_clock_sec" => 14400
+  },
+  "web" => {
+    "bind" => "127.0.0.1",
+    "port" => 4567,
+    "origin" => "http://127.0.0.1:4567",
+    "github" => { "owner" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1" }, # nil owner => first-login claimable
+    "session_secret_file" => nil
   },
   "babysitter" => {
     "enabled" => false,
@@ -136,6 +139,8 @@ tags: [config, yaml, validation]
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
+| `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
+| `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
 | `write_global_config!(data)` | Direct locked atomic write for the global config; restores existing mode bits after tempfile creation so umask cannot narrow them, leaves a sticky sibling lock file, and rewraps lock/write filesystem errors as `ConfigError`. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |
@@ -159,7 +164,7 @@ Rules:
 
 Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
 
-1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `babysitter`, `patrol`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
+1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
@@ -182,18 +187,28 @@ settings live under `bot.transcription`: the block must be a Hash;
 language array is accepted and means "do not filter language". See
 [[commands/bot]] and [[modules/bot]].
 
-The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen values in its nested `answers` object: required `claude_permission_mode`, `claude_model`, and `claude_effort` keys alongside the existing `claude_mode` field — so an agent reading init output sees the launch mode, permission mode, model pin, and effort choice. Only `claude_mode` is duplicated at the payload top level. See [[commands/init]].
+Global web settings are validated separately for [[commands/web]]:
+`web.bind` must be a non-empty string, `web.port` must be an integer in
+`1..65535`, `web.origin` must start with `http://` or `https://`,
+`web.github` must be a hash, optional `web.github.owner` and
+`web.github.client_id` must be non-empty strings when set, and
+`web.session_secret_file` must be a non-empty string when set. A blank/missing
+`web.github.owner` is valid and means the first successful hivebox GitHub
+device-flow login claims the box by writing that owner under the global config
+lock; pre-setting the owner keeps the older pinned-owner gate. GitHub sign-in
+uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
+exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
+app — public by design, since device flow is a public-client grant.
+
+The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 
 `claude.model` / `claude.effort` pin hive-launched claude sessions:
 `model: default` (the default) uses Claude Code's live alias for ITS
 recommended model — no hardcoded name, no inheriting the operator's
 interactive selection; `inherit` omits the flag; aliases/full names pass
-through. `effort: default`, `inherit`, or blank omits `--effort`
-(Claude Code's own tier); low/medium/high pass through. Raw config values
-are intentionally pass-through because Claude Code's model aliases and
-effort vocabulary can change; the TTY init prompt and `hive-init.v1`
-schema constrain the fresh-project answer surface to the documented
-effort choices.
+through. `effort: default` omits `--effort` (Claude Code's own tier);
+low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
+the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 
@@ -226,8 +241,9 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 ## Tests
 
 - `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, error on malformed YAML, normal and patrol reviewer/agent-name validation, babysitter and patrol default/validation coverage.
+- `test/unit/web/config_test.rb` — global web defaults and invalid web port rejection.
 
 ## Backlinks
 
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/web]]
 - [[modules/agent]] · [[state-model]]

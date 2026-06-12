@@ -51,6 +51,25 @@ class StagesTest < Minitest::Test
     assert_raises(ArgumentError) { Hive::Stages.next_dir(nil) }
   end
 
+  def test_prev_dir_returns_preceding_stage_or_nil_at_start
+    assert_equal "5-open-pr", Hive::Stages.prev_dir(6)
+    assert_equal "2-brainstorm", Hive::Stages.prev_dir(3)
+    assert_equal "1-inbox", Hive::Stages.prev_dir(2)
+    assert_nil Hive::Stages.prev_dir(1),
+               "the first stage has no prior gate; callers branch on nil"
+  end
+
+  def test_prev_dir_returns_nil_for_unknown_prefix
+    assert_nil Hive::Stages.prev_dir(99)
+  end
+
+  def test_prev_dir_raises_on_invalid_index
+    assert_raises(ArgumentError) { Hive::Stages.prev_dir(0) }
+    assert_raises(ArgumentError) { Hive::Stages.prev_dir(-1) }
+    assert_raises(ArgumentError) { Hive::Stages.prev_dir("3") }
+    assert_raises(ArgumentError) { Hive::Stages.prev_dir(nil) }
+  end
+
   def test_parse_validates_dir_membership
     # Well-formed-but-unknown stage strings return nil rather than parsing
     # successfully, so a hand-constructed stage like "99-foo" can't slip

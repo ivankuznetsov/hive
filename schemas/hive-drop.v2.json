@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-drop.v2.json",
+  "title": "hive drop output (v2)",
+  "description": "Stable contract emitted by `hive drop TARGET --json`. Hard-deletes an active task by killing the recorded agent, closing any draft PR, removing the task worktree and branch, deleting task folders from active stages, deleting per-slug logs, and committing an audit record on hive/state.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "slug",
+        "project",
+        "from_stages",
+        "pr_closed",
+        "worktree_removed",
+        "branch_deleted",
+        "agent_killed",
+        "agent_pid",
+        "agent_killed_pids",
+        "agent_kill_skipped_reason",
+        "commit_action"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-drop"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": true
+        },
+        "slug": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "from_stages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "1-inbox",
+              "2-brainstorm",
+              "3-plan",
+              "4-execute",
+              "5-open-pr",
+              "6-review",
+              "7-artifacts",
+              "8-finalize"
+            ]
+          }
+        },
+        "pr_closed": {
+          "type": "boolean",
+          "description": "v2 semantics: true whenever PR cleanup ends clean \u2014 including the common no-PR-recorded case; false strictly means a recorded PR could not be closed. (v1 reported false for the no-PR case too.)"
+        },
+        "worktree_removed": {
+          "type": "boolean"
+        },
+        "branch_deleted": {
+          "type": "boolean"
+        },
+        "agent_killed": {
+          "type": "boolean"
+        },
+        "agent_pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "First recorded process id considered for termination, or null when no PID was recorded."
+        },
+        "agent_killed_pids": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "agent_kill_skipped_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reason no recorded PID was terminated, e.g. pid_reuse_guard, not_alive, or no_pid."
+        },
+        "commit_action": {
+          "type": "string",
+          "enum": [
+            "committed"
+          ],
+          "description": "hive/state audit commit action. Drop always writes a commit (allow_empty=true), so the closed set is the single value `committed`."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-drop"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "already_archived",
+            "ambiguous_slug",
+            "wrong_stage",
+            "invalid_task_path",
+            "config",
+            "git",
+            "worktree",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            1,
+            4,
+            64,
+            70,
+            75,
+            78
+          ],
+          "description": "Process exit code (Hive::ExitCodes). 1=GENERIC, 4=WRONG_STAGE, 64=USAGE, 70=SOFTWARE, 75=TEMPFAIL, 78=CONFIG."
+        },
+        "message": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "current_stage": {
+          "type": "string"
+        },
+        "target_stage": {
+          "type": "string"
+        },
+        "holder": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Present on ConcurrentRunError (commit-lock contention) when the existing holder's metadata is recoverable. Properties are best-effort.",
+          "properties": {
+            "pid": {
+              "type": "integer"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": "string"
+            },
+            "process_start_time": {
+              "type": "string"
+            }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Present on ConcurrentRunError. Filesystem path of the lock file that triggered the failure."
+        }
+      }
+    }
+  }
+}

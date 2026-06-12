@@ -24,6 +24,45 @@ class WebDispatcherTest < Minitest::Test
     [ project, slug, dest ]
   end
 
+  def test_recover_queues_marker_clear_then_stage_rerun_as_one_sequence
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug, dest = seed_task_at(dir, "6-review")
+        File.write(File.join(dest, "task.md"),
+                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+
+        request_id = Hive::Web::Dispatcher.new.recover(
+          slug: slug, project: project, stage: "6-review",
+          marker: "review_error",
+          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+        )
+
+        requests = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
+        assert requests.any? { |f| File.file?(f) && File.read(f).include?("markers") },
+               "the FIRST queued command must be the guarded marker clear"
+        first = requests.map { |f| File.read(f) if File.file?(f) }.compact.join
+        assert_includes first, "pass=1", "the clear must be guarded by the most discriminating attr"
+
+        sequence = Dir[File.join(Hive::Paths.state_home, "**", "*#{request_id}*")]
+                   .select { |f| File.file?(f) && File.read(f).include?("review") }
+        assert sequence.any?,
+               "the stage rerun must ride the same request id so it stays invisible until the clear succeeds"
+      end
+    end
+  end
+
+  def test_recover_refuses_manual_only_states_with_a_readable_error
+    with_tmp_global_config do
+      error = assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.recover(
+          slug: "s", project: "p", stage: "6-review",
+          marker: "review_error", attrs: { "phase" => "fix", "reason" => "fix_tampered" }
+        )
+      end
+      refute_empty error.message, "the manual-only reply must reach the operator"
+    end
+  end
+
   def test_drop_hard_deletes_the_task_folder
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

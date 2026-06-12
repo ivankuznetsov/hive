@@ -28,6 +28,7 @@ Rails.application.routes.draw do
     post "reject" => "tasks#reject", as: :task_reject
     post "drop" => "tasks#drop", as: :task_drop
     post "run" => "tasks#run_stage", as: :task_run
+    post "recover" => "tasks#recover", as: :task_recover
     post "intervene" => "tasks#intervene", as: :task_intervene
     post "answers" => "tasks#answer", as: :task_answers
   end

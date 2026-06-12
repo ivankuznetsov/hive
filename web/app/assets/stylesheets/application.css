@@ -613,3 +613,11 @@ pre {
   padding: 14px 18px;
   margin: 18px 0 26px;
 }
+.state-banner-error {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  word-break: break-word;
+}

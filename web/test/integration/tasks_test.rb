@@ -117,6 +117,34 @@ class TasksTest < ActionDispatch::IntegrationTest
                     "stage markers are machinery — the stage badge owns that state"
   end
 
+  test "a red task offers Retry which queues the clear-then-rerun pair" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "6-review").join(@slug))
+    folder = stage_dir(@project, "6-review").join(@slug)
+    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select ".state-banner-error", { count: 1, text: /REVIEW_ERROR|triage/ },
+                  "the red state must say WHY, not just need recovery"
+    assert_select ".task-actions form[action=?] button", "/tasks/#{@project}/#{@slug}/recover",
+                  text: "Retry stage", count: 1
+
+    post "/tasks/#{@project}/#{@slug}/recover"
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_request*", "**", "*"))
+               .select { |f| File.file?(f) }
+    assert queue.any? { |f| File.read(f).include?("markers") },
+           "recover must queue the guarded marker clear"
+    assert queue.any? { |f| content = File.read(f); content.include?("review") && content.include?(@slug) },
+           "recover must queue the stage rerun behind the clear"
+  end
+
+  test "a healthy task shows no Retry button" do
+    get "/tasks/#{@project}/#{@slug}"
+    assert_select ".task-actions form[action=?]", "/tasks/#{@project}/#{@slug}/recover", count: 0
+  end
+
   test "a complete stage offers Approve and hides the force override" do
     # Stamp the marker Commands::Approve actually requires for a forward move.
     Hive::Markers.set(stage_dir(@project, "1-inbox").join(@slug, "idea.md").to_s, :complete)

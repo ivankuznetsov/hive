@@ -75,6 +75,17 @@ class TasksController < ApplicationController
     redirect_to task_path(@project["name"], params[:slug]), notice: "Queued for the daemon"
   end
 
+  def recover
+    # Recovery runs against the CURRENT row, not form-posted state: the
+    # marker's attrs become the clear guard, so a task that moved on since
+    # the page rendered makes the clear a no-op and the retry never fires.
+    row = task_row!
+    dispatcher.recover(slug: params[:slug], project: @project["name"],
+                       stage: row["stage"], marker: row["marker"], attrs: row["attrs"])
+    redirect_to task_path(@project["name"], params[:slug]),
+                notice: "Recovery queued — clearing the error and re-running the stage"
+  end
+
   def intervene
     row = task_row!
     dispatcher.intervene(folder: row["folder"], message: params[:message])

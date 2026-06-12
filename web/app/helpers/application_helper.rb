@@ -68,6 +68,12 @@ module ApplicationHelper
     sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
   end
 
+  # Mirrors Hive::TaskAction#diagnostic_action? — the three red states the
+  # TUI renders under its [Enter] Recover contract.
+  def recovery_action?(row)
+    %w[recover_execute recover_review error].include?(row["action"].to_s)
+  end
+
   def task_title(task)
     return task["display_name"] if task["display_name"].present? && task["display_name"] != task["slug"]
 

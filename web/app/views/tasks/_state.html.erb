@@ -10,7 +10,20 @@
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>
+  <% if recovery_action?(@row) %>
+    <div class="state-banner state-banner-error">
+      <span class="status-dot status-dot-error"></span>
+      <span><%= @row.dig("diagnostic", "summary").presence || "The stage hit an error and needs a retry." %></span>
+    </div>
+  <% end %>
+
   <div class="task-actions">
+    <% if recovery_action?(@row) %>
+      <%# The bot's Autofix, web-shaped: clears the failure marker (guarded
+          by its attrs) and re-runs the stage verb as one queued sequence. %>
+      <%= button_to "Retry stage", task_recover_path(@project["name"], @row["slug"]),
+            data: { turbo_submits_with: "Queueing…" } %>
+    <% end %>
     <% if stage_passable?(@row) %>
       <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
             params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>

@@ -1,6 +1,8 @@
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
+require "hive/bot/handlers/recovery_sequence"
+require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/commands/new"
@@ -52,6 +54,38 @@ module Hive
       # whose state has moved on.
       def drop(slug:, project:, from: nil)
         Hive::Commands::Drop.new(slug, project: project, from: from, json: false).call
+      end
+
+      # Adapter so NotificationBuilders.recovery_match_attr (written against
+      # the bot's row struct) reads a web status-row hash.
+      RecoveryRow = Struct.new(:marker, :attrs)
+
+      # Recovery = the bot's Autofix, web-shaped: clear the failure marker,
+      # then re-run the stage verb — dispatched through the daemon queue as
+      # ONE sequence, so the retry stays invisible until the clear exits 0.
+      # RecoverySequence is the single source of truth for the argvs and the
+      # manual-only guard; web, bot, and TUI recover byte-identically.
+      def recover(slug:, project:, stage:, marker:, attrs: nil)
+        attrs = (attrs || {}).to_h.transform_keys(&:to_s)
+        if Hive::Bot::Handlers::RecoverySequence.manual_only?(marker, attrs)
+          raise Hive::Error, Hive::Bot::Handlers::RecoverySequence.manual_only_text(marker, attrs)
+        end
+
+        match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(RecoveryRow.new(marker, attrs))
+        commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
+          project: project, slug: slug, stage: stage, marker: marker, match_attr: match_attr
+        )
+        raise Hive::Error, "no retry verb for stage #{stage.inspect}" if commands.empty?
+
+        request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
+        first, *remaining = commands
+        if remaining.any?
+          Hive::Bot::DispatchRequestWriter.write_sequence!(request_id: request_id,
+                                                           remaining_argvs: remaining)
+        end
+        Hive::Bot::DispatchRequestWriter.write!(project: project, slug: slug, argv: first,
+                                                trigger: "web_recover", request_id: request_id)
+        request_id
       end
 
       # Raise unless `action` maps to a known stage verb. Reused by the

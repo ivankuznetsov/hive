@@ -101,8 +101,12 @@ GitHub.
   github.com https credential helper to `gh auth git-credential`.
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
   meta-refresh; pi token form.
-- **Telegram** — getMe-validated token save, allowlist, supervisor SIGHUP,
-  round-trip test message.
+- **Telegram** — first-timer setup guide (collapsible, open while the bot is
+  unconfigured) covering BotFather `/newbot`, numeric chat IDs from
+  `@userinfobot`, sending `/start` before the round-trip test, the
+  no-webhook/long-polling model, and BotFather `/revoke` token rotation;
+  getMe-validated token save, allowlist, supervisor SIGHUP, round-trip test
+  message.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `TasksController#drop` → `Hive::Web::Dispatcher#drop` →
@@ -123,7 +127,9 @@ dev/test-only `/dev_login` is behind the owner gate.
 routes via the `http:` DI seam (no API stubbing), and the real
 `Commands::New`/`Approve`/`Drop` against a sandboxed `HIVE_HOME` (the suite
 NEVER touches the developer's real config — `test_helper.rb` sets the sandbox
-before the app loads). `web/test/system/` runs Capybara +
+before the app loads). It also pins the Telegram first-run guide shape: open
+while unconfigured, BotFather/userinfobot links, and the three setup steps.
+`web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Turbo Stream live row arrival without reload, grid

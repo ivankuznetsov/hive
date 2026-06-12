@@ -192,14 +192,18 @@ interface, now exec-ing Rails. The healthcheck hits the Rails `/health`.
 `/data` remains the persistence boundary; the sqlite files for
 cable/cache/queue live under `/data/state/hive/web-storage`.
 
-`packaging/docker/install-box.sh` is the one-command install entrypoint intended
-for `curl -fsSL https://hivecli.sh/box | sh`. It requires reachable Docker,
-honors `HIVEBOX_IMAGE` / `HIVEBOX_NAME` / `HIVEBOX_PORT` / `HIVEBOX_DATA`,
-refuses to overwrite an existing container name, pulls the image, starts it with
-`--restart unless-stopped`, mounts persistent data, and prints the local URL plus
-claim reminder. `.github/workflows/release.yml` publishes the matching
-multi-arch GHCR image as `ghcr.io/<owner>/hivebox:<version>` and
-`ghcr.io/<owner>/hivebox:latest` after `release-finalize` succeeds.
+`packaging/docker/install-box.sh` is the shell one-command install entrypoint
+intended for `curl -fsSL https://hivecli.sh/box | sh`; Windows PowerShell uses
+the same contract through `packaging/docker/install-box.ps1`, intended for
+`irm https://hivecli.sh/box.ps1 | iex`. Both require reachable Docker, honor
+`HIVEBOX_IMAGE` / `HIVEBOX_NAME` / `HIVEBOX_PORT` / `HIVEBOX_DATA`, refuse to
+overwrite an existing container name, pull the image, start it with
+`--restart unless-stopped`, mount persistent data, and print the local URL plus
+claim reminder. The PowerShell variant uses Docker Desktop-oriented diagnostics
+and avoids requiring `sh` or Git Bash volume-path translation.
+`.github/workflows/release.yml` publishes the matching multi-arch GHCR image as
+`ghcr.io/<owner>/hivebox:<version>` and `ghcr.io/<owner>/hivebox:latest` after
+`release-finalize` succeeds.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

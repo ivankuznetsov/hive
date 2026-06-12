@@ -19,7 +19,7 @@ tags: [gap, todo]
 | `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
-| `lib/hive/web/**`, `public/`, `hive.gemspec`, `lib/hive/commands/web.rb`, `packaging/docker/`, `.github/workflows/release.yml` hivebox image job | ✓ [[commands/web]], [[commands]], [[architecture]], [[modules/config]], [[dependencies]], and [[testing]] cover the web routes, installed asset payload, config/API surface, Docker entrypoints/install script, GHCR image publish job, and manual e2e contract. |
+| `lib/hive/web/**`, `public/`, `hive.gemspec`, `lib/hive/commands/web.rb`, `packaging/docker/`, `.github/workflows/release.yml` hivebox image job | ✓ [[commands/web]], [[commands]], [[architecture]], [[modules/config]], [[dependencies]], and [[testing]] cover the web routes, installed asset payload, config/API surface, Docker entrypoints/install scripts, GHCR image publish job, and manual e2e contract. |
 | `lib/hive/tui/**` | ✓ [[commands/tui]], [[architecture]], and [[token-usage]] cover the MVU/TUI surfaces. |
 | `lib/hive/agent.rb`, `lib/hive/agent_limit.rb`, `lib/hive/claude_launcher.rb`, `lib/hive/agent_profile*.rb`, `lib/hive/agent_profiles/**` | ✓ [[modules/agent]], [[modules/agent_profile]], [[stages/index]], [[stages/brainstorm]], [[token-usage]] |
 | `lib/hive/config.rb`, `templates/project_config.yml.erb` | ✓ [[modules/config]], [[commands/init]], [[state-model]] |
@@ -30,7 +30,7 @@ tags: [gap, todo]
 | `openclaw/skills/hive/SKILL.md`, `openclaw/README.md` | ✓ [[commands]], [[operating]], and [[commands/wiki]] cover the single ClawHub `hive-cli` skill, `/hive` slash-command dispatch, guided setup, wiki changelog verification, and publish-shape constraints. |
 | `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage. |
 
-Uncertainty: this table was refreshed manually from targeted source and wiki reads on 2026-06-11. It verifies domain coverage, not exact one-to-one file coverage. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
+Uncertainty: this table was refreshed manually from targeted source and wiki reads on 2026-06-12. It verifies domain coverage, not exact one-to-one file coverage. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 
 ## Open questions about the codebase
 
@@ -74,7 +74,7 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
 38. **3-plan terminal-agent-loss healer requeue is unit/integration-pinned but not live-smoked.** Commit `5f7ba051` changes `Hive::Daemon::StaleAgentHealer` so `3-plan` `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` clears also write a dispatch request for `hive plan <slug> --project <project> --from 3-plan` (`requestor=healer`, `trigger=terminal_agent_loss`) and log `heal_requeued`. Commit `65e90ebe` adds the distinct `heal_requeue_failed` event when the marker clear succeeded but queue write failed, plus integration coverage proving a real status row feeds the healer and lands an allowlisted dispatch request in `Hive::Daemon::DispatchRequestQueue`. This refresh did not find an in-tree live artifact showing a daemon observing such a red `3-plan` row, writing the queue file, dispatching the queued rerun, and surfacing either a recovered `WAITING`/`COMPLETE` plan or a bounded red state after repeated real failures.
 39. **Root `Gemfile.lock` still lists `rack-test` after the manifest removal.** Commit `b0a31edf` removed `gem "rack-test", "~> 2.2"` from the root `Gemfile`, and current `hive.gemspec` does not declare it, but `Gemfile.lock` still has `rack-test (~> 2.2)` under top-level `DEPENDENCIES`. `bundle check` passes. This refresh did not run a lockfile rewrite, so whether to prune that stale top-level lock entry remains open. The separate web bundle still resolves `rack-test` transitively through Rails/Capybara for upload integration tests.
 40. **Telegram `/start` welcome is source/unit-pinned but not live Bot API-smoked.** Commit `4353734f` adds the `:slash_start` router intent and `SlashHandlers#start` welcome reply so Telegram's automatic first-contact command gets concrete `/status`, `/idea`, and `/help` next steps. `test/unit/bot/router_test.rb` and `test/unit/bot/slash_handlers_test.rb` cover classification and copy. This refresh did not find an in-tree live Telegram artifact showing a freshly connected real chat sending `/start` to a running bot and receiving the welcome, nor an artifact proving the same first-contact path in a Dockerized hivebox after the supervisor starts the bot.
-41. **Hivebox golden-path install is source-pinned but not release/live-Docker-smoked.** Commit `bf3e7ee` adds the GHCR `hivebox-image` release job, `packaging/docker/install-box.sh`, ownerless first-login claim, same-origin Action Cable, and `gh` Agents-page login relay. Source tests cover claim persistence/refusal and the `gh` relay's auto-Enter prompt, but this refresh did not find an in-tree artifact proving a tagged release published `ghcr.io/ivankuznetsov/hivebox:<version>`/`latest`, that `https://hivecli.sh/box` serves the installer, or that the full live path works in Docker with real GitHub device login, Agents-page `gh` login, repository registration, and a daemon-owned PR push.
+41. **Hivebox golden-path install is source-pinned but not release/live-Docker-smoked.** Commit `bf3e7ee` adds the GHCR `hivebox-image` release job, `packaging/docker/install-box.sh`, ownerless first-login claim, same-origin Action Cable, and `gh` Agents-page login relay; commit `4c14bc3f` adds the native Windows PowerShell peer `packaging/docker/install-box.ps1` for `irm https://hivecli.sh/box.ps1 | iex`. Source tests cover claim persistence/refusal and the `gh` relay's auto-Enter prompt, but this refresh did not find an in-tree artifact proving a tagged release published `ghcr.io/ivankuznetsov/hivebox:<version>`/`latest`, that `https://hivecli.sh/box` and `https://hivecli.sh/box.ps1` serve the installers, that the PowerShell installer works on Windows Docker Desktop, or that the full live path works in Docker with real GitHub device login, Agents-page `gh` login, repository registration, and a daemon-owned PR push.
 
 ## Release install follow-ups
 
@@ -119,6 +119,18 @@ Uncertainty: this table was refreshed manually from targeted source and wiki rea
   treat "no tmux server" as session-terminated in the fix-phase sentinel,
   mirroring the reviewer-phase handling. Recovery today: TERM the `hive
   review` parent; the daemon re-dispatches and the stage resumes its pass.
+
+- **Brainstorm answers written within one daemon tick of round-end are
+  swallowed** — found by the hivebox golden-path E2E. The resume watcher
+  only sees state-file edits NEWER than its baseline, and the baseline is
+  seeded by the first classification tick after the round's child is
+  reaped. An operator answering inside that window (the push-updating web
+  UI shows questions the moment the agent writes them, before the child
+  even exits) strands the task at `needs_input` until some later edit. The
+  E2E syncs on the daemon's own event log to avoid the window
+  (`wait_for_answer_window!`); a product fix would be dispatching on
+  first sight when `answers_pending` is already false, or seeding the
+  baseline from the round's dispatch mtime instead of the current one.
 
 ## Areas the wiki could be expanded
 

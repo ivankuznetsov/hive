@@ -93,7 +93,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "approve must move the task into 2-brainstorm"
   end
 
-  test "an unconfigured box explains setup instead of a dead sign-in button" do
+  test "an ownerless box offers the claim flow, not config-editing homework" do
+    # No web config at all: the shipped client_id default makes the box
+    # CLAIMABLE out of the box — the first sign-in becomes the owner.
     path = File.join(ENV["HIVE_HOME"], "config.yml")
     data = YAML.safe_load_file(path) || {}
     data.delete("web")
@@ -101,8 +103,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     visit "/login"
 
-    assert_text "know its owner"
-    assert_no_button "Continue with GitHub", wait: 0
+    assert_text "first GitHub sign-in becomes its owner"
+    assert_button "Continue with GitHub"
   end
 
   test "the project rail filters the grid and survives live updates" do

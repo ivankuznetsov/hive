@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Stage-aware fake claude for the golden-path E2E. Under a REAL daemon every
+# stage launches the same binary with no per-step env (unlike the CLI e2e
+# scenarios), so this one keys its behavior on the cwd hive places it in.
+# It writes the same artifacts a real agent would; the stages own the
+# terminal markers exactly as in production.
+set -u
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s (Claude Code)\n' "2.1.118"
+  exit 0
+fi
+
+cwd="$(pwd)"
+case "$cwd" in
+  */stages/2-brainstorm/*)
+    # The stage pre-stamps brainstorm.md with AGENT_WORKING before the
+    # agent runs — "round 1" means no questions exist yet, not no file.
+    if ! grep -q '^### Q1' brainstorm.md 2>/dev/null; then
+      # Round 1: ask the operator something and wait.
+      printf '### Q1. Ship the sample feature?\n\n### A1.\n\n<!-- WAITING -->\n' > brainstorm.md
+    else
+      # Resume: complete the round only when A1 carries a real answer.
+      answered="$(awk '/^### A1\./{f=1;next} /^###|^<!--/{f=0} f && NF {print "yes"; exit}' brainstorm.md)"
+      if [[ "$answered" == "yes" ]]; then
+        grep -v '<!--' brainstorm.md > brainstorm.md.tmp
+        printf '\n<!-- COMPLETE -->\n' >> brainstorm.md.tmp
+        mv brainstorm.md.tmp brainstorm.md
+      fi
+    fi
+    ;;
+  */stages/3-plan/*)
+    printf '# Plan\n\n1. Implement the sample feature.\n\n<!-- COMPLETE -->\n' > plan.md
+    ;;
+  *worktrees/*)
+    # Execute runs in the project worktree: commit something real.
+    printf 'implemented by golden-path e2e\n' > implementation.txt
+    git add implementation.txt
+    git -c user.email=e2e@test.invalid -c user.name="E2E" \
+      commit -qm "feat: golden path sample implementation" || true
+    ;;
+  *)
+    # Anything else (display-name backfill, etc): a harmless one-liner.
+    # Committing here would poison the PROJECT repo — the backfiller runs
+    # claude against the main checkout, and a commit on master makes the
+    # later worktree branch see implementation.txt as already-tracked.
+    printf 'Golden Sample\n'
+    ;;
+esac
+exit 0

@@ -27,6 +27,7 @@ does not publish one ClawHub listing per Hive verb.
 - `packaging/docker/Dockerfile`
 - `packaging/docker/entrypoint.sh`
 - `packaging/docker/install-box.sh`
+- `packaging/docker/install-box.ps1`
 - `packaging/docker/README.md`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
@@ -101,13 +102,16 @@ normalizes GitHub SSH origins to https, and relies on the Docker image's
 the `gh auth login` PTY relay for that credential. Docker packaging adds the
 `hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
 directories and then runs `Hive::Web::Supervisor` unless custom argv is passed,
-and `packaging/docker/install-box.sh`, the one-command install entrypoint that
-pulls `ghcr.io/ivankuznetsov/hivebox:latest` by default, starts a named
-container, mounts persistent data, and prints the local URL. The release
-workflow publishes versioned and `latest` multi-arch hivebox images to GHCR
-after `release-finalize`. The gem deliberately does NOT package the web app
-(gemspec_test pins this); the Rails app ships in the Docker image at /app/web
-or runs from a source checkout.
+and `packaging/docker/install-box.{sh,ps1}`, the one-command install entrypoints
+for `curl -fsSL https://hivecli.sh/box | sh` and
+`irm https://hivecli.sh/box.ps1 | iex`. Both pull
+`ghcr.io/ivankuznetsov/hivebox:latest` by default, start a named container,
+mount persistent data, and print the local URL; the PowerShell script is the
+native Windows shape for Docker Desktop hosts where `sh` or MSYS path conversion
+would be the wrong interface. The release workflow publishes versioned and
+`latest` multi-arch hivebox images to GHCR after `release-finalize`. The gem
+deliberately does NOT package the web app (gemspec_test pins this); the Rails
+app ships in the Docker image at /app/web or runs from a source checkout.
 `hive web` command has the same renderable UI assets as a source checkout.
 
 ### E2E Harness

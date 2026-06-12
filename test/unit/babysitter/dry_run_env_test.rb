@@ -279,7 +279,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def test_gh_stub_scrubs_exec_influencing_environment_before_passthrough
     with_tmp_dir do |dir|
-      env_keys = %w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY]
+      env_keys = %w[
+        GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
+        GH_CONFIG_DIR XDG_CONFIG_HOME
+      ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
@@ -292,7 +295,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GIT_EDITOR" => "touch editor-pwned",
         "VISUAL" => "touch editor-pwned",
         "EDITOR" => "touch editor-pwned",
-        "GH_FORCE_TTY" => "80"
+        "GH_FORCE_TTY" => "80",
+        "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
+        "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")

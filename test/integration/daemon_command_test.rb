@@ -1399,7 +1399,7 @@ class HiveDaemonCommandTest < Minitest::Test
     FileUtils.mkdir_p(dir)
     payload = {
       "schema" => "hive-dispatch-request",
-      "schema_version" => 1,
+      "schema_version" => Hive::Daemon::DispatchRequestQueue::SCHEMA_VERSION,
       "request_id" => request_id,
       "created_at" => created_at,
       "project" => project,

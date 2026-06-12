@@ -1749,7 +1749,7 @@ end
     path = File.join(Q.directory(state_home: dir), Q.filename_for(created_at: created_at, request_id: request_id))
     payload = {
       "schema" => "hive-dispatch-request",
-      "schema_version" => 1,
+      "schema_version" => Q::SCHEMA_VERSION,
       "request_id" => request_id,
       "created_at" => created_at.utc.iso8601(6),
       "project" => project,

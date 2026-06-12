@@ -342,6 +342,35 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "form[id^='qa-form-']", 1
   end
 
+  test "an oversized diff renders truncated with a notice, not a memory bomb" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "4-execute").join(@slug))
+    project_payload = StatusBroadcaster.snapshot.fetch("projects", [])
+                                        .find { |p| p["name"] == @project }
+    row = project_payload.fetch("tasks", []).find { |t| t["slug"] == @slug }
+    worktree = row["worktree_path"]
+    FileUtils.mkdir_p(worktree)
+    system("git", "init", "-q", worktree, exception: true)
+    big = File.join(worktree, "big.txt")
+    File.write(big, "x
+")
+    system("git", "-C", worktree, "add", ".", exception: true)
+    system("git", "-C", worktree, "-c", "user.email=t@e.c", "-c", "user.name=T",
+           "commit", "-qm", "seed", exception: true)
+    # >512KB of uncommitted change must come back capped, flagged, and fast.
+    File.write(big, "y#{SecureRandom.hex(16)}
+" * 25_000)
+
+    get "/tasks/#{@project}/#{@slug}/diff"
+
+    assert_response :success
+    assert_match "Diff truncated to the first 512", response.body
+    assert response.body.bytesize < 700 * 1024,
+           "the rendered diff must be capped (got #{response.body.bytesize} bytes)"
+  ensure
+    FileUtils.rm_rf(worktree) if worktree.present?
+  end
+
   test "diff for a task without a worktree is 404 not a crash" do
     get "/tasks/#{@project}/#{@slug}/diff"
     assert_response :not_found

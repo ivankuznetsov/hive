@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-drop.v1.json",
-  "title": "hive drop output (v1)",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-drop.v2.json",
+  "title": "hive drop output (v2)",
   "description": "Stable contract emitted by `hive drop TARGET --json`. Hard-deletes an active task by killing the recorded agent, closing any draft PR, removing the task worktree and branch, deleting task folders from active stages, deleting per-slug logs, and committing an audit record on hive/state.",
   "oneOf": [
     {

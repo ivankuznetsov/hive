@@ -53,6 +53,13 @@ class ReposController < ApplicationController
     FileUtils.mkdir_p(root)
     target = File.join(root, name)
 
+    # A non-directory at the target (stray file, symlink) must be a hard
+    # stop: clone! deletes `target` on failure, and "clone over whatever is
+    # there" would turn that cleanup into deleting something we don't own.
+    if File.exist?(target) && !File.directory?(target)
+      raise Hive::Error, "#{name} already exists under the repos root and is not a directory — remove it first"
+    end
+
     setup = InitSetup.new(params[:settings])
     clone!(url, target) unless File.directory?(target)
     normalize_origin!(target)
@@ -79,6 +86,11 @@ class ReposController < ApplicationController
   # Runs in its own process group with a hard deadline; a timed-out or
   # failed clone removes the partial target so a retry starts clean.
   def clone!(url, target)
+    # Refuse rather than risk the failure-path cleanup deleting something
+    # that existed before this request (create already filters, but clone!
+    # must be safe on its own).
+    raise Hive::Error, "clone target already exists: #{File.basename(target)}" if File.exist?(target)
+
     env = session[:github_token] ? { "GH_TOKEN" => session[:github_token] } : {}
     log = Tempfile.create("hivebox-clone")
     pid = Process.spawn(env, "gh", "repo", "clone", url, target,

@@ -34,8 +34,12 @@ Build and run from source instead:
 
 ```sh
 docker build -f packaging/docker/Dockerfile -t hivebox .
-docker run --rm -p 4567:4567 -v "$PWD/hivebox-data:/data" hivebox
+docker run --rm -p 127.0.0.1:4567:4567 -v "$PWD/hivebox-data:/data" hivebox
 ```
+
+The loopback bind is deliberate: until the box is claimed, the first GitHub
+login becomes its owner — don't publish it beyond localhost unless ownership
+is pre-pinned (`web.github.owner`) or a trusted proxy/tunnel fronts it.
 
 `/data` is the box. It contains `$HOME`, Hive config/state/cache, agent auth
 directories, cloned repos under `/data/repos`, logs, and the generated web

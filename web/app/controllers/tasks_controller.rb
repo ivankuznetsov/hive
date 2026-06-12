@@ -1,4 +1,5 @@
 require "open3"
+require "tempfile"
 
 class TasksController < ApplicationController
   before_action :load_project
@@ -45,10 +46,7 @@ class TasksController < ApplicationController
     worktree = @row["worktree_path"].to_s
     raise Hive::InvalidTaskPath, "no worktree for #{params[:slug]}" if worktree.empty? || !File.directory?(worktree)
 
-    out, err, status = Open3.capture3("git", "-C", worktree, "diff", "--")
-    raise Hive::Error, "git diff failed: #{err.strip}" unless status.success?
-
-    @diff = out
+    @diff, @diff_truncated = bounded_diff(worktree)
   end
 
   def approve
@@ -100,6 +98,41 @@ class TasksController < ApplicationController
   end
 
   private
+
+  # An unbounded `git diff` from a huge or wedged worktree would pin one of
+  # the box's few Puma threads and buffer the whole diff in memory. Same
+  # discipline as ReposController#clone!: own process group, hard wall-clock
+  # deadline, output to a tempfile, and only the first DIFF_MAX_BYTES are
+  # rendered (with an explicit truncation flag).
+  DIFF_TIMEOUT_SEC = Integer(ENV.fetch("HIVEBOX_DIFF_TIMEOUT_SEC", 15))
+  DIFF_MAX_BYTES = 512 * 1024
+
+  def bounded_diff(worktree)
+    log = Tempfile.create("hivebox-diff")
+    pid = Process.spawn("git", "-C", worktree, "diff", "--",
+                        pgroup: true, out: log.path, err: log.path)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DIFF_TIMEOUT_SEC
+    status = nil
+    loop do
+      _, status = Process.waitpid2(pid, Process::WNOHANG)
+      break if status
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        Process.kill("KILL", -pid) rescue nil
+        Process.waitpid2(pid) rescue nil
+        raise Hive::Error, "git diff timed out after #{DIFF_TIMEOUT_SEC}s"
+      end
+      sleep 0.1
+    end
+    raise Hive::Error, "git diff failed: #{File.read(log.path).strip}" unless status.success?
+
+    out = File.open(log.path, "rb") { |f| f.read(DIFF_MAX_BYTES + 1) }.to_s.force_encoding(Encoding::UTF_8).scrub
+    truncated = out.bytesize > DIFF_MAX_BYTES
+    [ truncated ? out.byteslice(0, DIFF_MAX_BYTES).scrub : out, truncated ]
+  ensure
+    log&.close
+    File.unlink(log.path) if log && File.exist?(log.path)
+  end
 
   def load_project
     @project = find_project!(params[:project])

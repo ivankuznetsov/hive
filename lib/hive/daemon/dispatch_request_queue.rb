@@ -13,7 +13,7 @@ module Hive
       module_function
 
       SCHEMA = "hive-dispatch-request".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan review open-pr artifacts finalize

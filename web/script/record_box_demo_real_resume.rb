@@ -35,6 +35,13 @@ env_base = {
   "RUBYOPT" => nil, "RUBYLIB" => nil
 }
 
+def run!(env, *cmd, chdir: nil)
+  out, err, status = Open3.capture3(env, *cmd, chdir: chdir || Dir.pwd)
+  raise "#{cmd.join(' ')} failed: #{err}\n#{out}" unless status.success?
+
+  out
+end
+
 def stage_glob(project_dir, slug)
   Dir[File.join(project_dir, ".hive-state", "stages", "*", slug)].first
 end
@@ -46,6 +53,21 @@ if folder.include?("3-plan")
     FileUtils.rm_f([ plan_md, "#{plan_md}.markers-lock" ])
     puts "==> cleared stranded plan error marker"
   end
+end
+
+# The daemon's policy still classifies this task as error (events.jsonl /
+# status.md carry the failed stage_exit), so it will never re-dispatch it.
+# Run the plan stage FOREGROUND through the product CLI — the same argv the
+# stale-agent healer enqueues — which appends fresh stage events; once plan
+# completes, the daemon advances the task normally.
+if File.directory?(File.join(project_dir, ".hive-state", "stages", "3-plan", slug))
+  puts "==> rerunning plan (foreground, real agent)"
+  $stdout.flush
+  run!(env_base, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
+       "plan", slug, "--project", "shipped", "--from", "3-plan",
+       chdir: REPO_ROOT)
+  puts "==> plan complete"
+  $stdout.flush
 end
 
 puts "==> booting rails + daemon"

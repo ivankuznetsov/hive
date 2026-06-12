@@ -1635,6 +1635,33 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "durable patrol finding record must validate"
   end
 
+  # ── schema metadata identity ─────────────────────────────────────────────
+
+  # Copy-pasting vN.json to vN+1.json and only changing the version const is
+  # exactly how hive-drop.v2.json shipped with a v1 $id and title. For every
+  # current schema, the filename, $id basename, and any "(vN)" suffix in the
+  # title must agree with SCHEMA_VERSIONS.
+  def test_schema_file_identity_matches_schema_versions
+    Hive::Schemas::SCHEMA_VERSIONS.each do |name, version|
+      path = Hive::Schemas.schema_path(name)
+      doc = JSON.parse(File.read(path))
+      expected_basename = "#{name}.v#{version}.json"
+      id = doc["$id"].to_s
+      if id.start_with?("urn:")
+        # The status/run/diagnose family ids are URNs: urn:hive:schema:<short>:vN.
+        assert id.end_with?(":v#{version}"),
+               "#{expected_basename}: URN $id (#{id}) must end with :v#{version}"
+      else
+        assert_equal expected_basename, File.basename(id),
+                     "#{expected_basename}: $id basename must match the filename"
+      end
+      if (m = doc["title"].to_s.match(/\(v(\d+)\)/))
+        assert_equal version, Integer(m[1]),
+                     "#{expected_basename}: title version suffix must match SCHEMA_VERSIONS"
+      end
+    end
+  end
+
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
 
   # A `<id>.json.claimed` file still self-declares schema=hive-dispatch-request

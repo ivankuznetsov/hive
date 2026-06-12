@@ -5,7 +5,11 @@ services:
       dockerfile: packaging/docker/Dockerfile
     restart: unless-stopped
     ports:
-      - "4567:4567"
+      # Loopback only: an unclaimed box is claimed by the FIRST GitHub
+      # login, so it must not face the LAN until ownership is pinned.
+      # Publish wider ("4567:4567") only behind a trusted proxy/tunnel or
+      # after setting `web.github.owner` in the bind-mounted config.yml.
+      - "127.0.0.1:4567:4567"
     volumes:
       - ./hivebox-data:/data
     environment:

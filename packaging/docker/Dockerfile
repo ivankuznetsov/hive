@@ -52,5 +52,8 @@ RUN chmod 0755 /usr/local/bin/hivebox-entrypoint
 
 USER hive
 EXPOSE 4567
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ruby -rnet/http -e 'exit Net::HTTP.get_response(URI("http://127.0.0.1:4567/health")).is_a?(Net::HTTPSuccess) ? 0 : 1'
+# deep=1 verifies the daemon child via its pidfile, not just the web tier —
+# a crashlooping daemon must surface as an unhealthy container. start-period
+# covers the supervisor's restart backoff so a single slow boot doesn't flap.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD ruby -rnet/http -e 'exit Net::HTTP.get_response(URI("http://127.0.0.1:4567/health?deep=1")).is_a?(Net::HTTPSuccess) ? 0 : 1'
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hivebox-entrypoint"]

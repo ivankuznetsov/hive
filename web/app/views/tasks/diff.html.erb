@@ -9,5 +9,8 @@
 <% if @diff.strip.empty? %>
   <div class="empty-state"><p>The worktree has no uncommitted changes.</p></div>
 <% else %>
+  <% if @diff_truncated %>
+    <p class="flash-alert">Diff truncated to the first 512&nbsp;KB — inspect the worktree directly for the full change.</p>
+  <% end %>
   <pre><%= @diff %></pre>
 <% end %>

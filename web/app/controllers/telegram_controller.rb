@@ -9,6 +9,22 @@ class TelegramController < ApplicationController
     token = params[:token].to_s.strip
     raise Hive::Error, "token required" if token.empty?
 
+    # Strict parse BEFORE enabling: `to_i` would turn "@mychannel" into 0
+    # (authorizing nobody the operator meant) and blank input into an empty
+    # allowlist that only fails much later, at bot runtime.
+    raw_chats = params[:chat_ids].to_s.split(/[,\s]+/).reject(&:empty?)
+    chats = raw_chats.map { |c| Integer(c, exception: false) }
+    if raw_chats.empty? || chats.any?(&:nil?)
+      @bot = Hive::Config.load_global_bot
+      bad = raw_chats.zip(chats).select { |_, n| n.nil? }.map(&:first)
+      flash.now[:alert] = if raw_chats.empty?
+        "At least one numeric chat ID is required to enable the bot. Nothing was saved."
+      else
+        "Chat IDs must be numeric (got: #{bad.join(', ')}). Use the ID from @userinfobot, not a @handle. Nothing was saved."
+      end
+      return render :show, status: :unprocessable_entity
+    end
+
     # Validate against the real Telegram API (getMe) BEFORE saving. An
     # invalid token persists nothing and re-renders with an inline error.
     unless Hive::Web::TelegramValidator.call(token)
@@ -17,7 +33,6 @@ class TelegramController < ApplicationController
       return render :show, status: :unprocessable_entity
     end
 
-    chats = params[:chat_ids].to_s.split(/[,\s]+/).reject(&:empty?).map(&:to_i)
     write_env_value("HIVE_TELEGRAM_BOT_TOKEN", token)
     Hive::Config.update_global_config! do |data|
       data["bot"] ||= {}

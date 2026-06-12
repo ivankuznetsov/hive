@@ -105,6 +105,23 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_includes names, "already-here", "the existing checkout must be registered via hive init"
   end
 
+  test "a stray file at the clone target is a 422 and survives untouched" do
+    sign_in!
+    root = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos-root4")
+    FileUtils.mkdir_p(root)
+    stray = File.join(root, "stray-name")
+    File.write(stray, "operator data, not ours to delete")
+
+    with_repos_root(root) do
+      post "/repos", params: { url: "ivankuznetsov/stray-name", name: "stray-name" }
+    end
+
+    assert_response :unprocessable_entity
+    assert_match "not a directory", response.body
+    assert_equal "operator data, not ours to delete", File.read(stray),
+                 "the pre-existing file must survive the rejected clone"
+  end
+
   test "registration rewrites a github ssh origin to https" do
     # gh clones over ssh when the operator's git_protocol prefers it, but the
     # box can only push https (no SSH keys in the container, no agent for a

@@ -154,3 +154,18 @@ Uncertainty: this table was refreshed manually from targeted source, dependency-
 - 2026-05-14: Managed llm-wiki config, agent context, post-commit hook, and daily systemd timer were validated for `hive`.
 - 2026-05-15: `qmd status` reports Vulkan GPU offload on AMD Radeon 890M Graphics (RADV STRIX1) after installing the Arch Vulkan stack.
 - 2026-05-15: `qmd query "llm wiki managed bootstrap" -c hive --no-rerank -n 3` completed with local Vulkan-backed generation; sandboxed agent sessions still need qmd cache write access via `--add-dir` or host-side maintenance hooks.
+
+## Leaked sandbox daemons from tests/recorders (2026-06-12)
+
+Six `hive daemon start` processes (cwd: pr300-review worktree, throwaway
+HIVE_HOMEs) were found running on the dev machine, leaked across the day's
+web-suite/E2E/recorder runs. At least one was DETACHED (argv without
+--foreground) while bound to a recorder sandbox's HIVE_HOME, fighting the
+recorder's own foreground daemon over the pidfile. Open questions:
+- What spawns a detached daemon with an inherited sandbox HIVE_HOME?
+  (Only Hive::Web::Supervisor uses `hive daemon start` without
+  --foreground in-tree.)
+- Should `hive daemon start` refuse to detach when HIVE_HOME looks like a
+  test sandbox, or should test helpers register an at_exit reaper?
+- A daemon whose pidfile is stolen exits silently — no dispatcher_stopping
+  event. It should log what it observed before exiting.

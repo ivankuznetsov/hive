@@ -50,6 +50,11 @@ Non-owner logins, denied grants, and expired codes render 403 pages. A
 dev/test-only `/dev_login` seam (route drawn only when `Rails.env.local?`,
 double-checked in the action) is how Capybara signs in without driving real
 GitHub.
+Owner authorization is re-checked against the current global config on every
+owner-gated request, not just at sign-in. If `web.github.owner` changes while
+an old session is still live, `ApplicationController#require_login` resets that
+session and redirects to login so the old repo-scoped token does not remain
+usable. The local dev/test seam is exempt only for tokenless local sessions.
 
 ## Surfaces
 
@@ -103,13 +108,19 @@ GitHub.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
+  Server-side, the polled `TasksController#log` path reads only a 256 KiB byte
+  window and returns the last 200 lines with a torn leading line dropped, so a
+  multi-MB agent log cannot pin a Puma worker every 3 seconds.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
-  notice when GitHub is unreachable or the grant was revoked). Every
+  notice when GitHub is unreachable or the grant was revoked). Clone runs call
+  `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
+  group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
+  failure or timeout the partial target is removed so retry starts clean. Every
   registration runs a post-clone/post-existing-dir origin normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
@@ -149,15 +160,19 @@ request's sequence sidecar. If the guarded clear exits non-zero, the rerun is
 not promoted.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
-404) — never a blank 500. CSRF is Rails-default (per-form tokens); every
-route except `/health`, `/up`, `/login`, `/logout`, `/auth/github*`, and the
-dev/test-only `/dev_login` is behind the owner gate.
+404) — never a blank 500. Stage-run posts validate the action map before
+writing a daemon request, and `Hive::Web::Dispatcher#dispatch` wraps queue
+writer `ArgumentError`s (for example the queue's stricter slug grammar) as
+typed 422s instead of surfacing an opaque 500. CSRF is Rails-default (per-form
+tokens); every route except `/health`, `/up`, `/login`, `/logout`,
+`/auth/github*`, and the dev/test-only `/dev_login` is behind the owner gate.
 
 ## Tests
 
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), including ownerless
-first-login claim, persisted `web.github.owner`, and later non-owner refusal,
+first-login claim, persisted `web.github.owner`, request-time owner-change
+session eviction, and later non-owner refusal,
 and the real `Commands::New`/`Approve`/`Drop` plus web recovery queue writes
 against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
@@ -179,6 +194,12 @@ open-state preservation across pushed morphs with live content refresh. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop.
 
+`web/script/record_box_demo.rb` is a manual demo recorder, not a test. It
+stages a temporary local repo, boots the real Rails app and real `hive daemon`,
+uses stage-aware fake `claude` / `gh` shims so the pipeline advances in
+seconds, drives Chromium through Playwright, and writes
+`web/tmp/box-demo.webm` / `web/tmp/box-demo.mp4` via ffmpeg.
+
 ## Docker
 
 `packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
@@ -196,10 +217,13 @@ cable/cache/queue live under `/data/state/hive/web-storage`.
 intended for `curl -fsSL https://hivecli.sh/box | sh`; Windows PowerShell uses
 the same contract through `packaging/docker/install-box.ps1`, intended for
 `irm https://hivecli.sh/box.ps1 | iex`. Both require reachable Docker, honor
-`HIVEBOX_IMAGE` / `HIVEBOX_NAME` / `HIVEBOX_PORT` / `HIVEBOX_DATA`, refuse to
-overwrite an existing container name, pull the image, start it with
-`--restart unless-stopped`, mount persistent data, and print the local URL plus
-claim reminder. The PowerShell variant uses Docker Desktop-oriented diagnostics
+`HIVEBOX_IMAGE` / `HIVEBOX_NAME` / `HIVEBOX_PORT` / `HIVEBOX_DATA` /
+`HIVEBOX_BIND`, refuse to overwrite an existing container name, pull the image,
+start it with `--restart unless-stopped`, mount persistent data, and print the
+local URL plus claim reminder. The bind default is `127.0.0.1`, because an
+ownerless box is claimed by its first GitHub login; operators can set
+`HIVEBOX_BIND=0.0.0.0` after claiming or when fronting the box with a trusted
+tunnel/proxy. The PowerShell variant uses Docker Desktop-oriented diagnostics
 and avoids requiring `sh` or Git Bash volume-path translation.
 `.github/workflows/release.yml` publishes the matching multi-arch GHCR image as
 `ghcr.io/<owner>/hivebox:<version>` and `ghcr.io/<owner>/hivebox:latest` after

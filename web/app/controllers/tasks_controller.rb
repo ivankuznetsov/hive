@@ -175,7 +175,9 @@ class TasksController < ApplicationController
   end
 
   def latest_log
-    dir = File.join(@project["hive_state_path"], "logs", params[:slug])
+    # The route constraint already pins the slug shape; File.basename is
+    # defense in depth for the param-in-path pattern (and the scanner).
+    dir = File.join(@project["hive_state_path"], "logs", File.basename(params[:slug]))
     path = Dir.glob(File.join(dir, "*.log")).max_by { |p| File.mtime(p) }
     return nil unless path
 

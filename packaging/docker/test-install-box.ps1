@@ -32,10 +32,18 @@ function Invoke-Installer($extraPath, $stubLog) {
     return @{ Output = ($out | Out-String); Code = $LASTEXITCODE }
 }
 
-# --- Case 1: no docker anywhere → friendly failure, exit 1 -----------------
-$r = Invoke-Installer $null $null
-Assert-Case "missing docker fails friendly" `
-    (($r.Code -ne 0) -and ($r.Output -match "Docker is required")) `
+# --- Case 1: docker present but unreachable → friendly failure, exit 1 -----
+# (True PATH-absence is untestable on hosted runners: docker.exe is
+# resolvable from system locations no PATH restriction can hide.)
+$deadDir = Join-Path ([IO.Path]::GetTempPath()) ("deaddocker-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $deadDir | Out-Null
+@'
+@echo off
+exit /b 1
+'@ | Set-Content -Path (Join-Path $deadDir "docker.bat") -Encoding ascii
+$r = Invoke-Installer $deadDir $null
+Assert-Case "unreachable docker fails friendly" `
+    (($r.Code -ne 0) -and ($r.Output -match "not reachable|not running")) `
     "exit=$($r.Code) output=$($r.Output)"
 
 # --- Stub docker for the remaining cases -----------------------------------
@@ -66,7 +74,10 @@ Assert-Case "happy path runs the container and prints the URL" `
 @'
 @echo off
 if "%1"=="info" exit /b 0
-if "%1"=="ps" ( echo hivebox & exit /b 0 )
+if "%1"=="ps" (
+  echo hivebox
+  exit /b 0
+)
 exit /b 0
 '@ | Set-Content -Path (Join-Path $stubDir "docker.bat") -Encoding ascii
 $r = Invoke-Installer $stubDir $null

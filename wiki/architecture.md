@@ -247,7 +247,10 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
 (ADR-036): a configured `web.github.owner` gates entry, while an ownerless
 fresh box is claimable and the first successful login writes
-`web.github.owner` under the global config lock. Reads render
+`web.github.owner` under the global config lock. Owner-gated requests re-check
+the current owner on every request and evict old sessions when
+`web.github.owner` changes, so a repo-scoped session token cannot survive an
+ownership rotation. Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and
 `HIVEBOX_ORIGIN` only as an extra allow for split-origin deployments:
@@ -274,7 +277,7 @@ For state-mutating workflow verbs (`run`, `develop`, `brainstorm`,
 `plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`,
 `markers clear`) there is exactly ONE subprocess dispatcher: the daemon.
 The Telegram bot and hivebox web write file-backed JSON requests; the daemon's
-own healer also uses the same queue for the `3-plan` terminal-agent-loss rerun.
+own healer also uses the same queue for the `3-plan` terminal-error rerun.
 The daemon's tick loop is the only thing that calls `Process.spawn` on those
 verbs.
 

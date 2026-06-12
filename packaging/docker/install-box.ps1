@@ -26,7 +26,7 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Docker is installed but not running. Start Docker Desktop and re-run."
 }
 
-$existing = docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq $Name }
+$existing = docker ps -a --format '{{.Names}}' | Where-Object { "$_".Trim() -eq $Name }
 if ($existing) {
     Fail "a container named '$Name' already exists - 'docker start $Name' resumes it; remove it to reinstall."
 }

@@ -54,6 +54,16 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # The sandbox vanishes with the process — on failure, keep the daemon's
     # own event log and the task tree where a human can read them.
     unless passed?
+      # CI has no /tmp artifacts — put the tale in the job log itself.
+      daemon_events = File.join(ENV["HIVE_HOME"], "logs", "daemon.log")
+      if File.exist?(daemon_events)
+        puts "===== daemon events (tail) ====="
+        puts File.readlines(daemon_events).last(40).join
+      end
+      if @daemon_log && File.exist?(@daemon_log)
+        puts "===== daemon stdout ====="
+        puts File.read(@daemon_log)
+      end
       debug_dir = "/tmp/golden-e2e-debug"
       FileUtils.rm_rf(debug_dir)
       FileUtils.mkdir_p(debug_dir)

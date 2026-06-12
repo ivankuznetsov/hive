@@ -61,7 +61,12 @@ is claimable and the first successful device-flow login writes its login into
 the global config under `Hive::Config.update_global_config!`; the lock block
 re-checks ownership so simultaneous first-logins produce exactly one owner and
 the loser falls through to the normal owner 403. Session renewal at the auth
-boundary and non-owner 403 semantics are unchanged after claim.
+boundary and non-owner 403 semantics are unchanged after claim. Every later
+owner-gated request also re-loads the current global web config and re-checks
+`owner?(session[:github_login])`; if ownership changed, Rails resets the
+session and redirects to login so an old repo-scoped token does not remain
+usable. The tokenless local dev/test login seam stays exempt only in local
+Rails environments.
 
 **Consequences:** A fresh Docker box needs no config edit before sign-in; it
 needs only the default `web.github.client_id`, and the first operator who

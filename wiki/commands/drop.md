@@ -39,7 +39,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
 
-When `gh` is not installed on PATH, draft-PR close is skipped silently (warning on stderr, `pr_closed: false`, exit 0). Drop does not require `gh`. `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal).
+When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
 
 ## Steps Performed
 
@@ -59,12 +59,12 @@ Re-running after an interrupted cleanup converges: already-missing processes, fo
 
 ## JSON Contract
 
-Success emits `schema = "hive-drop"`, version 1:
+Success emits `schema = "hive-drop"`, current version 2:
 
 ```json
 {
   "schema": "hive-drop",
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "slug": "my-task-260522-abcd",
   "project": "demo",
@@ -80,7 +80,7 @@ Success emits `schema = "hive-drop"`, version 1:
 }
 ```
 
-Errors use `Hive::Schemas::ErrorEnvelope.build` under the same `hive-drop` schema. External consumers validate against `schemas/hive-drop.v1.json`; resolve via `Hive::Schemas.schema_path("hive-drop")`.
+Errors use `Hive::Schemas::ErrorEnvelope.build` under the same `hive-drop` schema. External consumers should resolve the current file via `Hive::Schemas.schema_path("hive-drop")`, which now points at v2; `Hive::Schemas.schema_path("hive-drop", version: 1)` remains available for pinned v1 validators.
 
 ## TUI Binding
 

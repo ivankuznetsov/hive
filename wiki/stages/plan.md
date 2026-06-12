@@ -33,7 +33,16 @@ Agent must not modify any file other than `plan.md`. Must not execute code in th
 
 If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 
-When the plan agent did write a terminal agent-loss marker (`ERROR reason=tmux_session_terminated` or `reason=agent_orphaned`), `Hive::Daemon::StaleAgentHealer` clears it under the normal marker-id and retry-budget guards, then also enqueues `hive plan <slug> --project <project> --from 3-plan` through the dispatch request queue. `3-plan` needs that explicit rerun because clearing the marker can leave the dead run's empty `plan.md` as the only artifact, which `TaskAction#incomplete_plan_artifact?` classifies as markerless `:error` and the daemon policy would otherwise skip.
+When the plan agent did write a recoverable terminal `ERROR` marker,
+`Hive::Daemon::StaleAgentHealer` clears it under the normal marker-id and
+retry-budget guards, then also enqueues
+`hive plan <slug> --project <project> --from 3-plan` through the dispatch
+request queue. This covers terminal agent-loss markers
+(`ERROR reason=tmux_session_terminated` / `reason=agent_orphaned`) and elapsed
+`ERROR reason=limits_reached retry_after=...` cooldown markers. `3-plan` needs
+that explicit rerun because clearing the marker can leave the dead run's empty
+`plan.md` as the only artifact, which `TaskAction#incomplete_plan_artifact?`
+classifies as markerless `:error` and the daemon policy would otherwise skip.
 
 ## Marker → commit action mapping (`Stages::Plan.action_for`)
 

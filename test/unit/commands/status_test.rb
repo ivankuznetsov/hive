@@ -229,6 +229,69 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_collect_rows_skips_non_finalize_stage_entry_that_vanishes_mid_read
+    # The rescue keys on ENOENT + folder existence, NOT on the stage, so the
+    # vanish/resurface dance must hold for any forward move — not just the
+    # 8-finalize -> 9-done terminal case the other vanish test covers. Here a
+    # task slips from 4-execute to 6-review mid-scan; it must resurface exactly
+    # once under 6-review with a non-error action.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "execute-race-260611-abcd"
+      old_folder = create_status_task(hive_state, "4-execute", slug,
+                                      marker: "REVIEW_COMPLETE", age_days: 0)
+      new_folder = File.join(hive_state, "stages", "6-review", slug)
+      FileUtils.mkdir_p(File.dirname(new_folder))
+
+      cmd = StatusRaceCommand.new(
+        old_folder: old_folder,
+        new_folder: new_folder,
+        vanish_during_read_stage: "4-execute"
+      )
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      status_project(project_root, hive_state),
+                      1,
+                      with_diagnostic: false)
+      race_rows = rows.select { |row| row.fetch(:slug) == slug }
+
+      assert_equal 1, race_rows.size
+      assert_equal "6-review", race_rows.first.fetch(:stage)
+      refute_equal Hive::Schemas::TaskActionKind::ERROR, race_rows.first.fetch(:action_key)
+      assert cmd.vanish_double.renamed?,
+             "vanish double never renamed: the 4-execute mid-read rename did not fire"
+    end
+  end
+
+  def test_vanish_after_directory_check_path_renames_on_second_to_path_call
+    # Pins the test double's timing contract independently of collect_rows'
+    # internal call order: the rename must fire on to_path call 2 (the basename
+    # slug-extraction coercion), never on call 1 (the directory? guard). The
+    # vanish-during-read tests assert renamed? AFTER running collect_rows, so a
+    # refactor that swapped File.basename(entry) for a non-File.* string op
+    # (e.g. entry.split("/").last) while keeping a later File.*(entry) call
+    # could leave them passing for the wrong reason; this decouples the timing
+    # contract from collect_rows entirely.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "double-timing-260611-abcd"
+      old_folder = create_finalize_ready_task(hive_state, slug)
+      new_folder = File.join(hive_state, "stages", "9-done", slug)
+      FileUtils.mkdir_p(File.dirname(new_folder))
+
+      path = VanishAfterDirectoryCheckPath.new(old_folder, new_folder)
+
+      assert_equal old_folder, path.to_path
+      refute path.renamed?, "call 1 (the directory? guard) must not fire the rename"
+      assert File.directory?(old_folder), "folder must still exist after to_path call 1"
+
+      assert_equal old_folder, path.to_path
+      assert path.renamed?, "to_path call 2 must fire the rename"
+      refute File.directory?(old_folder), "old folder must be gone after the rename"
+      assert File.directory?(new_folder), "folder must have moved to its new stage"
+    end
+  end
+
   def test_collect_rows_drops_old_stage_duplicate_when_rename_lands_before_new_stage_scan
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -286,6 +349,40 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_collect_rows_reraises_enoent_from_state_file_mtime_when_folder_survives
+    # Companion to test_collect_rows_reraises_enoent_when_folder_survives,
+    # pinning the SAME re-raise contract at the line-434 state-file TOCTOU
+    # (File.exist?(state_file) then File.mtime(state_file)) — the exact in-folder
+    # read the rescue comment names as the intended re-raise path. A state read
+    # failing inside a folder that did NOT move stages must propagate (exit-70),
+    # not be swallowed as a stage move.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "state-corrupt-260611-abcd"
+      folder = create_finalize_ready_task(hive_state, slug)
+      state_basename = File.basename(Hive::Task.new(folder).state_file)
+
+      # Raise ENOENT only for the state-file mtime (basename == pr.md), leaving
+      # the folder mtime at :433 (basename == slug) intact — so the ENOENT can
+      # only originate at the :434 state-file read while the folder survives.
+      original = File.singleton_class.instance_method(:mtime)
+      File.define_singleton_method(:mtime) do |path|
+        raise Errno::ENOENT, path.to_s if File.basename(path.to_s) == state_basename
+
+        original.bind(File).call(path)
+      end
+      begin
+        error = assert_raises(Errno::ENOENT) do
+          Hive::Commands::Status.new.send(:collect_rows, hive_state)
+        end
+        assert_match(state_basename, error.message)
+        assert File.directory?(folder), "folder must survive — that is what forces the re-raise"
+      ensure
+        File.singleton_class.define_method(:mtime, original)
+      end
+    end
+  end
+
   def test_drop_transient_stage_moves_leaves_unique_slug_rows_untouched
     # The `return rows if duplicated_slugs.empty?` early-exit must hand back the
     # exact same array — no rejection pass — when no slug collides, even if some
@@ -314,6 +411,30 @@ class CommandsStatusTest < Minitest::Test
     ]
 
     assert_empty cmd.send(:drop_transient_stage_moves, rows)
+  end
+
+  def test_drop_transient_stage_moves_keeps_only_surviving_row_in_three_member_group
+    # drop_transient_stage_moves reject-filters EVERY duplicate-slug row whose
+    # folder is gone, with no "keep exactly one" special case. A 3-member group
+    # (two vanished folders + one survivor) must collapse to exactly the
+    # survivor — pinning the count-agnostic behaviour against a future "keep the
+    # first/last duplicate" rewrite that the 2-member tests would not catch.
+    with_tmp_dir do |project_root|
+      slug = "triple-race-260611-abcd"
+      survivor_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      FileUtils.mkdir_p(survivor_folder)
+      rows = [
+        { slug: slug, stage: "4-execute", folder: "/nonexistent/4-execute/#{slug}" },
+        { slug: slug, stage: "8-finalize", folder: "/nonexistent/8-finalize/#{slug}" },
+        { slug: slug, stage: "6-review", folder: survivor_folder }
+      ]
+
+      result = Hive::Commands::Status.new.send(:drop_transient_stage_moves, rows)
+
+      assert_equal 1, result.size, "only the surviving row should remain"
+      assert_equal survivor_folder, result.first.fetch(:folder)
+      assert_equal "6-review", result.first.fetch(:stage)
+    end
   end
 
   def test_json_payload_never_emits_transient_duplicate_for_stage_move_race
@@ -889,22 +1010,28 @@ class CommandsStatusTest < Minitest::Test
   end
 
   # Coerces to a path string but vanishes the folder mid-read to reproduce the
-  # stage-move race. The vanish is timed by the production coercion sequence in
-  # collect_rows, where `File.*` coerce the argument via the `to_path` protocol
-  # (not `to_str`):
-  #   - call 1 is the `File.directory?(entry)` existence guard (status.rb:423,
-  #     folder still present, so the row loop is entered);
-  #   - call 2 is `File.basename(entry)` slug extraction (status.rb:425), and
-  #     `@calls > 1` fires the rename there;
-  #   - the ENOENT then surfaces at the next read of the now-renamed folder,
-  #     `File.mtime(entry)` (status.rb:433) — the `rows << { … }` hash literal
-  #     never coerces `entry`.
-  # If a future Ruby or a refactor at status.rb's row loop changes how many
-  # times `File.*` coerces the argument, revisit this `@calls > 1` threshold;
-  # StatusRaceCommand#vanish_double + #renamed? let the test fail loudly if the
-  # rename silently stops firing. Only `to_path` participates in the rename
-  # dance; `to_s` is an inert fallback for inspection/logging and never triggers
-  # the vanish (omitting `to_str` is deliberate for the same reason).
+  # stage-move race. `File.*` coerce their argument via the `to_path` protocol
+  # (not `to_str`), so the rename is timed by a `to_path` call count. The only
+  # load-bearing fact is that the rename fires on the FIRST coercion AFTER the
+  # `File.directory?(entry)` existence guard (status.rb:423) — the exact
+  # downstream count is NOT load-bearing:
+  #   - call 1 is the directory? guard itself (folder still present, so the row
+  #     loop is entered);
+  #   - call 2 is `File.basename(entry)` slug extraction (status.rb:425), where
+  #     `@calls > 1` fires the rename;
+  #   - the row loop then coerces `entry` again — first `Task.new(entry)`'s
+  #     `File.expand_path` (a pure string op, no disk hit), then finally
+  #     `File.mtime(entry)` (status.rb:433), where the now-renamed folder
+  #     surfaces the ENOENT (`File.mtime` itself coerces twice; the precise
+  #     tally past call 2 does not matter).
+  # Because only the post-guard timing matters, a coercion-count shift from a
+  # refactor stays harmless as long as some `File.*(entry)` call still follows
+  # the rename; StatusRaceCommand#vanish_double + #renamed? (and
+  # test_vanish_after_directory_check_path_renames_on_second_to_path_call) let
+  # the suite fail loudly if the rename silently stops firing. Only `to_path`
+  # participates in the rename dance; `to_s` is an inert fallback for
+  # inspection/logging and never triggers the vanish (omitting `to_str` is
+  # deliberate for the same reason).
   class VanishAfterDirectoryCheckPath
     def initialize(path, new_path)
       @path = path

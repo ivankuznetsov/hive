@@ -467,21 +467,37 @@ module Hive
                 live_task_lock: !live_holder.nil?
               }
             # A mid-scan stage-move (atomic rename of <stage>/<slug> out from
-            # under us) makes File.mtime(entry) at :433 raise ENOENT even though
-            # the :423 File.directory? guard already passed. We swallow that and
-            # `next`: the task resurfaces under its new stage in this same scan,
-            # and drop_transient_stage_moves prunes any stale duplicate.
+            # under us) makes an in-folder read raise ENOENT even though the
+            # :423 File.directory? guard already passed. The rescue wraps the
+            # whole begin, so the ENOENT can surface from ANY in-folder read —
+            # File.mtime(entry) at :433, Markers.current's File.exist?->File.read
+            # (markers.rb:59-61), or the .lock read in task_lock_holder — all of
+            # which behave identically here. We swallow it and `next`: on a
+            # forward stage-move the task resurfaces under its new (higher-
+            # numbered) stage later in this same scan, and
+            # drop_transient_stage_moves prunes any stale duplicate. A backward
+            # move (higher stage -> already-scanned lower stage) instead just
+            # drops the row for one frame and it reappears on the next poll — no
+            # correctness impact, only a one-frame glitch (out of plan scope).
             #
             # The `raise if File.directory?(entry)` re-check preserves the
             # corrupted-but-present -> Error path. If the folder still exists at
             # rescue time, the ENOENT came from genuine in-folder corruption
-            # (e.g. a state file removed mid-read), NOT a stage move, so we let
-            # it propagate (exit-70). This contract assumes EVERY state-file
-            # mutation is an atomic rename (see Markers.write_atomic): a future
-            # non-atomic writer could leave a surviving folder with a
-            # transiently-missing file and reintroduce a process-killing crash on
+            # (e.g. a state file removed out of band), NOT a stage move, so we
+            # let it propagate (exit-70). The safety premise is folder-level, not
+            # write-level: the ONLY thing that makes `entry` (the folder) vanish
+            # is an atomic stage-move rename — in-place file writers never make
+            # the folder disappear, and they never leave the state file
+            # transiently *absent* inside a surviving folder either. Plain
+            # File.write callers (execute.rb, open_pr.rb, babysitter/pr_fixer.rb)
+            # open O_CREAT|O_TRUNC, truncating to zero *length*, never zero
+            # *existence*, so File.mtime still succeeds; atomic-rename writers
+            # (Markers.write_atomic) likewise always leave a file in place. Only
+            # a future change that unlinked or renamed a *folder* out of band
+            # would break that premise and reintroduce a process-killing crash on
             # this poll-heavy surface. Pinned by
-            # test_collect_rows_reraises_enoent_when_folder_survives.
+            # test_collect_rows_reraises_enoent_when_folder_survives and
+            # test_collect_rows_reraises_enoent_from_state_file_mtime_when_folder_survives.
             #
             # Only Errno::ENOENT is rescued: local same-device .hive-state
             # renames always yield ENOENT. Other vanish errnos (ENOTDIR from a
@@ -497,6 +513,10 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
+      # The production glob over a stage dir's task folders, extracted into its
+      # own method so the deterministic stage-move race tests can subclass and
+      # override it (test StatusRaceCommand) to inject a mid-scan rename/vanish.
+      # collect_rows (:422) is the sole caller.
       def stage_task_entries(stage_dir)
         Dir[File.join(stage_dir, "*")]
       end

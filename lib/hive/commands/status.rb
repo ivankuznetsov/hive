@@ -424,7 +424,11 @@ module Hive
 
             slug = File.basename(entry)
             begin
-              task = Hive::Task.new(entry)
+              begin
+                task = Hive::Task.new(entry)
+              rescue Hive::InvalidTaskPath
+                next
+              end
               marker = Hive::Markers.current(task.state_file)
               folder_mtime = File.mtime(entry)
               mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
@@ -462,8 +466,6 @@ module Hive
                 claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
                 live_task_lock: !live_holder.nil?
               }
-            rescue Hive::InvalidTaskPath
-              next
             rescue Errno::ENOENT
               raise if File.directory?(entry)
 

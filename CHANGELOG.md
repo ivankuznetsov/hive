@@ -2,6 +2,12 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.2.4
+
+Hive-launched claude sessions stop silently billing the operator's interactive model.
+
+- **`claude.model` / `claude.effort`** (global or per-project config, asked at `hive init`): sessions now launch with `--model default` — Claude Code's live alias for its recommended model (Opus-class today) — instead of inheriting the operator's interactive pick (e.g. a premium long-context configuration). `inherit` restores the old behavior; any alias/full name passes through; `effort` accepts low/medium/high or keeps Claude Code's own tier. Applies to every stage including reviewers, triage, and fix phases.
+
 ## 0.2.3
 
 Hotfix: parallel agents were being killed by another task's cleanup sweep.

@@ -94,3 +94,6 @@ Assert-Case "existing container refuses with resume guidance" `
 
 if ($failures -gt 0) { exit 1 }
 Write-Host "install-box.ps1: all cases green"
+# The refusal case intentionally leaves $LASTEXITCODE=1, and the Actions pwsh
+# wrapper appends `exit $LASTEXITCODE` — without this the green run exits 1.
+exit 0

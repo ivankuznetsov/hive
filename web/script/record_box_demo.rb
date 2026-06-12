@@ -13,6 +13,7 @@ require "json"
 require "net/http"
 require "open3"
 require "playwright"
+require "timeout"
 require "socket"
 require "tmpdir"
 require "yaml"
@@ -67,8 +68,11 @@ File.write(File.join(demo_bin, "claude"), <<~SH)
     exit 0
   fi
   cwd="$(pwd)"
+  # The camera needs to SEE stages run: a real agent thinks for minutes,
+  # the fake for a beat or two.
   case "$cwd" in
     */stages/2-brainstorm/*)
+      sleep 1.6
       if ! grep -q '^### Q1' brainstorm.md 2>/dev/null; then
         printf '### Q1. Should dark mode follow the system setting?\n\n### A1.\n\n<!-- WAITING -->\n' > brainstorm.md
       else
@@ -81,9 +85,11 @@ File.write(File.join(demo_bin, "claude"), <<~SH)
       fi
       ;;
     */stages/3-plan/*)
+      sleep 2.2
       printf '# Plan\n\n1. Add a theme setting (light / dark / system).\n2. Persist per user; apply via data-theme.\n3. Tests for toggle + system fallback.\n\n<!-- COMPLETE -->\n' > plan.md
       ;;
     *worktrees/*)
+      sleep 2.4
       printf 'theme toggle implemented\n' > implementation.txt
       git add implementation.txt
       git -c user.email=demo@hivecli.sh -c user.name="Hive Demo" \
@@ -201,6 +207,10 @@ def wait_answer_window!(events_path, slug, timeout: 60)
   end
 end
 
+def newest_webm(existing)
+  (Dir[File.join(OUT_DIR, "*.webm")] - existing).max_by { |f| File.mtime(f) }
+end
+
 video = nil
 begin
   Playwright.create(playwright_cli_executable_path: "npx playwright") do |pw|
@@ -211,11 +221,13 @@ begin
       record_video_size: { width: 1280, height: 800 }
     )
     page = context.new_page
+    webms_before_a = Dir[File.join(OUT_DIR, "*.webm")]
 
     puts "==> recording"
+    $stdout.flush
     page.goto("#{base}/dev_login?as=ivan")
     page.wait_for_selector(".composer textarea")
-    sleep 1.2
+    sleep 2.2
 
     # Beat 1 — the idea, typed like a human.
     page.click(".composer textarea")
@@ -223,7 +235,7 @@ begin
     sleep 0.8
     page.click("input[type='submit'][value='Add idea']")
     page.wait_for_selector(".task-row")
-    sleep 1.4
+    sleep 2.4
 
     # Beat 2 — open the task; the daemon's brainstorm asks a question.
     page.click(".task-row a")
@@ -235,7 +247,7 @@ begin
     page.keyboard.type(ANSWER, delay: 30)
     sleep 0.5
     page.click("input[type='submit'][value='Send answers']")
-    sleep 1.0
+    sleep 1.6
 
     # Beat 3 — hands off: the pipeline advances live (push morphs, no
     # reloads). The camera lingers; the script only waits for the terminal
@@ -245,14 +257,19 @@ begin
       ".task-meta:has-text('Ready to open PR'), .stage-badge:has-text('open-pr'), .stage-badge:has-text('review')",
       timeout: 120_000
     )
-    sleep 1.6
+    sleep 2.6
 
     # CUT — segment A ends here. The daemon blows through open-pr and
     # into review within a tick; instead of fighting that race on camera,
-    # segment B is a clean shot of the PR state.
+    # segment B is a clean shot of the PR state. Video paths come from the
+    # filesystem, not page.video.path — that call rides the playwright
+    # channel and can futex-wedge forever; the dir is ours anyway. Each
+    # close gets a hard deadline for the same reason.
     sleep 0.4
-    video = page.video.path rescue nil
-    context.close
+    Timeout.timeout(60) { context.close }
+    video = newest_webm(webms_before_a)
+    puts "==> segment A: #{video}"
+    $stdout.flush
 
     # Off camera: freeze the world at "PR opened".
     Process.kill("KILL", daemon_pid)
@@ -279,6 +296,7 @@ begin
     end
 
     # Segment B — the payoff: the task page at open-pr with the PR link.
+    webms_before_b = Dir[File.join(OUT_DIR, "*.webm")]
     context = browser.new_context(
       viewport: { width: 1280, height: 800 },
       record_video_dir: OUT_DIR,
@@ -289,12 +307,14 @@ begin
     page.wait_for_selector(".composer textarea")
     page.goto("#{base}/tasks/demo-app/#{slug}")
     page.wait_for_selector(".stage-badge:has-text('open-pr')", timeout: 15_000)
-    sleep 0.9
+    sleep 1.8
     page.click("details[data-artifact-name='pr.md'] summary")
-    sleep 3.0
-    @video_b = page.video.path rescue nil
-    context.close
-    browser.close
+    sleep 5.5
+    Timeout.timeout(60) { context.close }
+    @video_b = newest_webm(webms_before_b)
+    puts "==> segment B: #{@video_b}"
+    $stdout.flush
+    Timeout.timeout(30) { browser.close }
   end
 ensure
   Process.kill("TERM", daemon_pid) if daemon_pid

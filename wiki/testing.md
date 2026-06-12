@@ -181,7 +181,23 @@ Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtu
 
 Per the user's CLAUDE.md rule: never pass non-Ruby files to rubocop.
 
-## Backlinks
+## ## hivebox golden-path E2E
+
+`web/test/e2e/golden_path_e2e.rb` (deliberately not `*_test.rb` — the
+default suites skip it; run `cd web && bin/rails test
+test/e2e/golden_path_e2e.rb`, ~35s): a real browser drives the full
+mother-test path — claim-by-first-login through the REAL device-flow logic
+against a stubbed GitHub HTTP seam, an idea composed in the UI, a REAL
+`hive daemon` subprocess advancing brainstorm→plan→execute with the
+stage-aware fake claude (`web/test/e2e/support/claude`, keyed on cwd
+because a daemon launches every stage with the same binary), the Q&A
+answered in the browser, ending at the network-free boundary "Ready to
+open PR" with a real commit in a real worktree. Failure artifacts (daemon
+event log, task files, agent logs) land in `/tmp/golden-e2e-debug`. The
+Telegram leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now
+asserts the /start welcome ahead of the idea flow.
+
+Backlinks
 
 - [[architecture]]
 - [[modules/agent]]

@@ -37,7 +37,7 @@ export default class extends Controller {
   restore(event) {
     if (!this.openByName || event.detail.renderMethod !== "morph") return
 
-    document.querySelectorAll("details[data-artifact-name]").forEach((details) => {
+    this.element.querySelectorAll("details[data-artifact-name]").forEach((details) => {
       const open = this.openByName[details.dataset.artifactName]
       if (open !== undefined) details.open = open
     })

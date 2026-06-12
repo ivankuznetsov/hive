@@ -141,6 +141,28 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_current_path "/repos"
   end
 
+  test "a project deep link lands filtered with the composer preselected" do
+    second = create_hive_project!("second-app")
+    create_task!(@project, "Demo deep task")
+    create_task!(second, "Second deep task")
+    sign_in!
+
+    visit "/?project=#{@project}"
+    assert_selector ".project-section[data-project-name='#{@project}']"
+    assert_selector ".project-section[data-project-name='second-app']", count: 0
+    assert_equal @project, find(".composer select[name='project']").value,
+                 "a filtered deep link must preselect the composer"
+
+    # Ghost link (renamed/forgotten project): never an empty grid — fall
+    # back to All projects and clean the URL.
+    visit "/?project=ghost-app"
+    assert_selector ".project-section[data-project-name='#{@project}']"
+    assert_selector ".project-section[data-project-name='second-app']"
+    assert_selector ".project-nav-item.active", text: "All projects"
+    refute_includes page.current_url, "ghost-app",
+                    "the dead filter must not survive in the URL"
+  end
+
   test "grid updates preserve scroll position and composer state" do
     # Enough rows to overflow the viewport so window scroll is meaningful.
     30.times { |n| create_task!(@project, "Filler idea number #{n}") }
@@ -189,8 +211,14 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     page.execute_script("document.querySelector('pre[data-tail-follow]').scrollTop = 0")
     log_file.write("line 121 marker-while-reading\n", mode: "a")
-    # Outlast a 3s poll tick: a paused pane must neither move nor refresh.
-    assert_no_text "marker-while-reading", wait: 5
+    # Provably outlast TWO real poll ticks: the controller counts every
+    # timer firing (including paused ones) in data-poll-ticks, so waiting
+    # for the counter to advance is an explicit wait, not a sleep — and a
+    # deleted readerBusy() would fail the absence assertions below.
+    ticks = page.evaluate_script("Number(document.querySelector('#task-log').dataset.pollTicks || 0)")
+    assert_selector "#task-log[data-poll-ticks='#{ticks + 2}']", wait: 10
+    assert_selector "pre[data-tail-follow][data-following='false']"
+    assert_no_text "marker-while-reading"
     assert_equal 0, page.evaluate_script("document.querySelector('pre[data-tail-follow]').scrollTop"),
                  "reading position must survive poll ticks"
 
@@ -232,6 +260,27 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "the operator's open choice must survive the morph"
   end
 
+  test "a new question round replaces the Q&A form cleanly" do
+    folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Round probe"))
+    folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
+    sign_in!
+    visit "/tasks/#{@project}/#{folder.basename}"
+    assert_selector "form[id='qa-form-1']", wait: 5
+
+    # The agent answers Q1 and asks Q2 — the open set changes [1] → [2].
+    folder.join("brainstorm.md").write(
+      "### Q1. Scope?\n\n### A1.\nDone\n\n### Q2. Deadline?\n\n### A2.\n\n<!-- WAITING -->\n"
+    )
+    create_task!(@project, "Round trigger")
+
+    assert_selector "form[id='qa-form-2']", wait: 10
+    # Capybara assertions carry no custom messages; the selectors are the doc:
+    # the previous round's form must not linger, and exactly one form remains.
+    assert_selector "form[id='qa-form-1']", count: 0
+    assert_selector "form[id^='qa-form-']", count: 1
+    assert_selector ".qa-question", text: /Deadline/
+  end
+
   test "typing in the Q&A survives a pushed morph refresh" do
     folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Focus probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
@@ -240,14 +289,15 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     field = find("textarea[name='answers[1]']", wait: 5)
     field.fill_in with: "typing slowly"
-    # Force a status change → StatusBroadcaster pushes a refresh → the page
-    # morphs. The permanent Q&A form must keep both the text and the caret.
+    # Change the task's OWN visible content, then force a broadcast → morph.
+    # Waiting for the updated question text is the sync point proving the
+    # morph actually landed before we assert survival — without it every
+    # assertion could pass against the pre-morph DOM.
+    folder.join("brainstorm.md").write("### Q1. Scope? (clarified)\n\n### A1.\n\n<!-- WAITING -->\n")
     create_task!(@project, "Refresh trigger")
-    assert_selector ".task-header", wait: 10
-    using_wait_time(8) do
-      assert_equal "typing slowly", find("textarea[name='answers[1]']").value,
-                   "a pushed morph must not discard typed-but-unsent input"
-    end
+    assert_selector ".qa-question", text: /clarified/, wait: 10
+    assert_equal "typing slowly", find("textarea[name='answers[1]']").value,
+                 "a pushed morph must not discard typed-but-unsent input"
     field.send_keys(" still here")
     assert_equal "typing slowly still here", find("textarea[name='answers[1]']").value,
                  "focus must remain in the field across refreshes"

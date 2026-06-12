@@ -52,16 +52,19 @@ class StatusBroadcaster
     private
 
     def broadcast(payload)
+      # Refresh signal FIRST: it carries no payload and cannot fail on
+      # content, while the partial render below can (one bad row). Task
+      # pages subscribe to the same channel and morph-refresh on this
+      # signal — push, not poll: zero traffic when idle, instant when the
+      # pipeline moves. Ordering keeps task pages live even while a grid
+      # render bug is being logged every retry.
+      Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
       Turbo::StreamsChannel.broadcast_replace_to(
         CHANNEL,
         target: "projects",
         partial: "status/projects",
         locals: { projects: payload.fetch("projects", []) }
       )
-      # Pages without a #projects frame (task pages) subscribe to the same
-      # channel and morph-refresh on this signal — push, not poll: zero
-      # traffic when idle, instant when the pipeline moves.
-      Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
     end
   end
 end

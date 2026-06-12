@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/
 created: 2026-06-04
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -15,7 +15,10 @@ pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
 through the daemon dispatch queue (`Hive::Web::Dispatcher`), and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, and the Telegram validators from
-the gem.
+the gem. Red task recovery uses the bot's `RecoverySequence` path so the web
+Retry button and Telegram Autofix share the same guarded clear plus rerun
+contract; the TUI's Recover has its own subprocess-based clear + `hive run`
+path with separate gates.
 
 ## CLI
 
@@ -65,9 +68,10 @@ GitHub.
   the operator back to the top; the composer form is `data-turbo-permanent`
   because typed-but-unsent idea text and staged image chips live in browser
   state. No polling JS, no SSE.
-- **Task page** — state-driven actions (Approve only when the marker makes
-  a forward move possible; Run <verb> only when the project daemon is
-  disabled; Diff only when the worktree exists; Reject, Force approve, and
+- **Task page** — state-driven actions (Retry stage for red
+  `recover_review` / `recover_execute` / `error` rows; Approve only when the
+  marker makes a forward move possible; Run <verb> only when the project daemon
+  is disabled; Diff only when the worktree exists; Reject, Force approve, and
   Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
   described cards in a bottom Advanced section, confirm-gated), per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
@@ -87,6 +91,9 @@ GitHub.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
+  Red diagnostic rows also render a danger banner from
+  `tasks[].diagnostic.summary` so the page says why the row is stuck before
+  offering Retry.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
@@ -116,6 +123,17 @@ form posts the row's rendered `stage` as `from`; if the task moved after the
 page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
+Task recovery is routed as `POST /tasks/:project/:slug/recover` →
+`TasksController#recover` → `Hive::Web::Dispatcher#recover`. The controller
+re-reads the current status row rather than trusting form-posted stage/marker
+state. The dispatcher refuses manual-only states with
+`RecoverySequence.manual_only_text`, derives the most discriminating
+`--match-attr` through `NotificationBuilders.recovery_match_attr`, then writes
+the first command (`hive markers clear ... --json`) to the daemon dispatch
+queue with `trigger=web_recover` and persists the stage rerun as the same
+request's sequence sidecar. If the guarded clear exits non-zero, the rerun is
+not promoted.
+
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. CSRF is Rails-default (per-form tokens); every
 route except `/health`, `/up`, `/login`, `/logout`, `/auth/github*`, and the
@@ -125,10 +143,13 @@ dev/test-only `/dev_login` is behind the owner gate.
 
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), and the real
-`Commands::New`/`Approve`/`Drop` against a sandboxed `HIVE_HOME` (the suite
-NEVER touches the developer's real config — `test_helper.rb` sets the sandbox
-before the app loads). It also pins the Telegram first-run guide shape: open
-while unconfigured, BotFather/userinfobot links, and the three setup steps.
+`Commands::New`/`Approve`/`Drop` plus web recovery queue writes against a
+sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real config —
+`test_helper.rb` sets the sandbox before the app loads). It pins that a red
+task page shows the diagnostic banner and Retry button, and that the route
+queues the marker-clear command plus the hidden rerun sequence. It also pins
+the Telegram first-run guide shape: open while unconfigured,
+BotFather/userinfobot links, and the three setup steps.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the

@@ -38,10 +38,6 @@ module ApplicationHelper
     Hive::Config.registered_projects.map { |p| p["name"] }
   end
 
-  # Pipeline-generated display names arrive later in a task's life; until
-  # then prefer the operator's ORIGINAL idea text (idea.md front matter) —
-  # a de-slugged title truncates mid-phrase ("Add dark mode toggle to").
-  # The slug stays the fallback of last resort.
   MARKDOWN_TAGS = %w[
     h1 h2 h3 h4 h5 h6 p a ul ol li blockquote pre code em strong del hr br img
     table thead tbody tr th td
@@ -52,11 +48,13 @@ module ApplicationHelper
   # code). Two safety layers for LLM-authored content: escape_html turns raw
   # HTML in the source into visible text (nothing executes), and sanitize
   # strips whatever survives (e.g. javascript: link protocols). Two kinds of
-  # machinery are dropped from the rendered view, matching how GitHub renders
-  # markdown: leading YAML front matter and HTML comments — which is where
-  # stage markers like <!-- COMPLETE --> live; the stage badge owns that
-  # state, the prose should not repeat it. A fresh renderer per call:
-  # Redcarpet instances are not thread-safe under Puma.
+  # machinery are dropped from the rendered view — escape_html would
+  # otherwise print both as literal text: leading YAML front matter, and
+  # STAGE MARKERS (matched by the gem's own MARKER_RE, not a blanket
+  # comment regex — an artifact whose fenced code sample documents
+  # "<!-- COMPLETE -->" keeps it; only real marker lines vanish, since the
+  # stage badge owns that state). A fresh renderer per call: Redcarpet
+  # instances are not thread-safe under Puma.
   def render_markdown(text)
     renderer = Redcarpet::Markdown.new(
       Redcarpet::Render::HTML.new(escape_html: true,
@@ -64,7 +62,8 @@ module ApplicationHelper
       fenced_code_blocks: true, tables: true, autolink: true,
       strikethrough: true, no_intra_emphasis: true, lax_spacing: true
     )
-    body = text.to_s.sub(/\A---\n.*?\n---\n/m, "").gsub(/<!--.*?-->/m, "")
+    body = text.to_s.sub(/\A---\n.*?\n---\n/m, "")
+    body = body.gsub(/^[ \t]*#{Hive::Markers::MARKER_RE}[ \t]*(?:\r?\n|\z)/, "")
     sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
   end
 
@@ -74,6 +73,10 @@ module ApplicationHelper
     %w[recover_execute recover_review error].include?(row["action"].to_s)
   end
 
+  # Pipeline-generated display names arrive later in a task's life; until
+  # then prefer the operator's ORIGINAL idea text (idea.md front matter) —
+  # a de-slugged title truncates mid-phrase ("Add dark mode toggle to").
+  # The slug stays the fallback of last resort.
   def task_title(task)
     return task["display_name"] if task["display_name"].present? && task["display_name"] != task["slug"]
 

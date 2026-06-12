@@ -46,6 +46,7 @@ module Hive
         gh_error
         marker_healed
         heal_requeued
+        heal_requeue_failed
         marker_heal_failed
         marker_heal_exhausted
         marker_heal_observer_missing

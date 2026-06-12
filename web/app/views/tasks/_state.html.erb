@@ -1,7 +1,8 @@
 <%# Updated by Turbo 8 morph-refresh (pushed from StatusBroadcaster) —
-    no frame, no polling. The Q&A form below is data-turbo-permanent so a
-    morph can never disturb typing. %>
-<section id="task-state">
+    no frame, no polling. The answers controller carries typed-but-unsent
+    text and the caret across each morph (forms morph freely; permanence
+    would make a new round's form unable to replace the old one). %>
+<section id="task-state" data-controller="answers">
   <div class="task-header">
     <%= stage_badge(@row["stage"]) %>
     <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
@@ -48,13 +49,11 @@
         </details>
       <% end %>
       <p class="muted">Answer what you can — the daemon resumes the brainstorm once answers land. Unanswered questions stay open.</p>
-      <%# data-turbo-permanent (keyed by id): morphs skip this subtree
-        entirely, so typed-but-unsent answers and focus always survive a
-        refresh. The form is static within a round; a NEW round replaces
-        the whole section (different open-question set → new form id). %>
+      <%# The id is round-keyed for tests/inspection; typing survival across
+        morphs is the answers controller's job (see its header for why
+        data-turbo-permanent must NOT be used here). %>
     <%= form_with url: task_answers_path(@project["name"], @row["slug"]),
-          id: "qa-form-#{@questions.map(&:n).join("-")}",
-          data: { turbo_permanent: true } do |f| %>
+          id: "qa-form-#{@questions.map(&:n).join("-")}" do |f| %>
         <% @questions.each do |question| %>
           <div class="qa-item">
             <%# Single line: qa-question is pre-wrap, so template indentation
@@ -74,16 +73,17 @@
     <details class="intervene">
       <summary class="muted">Reply free-form instead (fills Q<%= @questions.first.n %>)</summary>
       <%= form_with url: task_intervene_path(@project["name"], @row["slug"]),
-            id: "intervene-form", data: { turbo_permanent: true } do |f| %>
+            id: "intervene-form" do |f| %>
         <%= f.text_area :message, required: true,
               placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>
         <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>
   <% elsif @row["marker"].to_s == "waiting" && !stage_passable?(@row) %>
-    <%# Post-answer limbo: everything answered, daemon not done yet. This
-        frame polls, so the banner hands off to the next round's questions,
-        a running dot, or a passable gate on its own. %>
+    <%# Post-answer limbo: everything answered, daemon not done yet. The
+        page morph-refreshes on every status push, so the banner hands off
+        to the next round's questions, a running dot, or a passable gate
+        on its own. %>
     <div class="state-banner">
       <span class="status-dot status-dot-waiting"></span>
       <% if @row["claude_pid_alive"] %>

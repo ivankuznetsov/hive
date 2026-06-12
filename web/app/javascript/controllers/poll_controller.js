@@ -6,7 +6,8 @@ import { Controller } from "@hotwired/stimulus"
 //
 // The human always wins over the poll:
 // - a focused field or typed-but-unsent input inside the frame pauses it
-//   (a reload REPLACES children — it would steal focus and discard input);
+//   (a reload replaces children — or morphs, when the frame opts in via
+//   refresh="morph" — and either way the server renders fields empty);
 // - a [data-tail-follow] pane scrolled away from its bottom pauses it too
 //   (the operator is reading history; reloading would yank the content out
 //   from under them). At the bottom the pane follows like `tail -f`: every
@@ -29,7 +30,16 @@ export default class extends Controller {
   }
 
   reloadUnlessBusy() {
-    if (this.operatorBusy() || this.readerBusy()) return
+    // Tick beacon: counts every timer firing, INCLUDING paused ones. "The
+    // poll ran and chose not to touch the pane" is otherwise unobservable,
+    // which made the reading-pause untestable without sleeps.
+    this.element.dataset.pollTicks = String(Number(this.element.dataset.pollTicks || 0) + 1)
+    if (this.operatorBusy()) return
+    if (this.readerBusy()) {
+      const pane = this.tailPane()
+      if (pane) pane.dataset.following = "false"
+      return
+    }
 
     this.element.reload()
   }
@@ -39,8 +49,9 @@ export default class extends Controller {
     if (!pane) return
 
     pane.scrollTop = pane.scrollHeight
-    // Observable "the controller has taken over" beacon: tests (and CSS,
-    // if ever needed) can wait on it instead of racing module load.
+    // Observable state beacon: "true" while pinned and following, flipped
+    // to "false" by a paused tick. Tests wait on it instead of racing
+    // module load or sleeping through poll intervals.
     pane.dataset.following = "true"
   }
 

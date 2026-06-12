@@ -39,7 +39,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
 
-When `gh` is not installed on PATH, draft-PR close is skipped silently (warning on stderr, `pr_closed: false`, exit 0). Drop does not require `gh`.
+When `gh` is not installed on PATH, draft-PR close is skipped silently (warning on stderr, `pr_closed: false`, exit 0). Drop does not require `gh`. `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal).
 
 ## Steps Performed
 

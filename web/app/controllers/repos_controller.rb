@@ -77,18 +77,33 @@ class ReposController < ApplicationController
     raise Hive::Error, "clone failed: #{[ out, err ].join("\n").strip}" unless status.success?
   end
 
-  # Registered repos must push over https: the device-flow/gh token feeds
-  # git's https credential helper, while SSH is a dead end here — the
+  # Registered repos must push over https: at push time git's credential
+  # helper reads the box's `gh auth login` (the device-flow session token
+  # only powers clone-time GH_TOKEN and is never persisted), while SSH is a
+  # dead end here — the
   # container ships no keys, and a host daemon can't answer an interactive
   # agent (1Password and friends). gh clones over ssh whenever the
   # operator's git_protocol prefers it, so rewrite the origin afterwards.
   def normalize_origin!(target)
-    out, _err, status = Open3.capture3("git", "-C", target, "remote", "get-url", "origin")
-    return unless status.success?
+    out, err, status = Open3.capture3("git", "-C", target, "remote", "get-url", "origin")
+    unless status.success?
+      # Pre-existing dir with no origin (or not a repo): registration still
+      # proceeds, but pushes will fail far from here — leave the breadcrumb.
+      Rails.logger.warn("origin not normalized for #{target}: #{err.strip.presence || out.strip}")
+      return
+    end
 
     url = out.strip
     https = url.sub(%r{\A(?:ssh://)?git@github\.com[:/]}, "https://github.com/")
-    return if https == url
+    if https == url
+      # Non-github ssh remotes survive the rewrite (the allowlist only admits
+      # github.com sources, but a pre-existing dir can point anywhere) — and
+      # the box only ships push credentials for https://github.com.
+      unless url.start_with?("https://github.com/")
+        Rails.logger.warn("origin for #{target} is #{url.inspect} — the box can only push to https://github.com remotes")
+      end
+      return
+    end
 
     _out, err, set_status = Open3.capture3("git", "-C", target, "remote", "set-url", "origin", https)
     raise Hive::Error, "failed to switch origin to https: #{err.strip}" unless set_status.success?

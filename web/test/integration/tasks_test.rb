@@ -102,6 +102,12 @@ class TasksTest < ActionDispatch::IntegrationTest
 
       **bold move** and <script>alert(1)</script> stays inert.
 
+      ```
+      a code sample documenting <!-- COMPLETE --> markers
+      ```
+
+      <!-- a plain html comment -->
+
       <!-- COMPLETE -->
     MD
 
@@ -113,8 +119,14 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_includes plan, "<strong>bold move</strong>"
     refute_includes plan, "<script>", "agent-written HTML must never execute"
     refute_includes plan, "created_at", "front matter is metadata, not prose"
-    refute_includes plan, "COMPLETE",
-                    "stage markers are machinery — the stage badge owns that state"
+    assert_includes plan, "a code sample documenting &lt;!-- COMPLETE --&gt; markers",
+                     "a fenced example mentioning a marker is CONTENT, not machinery"
+    assert_includes plan, "a plain html comment",
+                     "escape_html renders non-marker comments as text — only real markers vanish"
+    refute_match(/^<p>.*<!-- COMPLETE -->.*<\/p>/, plan,
+                 "real marker lines are machinery — the stage badge owns that state")
+    refute_includes plan.gsub(/a code sample[^<]*/, ""), "&lt;!-- COMPLETE",
+                    "the standalone marker line must be stripped"
   end
 
   test "a red task offers Retry which queues the clear-then-rerun pair" do
@@ -138,6 +150,15 @@ class TasksTest < ActionDispatch::IntegrationTest
            "recover must queue the guarded marker clear"
     assert queue.any? { |f| content = File.read(f); content.include?("review") && content.include?(@slug) },
            "recover must queue the stage rerun behind the clear"
+  end
+
+  test "recover on a healthy task is a readable 422, not a hidden run" do
+    post "/tasks/#{@project}/#{@slug}/recover"
+    assert_response :unprocessable_entity
+    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_request*", "**", "*"))
+               .select { |f| File.file?(f) }
+    assert queue.none? { |f| File.read(f).include?(@slug) },
+           "a refused recover must queue NOTHING — a bare rerun behind a flash would be a hidden Run"
   end
 
   test "a healthy task shows no Retry button" do
@@ -309,12 +330,16 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".qa-item", 0, "no open questions → no answer form"
   end
 
-  test "the Q&A form is turbo-permanent so morphs never disturb typing" do
+  test "the Q&A form is morph-managed by the answers controller, never permanent" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
 
     get "/tasks/#{@project}/#{@slug}"
-    assert_select "form[data-turbo-permanent][id^='qa-form-']", 1
+    assert_select "section#task-state[data-controller='answers']", 1,
+                  "typed input survives morphs via snapshot/restore, not permanence"
+    assert_select "form[data-turbo-permanent]", 0,
+                  "permanent forms cannot be REMOVED by a morph — a new round would leave "                   "the old form lingering (pinned by the round-transition system test)"
+    assert_select "form[id^='qa-form-']", 1
   end
 
   test "diff for a task without a worktree is 404 not a crash" do

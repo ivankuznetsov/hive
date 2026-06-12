@@ -51,6 +51,41 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  def test_recover_discards_the_sequence_sidecar_when_the_request_write_fails
+    with_tmp_global_config do
+      original = Hive::Bot::DispatchRequestWriter.method(:write!)
+      Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!) do |**|
+        raise Errno::ENOSPC, "no space left on device"
+      end
+
+      assert_raises(Errno::ENOSPC) do
+        Hive::Web::Dispatcher.new.recover(
+          slug: "stuck-260612-bbbb", project: "p", stage: "6-review",
+          marker: "review_error",
+          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+        )
+      end
+
+      leftovers = Dir[File.join(Hive::Paths.state_home, "**", "*.sequence*")]
+      assert_empty leftovers,
+                   "a failed request write must not orphan its .sequence sidecar - "                    "nothing in the daemon ever cleans one whose request id never lands"
+    ensure
+      Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!, original) if original
+    end
+  end
+
+  def test_recover_refuses_a_row_without_a_failure_marker
+    with_tmp_global_config do
+      error = assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.recover(
+          slug: "fine-260612-cccc", project: "p", stage: "6-review", marker: "none"
+        )
+      end
+      assert_match(/nothing to recover/, error.message,
+                   "a bare rerun behind a 'Recovery queued' notice would be a hidden, unguarded Run")
+    end
+  end
+
   def test_recover_refuses_manual_only_states_with_a_readable_error
     with_tmp_global_config do
       error = assert_raises(Hive::Error) do

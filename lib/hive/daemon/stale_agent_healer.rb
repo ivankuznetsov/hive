@@ -222,7 +222,11 @@ module Hive
       # skips, and with no marker reason left this healer can never match it
       # again. Re-entry must be explicit: enqueue the exact rerun an operator
       # would type. The daemon executes it like any web/bot request, so the
-      # usual concurrency gates (caps, cooldown, quarantine) still apply.
+      # usual concurrency gates (caps, cooldown, quarantine) still apply —
+      # which also means a request blocked longer than the queue's expiry
+      # (~10 min) is silently dropped and the row stays red until the web
+      # Retry button / bot Autofix re-enter it; acceptable, since both
+      # remain available on the markerless red row.
       def requeue_plan_rerun(row)
         request_id = @request_queue.write_request!(
           project: row.project,
@@ -236,6 +240,19 @@ module Hive
                       slug: row.slug,
                       stage: row.stage,
                       request_id: request_id)
+      rescue StandardError => e
+        # Own rescue, NOT the caller's marker_heal_failed: by this point the
+        # clear already SUCCEEDED, so "heal failed, next tick retries" would
+        # be a lie — the marker is gone, this healer can never re-match the
+        # row, and no retry will come. The distinct event says exactly that
+        # and carries the manual re-entry command (the web Retry button and
+        # bot Autofix also still work on the markerless red row).
+        @logger.event(:heal_requeue_failed,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      error: "#{e.class}: #{e.message}",
+                      remediation: "hive plan #{row.slug} --project #{row.project} --from 3-plan")
       end
 
       def auto_recoverable_error?(row, now:)

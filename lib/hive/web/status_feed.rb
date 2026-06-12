@@ -45,6 +45,10 @@ module Hive
       # tick — the documented dedup was dead in production and the on_idle
       # keep-alive branch never ran. Strip the volatile fields for the
       # comparison; subscribers still receive the full payload.
+      # mtime/folder_mtime are deliberately NOT volatile: task-page artifact
+      # liveness rides on them — a state-file write is often the ONLY field
+      # that changes while an agent works, and stripping it would dedup away
+      # the broadcast that refreshes artifact bodies mid-write.
       VOLATILE_KEYS = %w[generated_at age_seconds].freeze
 
       def each_snapshot(on_idle: nil)

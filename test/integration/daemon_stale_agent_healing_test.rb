@@ -99,6 +99,39 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     rows
   end
 
+  def test_full_pipeline_requeues_a_3_plan_terminal_loss_through_the_real_queue
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "stale-plan-260612-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "plan.md")
+        File.write(state_file, "# plan\n\n<!-- ERROR reason=tmux_session_terminated marker_id=it1 -->\n")
+        backdated = Time.now - 600
+        File.utime(backdated, backdated, state_file)
+
+        rows = status_rows_via_consumer(dir)
+        row = rows.find { |r| r.slug == slug }
+        refute_nil row, "the seeded 3-plan error row must classify"
+
+        @healer.heal([ row ])
+
+        assert(@logger.events.any? { |name, _| name == :heal_requeued },
+               "the heal must enqueue the plan rerun")
+        pending = Hive::Daemon::DispatchRequestQueue.pending
+        request = pending.find { |r| r.slug == slug }
+        refute_nil request,
+                   "the rerun must land in the REAL queue (argv allowlist, slug grammar, kwargs contract)"
+        assert Hive::Daemon::DispatchRequestQueue.valid_argv?(request.argv),
+               "the queued argv must pass the dispatcher's allowlist"
+        assert_equal [ "hive", "plan", slug, "--project", File.basename(dir), "--from", "3-plan" ],
+                     request.argv
+        assert_equal "healer", request.requestor
+      end
+    end
+  end
+
   def test_full_pipeline_heals_placeholder_AGENT_WORKING_past_grace
     with_seeded_task do |_dir, _folder, state_file, slug|
       # Placeholder marker (no pid attr) — exactly the shape

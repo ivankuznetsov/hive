@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [test, minitest, fixtures]
 ---
 
@@ -79,7 +79,7 @@ task default: :test
 | `openclaw_skills_test.rb` | OpenClaw skill metadata — only the umbrella `hive-cli` listing is published, setup stays visible before the CLI is installed, `/hive` common paths include `wiki compile-log --check`, fragment-first changelog guidance is present, destructive/foreground admin commands require confirmation, and README publish instructions avoid shortcut listings. |
 | `commands/babysit_test.rb` | `Hive::Commands::Babysit` — lifecycle command routing, PID-file ownership handling, stale-runtime status/reload warnings, foreground restart, detached restart re-exec into canonical `start --detach` through the stable invoked wrapper, aborting restart and failing direct stop after a refused stop, clear detached re-exec failure reporting, initial/post-grace ownership-probe clean-exit handling, pre-KILL ownership refusal, bounded PID-lock timeout, guarded stop cleanup that preserves a replacement PID file, and skip-KILL PID-file preservation when ownership becomes unverified. |
 | `test/unit/web/web_command_test.rb` | `hive web` Rails-app-dir resolution (HIVEBOX_WEB_APP_DIR override, missing-app exit 1) and the public-bind warning. |
-| `test/unit/web/dispatcher_test.rb` | `Hive::Web::Dispatcher` — stage-run verb mapping, unknown-action refusal before daemon queue writes, Reject's prior-gate derivation, brainstorm answer/intervene writes through `BrainstormAnswerWriter`, and Advanced Drop calling `Commands::Drop` in-process while refusing stale `from` stages with `Hive::WrongStage`. |
+| `test/unit/web/dispatcher_test.rb` | `Hive::Web::Dispatcher` — stage-run verb mapping, unknown-action refusal before daemon queue writes, Recover queuing a guarded marker-clear plus stage rerun as one request sequence while refusing manual-only states, Reject's prior-gate derivation, brainstorm answer/intervene writes through `BrainstormAnswerWriter`, and Advanced Drop calling `Commands::Drop` in-process while refusing stale `from` stages with `Hive::WrongStage`. |
 | `web/status_feed_test.rb`, `web/status_routes_test.rb`, `web/sse_limiter_test.rb` | Hivebox status/read routes — registered-project snapshots, shared one-scan-per-tick SSE polling, dedup/keep-alive, stream limiter 503/release behavior, named `status`/`log` SSE frames, safe slug guards, diff 404/422 handling, and bounded log-tail idle release. |
 | `web/agents_auth_test.rb`, `web/agents_auth_login_test.rb`, `web/agents_routes_test.rb` | `Hive::Web::AgentsAuth` — Claude/Codex PTY login URL capture, pasted-code relay, rejected-code errors, watchdog/process-group cleanup, concurrent-session cap, Pi token JSON rejection/persistence, and route wiring. |
 | `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
@@ -129,7 +129,7 @@ command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, replay path safety, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ideas with uploads, task Q&A/actions including Advanced Drop and stale-stage 422, task artifact ordering/markdown rendering/log layout, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job.
+The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, and red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, repos questionnaire, and Repos SSH-origin normalization) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job.
 
 The opt-in Dockerized hivebox smoke covers the packaged web surface. It skips unless `HIVEBOX_URL` is set, checks
 that a fresh box redirects to `/login` and shows the GitHub login link, and

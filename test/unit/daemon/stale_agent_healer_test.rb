@@ -942,6 +942,42 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_requeue_failure_after_a_successful_clear_logs_its_own_event
+    failing_queue = Class.new do
+      def write_request!(**)
+        raise Errno::ENOSPC, "no space left on device"
+      end
+    end.new
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: @logger, grace_sec: 300,
+      request_queue: failing_queue
+    )
+
+    with_marker_file do |state_file|
+      File.write(state_file, "# t\n\n<!-- ERROR reason=tmux_session_terminated marker_id=rq1 -->\n")
+      row = make_row(
+        state_file,
+        pid_alive: nil, mtime: NOW - 5151, stage: "3-plan", marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "rq1" },
+        action: "error", live_task_lock: false
+      )
+
+      healer.heal([ row ], now: NOW)
+
+      names = @logger.events.map(&:first)
+      assert_includes names, :marker_healed, "the clear itself succeeded and must say so"
+      assert_includes names, :heal_requeue_failed,
+                      "a lost requeue is NOT a retryable heal failure — it needs its own truthful event"
+      refute_includes names, :marker_heal_failed,
+                      "marker_heal_failed means 'next tick retries' — a lie here, the marker is gone"
+      requeue_event = @logger.events.find { |name, _| name == :heal_requeue_failed }[1]
+      assert_match(/hive plan/, requeue_event[:remediation],
+                   "the operator needs the manual re-entry command")
+      assert Hive::Markers.current(state_file).none?,
+             "the marker stays cleared — the failure is the requeue, not the heal"
+    end
+  end
+
   def test_auto_recovers_terminal_agent_loss_error_matrix
     # Every stage except 6-review: the sweep-kills-the-server incident took
     # out parallel BRAINSTORMS, and a rerun resumes from on-disk artifacts.

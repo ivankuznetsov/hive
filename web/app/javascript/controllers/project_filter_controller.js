@@ -13,8 +13,15 @@ export default class extends Controller {
   connect() {
     this.selected = new URLSearchParams(window.location.search).get("project") || ""
     // childList only: apply() toggles attributes, which must not retrigger.
+    // This covers the broadcast REPLACE of #projects. Morph refreshes are
+    // the other update path — they strip our hidden/active attributes with
+    // NO childList mutation, so the observer alone would silently lose the
+    // filter; the turbo:render listener below re-applies after each morph
+    // (same pattern as the artifacts controller).
     this.observer = new MutationObserver(() => this.apply())
     this.observer.observe(this.element, { childList: true, subtree: true })
+    this.reapply = this.reapply.bind(this)
+    document.addEventListener("turbo:render", this.reapply)
     this.apply()
     // A filtered deep-link also preselects the composer — but never over a
     // value that is already chosen (e.g. the single-project preselect).
@@ -23,6 +30,11 @@ export default class extends Controller {
 
   disconnect() {
     this.observer.disconnect()
+    document.removeEventListener("turbo:render", this.reapply)
+  }
+
+  reapply(event) {
+    if (event.detail.renderMethod === "morph") this.apply()
   }
 
   choose(event) {
@@ -51,6 +63,17 @@ export default class extends Controller {
   }
 
   apply() {
+    // A ghost deep link (?project= for a renamed/forgotten project) would
+    // hide EVERY section with no active rail button — an empty grid with
+    // zero explanation. Fall back to All projects and clean the URL.
+    if (this.selected &&
+        !this.buttonTargets.some((b) => (b.dataset.projectFilterNameParam || "") === this.selected)) {
+      this.selected = ""
+      const url = new URL(window.location)
+      url.searchParams.delete("project")
+      history.replaceState({}, "", url)
+    }
+
     this.element.querySelectorAll("[data-project-name]").forEach((section) => {
       const show = !this.selected || section.dataset.projectName === this.selected
       if (section.hidden === show) section.hidden = !show

@@ -63,9 +63,13 @@ class TasksController < ApplicationController
   end
 
   def drop
-    dispatcher.drop(slug: params[:slug], project: @project["name"], from: params[:from])
-    # The task no longer exists at any stage — its page is gone too.
-    redirect_to root_path, notice: "Dropped #{params[:slug]}"
+    payload = dispatcher.drop(slug: params[:slug], project: @project["name"], from: params[:from])
+    # The task no longer exists at any stage — its page is gone too. The
+    # notice stays honest about warn-only cleanup steps Drop degraded
+    # (false = attempted and failed; nil = nothing to do).
+    notice = "Dropped #{params[:slug]}"
+    notice += " — note: its draft PR could not be closed" if payload["pr_closed"] == false
+    redirect_to root_path, notice: notice
   end
 
   def run_stage

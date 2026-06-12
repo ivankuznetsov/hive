@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -135,7 +135,10 @@ stage does not move; the only same-stage workflow enqueue is the
    3-plan` with `requestor=healer` / `trigger=terminal_agent_loss` and logs
    `heal_requeued`. That request still goes through the normal dispatch queue
    gates: allowlist, expiry, per-slug in-flight, capacity, cooldown, and
-   quarantine. **Usage/credit limits self-heal on
+   quarantine. If the marker clear succeeds but the request write raises, the
+   healer logs `heal_requeue_failed` with the manual `hive plan ... --from
+   3-plan` remediation instead of `marker_heal_failed`, because the marker is
+   already gone and a later healer tick cannot retry that same match. **Usage/credit limits self-heal on
    a cooldown:** any `limits_reached` marker — the reviewers `REVIEW_ERROR
    phase=reviewers reason=limits_reached` written by `Stages::Review`, and the
    single-agent `ERROR reason=limits_reached` written by `ClaudeLauncher` /
@@ -484,13 +487,16 @@ the poll interval.
 
 ### Queue sequence continuations
 
-Bot recovery flows can be two-step operations: clear the recovery marker,
-then retry the workflow verb. The bot writes only the first request and
-stores later argv arrays in `<request_id>.sequence`. On successful reap
-(`exit_code == 0`), `Dispatcher#promote_dispatch_sequence` writes the
-next request with the original Telegram routing metadata; on non-zero or
-nil exit it discards the sidecar. This keeps retries from running when
-the marker-clear command failed.
+Bot and web recovery flows can be two-step operations: clear the recovery
+marker, then retry the workflow verb. Producers write only the first request
+and store later argv arrays in `<request_id>.sequence`. On successful reap
+(`exit_code == 0`), `Dispatcher#promote_dispatch_sequence` writes the next
+request with the original routing metadata; on non-zero or nil exit it
+discards the sidecar. Hivebox writes the sequence before the first request so a
+fast daemon cannot clear the marker before the continuation exists, then
+discards that sidecar if the first request write fails. This keeps retries from
+running when the marker-clear command failed and prevents orphaned continuations
+when enqueueing itself fails.
 
 ### Completion feedback to Telegram (ADV-1)
 

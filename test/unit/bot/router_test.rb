@@ -49,6 +49,8 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :slash_details, @router.classify(update(text: "/details slug"))
     assert_equal :slash_done, @router.classify(update(text: "/done"))
     assert_equal :slash_help, @router.classify(update(text: "/help"))
+    assert_equal :slash_start, @router.classify(update(text: "/start")),
+                 "Telegram's automatic first-contact command must be welcomed, not met with 'I did not understand'"
   end
 
   def test_autofix_slash_resolves_against_default_empty_snapshot_provider

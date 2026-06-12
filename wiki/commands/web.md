@@ -60,14 +60,17 @@ GitHub.
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
-  Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`,
-  strips volatile fields (`generated_at`, `age_seconds`), broadcasts a replace
-  of the `projects` frame over solid_cable, and also sends a page refresh for
-  subscribers that do not have that frame. The index opts that refresh into
-  Turbo morphing with scroll preservation so a live row arrival does not yank
-  the operator back to the top; the composer form is `data-turbo-permanent`
-  because typed-but-unsent idea text and staged image chips live in browser
-  state. No polling JS, no SSE.
+  Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
+  `StatusFeed` suppresses unchanged snapshots by comparing with only
+  `generated_at` and `age_seconds` removed while keeping `mtime` /
+  `folder_mtime` as liveness signals. The broadcaster sends the status-channel
+  refresh first, then renders and replaces the `projects` frame over
+  solid_cable, so task pages without that frame still receive a morph signal if
+  the dashboard partial raises. The index opts that refresh into Turbo morphing
+  with scroll preservation so a live row arrival does not yank the operator
+  back to the top; the composer form is `data-turbo-permanent` because
+  typed-but-unsent idea text and staged image chips live in browser state. No
+  polling JS, no SSE.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon

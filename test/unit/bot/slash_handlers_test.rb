@@ -59,6 +59,14 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "my project", result.project
   end
 
+  def test_start_welcomes_with_concrete_next_steps
+    result = @handlers.start(Update.new(text: "/start"))
+    assert_equal :reply, result.action
+    assert_match(/Connected/, result.text)
+    assert_match(%r{/status}, result.text, "the welcome must hand the operator a next step")
+    assert_match(%r{/help}, result.text)
+  end
+
   def test_help_documents_project_status_argument
     result = @handlers.help(Update.new(text: "/help"))
 

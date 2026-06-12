@@ -1,13 +1,13 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-06-08
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive]
+updated: 2026-06-12
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. The workflow "data model" is the directory layout, marker grammar, and YAML schemas described below.
+**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
 
 ## Stage directory layout
 
@@ -117,6 +117,58 @@ Recovery from a stale or error marker is agent-callable via `hive markers clear 
 
 - **Per-task lock**: `<task folder>/.lock` — YAML payload `{pid, started_at, process_start_time, claude_pid?, slug?, stage?}`. Acquired EXCL by `Hive::Lock.acquire_task_lock` (`lib/hive/lock.rb:18`). Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat PID reuse.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
+
+## Runtime dispatch queue and web snapshots
+
+The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
+(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Producers are
+the Telegram bot, hivebox web, and the `3-plan` terminal-agent-loss healer.
+Web paths currently write through `Hive::Bot::DispatchRequestWriter`, so the
+JSON `requestor` field is commonly `bot`; `trigger` values such as `web` and
+`web_recover` distinguish the web-originated requests, while the healer writes
+`requestor=healer`.
+Each pending request is one JSON file:
+
+```yaml
+schema: hive-dispatch-request
+schema_version: 1
+request_id: <hex16>
+created_at: <UTC-ISO8601>
+project: <registered project name>
+slug: <task slug>
+argv: ["hive", "<allowlisted verb>", ...]
+requestor: bot|healer|...
+chat_id:
+update_id:
+trigger:
+```
+
+`Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
+and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
+`plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`, `markers`).
+Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
+renames the file to `<id>.json.claimed` and writes
+`<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
+those claim files are the at-most-once dispatch record. Multi-step recoveries
+store later argv arrays in `<request_id>.sequence` and promote the next request
+only after the previous child exits 0; non-zero/nil exits discard the sequence.
+Hivebox `recover` writes the sequence sidecar first, then the guarded
+`hive markers clear ... --json` request, and discards the sidecar if the
+request write fails so no orphaned continuation remains.
+
+Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
+is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
+Turbo Streams. `StatusFeed#snapshot` computes a fresh
+`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
+request-time reads; `StatusFeed#each_snapshot` runs one shared poller per
+process and compares snapshots with only volatile `generated_at` /
+`age_seconds` fields removed. `mtime` and `folder_mtime` deliberately remain
+part of the comparison key because task pages use those changes as the liveness
+signal for artifact/log refreshes while agents write. `StatusBroadcaster`
+publishes a status-channel refresh before rendering and replacing the
+dashboard's `projects` frame, so task pages that do not contain that frame
+still receive a morph signal even if a bad project row makes the grid partial
+raise.
 
 ## Worktree pointer
 

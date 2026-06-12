@@ -746,7 +746,7 @@ class CommandsStatusTest < Minitest::Test
   def create_status_task(hive_state, stage, slug, marker:, age_days:)
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
-    state_file = File.join(folder, stage == "9-done" ? "task.md" : "task.md")
+    state_file = File.join(folder, "task.md")
     File.write(state_file, "<!-- #{marker} -->\n")
     old = Time.now - (age_days * 86_400)
     File.utime(old, old, state_file)
@@ -801,6 +801,15 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # Coerces to a path string but vanishes the folder mid-read to reproduce the
+  # stage-move race. The vanish is timed by the production coercion sequence in
+  # collect_rows: the first `to_path` is the `File.directory?(entry)` existence
+  # guard (call 1, folder still present), and a later coercion during the row
+  # build (call 2+) triggers the rename. If a future Ruby or a refactor at
+  # status.rb's row loop changes how many times File.* coerces the argument,
+  # revisit this `@calls > 1` threshold. Only `to_path` participates in the
+  # rename dance; `to_s` is an inert fallback for inspection/logging and never
+  # triggers the vanish (omitting `to_str` is deliberate for the same reason).
   class VanishAfterDirectoryCheckPath
     def initialize(path, new_path)
       @path = path

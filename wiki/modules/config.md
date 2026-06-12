@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [config, yaml, validation]
 ---
 
@@ -68,7 +68,7 @@ tags: [config, yaml, validation]
     "bind" => "127.0.0.1",
     "port" => 4567,
     "origin" => "http://127.0.0.1:4567",
-    "github" => { "owner" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1" }, # shared hivebox device-flow app
+    "github" => { "owner" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1" }, # nil owner => first-login claimable
     "session_secret_file" => nil
   },
   "babysitter" => {
@@ -189,7 +189,10 @@ Global web settings are validated separately for [[commands/web]]:
 `1..65535`, `web.origin` must start with `http://` or `https://`,
 `web.github` must be a hash, optional `web.github.owner` and
 `web.github.client_id` must be non-empty strings when set, and
-`web.session_secret_file` must be a non-empty string when set. GitHub sign-in
+`web.session_secret_file` must be a non-empty string when set. A blank/missing
+`web.github.owner` is valid and means the first successful hivebox GitHub
+device-flow login claims the box by writing that owner under the global config
+lock; pre-setting the owner keeps the older pinned-owner gate. GitHub sign-in
 uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
 exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
 app — public by design, since device flow is a public-client grant.

@@ -2,15 +2,24 @@
 
 ## Install (golden path)
 
-One command on any machine with Docker:
+One command on any machine with Docker.
+
+macOS / Linux (and Windows inside a WSL 2 shell):
 
 ```sh
 curl -fsSL https://hivecli.sh/box | sh
 ```
 
-(the script is `packaging/docker/install-box.sh`; it pulls
-`ghcr.io/ivankuznetsov/hivebox:latest`, starts the container with a
-persistent `~/hivebox-data` mount, and prints the URL). Then open
+Windows PowerShell:
+
+```powershell
+irm https://hivecli.sh/box.ps1 | iex
+```
+
+(the scripts are `packaging/docker/install-box.{sh,ps1}`; they pull
+`ghcr.io/ivankuznetsov/hivebox:latest`, start the container with a
+persistent `~/hivebox-data` mount, and print the URL — the image is
+multi-arch, so Apple-silicon Macs and ARM home servers pull native). Then open
 http://localhost:4567 and click **Continue with GitHub** — you'll type a
 short code at github.com/login/device from any browser or phone. **The
 first sign-in claims the box as its owner**; every later login by anyone

@@ -230,9 +230,13 @@ buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
 `hive web` serves a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
 original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
-(ADR-036) restricted to `web.github.owner`. Reads render
+(ADR-036): a configured `web.github.owner` gates entry, while an ownerless
+fresh box is claimable and the first successful login writes
+`web.github.owner` under the global config lock. Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
-Streams: `StatusBroadcaster` (self-healing subscriber loop) bridges
+Streams, with production Action Cable accepting same-origin-as-host and
+`HIVEBOX_ORIGIN` only as an extra allow for split-origin deployments:
+`StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast of the projects frame over solid_cable. Mutations reuse gem
 primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
@@ -242,7 +246,9 @@ stage rerun as one queued request sequence), `BrainstormAnswerWriter` for Q&A
 answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
 idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
 and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
-pushes use token-backed credentials. The container supervisor (tini →
+pushes use token-backed credentials; the Agents page can run the `gh` PTY
+login relay so the image's `gh auth git-credential` helper supplies those
+push credentials without docker-exec setup. The container supervisor (tini →
 `Hive::Web::Supervisor`) runs daemon + web + optional bot, restarts crashed or
 signal-killed children with backoff, survives malformed config, and
 SIGHUP-reloads the bot set. Details: [[commands/web]].

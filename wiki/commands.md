@@ -1,9 +1,9 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, public/, hive.gemspec, packaging/docker/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-11
+updated: 2026-06-12
 tags: [commands, api]
 ---
 
@@ -23,7 +23,11 @@ does not publish one ClawHub listing per Hive verb.
 - `web/app/views/**`
 - `web/app/assets/**`
 - `hive.gemspec`
+- `.github/workflows/release.yml`
+- `packaging/docker/Dockerfile`
 - `packaging/docker/entrypoint.sh`
+- `packaging/docker/install-box.sh`
+- `packaging/docker/README.md`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
 
@@ -83,18 +87,27 @@ CLI.
 
 ### Hivebox Web
 
-`hive web` boots the hivebox Rails 8 + Turbo app from `web/` (see [[commands/web]]): it derives SECRET_KEY_BASE from the persisted session secret, keeps the solid-stack sqlite under state_home, runs db:prepare, and execs `bin/rails server`.
-[[commands/web]]. The web app reuses the same status, approval, daemon-queue,
+`hive web` boots the hivebox Rails 8 + Turbo app from `web/` (see [[commands/web]]): it derives SECRET_KEY_BASE from the persisted session secret, keeps the solid-stack sqlite under state_home, runs db:prepare, and execs `bin/rails server`. The web app reuses the same status, approval, daemon-queue,
 task-drop, agent-auth, repo, and Telegram setup contracts as the
-CLI/bot/daemon stack; it does not introduce a separate workflow engine. Task
-Drop is deliberately not daemon-queued: the web handler calls
+CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
+device-flow auth can either use a pre-pinned `web.github.owner` or first-login
+claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
+with `web.origin` / `HIVEBOX_ORIGIN` only as an extra allow for split-origin
+deploys. Task Drop is deliberately not daemon-queued: the web handler calls
 `Hive::Web::Dispatcher#drop`, which runs `Commands::Drop` in-process with the
 rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
 normalizes GitHub SSH origins to https, and relies on the Docker image's
-`gh auth git-credential` helper for GitHub push auth. Docker packaging adds the
+`gh auth git-credential` helper for GitHub push auth; the Agents page now starts
+the `gh auth login` PTY relay for that credential. Docker packaging adds the
 `hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
-directories and then runs `Hive::Web::Supervisor` unless custom argv is passed.
-The gem deliberately does NOT package the web app (gemspec_test pins this); the Rails app ships in the Docker image at /app/web or runs from a source checkout.
+directories and then runs `Hive::Web::Supervisor` unless custom argv is passed,
+and `packaging/docker/install-box.sh`, the one-command install entrypoint that
+pulls `ghcr.io/ivankuznetsov/hivebox:latest` by default, starts a named
+container, mounts persistent data, and prints the local URL. The release
+workflow publishes versioned and `latest` multi-arch hivebox images to GHCR
+after `release-finalize`. The gem deliberately does NOT package the web app
+(gemspec_test pins this); the Rails app ships in the Docker image at /app/web
+or runs from a source checkout.
 `hive web` command has the same renderable UI assets as a source checkout.
 
 ### E2E Harness

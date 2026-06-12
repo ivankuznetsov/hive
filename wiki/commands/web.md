@@ -1,7 +1,7 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/
+source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
 updated: 2026-06-12
 tags: [command, web, hivebox, rails, turbo]
@@ -26,7 +26,8 @@ path with separate gates.
 command locates the Rails app (`HIVEBOX_WEB_APP_DIR` override, else `web/`
 next to `lib/`), exports `SECRET_KEY_BASE` (derived from the same persisted
 `Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVEBOX_ORIGIN` (Action Cable origin check), and
+recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
+host traffic is accepted without config), and
 `HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
 `Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
 `bin/rails db:prepare`, then execs `bin/rails server`. Outside the container
@@ -155,13 +156,14 @@ dev/test-only `/dev_login` is behind the owner gate.
 ## Tests
 
 `web/test/integration/` drives the real GithubAuth through the device-flow
-routes via the `http:` DI seam (no API stubbing), and the real
-`Commands::New`/`Approve`/`Drop` plus web recovery queue writes against a
-sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real config —
-`test_helper.rb` sets the sandbox before the app loads). It pins that a red
-task page shows the diagnostic banner and Retry button, and that the route
-queues the marker-clear command plus the hidden rerun sequence. It also pins
-the Telegram first-run guide shape: open while unconfigured,
+routes via the `http:` DI seam (no API stubbing), including ownerless
+first-login claim, persisted `web.github.owner`, and later non-owner refusal,
+and the real `Commands::New`/`Approve`/`Drop` plus web recovery queue writes
+against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
+config — `test_helper.rb` sets the sandbox before the app loads). It pins that
+a red task page shows the diagnostic banner and Retry button, and that the
+route queues the marker-clear command plus the hidden rerun sequence. It also
+pins the Telegram first-run guide shape: open while unconfigured,
 BotFather/userinfobot links, and the three setup steps.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
@@ -189,6 +191,15 @@ credentials for repos under `/data/repos`. The supervisor still spawns
 interface, now exec-ing Rails. The healthcheck hits the Rails `/health`.
 `/data` remains the persistence boundary; the sqlite files for
 cable/cache/queue live under `/data/state/hive/web-storage`.
+
+`packaging/docker/install-box.sh` is the one-command install entrypoint intended
+for `curl -fsSL https://hivecli.sh/box | sh`. It requires reachable Docker,
+honors `HIVEBOX_IMAGE` / `HIVEBOX_NAME` / `HIVEBOX_PORT` / `HIVEBOX_DATA`,
+refuses to overwrite an existing container name, pulls the image, starts it with
+`--restart unless-stopped`, mounts persistent data, and prints the local URL plus
+claim reminder. `.github/workflows/release.yml` publishes the matching
+multi-arch GHCR image as `ghcr.io/<owner>/hivebox:<version>` and
+`ghcr.io/<owner>/hivebox:latest` after `release-finalize` succeeds.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

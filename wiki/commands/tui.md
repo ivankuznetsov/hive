@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-06-11
+updated: 2026-06-14
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive]
 ---
 
@@ -150,11 +150,13 @@ without any file write and must self-heal — and it never causes a redraw
 because `App.start_snapshot_poller` dedups identical snapshots (below).
 Because status is the sole task-row producer, stage-move races are
 normalised upstream: `Status#collect_rows` skips task folders that vanish
-mid-read and prunes duplicate-slug rows only when one duplicate folder has
-already disappeared by the end of the scan. The TUI therefore should not
-render a one-poll old-stage/new-stage duplicate during ordinary workflow
-moves; two still-existing same-slug folders remain visible as a real
-status collision.
+mid-read, re-raises `ENOENT` when the folder still exists, and prunes
+duplicate-slug rows only when one duplicate folder has already disappeared by
+the end of the scan. The TUI therefore should not render a one-poll
+old-stage/new-stage duplicate during ordinary forward workflow moves; a
+backward move to an already-scanned stage can drop out for one poll and then
+reappear on the next refresh. Two still-existing same-slug folders remain
+visible as a real status collision.
 Read-only, no locks taken. The render thread reads `@current` once per frame; under
 MRI 3.4's GVL the pointer-sized reference write is atomic.
 JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a

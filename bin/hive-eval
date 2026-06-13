@@ -34,20 +34,19 @@ rescue OptionParser::ParseError => e
 end
 
 unless remaining.empty?
-  warn "hive-eval: unexpected argument(s): #{remaining.join(" ")}"
+  label = remaining.length == 1 ? "argument" : "arguments"
+  warn "hive-eval: unexpected #{label}: #{remaining.join(" ")}"
   warn parser
   exit 64
 end
 
 def scenario_path(scenario_root, value)
   return nil if value.nil?
-  if value.match?(%r{[\\/]})
-    raise ArgumentError, "scenario must be a basename; scenario basename must not contain path separators: #{value}"
-  end
+  raise ArgumentError, "scenario basename must not contain path separators: #{value}" if value.match?(%r{[\\/]})
 
   basename = value.sub(/_test\z/, "")
   unless basename.match?(SAFE_SCENARIO_BASENAME)
-    raise ArgumentError, "scenario must be a safe basename: #{value}"
+    raise ArgumentError, "scenario must be a safe basename under test/eval/scenarios"
   end
 
   File.join(scenario_root, "#{basename}_test.rb")

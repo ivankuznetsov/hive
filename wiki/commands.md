@@ -56,6 +56,13 @@ false forms such as `--no-json`, `--skip-json`, or `--json=false` move behind
 the command before dispatch; unsupported assignments such as `--json=1` or
 `--json=yes` fail as usage errors before the assigned value can become a
 command argument or task target.
+If `--json` is requested and Thor raises a usage error before a command handler
+is instantiated, the wrapper maps required-argument failures for the main
+agent-callable surfaces to their command schema: `hive-stage-action` for
+workflow verbs, `hive-run`, `hive-approve`, `hive-drop`, `hive-findings`,
+`hive-markers-clear`, `hive-patrol`, and the unversioned `hive-rebase-status`
+inspector. Workflow aliases preserve their payload extras (`pr` reports
+`verb: "open-pr"`; finding toggles report `operation`).
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not

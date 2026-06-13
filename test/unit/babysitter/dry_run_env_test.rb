@@ -58,8 +58,18 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "run", "view", "123", "-w"
       assert_stubbed env, "gh", "auth", "status", "--show-token"
       assert_stubbed env, "gh", "auth", "status", "-t"
+      # gh (pflag) clusters boolean shorthands, so `-t` smuggled into a cluster
+      # with `-a`/`--active` still reveals the token and must be skipped.
+      assert_stubbed env, "gh", "auth", "status", "-at"
+      assert_stubbed env, "gh", "auth", "status", "-ta"
+      assert_stubbed env, "gh", "auth", "status", "-ath"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "auth", "status"
+      assert_passes env, "gh", "auth", "status", "-a"
+      # `-h`/`--hostname` consumes the rest of the cluster as its value, so a
+      # `t` that follows it is hostname data, not a token flag.
+      assert_passes env, "gh", "auth", "status", "-h", "github.com"
+      assert_passes env, "gh", "auth", "status", "-hgithub.com"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
@@ -236,6 +246,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh run view 123 -w skipped"
       assert_includes skipped, "gh auth status --show-token skipped"
       assert_includes skipped, "gh auth status -t skipped"
+      assert_includes skipped, "gh auth status -at skipped"
+      assert_includes skipped, "gh auth status -ta skipped"
+      assert_includes skipped, "gh auth status -ath skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"

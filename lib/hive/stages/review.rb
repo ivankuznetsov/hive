@@ -388,9 +388,12 @@ module Hive
                 return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
                          status: :review_error }
               when :error
-                Hive::Markers.set(task.state_file, :review_error,
-                                  phase: :triage, reason: "triage_failed", pass: pass)
-                return { commit: "triage_error_pass_#{format('%02d', pass)}",
+                limited = mark_review_phase_failure(
+                  task, phase: :triage, terminal_reason: "triage_failed",
+                  pass: pass, error_message: triage_result.error_message
+                )
+                label = limited ? "triage_limits_reached" : "triage_error"
+                return { commit: "#{label}_pass_#{format('%02d', pass)}",
                          status: :review_error }
               end
             else
@@ -509,9 +512,12 @@ module Hive
           end
 
           if agent_failed?(fix_result)
-            Hive::Markers.set(task.state_file, :review_error,
-                              phase: :fix, reason: "fix_failed", pass: pass)
-            return { commit: "fix_error_pass_#{format('%02d', pass)}",
+            limited = mark_review_phase_failure(
+              task, phase: :fix, terminal_reason: "fix_failed",
+              pass: pass, error_message: fix_result && fix_result[:error_message]
+            )
+            label = limited ? "fix_limits_reached" : "fix_error"
+            return { commit: "#{label}_pass_#{format('%02d', pass)}",
                      status: :review_error }
           end
 
@@ -771,6 +777,30 @@ module Hive
                           reason: "wall_clock", pass: pass, elapsed: elapsed)
         { commit: "stale_wall_clock_pass_#{format('%02d', pass)}",
           status: :review_stale }
+      end
+
+      # A per-pass review-phase agent (triage, fix) that died because the
+      # provider hit a usage/credit limit must self-heal like the reviewers
+      # phase already does — not sit terminally red until a human retries.
+      # When the captured error text reads as a limit, stamp
+      # `reason: limits_reached` plus a `retry_after` cooldown the daemon
+      # healer honors (StaleAgentHealer#auto_recoverable_review_error?);
+      # otherwise write the terminal `<phase>_failed` marker as before.
+      # A timeout (no limit text) stays terminal — only an actual limit
+      # earns the self-healing retry stamp. Returns whether the limit path
+      # was taken so the caller can label its commit.
+      def mark_review_phase_failure(task, phase:, terminal_reason:, pass:, error_message:)
+        if Hive::AgentLimit.limit_reached?(error_message.to_s)
+          Hive::Markers.set(task.state_file, :review_error,
+                            phase: phase, reason: "limits_reached", pass: pass,
+                            message: "#{phase} hit a usage/credit limit",
+                            retry_after: Hive::AgentLimit.retry_after)
+          true
+        else
+          Hive::Markers.set(task.state_file, :review_error,
+                            phase: phase, reason: terminal_reason, pass: pass)
+          false
+        end
       end
 
       # Pass to start at on a fresh hive run. Falls back to 1 when no

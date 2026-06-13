@@ -479,6 +479,80 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # A triage agent that dies on a provider usage/credit limit must self-heal
+  # like the reviewers phase already does — reason=limits_reached + a
+  # retry_after the daemon healer honors — not sit terminally on
+  # triage_failed. (Patrol PRs review with codex but still triage with
+  # claude, so a claude session-limit wall stranded three patrol tasks.)
+  def test_triage_usage_limit_self_heals_as_limits_reached_with_retry_after
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_lp!, :run!)
+        Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
+          Hive::Stages::Review::Triage::Result.new(
+            status: :error,
+            escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
+            error_message: "limits reached for claude: You've hit your session limit · resets 8pm (Europe/London)",
+            tampered_files: []
+          )
+        end
+        begin
+          capture_io do
+            assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
+          end
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "triage", marker.attrs["phase"]
+          assert_equal "limits_reached", marker.attrs["reason"],
+                       "a triage usage-limit failure must self-heal, not sit terminal on triage_failed"
+          refute_nil marker.attrs["retry_after"],
+                     "the limits_reached marker must carry the retry_after cooldown the healer reads"
+          assert Time.parse(marker.attrs["retry_after"]) > Time.now - 5,
+                 "retry_after must be a future cooldown stamp"
+        ensure
+          Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_lp!)
+          Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_lp!)
+        end
+      end
+    end
+  end
+
+  # A non-limit triage failure (e.g. a timeout) must stay terminal: only an
+  # actual usage/credit limit earns the self-healing retry stamp, so a real
+  # bug can't masquerade as a transient limit and loop forever.
+  def test_triage_non_limit_error_stays_terminal_triage_failed
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_np!, :run!)
+        Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
+          Hive::Stages::Review::Triage::Result.new(
+            status: :error,
+            escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
+            error_message: "triage agent failed (timeout)",
+            tampered_files: []
+          )
+        end
+        begin
+          capture_io do
+            assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
+          end
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "triage", marker.attrs["phase"]
+          assert_equal "triage_failed", marker.attrs["reason"],
+                       "a non-limit triage failure must stay terminal (no false self-heal)"
+          assert_nil marker.attrs["retry_after"],
+                     "a terminal triage_failed must not carry a retry_after"
+        ensure
+          Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_np!)
+          Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_np!)
+        end
+      end
+    end
+  end
+
   def test_review_fix_agent_dirty_worktree_is_auto_committed
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

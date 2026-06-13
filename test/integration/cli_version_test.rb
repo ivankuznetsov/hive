@@ -54,6 +54,32 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_json_usage_errors_cover_documented_required_arg_commands
+    [
+      [ %w[drop --json], "hive-drop", "invalid_task_path", {} ],
+      [ %w[findings --json], "hive-findings", "invalid_task_path", {} ],
+      [ %w[rebase-status --json], "hive-rebase-status", "invalid_task_path", {} ],
+      [ %w[plan --json], "hive-stage-action", "invalid_task_path", { "verb" => "plan" } ]
+    ].each do |argv, schema, error_kind, extras|
+      out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", *argv)
+
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus, "#{argv.join(' ')} should exit 64"
+      payload = JSON.parse(out)
+      assert_equal schema, payload["schema"]
+      if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch(schema), payload["schema_version"]
+      else
+        refute payload.key?("schema_version")
+      end
+      assert_equal false, payload["ok"]
+      assert_equal error_kind, payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      extras.each { |key, value| assert_equal value, payload[key] }
+      assert_match(/called with no arguments/, payload["message"])
+      assert_match(/^hive: /, err)
+    end
+  end
+
   private
 
   def without_generated_at(payload)

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-12
+updated: 2026-06-13
 tags: [dependencies, gems, runtime]
 ---
 
@@ -11,10 +11,12 @@ tags: [dependencies, gems, runtime]
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. Commit `c7d8aa4f` changed the local path gem entry in
-`Gemfile.lock` from `hive-cli (0.2.3)` to `hive-cli (0.2.4)` to match
-`Hive::VERSION`; it did not change third-party gem constraints or
-resolved third-party versions.
+tools. The current checkout is `0.3.0`: `lib/hive.rb`, root
+`Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
+`hive-cli (0.3.0)`. Recent release lockfile commits `c7d8aa4f`
+(`0.2.4`) and `8146d481` (`0.3.0`) changed only local path gem
+metadata; they did not change third-party gem constraints or resolved
+third-party versions.
 
 ## Runtime gems
 

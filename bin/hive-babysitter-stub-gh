@@ -33,7 +33,7 @@ end
 # nil value (a trailing `-F` with no argument) and an empty split result, which
 # would otherwise raise `NoMethodError` on `nil.start_with?`.
 def field_uses_file?(value)
-  value.to_s.split("=", 2).last.to_s.start_with?("@")
+  value.to_s.sub(/\A=/, "").split("=", 2).last.to_s.start_with?("@")
 end
 
 def api_read_only?(rest)

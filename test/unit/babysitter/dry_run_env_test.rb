@@ -65,6 +65,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # not just the space-separated `-F q=@secret` form: each branch
       # reimplements the @-prefix check, so they need independent coverage.
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-Fq=@secret"
+      assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F=q=@secret"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--field=q=@secret"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input=payload.json"
       # Glued/inline forms with scalar values stay read-only on explicit GET.
@@ -225,6 +226,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input payload.json skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues -F q=@secret skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues -Fq=@secret skipped"
+      assert_includes skipped, "gh api --method GET repos/owner/repo/issues -F=q=@secret skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues --field=q=@secret skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input=payload.json skipped"
       assert_includes skipped, "gh workflow run release.yml skipped"

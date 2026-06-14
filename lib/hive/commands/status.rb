@@ -186,8 +186,8 @@ module Hive
           "worktree_path" => row[:worktree_path],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
-          "mtime" => row[:mtime].utc.iso8601,
-          "folder_mtime" => row[:folder_mtime].utc.iso8601,
+          "mtime" => row[:mtime].utc.iso8601(6),
+          "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
@@ -419,55 +419,123 @@ module Hive
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
-          Dir[File.join(stage_dir, "*")].each do |entry|
+          stage_task_entries(stage_dir).each do |entry|
             next unless File.directory?(entry)
 
             slug = File.basename(entry)
             begin
-              task = Hive::Task.new(entry)
-            rescue Hive::InvalidTaskPath
+              begin
+                task = Hive::Task.new(entry)
+              rescue Hive::InvalidTaskPath
+                next
+              end
+              marker = Hive::Markers.current(task.state_file)
+              folder_mtime = File.mtime(entry)
+              mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
+              lock_holder = task_lock_holder(task)
+              live_holder = live_task_lock_holder(lock_holder)
+              icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
+              claude_pid = claude_pid_from_lock(lock_holder)
+              # Resolve once per row so JSON consumers (bot / daemon / agents)
+              # get the absolute worktree path without re-implementing the
+              # branch.yml lookup. Pre-execute stages legitimately return
+              # nil. See PR #84 review finding #8.
+              worktree_path =
+                begin
+                  task.worktree_path
+                rescue StandardError
+                  nil
+                end
+              rows << {
+                stage: stage,
+                slug: slug,
+                id: task.id,
+                display_name: task.display_name,
+                folder: entry,
+                state_file: task.state_file,
+                worktree_path: worktree_path,
+                task: task,
+                marker_name: marker.name,
+                marker_attrs: marker.attrs,
+                icon: icon,
+                state_label: state_label,
+                mtime: mtime,
+                folder_mtime: folder_mtime,
+                age: humanise_age(mtime),
+                claude_pid: claude_pid,
+                claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
+                live_task_lock: !live_holder.nil?
+              }
+            # A mid-scan stage-move (atomic rename of <stage>/<slug> out from
+            # under us) makes an in-folder read raise ENOENT even though the
+            # :423 File.directory? guard already passed. The rescue wraps the
+            # whole begin, so the ENOENT can surface from ANY in-folder read —
+            # File.mtime(entry) at :433, Markers.current's File.exist?->File.read
+            # (markers.rb:59-61), or the .lock read in task_lock_holder — all of
+            # which behave identically here. We swallow it and `next`: on a
+            # forward stage-move the task resurfaces under its new (higher-
+            # numbered) stage later in this same scan, and
+            # drop_transient_stage_moves prunes any stale duplicate. A backward
+            # move (higher stage -> already-scanned lower stage) instead just
+            # drops the row for one frame and it reappears on the next poll — no
+            # correctness impact, only a one-frame glitch (out of plan scope).
+            #
+            # The `raise if File.directory?(entry)` re-check preserves the
+            # corrupted-but-present -> Error path. If the folder still exists at
+            # rescue time, the ENOENT came from genuine in-folder corruption
+            # (e.g. a state file removed out of band), NOT a stage move, so we
+            # let it propagate (exit-70). The safety premise is folder-level, not
+            # write-level: the ONLY thing that makes `entry` (the folder) vanish
+            # is an atomic stage-move rename — in-place file writers never make
+            # the folder disappear, and they never leave the state file
+            # transiently *absent* inside a surviving folder either. Plain
+            # File.write callers (execute.rb, open_pr.rb, babysitter/pr_fixer.rb)
+            # open O_CREAT|O_TRUNC, truncating to zero *length*, never zero
+            # *existence*, so File.mtime still succeeds; atomic-rename writers
+            # (Markers.write_atomic) likewise always leave a file in place. Only
+            # a future change that unlinked or renamed a *folder* out of band
+            # would break that premise and reintroduce a process-killing crash on
+            # this poll-heavy surface. Pinned by
+            # test_collect_rows_reraises_enoent_when_folder_survives and
+            # test_collect_rows_reraises_enoent_from_state_file_mtime_when_folder_survives.
+            #
+            # Only Errno::ENOENT is rescued: local same-device .hive-state
+            # renames always yield ENOENT. Other vanish errnos (ENOTDIR from a
+            # path component flipping to a file, ESTALE from an NFS handle) are
+            # deliberately NOT caught and propagate as exit-70.
+            rescue Errno::ENOENT
+              raise if File.directory?(entry)
+
               next
             end
-            marker = Hive::Markers.current(task.state_file)
-            folder_mtime = File.mtime(entry)
-            mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
-            lock_holder = task_lock_holder(task)
-            live_holder = live_task_lock_holder(lock_holder)
-            icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
-            claude_pid = claude_pid_from_lock(lock_holder)
-            # Resolve once per row so JSON consumers (bot / daemon / agents)
-            # get the absolute worktree path without re-implementing the
-            # branch.yml lookup. Pre-execute stages legitimately return
-            # nil. See PR #84 review finding #8.
-            worktree_path =
-              begin
-                task.worktree_path
-              rescue StandardError
-                nil
-              end
-            rows << {
-              stage: stage,
-              slug: slug,
-              id: task.id,
-              display_name: task.display_name,
-              folder: entry,
-              state_file: task.state_file,
-              worktree_path: worktree_path,
-              task: task,
-              marker_name: marker.name,
-              marker_attrs: marker.attrs,
-              icon: icon,
-              state_label: state_label,
-              mtime: mtime,
-              folder_mtime: folder_mtime,
-              age: humanise_age(mtime),
-              claude_pid: claude_pid,
-              claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
-              live_task_lock: !live_holder.nil?
-            }
           end
         end
-        rows
+        drop_transient_stage_moves(rows)
+      end
+
+      # The production glob over a stage dir's task folders, extracted into its
+      # own method so the deterministic stage-move race tests can subclass and
+      # override it (test StatusRaceCommand) to inject a mid-scan rename/vanish.
+      # collect_rows (:422) is the sole caller.
+      def stage_task_entries(stage_dir)
+        Dir[File.join(stage_dir, "*")]
+      end
+
+      # Prune the stale half of a stage-move duplicate: when one slug shows up in
+      # two stages because a rename landed mid-scan, drop the row whose folder no
+      # longer exists. The predicate keys on slug + folder existence, NOT task
+      # identity (inode / meta.yml id): a <stage>/<slug> path torn down and
+      # recreated by a *different* task inside one scan window could momentarily
+      # keep a row whose id/display_name no longer match the folder. That is
+      # astronomically narrow under atomic renames and self-heals on the next
+      # poll, so the slug-path identity assumption is intentional.
+      def drop_transient_stage_moves(rows)
+        duplicated_slugs = rows.group_by { |row| row[:slug] }.select { |_slug, group| group.size > 1 }
+        return rows if duplicated_slugs.empty?
+
+        rows.reject do |row|
+          duplicated_slugs.key?(row[:slug]) && !File.directory?(row[:folder])
+        end
       end
 
       def decorate(task, marker, lock_holder: nil, live_task_lock: false)

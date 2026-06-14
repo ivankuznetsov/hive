@@ -279,7 +279,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def test_gh_stub_scrubs_exec_influencing_environment_before_passthrough
     with_tmp_dir do |dir|
-      env_keys = %w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY]
+      env_keys = %w[
+        GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
+        GH_CONFIG_DIR XDG_CONFIG_HOME
+      ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
@@ -292,13 +295,36 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GIT_EDITOR" => "touch editor-pwned",
         "VISUAL" => "touch editor-pwned",
         "EDITOR" => "touch editor-pwned",
-        "GH_FORCE_TTY" => "80"
+        "GH_FORCE_TTY" => "80",
+        "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
+        "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
 
       assert status.success?, err
       assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_gh_api_cache_flags_are_skipped_without_writing_cache
+    with_tmp_dir do |dir|
+      cache_dir = File.join(dir, "cache")
+      log_path = File.join(dir, "skipped.log")
+      real_gh = cache_writing_gh_binary(dir, "real-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path,
+        "XDG_CACHE_HOME" => cache_dir
+      }
+
+      assert_stubbed env, "gh", "api", "--method", "GET", "--cache", "1h", "rate_limit"
+      assert_stubbed env, "gh", "api", "--method=GET", "--cache=1h", "rate_limit"
+
+      refute_path_exists File.join(cache_dir, "gh")
+      skipped = File.read(log_path)
+      assert_includes skipped, "gh api --method GET --cache 1h rate_limit skipped"
+      assert_includes skipped, "gh api --method=GET --cache=1h rate_limit skipped"
     end
   end
 
@@ -447,6 +473,21 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_remote_show_without_no_query_flag
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "remote-show-ran")
+      helper = executable_touch_binary(dir, "remote-helper", pwn_path)
+      run!("git", "-C", dir, "config", "protocol.ext.allow", "always")
+      run!("git", "-C", dir, "config", "remote.origin.url", "ext::#{helper}")
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "remote", "show", "origin")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] git -C #{dir} remote show origin skipped"
+      refute_path_exists pwn_path
+    end
+  end
+
   private
 
   def assert_stubbed(env, binary, *args)
@@ -507,6 +548,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def cache_writing_gh_binary(dir, name)
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      require "fileutils"
+      cache_path = File.join(ENV.fetch("XDG_CACHE_HOME"), "gh")
+      FileUtils.mkdir_p(cache_path)
+      File.write(File.join(cache_path, "api-cache"), ARGV.join(" "))
     RUBY
     FileUtils.chmod("+x", path)
     path

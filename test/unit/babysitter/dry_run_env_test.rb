@@ -56,7 +56,20 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "repo", "view", "--web"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
       assert_stubbed env, "gh", "run", "view", "123", "-w"
+      assert_stubbed env, "gh", "auth", "status", "--show-token"
+      assert_stubbed env, "gh", "auth", "status", "-t"
+      # gh (pflag) clusters boolean shorthands, so `-t` smuggled into a cluster
+      # with `-a`/`--active` still reveals the token and must be skipped.
+      assert_stubbed env, "gh", "auth", "status", "-at"
+      assert_stubbed env, "gh", "auth", "status", "-ta"
+      assert_stubbed env, "gh", "auth", "status", "-ath"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
+      assert_passes env, "gh", "auth", "status"
+      assert_passes env, "gh", "auth", "status", "-a"
+      # `-h`/`--hostname` consumes the rest of the cluster as its value, so a
+      # `t` that follows it is hostname data, not a token flag.
+      assert_passes env, "gh", "auth", "status", "-h", "github.com"
+      assert_passes env, "gh", "auth", "status", "-hgithub.com"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
@@ -78,6 +91,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
       assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
       assert_stubbed env, "git", "merge", "feature"
+      assert_stubbed env, "git", "branch", "--contains", "HEAD", "-D", "feature"
+      assert_stubbed env, "git", "branch", "-D", "feature", "--contains", "HEAD"
+      assert_stubbed env, "git", "branch", "--show-current", "-m", "old", "new"
+      assert_stubbed env, "git", "branch", "--contains=HEAD", "--set-upstream-to", "origin/main", "feature"
       assert_stubbed env, "git", "config", "user.name", "newvalue", "--get"
       assert_stubbed env, "git", "config", "user.email", "newvalue", "--get-all"
       assert_stubbed env, "git", "config", "commit.gpgsign", "false", "--list"
@@ -174,6 +191,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "git", "config", "--path", "--get", "core.excludesfile"
       assert_passes env, "git", "config", "-z", "--get-all", "remote.origin.fetch"
       assert_passes env, "git", "config", "--type=bool", "--get", "commit.gpgsign"
+      assert_passes env, "git", "branch"
+      assert_passes env, "git", "branch", "--show-current"
+      assert_passes env, "git", "branch", "--contains"
+      assert_passes env, "git", "branch", "--contains", "HEAD"
+      assert_passes env, "git", "branch", "--contains=HEAD"
       assert_passes env, "git", "remote"
       assert_passes env, "git", "remote", "-v"
       assert_passes env, "git", "remote", "show", "-n", "origin"
@@ -233,9 +255,18 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh repo view --web skipped"
       assert_includes skipped, "gh pr view 42 --web skipped"
       assert_includes skipped, "gh run view 123 -w skipped"
+      assert_includes skipped, "gh auth status --show-token skipped"
+      assert_includes skipped, "gh auth status -t skipped"
+      assert_includes skipped, "gh auth status -at skipped"
+      assert_includes skipped, "gh auth status -ta skipped"
+      assert_includes skipped, "gh auth status -ath skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
+      assert_includes skipped, "git branch --contains HEAD -D feature skipped"
+      assert_includes skipped, "git branch -D feature --contains HEAD skipped"
+      assert_includes skipped, "git branch --show-current -m old new skipped"
+      assert_includes skipped, "git branch --contains=HEAD --set-upstream-to origin/main feature skipped"
       assert_includes skipped, "git config user.name newvalue --get skipped"
       assert_includes skipped, "git config user.email newvalue --get-all skipped"
       assert_includes skipped, "git config commit.gpgsign false --list skipped"
@@ -250,6 +281,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
+      assert_includes real_invocations, "real-gh auth status"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
@@ -262,6 +294,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, expected_real_invocation("git", "config", "--path", "--get", "core.excludesfile")
       assert_includes real_invocations, expected_real_invocation("git", "config", "-z", "--get-all", "remote.origin.fetch")
       assert_includes real_invocations, expected_real_invocation("git", "config", "--type=bool", "--get", "commit.gpgsign")
+      assert_includes real_invocations, expected_real_invocation("git", "branch")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--show-current")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--contains")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--contains", "HEAD")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--contains=HEAD")
       assert_includes real_invocations, expected_real_invocation("git", "remote")
       assert_includes real_invocations, expected_real_invocation("git", "remote", "-v")
       assert_includes real_invocations, expected_real_invocation("git", "remote", "show", "-n", "origin")
@@ -281,7 +318,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def test_gh_stub_scrubs_exec_influencing_environment_before_passthrough
     with_tmp_dir do |dir|
-      env_keys = %w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY]
+      env_keys = %w[
+        GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
+        GH_CONFIG_DIR XDG_CONFIG_HOME
+      ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
@@ -294,13 +334,36 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GIT_EDITOR" => "touch editor-pwned",
         "VISUAL" => "touch editor-pwned",
         "EDITOR" => "touch editor-pwned",
-        "GH_FORCE_TTY" => "80"
+        "GH_FORCE_TTY" => "80",
+        "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
+        "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
 
       assert status.success?, err
       assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_gh_api_cache_flags_are_skipped_without_writing_cache
+    with_tmp_dir do |dir|
+      cache_dir = File.join(dir, "cache")
+      log_path = File.join(dir, "skipped.log")
+      real_gh = cache_writing_gh_binary(dir, "real-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path,
+        "XDG_CACHE_HOME" => cache_dir
+      }
+
+      assert_stubbed env, "gh", "api", "--method", "GET", "--cache", "1h", "rate_limit"
+      assert_stubbed env, "gh", "api", "--method=GET", "--cache=1h", "rate_limit"
+
+      refute_path_exists File.join(cache_dir, "gh")
+      skipped = File.read(log_path)
+      assert_includes skipped, "gh api --method GET --cache 1h rate_limit skipped"
+      assert_includes skipped, "gh api --method=GET --cache=1h rate_limit skipped"
     end
   end
 
@@ -320,6 +383,39 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "-w"
 
       refute File.exist?(File.join(dir, "real.log"))
+    end
+  end
+
+  def test_gh_api_cache_option_is_skipped_to_avoid_local_cache_writes
+    with_tmp_dir do |dir|
+      cache_home = File.join(dir, "cache")
+      real_gh = cache_writing_gh_binary(dir, "real-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "XDG_CACHE_HOME" => cache_home
+      }
+
+      [
+        [ "--cache", "1h" ],
+        [ "--cache=1h" ]
+      ].each do |cache_args|
+        FileUtils.rm_rf(cache_home)
+
+        _out, err, status = Open3.capture3(
+          env,
+          stub_path("gh"),
+          "api",
+          "--method",
+          "GET",
+          *cache_args,
+          "rate_limit"
+        )
+
+        assert status.success?, err
+        refute_path_exists File.join(cache_home, "gh")
+        assert_includes err, "[dry-run] gh api --method GET #{cache_args.join(' ')} rate_limit skipped"
+      end
     end
   end
 
@@ -449,6 +545,21 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_remote_show_without_no_query_flag
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "remote-show-ran")
+      helper = executable_touch_binary(dir, "remote-helper", pwn_path)
+      run!("git", "-C", dir, "config", "protocol.ext.allow", "always")
+      run!("git", "-C", dir, "config", "remote.origin.url", "ext::#{helper}")
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "remote", "show", "origin")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] git -C #{dir} remote show origin skipped"
+      refute_path_exists pwn_path
+    end
+  end
+
   private
 
   def assert_stubbed(env, binary, *args)
@@ -509,6 +620,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def cache_writing_gh_binary(dir, name)
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      require "fileutils"
+      cache_path = File.join(ENV.fetch("XDG_CACHE_HOME"), "gh")
+      FileUtils.mkdir_p(cache_path)
+      File.write(File.join(cache_path, "api-cache"), ARGV.join(" "))
     RUBY
     FileUtils.chmod("+x", path)
     path

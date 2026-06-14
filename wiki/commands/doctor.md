@@ -87,7 +87,7 @@ Rescue scope is `StandardError` (with a `Errno::EPIPE` micro-rescue around `warn
 ## Tests
 
 - `test/unit/commands/doctor_test.rb` — stage rows, reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, QMD managed-binary and broken-binary rows, JSON envelope shape, long-label width, `attr_reader :rows` exposure.
-- `test/unit/skill_check_test.rb` — per-agent verifier paths (including pi recursive walks, settings entries, manifest entries, global `npm root -g` success/blank handling, and glob-metacharacter rejection).
+- `test/unit/skill_check_test.rb` — per-agent verifier paths (including pi recursive walks, settings entries, manifest entries, global npm-root success/timeout handling, and glob-metacharacter rejection).
 - `test/integration/init_doctor_preflight_test.rb` — all-green silence, single-missing stderr warning, multi-missing including a reviewer row, init exit-code unchanged, preflight crash → bug-hint warning, config-load error → bug-hint warning.
 
 ## Backlinks

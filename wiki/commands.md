@@ -55,7 +55,9 @@ uses for boolean options. Leading `--json`, `--json=true`/`TRUE`/`t`/`T`, and
 false forms such as `--no-json`, `--skip-json`, or `--json=false` move behind
 the command before dispatch; unsupported assignments such as `--json=1` or
 `--json=yes` fail as usage errors before the assigned value can become a
-command argument or task target.
+command argument or task target. Wrapper-owned usage errors use the last
+recognized JSON boolean flag, so `--json --no-json` and
+`--json --json=false` choose human prose instead of an error envelope.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
@@ -134,7 +136,9 @@ JSON boolean grammar, so `bin/hive-e2e run --filter tui --help` prints the
 `run` usage instead of selecting scenarios or running preflight checks, while
 `bin/hive-e2e --json=true list` dispatches to `list` and unsupported
 `--json=<value>` assignments fail before the default `run` pattern can consume
-the value. Its successful `--json` surfaces are single-document stdout
+the value. Its wrapper-owned usage/preflight/error envelopes also follow the
+last recognized JSON boolean flag, matching the main CLI wrapper. Successful
+`--json` surfaces are single-document stdout
 contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 `hive-e2e-clean`.
 

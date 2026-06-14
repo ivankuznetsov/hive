@@ -14,7 +14,7 @@ class HiveEvalReporterTest < Minitest::Test
       )
 
       assert_equal 64, status.exitstatus
-      assert_match(/unexpected argument: s1_status/, err)
+      assert_match(/unexpected argument\(s\): s1_status/, err)
       refute File.exist?(report), "unexpected positional args must exit before running eval scenarios"
     end
   end
@@ -225,7 +225,7 @@ class HiveEvalReporterTest < Minitest::Test
 
       refute status.success?
       assert_equal 64, status.exitstatus
-      assert_match(/hive-eval: unexpected argument: extra/, err)
+      assert_match(/hive-eval: unexpected argument\(s\): extra/, err)
       refute File.exist?(report)
     end
   end

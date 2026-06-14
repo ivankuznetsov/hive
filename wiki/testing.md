@@ -1,7 +1,7 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
+source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
 updated: 2026-06-14
 tags: [test, minitest, fixtures]
@@ -189,9 +189,9 @@ bundle exec rake test:eval
 bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 ```
 
-`test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
+`test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, child-supervisor and dispatch-request captures, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior. Queue-routable bot verbs are captured through the fake `DispatchRequestWriter`, and `Harness#dispatched_commands` lets scenarios assert command intent across both queued and child-spawned dispatch paths.
 
-`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
+`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. `--scenario` accepts a scenario basename only: positional scenario names are usage errors, path separators are rejected before lookup, an optional trailing `_test` is stripped, and the remaining basename must match `[A-Za-z0-9_-]+` before being joined under `test/eval/scenarios/` or `HIVE_EVAL_SCENARIO_ROOT`. Invalid selectors exit 64 before the report file is written. Scenario `s3_noise` now pins the daemon-enabled signal-not-noise contract: ready/finished rows should not become proactive Telegram alerts when the daemon owns those transitions, while repeated waiting questions still satisfy the typed-message and dedupe rules.
 
 ## Lint
 

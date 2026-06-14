@@ -486,6 +486,20 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_global_npm_root_returns_first_line_on_success
+    status = Object.new
+    status.define_singleton_method(:success?) { true }
+    calls = []
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*argv|
+      calls << argv
+      [ "/tmp/pi-global\nignored\n", "", status ]
+    }) do
+      assert_equal "/tmp/pi-global", Hive::SkillCheck::Pi.global_npm_root
+    end
+    assert_equal [ [ "npm", "root", "-g" ] ], calls
+  end
+
   def test_manifest_skill_candidates_expands_jailed_globs
     with_tmp_dir do |package_root|
       write_file("#{package_root}/package.json", '{"pi":{"skills":["custom-*"]}}')

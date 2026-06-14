@@ -59,6 +59,8 @@ def api_read_only?(rest)
     when "-f", "--raw-field"
       payload = true
       index += 2
+    when "--cache", /\A--cache=/
+      return false
     when "-F", "--field"
       payload = true
       unsafe_payload ||= field_uses_file?(rest[index + 1])

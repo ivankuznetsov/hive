@@ -384,6 +384,39 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_api_cache_option_is_skipped_to_avoid_local_cache_writes
+    with_tmp_dir do |dir|
+      cache_home = File.join(dir, "cache")
+      real_gh = cache_writing_gh_binary(dir, "real-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "XDG_CACHE_HOME" => cache_home
+      }
+
+      [
+        [ "--cache", "1h" ],
+        [ "--cache=1h" ]
+      ].each do |cache_args|
+        FileUtils.rm_rf(cache_home)
+
+        _out, err, status = Open3.capture3(
+          env,
+          stub_path("gh"),
+          "api",
+          "--method",
+          "GET",
+          *cache_args,
+          "rate_limit"
+        )
+
+        assert status.success?, err
+        refute_path_exists File.join(cache_home, "gh")
+        assert_includes err, "[dry-run] gh api --method GET #{cache_args.join(' ')} rate_limit skipped"
+      end
+    end
+  end
+
   def test_git_stub_scrubs_trace_env_before_read_only_passthrough
     with_tmp_git_repo do |dir|
       trace_path = File.join(dir, "trace.log")

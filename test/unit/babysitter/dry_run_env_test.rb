@@ -468,6 +468,21 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_remote_show_without_no_query_flag
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "remote-show-ran")
+      helper = executable_touch_binary(dir, "remote-helper", pwn_path)
+      run!("git", "-C", dir, "config", "protocol.ext.allow", "always")
+      run!("git", "-C", dir, "config", "remote.origin.url", "ext::#{helper}")
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "remote", "show", "origin")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] git -C #{dir} remote show origin skipped"
+      refute_path_exists pwn_path
+    end
+  end
+
   private
 
   def assert_stubbed(env, binary, *args)

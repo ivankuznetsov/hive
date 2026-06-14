@@ -179,8 +179,10 @@ def read_only_remote?(rest)
   case args.first
   when "show"
     args.shift
-    args.shift if args.first == "-n"
-    args.all? { |arg| !arg.start_with?("-") }
+    return false unless args.first == "-n"
+
+    args.shift
+    !args.empty? && args.all? { |arg| !arg.start_with?("-") }
   when "get-url"
     args.shift
     args.shift while [ "--push", "--all" ].include?(args.first)

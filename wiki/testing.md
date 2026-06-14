@@ -97,7 +97,7 @@ task default: :test
 | File | Covers |
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
-| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit. |
+| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |

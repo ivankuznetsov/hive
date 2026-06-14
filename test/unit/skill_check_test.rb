@@ -486,6 +486,14 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_global_npm_root_returns_nil_for_blank_successful_output
+    status = Struct.new(:success?).new(true)
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "\n", "", status ] }) do
+      assert_nil Hive::SkillCheck::Pi.global_npm_root
+    end
+  end
+
   def test_manifest_skill_candidates_expands_jailed_globs
     with_tmp_dir do |package_root|
       write_file("#{package_root}/package.json", '{"pi":{"skills":["custom-*"]}}')

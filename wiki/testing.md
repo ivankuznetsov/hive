@@ -140,11 +140,17 @@ boots a fresh container on a random host port, polls `/health`, asserts the
 ownerless `/login` page is claimable, and verifies unauthenticated `/` is
 owner-gated with a 302. The image's runtime Docker `HEALTHCHECK` is deeper
 than that smoke and hits `/health?deep=1`, so a stale/missing daemon pidfile
-turns the container unhealthy even when Rails is still serving. `.github/workflows/ci.yml` builds a local image and
-runs that smoke on Linux for every push/PR; `.github/workflows/release.yml`
-runs the same smoke against the amd64 image before any GHCR push, then pulls
-the published arm64 image on `macos-15` under Colima and smokes it again. The
-Windows CI surface is `packaging/docker/test-install-box.ps1`: real PowerShell
+turns the container unhealthy even when Rails is still serving.
+`.github/workflows/release.yml` runs that smoke against the amd64 image before
+any GHCR push, then is intended to pull the published arm64 image on `macos-15`
+under Colima and smoke it again. Current `.github/workflows/ci.yml` does not
+build or smoke a local hivebox Docker image on push/PR; it covers the Rails web
+tests, the golden-path browser E2E, and the Windows installer-script harness.
+Commit `abb62aae` records a current hosted-runner failure before the macOS
+Docker smoke starts: `colima start --cpu 2 --memory 4` can die when Lima's VZ VM
+exits, so the macOS leg remains a verification gap until a qemu fallback/retry
+or passing run artifact exists. The Windows CI surface is
+`packaging/docker/test-install-box.ps1`: real PowerShell
 syntax, `$LASTEXITCODE` behavior, and failure-output capture with a stubbed
 Docker CLI for missing-Docker diagnostics, happy-path pull/run argv including
 the default `127.0.0.1:4567:4567` bind, and existing-container refusal. The

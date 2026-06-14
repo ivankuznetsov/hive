@@ -71,6 +71,7 @@ module Hive
         dispatch_request_expired
         dispatch_request_recovered
         dispatch_result_written
+        digest_catchup_skipped
         fatal
       ].freeze
 

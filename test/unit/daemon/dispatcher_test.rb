@@ -46,9 +46,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
+    attr_accessor :next_exits
     def initialize
       @spawned = []
       @next_pid = 100
+      @next_exits = []
     end
 
     def spawn(command_string:, project:, slug:, stage:,
@@ -65,7 +67,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def reap_all(now: Time.now)
-      []
+      out = @next_exits
+      @next_exits = []
+      out
     end
 
     def reap_dry_run(now: Time.now)
@@ -142,12 +146,33 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakeDigestScheduler
+    attr_accessor :next_dispatches
+    attr_reader :completed
+
+    def initialize
+      @next_dispatches = []
+      @completed = []
+    end
+
+    def tick(now:)
+      out = @next_dispatches
+      @next_dispatches = []
+      out
+    end
+
+    def complete(date:, exit_code:, now:)
+      @completed << { date: date, exit_code: exit_code, now: now }
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
                       with_patrol_scheduler: false, project_enabled: true,
                       dispatch_state: nil, status_result: nil,
-                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
+                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
+                      with_digest_scheduler: false)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -177,6 +202,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
     patrol_scheduler = with_patrol_scheduler ? FakePatrolScheduler.new : nil
+    digest_scheduler = with_digest_scheduler ? FakeDigestScheduler.new : nil
 
     dispatcher = Hive::Daemon::Dispatcher.new(
       config: config,
@@ -186,6 +212,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       logger: logger,
       merge_watcher: merge_watcher,
       patrol_scheduler: patrol_scheduler,
+      digest_scheduler: digest_scheduler,
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home
@@ -193,7 +220,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
-    [ dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler ]
+    [ dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler, digest_scheduler ]
   end
 
   class StubLogger
@@ -233,6 +260,56 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
+  end
+
+  def test_digest_scheduler_dispatches_global_digest_without_project_gate
+    dispatcher, sup, _ctrl, logger, _mw, _patrol, digest = make_dispatcher(
+      rows: [],
+      project_enabled: false,
+      with_digest_scheduler: true
+    )
+    digest.next_dispatches = [
+      {
+        project: "digest",
+        slug: "2026-06-13",
+        stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_mtime: nil,
+        state_file_path: nil,
+        hive_state_path: nil
+      }
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size
+    assert_equal "hive digest --date 2026-06-13 --json", sup.spawned.first[:command]
+    assert_equal "digest", sup.spawned.first[:stage]
+    event = logger.events.find { |name, _attrs| name == :dispatched }
+    assert_equal "digest", event.last.fetch(:trigger)
+  end
+
+  def test_digest_scheduler_completes_on_digest_child_exit
+    dispatcher, sup, = make_dispatcher(rows: [], with_digest_scheduler: true)
+    digest = dispatcher.instance_variable_get(:@digest_scheduler)
+    sup.next_exits = [
+      ChildExit.new(
+        pid: 123,
+        exit_code: 0,
+        project: "digest",
+        slug: "2026-06-13",
+        stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_path: nil,
+        started_at: T0 - 5,
+        finished_at: T0,
+        json_envelope: nil
+      )
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed
   end
 
   def test_dispatches_later_pipeline_stages_first

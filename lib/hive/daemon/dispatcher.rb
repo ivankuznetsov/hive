@@ -15,6 +15,7 @@ require "hive/daemon/display_name_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
+require "hive/daemon/digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/pr_merge_watcher"
 require "hive/lock"
@@ -53,7 +54,7 @@ module Hive
       # @param patrol_scheduler [PatrolScheduler, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
-                     merge_watcher: nil, patrol_scheduler: nil, dry_run: false,
+                     merge_watcher: nil, patrol_scheduler: nil, digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
         @config = config
@@ -63,6 +64,7 @@ module Hive
         @logger = logger
         @merge_watcher = merge_watcher
         @patrol_scheduler = patrol_scheduler
+        @digest_scheduler = digest_scheduler
         @dry_run = dry_run
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -193,6 +195,13 @@ module Hive
 
         # 1d. Bound the dispatch-result notice dir (ADV-1 #6).
         prune_dispatch_results(now: now)
+
+        # 1e. Global daily shipped digest. This is not project-scoped and
+        # does not depend on the status snapshot, so it runs before status
+        # fetch and bypasses per-project daemon gates.
+        @digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
+          dispatch_digest(digest_dispatch, now: now)
+        end
 
         # 2. Fetch status
         result = @status_consumer.fetch
@@ -554,6 +563,9 @@ module Hive
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
             @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
+          end
+          if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
+            @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
           end
         end
         entries.any?
@@ -1013,6 +1025,25 @@ module Hive
         @patrol_scheduler&.complete(project: project, exit_code: 1, now: now)
         @logger.event(:fatal, message: "patrol dispatch error: #{e.class}: #{e.message}",
                               project: project, slug: slug)
+      end
+
+      def dispatch_digest(digest_dispatch, now:)
+        date = digest_dispatch[:slug]
+        dispatch_command(
+          digest_dispatch[:command],
+          project: digest_dispatch[:project],
+          slug: date,
+          stage: digest_dispatch[:stage],
+          state_file_mtime: digest_dispatch[:state_file_mtime],
+          state_file_path: digest_dispatch[:state_file_path],
+          hive_state_path: digest_dispatch[:hive_state_path],
+          now: now,
+          trigger: "digest"
+        )
+      rescue StandardError => e
+        @digest_scheduler&.complete(date: date, exit_code: 1, now: now) if date
+        @logger.event(:fatal, message: "digest dispatch error: #{e.class}: #{e.message}",
+                              project: digest_dispatch[:project], slug: date)
       end
 
       # Consume the file-backed dispatch-request queue (plan

@@ -87,8 +87,19 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
 
     assert_equal [ :run_forever ], dispatcher.calls
-    assert_equal({ "daemon" => config, "update" => update_config }, captured.fetch(:config))
+    assert_equal(
+      {
+        "daemon" => config,
+        "update" => update_config,
+        "digest" => {
+          "enabled" => false,
+          "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+        }
+      },
+      captured.fetch(:config)
+    )
     assert_equal true, captured.fetch(:dry_run)
+    assert_instance_of Hive::Daemon::DigestScheduler, captured.fetch(:digest_scheduler)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 

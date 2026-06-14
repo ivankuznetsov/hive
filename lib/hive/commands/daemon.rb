@@ -13,6 +13,7 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/patrol_scheduler"
+require "hive/daemon/digest_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
 require "hive/invoked_binary"
@@ -146,7 +147,8 @@ module Hive
         # etc.) actually take effect. PR-40 review P1 #2: this used to
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
-        config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update }
+        digest_cfg = load_digest_config
+        config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update, "digest" => digest_cfg }
 
         # Build the logger BEFORE the controller so both the controller and
         # the persisted-baselines store get wired to it. Otherwise a torn
@@ -183,11 +185,20 @@ module Hive
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
+        digest_scheduler = Hive::Daemon::DigestScheduler.new(
+          enabled: digest_cfg.fetch("enabled", false),
+          max_catchup_days: digest_cfg.fetch(
+            "max_catchup_days",
+            Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+          ),
+          logger: logger
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
-          merge_watcher: merge_watcher, patrol_scheduler: patrol_scheduler, dry_run: @dry_run,
+          merge_watcher: merge_watcher, patrol_scheduler: patrol_scheduler,
+          digest_scheduler: digest_scheduler, dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new
         )
 
@@ -231,6 +242,17 @@ module Hive
         reexec_argv = [ "daemon", "start" ]
         reexec_argv << "--dry-run" if @dry_run
         Kernel.method(:exec).call(Process.argv0, *reexec_argv)
+      end
+
+      def load_digest_config
+        if Hive::Config.respond_to?(:load_global_digest)
+          Hive::Config.load_global_digest
+        else
+          {
+            "enabled" => false,
+            "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+          }
+        end
       end
 
       def stop_daemon

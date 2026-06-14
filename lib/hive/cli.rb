@@ -490,6 +490,27 @@ module Hive
       ).call
     end
 
+    desc "digest", "Generate and send the daily shipped digest"
+    long_desc <<~DESC
+      Collects tasks that shipped on the requested local calendar date
+      across all registered projects, asks the configured digest agent to
+      write friendly changelog lines, and sends one Telegram MarkdownV2
+      message to the configured digest chat.
+
+      Without --date, uses the local calendar day that just ended. Use
+      --dry-run to print the composed message instead of sending Telegram.
+    DESC
+    option :date, type: :string, desc: "local calendar date to digest (YYYY-MM-DD)"
+    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
+    def digest
+      require "hive/commands/digest"
+      Hive::Commands::Digest.new(
+        date: options[:date],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered

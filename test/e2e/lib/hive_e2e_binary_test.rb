@@ -305,6 +305,19 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_usage_error_respects_last_json_boolean_flag
+    [
+      %w[--json --no-json],
+      %w[--json --json=false]
+    ].each do |flags|
+      out, err, status = Open3.capture3(hive_e2e, "no-such", *flags)
+
+      assert_equal 64, status.exitstatus, "#{flags.join(" ")}: usage error must exit 64"
+      assert_empty out, "#{flags.join(" ")}: final false JSON flag must force prose output"
+      assert_match(/hive-e2e:/, err)
+    end
+  end
+
   def test_missing_required_args_with_json_true_emits_envelope_on_stdout
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json=true")
     refute_equal 0, status.exitstatus

@@ -125,9 +125,28 @@ jobs:
             echo "verify-release skipped: ${HIVE_VERSION} is not published yet" >&2
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Install jq (for envelope assertions)
+      - name: Ensure jq is available
         if: ${{ steps.release.outputs.exists == 'true' }}
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+        run: |
+          if command -v jq >/dev/null 2>&1; then
+            jq --version
+            exit 0
+          fi
+
+          if ! sudo apt-get update -qq; then
+            echo "apt-get update failed; disabling packages.microsoft.com sources and retrying" >&2
+            mapfile -t microsoft_sources < <(
+              grep -rl 'packages.microsoft.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
+            )
+            for source in "${microsoft_sources[@]}"; do
+              echo "disabling $source" >&2
+              sudo mv "$source" "$source.disabled"
+            done
+            sudo apt-get update -qq
+          fi
+
+          sudo apt-get install -y -qq jq
+          jq --version
       - name: Run verify-release.sh
         if: ${{ steps.release.outputs.exists == 'true' }}
         env:

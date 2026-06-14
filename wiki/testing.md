@@ -1,13 +1,13 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
+source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
 updated: 2026-06-14
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, and bundler-audit on top.
+**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e, eval, install-smoke, release-verify, and hivebox image smoke layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, bundler-audit, installer checks, and Docker smoke tests on top.
 
 ## Run all
 
@@ -66,6 +66,7 @@ task default: :test
 | `gh_test.rb` | `Hive::Gh` — PR frontmatter parsing, secret-scan fetch-failure semantics, open/merged PR lookup, `pr_state` success/error parsing, `PushResult`, subprocess timeout/termination, `mergeStateStatus` request shape for open PR listing, and failing-job log clipping. |
 | `agent_limit_test.rb` | `Hive::AgentLimit` — provider-limit classifier for Claude usage-credit menus and common quota/rate-limit API errors, with false-positive guards for source line numbers and ordinary "missing rate limit" findings. |
 | `agent_test.rb` | `Hive::Agent` — spawn/wait/timeout/SIGINT forwarding, version check, configured Claude model/effort `cli_flags` reaching the headless argv, and provider-limit classification before generic exit-code / expected-output failures. |
+| `skill_check_test.rb` | `Hive::SkillCheck` — Claude/Codex/Pi skill invocation parsing and discovery, plugin fallback paths, Pi package/settings/git discovery, malformed invocation hints, and deterministic `npm root -g` success/timeout coverage for the global npm root probe. |
 | `wiki_log_test.rb` | `Hive::WikiLog` — fragment sorting, generated-block idempotency, stale detection for compiled `wiki/log.md`, and dropping template prose that is not a real legacy `##` entry. |
 | `schema_files_test.rb` | Published JSON schema contracts — current-version schema files exist for every `Hive::Schemas::SCHEMA_VERSIONS` entry, back-compat schema files remain for pinned consumers, producer required-key drift is pinned, `hive-dispatch-request` claimed files remain schema-valid, and every schema filename/version matches its `$id` basename or URN suffix plus `title` version text. |
 | `cli_test.rb` | `Hive::CLI` — command delegation and option threading for the Thor surface, including `hive generate-name` lookup scoping and internal archive recovery flags. |
@@ -75,10 +76,12 @@ task default: :test
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
 | `tmux_runner_test.rb` | `Hive::TmuxRunner` — detached session startup, environment propagation, prompt injection via tmux buffers, typed tmux failure/timeout classes, bounded pane-tail capture, PID lookup, idempotent teardown, and a lightweight fake-tmux timeout harness so setup commands cannot consume the timeout budget before the intentionally hanging `send-keys` call. |
 | `daemon/pr_merge_watcher_test.rb`, `daemon/dispatcher_test.rb` | Finalize merge watcher routing — `MERGED` PR polling returns archive dispatches, carries the internal `--recover-merged-error-reason` flag for whitelisted finalize errors, ignores unknown error reasons, and the dispatcher hands `8-finalize ERROR reason=git_status_failed` rows to the watcher instead of skipping them as generic errors. |
+| `daemon/status_consumer_test.rb` | `Hive::Daemon::StatusConsumer` — `hive status --json` envelope parsing, schema-version skew handling, strict `live_task_lock` coercion, legacy project filtering, and local `state_file` mtime re-stat so daemon edit-resume decisions keep subsecond precision even though public JSON timestamps are whole-second ISO8601. |
 | `daemon/stale_agent_healer_test.rb` | `Hive::Daemon::StaleAgentHealer` — stale `AGENT_WORKING` healing, wedged `REVIEW_WORKING` lock cleanup, and bounded daemon auto-recovery for `review_agent_died`, reviewer partial failures caused only by Claude/tmux expected-output session death, `8-finalize` `ERROR reason=unpushed_commits`, elapsed `limits_reached` cooldown markers, and non-review terminal agent-loss errors (`2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, `8-finalize` `ERROR reason=tmux_session_terminated` or `reason=agent_orphaned`). Terminal-error coverage pins marker-id guarded clears, live-lock skips, manual repository-state skips, shared budgets across fresh marker ids, per-task budget isolation, pre-clear dispatch-baseline seeding, the `3-plan` `hive plan ... --from 3-plan` dispatch-request requeue / `heal_requeued` trace for both agent-loss and `limits_reached` clears, the distinct `heal_requeue_failed` event when enqueueing fails after a successful clear, and one-shot `marker_heal_exhausted` logging. |
 | `hv_test.rb` | `bin/hv` — refuses unsafe Apache Hive fallback paths (`/usr/bin/hive`, `/opt/hive/bin/hive`) and verifies `HIVE_BIN_OVERRIDE` can point at a custom Hive CLI install path. |
 | `gemspec_test.rb`, `install_script_test.rb` | RubyGem/install packaging — `hv` stays out of `spec.executables` so RubyGems does not create a broken Ruby binstub for the bash launcher; the bash installer writes its own `hv` wrapper and does not expect a gem-installed `hv` shim. |
-| `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, `gh api` implicit-POST payload flag blocking, git executable/write-option skips, env config/command seam skips, hermetic HOME/XDG/local git config passthrough guards, `--textconv` abbreviation and `cat-file --filters` skips, subcommand `-p` passthrough, `grep`/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, and pathspec separator handling. |
+| `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, `gh api` implicit-POST payload flag blocking, plain/non-token `gh auth status` passthrough with `--show-token`, bare `-t`, and clustered `-at` / `-ta` / `-ath` skips, git executable/write-option skips, `remote show` without `-n` skipping before repo-configured transport helpers can run, env config/command seam skips, hermetic HOME/XDG/local git config passthrough guards, `--textconv` abbreviation and `cat-file --filters` skips, subcommand `-p` passthrough, `grep`/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, and pathspec separator handling. |
+| `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv` plus `bin/hive-babysitter-stub-git` / `bin/hive-babysitter-stub-gh` — PATH overlay, recording fake binaries, default-deny skips, read-only passthrough, `gh api` implicit-POST payload flag blocking, git executable/write-option skips, exact read-only `git branch` forms and mixed branch mutation skips, env config/command seam skips, hermetic HOME/XDG/local git config passthrough guards, `--textconv` abbreviation and `cat-file --filters` skips, subcommand `-p` passthrough, `grep`/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, and pathspec separator handling. |
 | `bot/router_test.rb`, `bot/slash_handlers_test.rb`, `bot/supervisor_test.rb` | Telegram bot slash/menu surface — router classification for supported slash commands including first-contact `/start`, `SlashHandlers#start` welcome copy with concrete next steps, and the `setMyCommands` quick-actions list (`/idea`, `/status`, `/queue`, `/answer`, `/approve`, `/autofix`, `/details`, `/done`, `/help`). |
 | `openclaw_skills_test.rb` | OpenClaw skill metadata — only the umbrella `hive-cli` listing is published, setup stays visible before the CLI is installed, `/hive` common paths include `wiki compile-log --check`, fragment-first changelog guidance is present, destructive/foreground admin commands require confirmation, and README publish instructions avoid shortcut listings. |
 | `commands/babysit_test.rb` | `Hive::Commands::Babysit` — lifecycle command routing, PID-file ownership handling, stale-runtime status/reload warnings, foreground restart, detached restart re-exec into canonical `start --detach` through the stable invoked wrapper, aborting restart and failing direct stop after a refused stop, clear detached re-exec failure reporting, initial/post-grace ownership-probe clean-exit handling, pre-KILL ownership refusal, bounded PID-lock timeout, guarded stop cleanup that preserves a replacement PID file, and skip-KILL PID-file preservation when ownership becomes unverified. |
@@ -89,7 +92,7 @@ task default: :test
 | `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
 | `stages/review/run_reviewers_test.rb` | `Hive::Stages::Review.run_reviewers` — reviewer list selection for normal vs patrol-sourced tasks, per-reviewer failures, wall-clock deadlines, shared Claude tmux sessions, and GitHub comment mirroring. |
-| `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, and explicit archive views remain age-unfiltered. |
+| `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive and scan boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, explicit archive views remain age-unfiltered, and stage-move race coverage pins vanished-folder skips, surviving-folder `ENOENT` re-raises, and duplicate-pruning behavior. |
 | `tui/app_test.rb`, `tui/state_source_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, mtime-gated refresh reuse, and liveness-fallback reparsing. |
 
 ## Integration suite (`test/integration/`)
@@ -97,18 +100,19 @@ task default: :test
 | File | Covers |
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
-| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit. |
+| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
 | `run_open_pr_test.rb` | `hive run` of `5-open-pr/` — push, draft PR creation, idempotent existing-PR path. |
+| `run_review_test.rb` | `hive run` of `6-review/` — pre-flight states, reviewer/triage/fix/browser branching, manual wait and stale/error recovery, auto-commit/guardrail boundaries, and provider-limit marker behavior for reviewers plus triage limit vs non-limit failures. |
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, PR-ready wrap-up, summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |
-| `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration. |
+| `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration, and stage-move race behavior through the command surface. |
 | `daemon_stale_agent_healing_test.rb` | Status-to-healer integration — real `hive status --json` rows feed `Hive::Daemon::StaleAgentHealer`, pinning stale `AGENT_WORKING` classification, on-disk healing, closed logger events (`marker_healed`, `heal_requeued`, `marker_heal_failed`), `daemon.agent_marker_grace_sec` threading, and the `3-plan` terminal-loss healer writing a real allowlisted dispatch request. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
-| `cli_version_test.rb` | `bin/hive` wrapper contract — top-level `--version`, command-local help after option-bearing invocations (`hive approve --from 2-brainstorm --help`), leading `--json=true`, and malformed `--json=1` / `--json=yes` assignment rejection. |
+| `cli_version_test.rb`, `cli_usage_error_json_test.rb` | `bin/hive` wrapper contract — top-level `--version`, command-local help after option-bearing invocations (`hive approve --from 2-brainstorm --help`), leading `--json=true`, malformed `--json=1` / `--json=yes` assignment rejection, and pre-dispatch JSON usage-error envelopes for missing required arguments on representative command schemas (`hive-run`, `hive-approve`, `hive-markers-clear`, `hive-drop`, `hive-findings`, `hive-rebase-status`, and `hive-stage-action`). |
 | `patrol_command_test.rb` | `hive patrol` — JSON envelope, dry-run behavior, scan-state recording, inbox non-interference, retry/backoff outcomes, and schema validation with fake mapper/reviewer/fixer/PR opener collaborators. |
 | `wiki_command_test.rb` | `hive wiki` — compile-log writes the generated aggregate, `--check` distinguishes stale vs up-to-date output, invalid subcommands/missing wiki dirs raise usage errors, CLI dispatch reaches the command, and help lists the wiki surface. |
 | `tui_smoke_test.rb`, `tui_smoke_charm_test.rb` | PTY-driven `bin/hive tui` smokes — boot, first useful paint with a seeded project, clean `q` exit, horizontal and vertical resize handling, and the startup regression gate (a generous 5s bound that catches a revert to the starved-poll loading grid without flaking; the 10s read_until is the hard gate). |
@@ -130,21 +134,47 @@ scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,
 missing argument errors, top-level version output, command-local help after
 command options (`run --filter tui --help`), leading JSON option normalization,
-malformed JSON assignment rejection, replay path safety, cleanup retention
-validation, and the single-dispatch invariant for successful JSON commands.
+malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
+replay path safety, cleanup retention validation, and the single-dispatch
+invariant for successful JSON commands.
+
+The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
+runs `packaging/verify-release.sh --version=v0.1.0` against the published
+release after the pinned-release existence gate. The script itself requires
+`jq` for envelope assertions; CI first uses runner-provided `jq` when present
+and only falls back to apt provisioning when missing. If that fallback's
+`apt-get update` is blocked by transient `packages.microsoft.com` repository
+errors, the workflow disables those Microsoft source files and retries so an
+unrelated third-party apt outage does not hide the verifier's actual behavior.
 
 The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Telegram setup guide, and strict blank/@handle chat-ID rejection) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
+After adding the sample idea, the golden-path E2E reads the task slug from a
+single current-DOM query and visits the task page directly. It does not retain a
+`.task-row` Capybara element across daemon-driven Turbo replacements, because a
+grid broadcast can detach the row while Playwright is preparing a click. Before
+submitting the brainstorm answer, it waits for the daemon to classify the
+`needs_input` row and for the current `brainstorm.md` mtime second to pass, so
+the answer write is strictly newer than the daemon's edit-resume baseline even
+on coarse CI filesystems. The production path also depends on
+`hive status --json` preserving subsecond task mtimes; otherwise a newer answer
+written in the same second as the baseline can be reported as older or equal.
 
 The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
 boots a fresh container on a random host port, polls `/health`, asserts the
 ownerless `/login` page is claimable, and verifies unauthenticated `/` is
 owner-gated with a 302. The image's runtime Docker `HEALTHCHECK` is deeper
 than that smoke and hits `/health?deep=1`, so a stale/missing daemon pidfile
-turns the container unhealthy even when Rails is still serving. `.github/workflows/ci.yml` builds a local image and
-runs that smoke on Linux for every push/PR; `.github/workflows/release.yml`
-runs the same smoke against the amd64 image before any GHCR push, then pulls
-the published arm64 image on `macos-15` under Colima and smokes it again. The
-Windows CI surface is `packaging/docker/test-install-box.ps1`: real PowerShell
+turns the container unhealthy even when Rails is still serving.
+`.github/workflows/release.yml` runs that smoke against the amd64 image before
+any GHCR push, then is intended to pull the published arm64 image on `macos-15`
+under Colima and smoke it again. Current `.github/workflows/ci.yml` does not
+build or smoke a local hivebox Docker image on push/PR; it covers the Rails web
+tests, the golden-path browser E2E, and the Windows installer-script harness.
+Commit `abb62aae` records a current hosted-runner failure before the macOS
+Docker smoke starts: `colima start --cpu 2 --memory 4` can die when Lima's VZ VM
+exits, so the macOS leg remains a verification gap until a qemu fallback/retry
+or passing run artifact exists. The Windows CI surface is
+`packaging/docker/test-install-box.ps1`: real PowerShell
 syntax, `$LASTEXITCODE` behavior, and failure-output capture with a stubbed
 Docker CLI for missing-Docker diagnostics, happy-path pull/run argv including
 the default `127.0.0.1:4567:4567` bind, and existing-container refusal. The
@@ -159,7 +189,7 @@ credentials inside a running box.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
-`test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, replay path validation, and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
+`test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, replay path validation, and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
 
 ## Live Claude tmux dogfood
 
@@ -187,9 +217,11 @@ bundle exec rake test:eval
 bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 ```
 
-`test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
+`test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, child-supervisor and dispatch-request captures, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior. Queue-routable bot verbs are captured through the fake `DispatchRequestWriter`, and `Harness#dispatched_commands` lets scenarios assert command intent across both queued and child-spawned dispatch paths.
 
-`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
+`bin/hive-eval` is a checkout-local OptionParser wrapper over `rake test:eval`. It accepts only `--scenario NAME`, `--report PATH`, and `--no-judge`; invalid options, missing option values, stray positional arguments, missing scenarios, and unsafe scenario names exit `64` before a report file is created. Unexpected positional-argument errors label the count as `argument` or `arguments`; `--scenario` resolves a basename under the scenario root after stripping an optional `_test` suffix. Slash and backslash path separators get a distinct usage error, and separator-free names still must match `[A-Za-z0-9_-]+` before being joined under `test/eval/scenarios/` or `HIVE_EVAL_SCENARIO_ROOT`. All-scenario runs clear inherited `TEST` and set `HIVE_EVAL_SCENARIOS_ONLY=1` so ambient test selection cannot execute support or unit files. Tests may point `HIVE_EVAL_SCENARIO_ROOT` at a temporary scenario directory for throwaway fixtures.
+
+Successful eval runs write a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and scenario failures make the wrapper exit non-zero. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is now a passing daemon-enabled noise regression: ready-to-action rows should not become proactive Telegram alerts when the daemon owns dispatch, and the scenario still asserts no duplicate messages plus the proactive allowlist (`agent_blocked_question`, `fatal_error`). Reporter failure-path coverage no longer relies on a production scenario staying red; `test/eval/support/reporter_test.rb` creates a tmpdir-scoped intentional-failure scenario through `HIVE_EVAL_SCENARIO_ROOT`.
 
 ## Lint
 
@@ -245,12 +277,24 @@ answered in the browser, ending at the network-free boundary "Ready to
 open PR" with a real commit in a real worktree. Failure artifacts (daemon
 event log, daemon stdout, daemon PID liveness, HIVE_HOME log inventory,
 task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
+The first task-page navigation deliberately re-resolves the grid link through
+brief row-lookup misses or Playwright "not attached to the DOM" click errors
+because Turbo can replace the row while the daemon advances the task from
+`1-inbox` to `2-brainstorm`.
 The daemon is preflighted with the exact spawn env via `bin/hive --version`
 before `Process.spawn`, so CI boot failures surface synchronously. In CI that
 env uses `GOLDEN_E2E_BUNDLE_PATH` to force the daemon onto the root bundle
-instead of the Rails app's `web/vendor` bundle. The Telegram leg lives in
-`test/e2e/tg` (real Bot API, secret-gated) and now asserts the /start welcome
-ahead of the idea flow.
+instead of the Rails app's `web/vendor` bundle. After the idea submit, the
+test resolves the task slug from a single current-DOM query and visits the task
+page directly, avoiding a saved `.task-row` element that Turbo may detach while
+the daemon broadcasts grid replacements. Before submitting the brainstorm
+answer, it waits for the daemon's `needs_input` classification and for the
+current `brainstorm.md` mtime second to pass, avoiding equality with the
+daemon's edit-resume baseline on coarse CI filesystems. `status_test.rb` pins
+the matching production contract: JSON task `mtime` and `folder_mtime` keep
+subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
+leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the
+/start welcome ahead of the idea flow.
 
 ## Backlinks
 

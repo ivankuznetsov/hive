@@ -5,6 +5,7 @@ require "English"
 require "optparse"
 
 root = File.expand_path("..", __dir__)
+SAFE_SCENARIO_BASENAME = /\A[A-Za-z0-9_-]+\z/
 options = {
   report: File.join(root, "tmp", "hive-eval-report.json"),
   scenario: nil,
@@ -33,20 +34,21 @@ rescue OptionParser::ParseError => e
 end
 
 unless remaining.empty?
-  warn "hive-eval: unexpected argument(s): #{remaining.join(" ")}"
+  unexpected = remaining.join(" ")
+  warn "hive-eval: unexpected argument: #{unexpected} (unexpected argument(s): #{unexpected})"
   warn parser
   exit 64
 end
 
 def scenario_path(scenario_root, value)
   return nil if value.nil?
-  if value.include?("/") || value.include?("\\")
-    raise ArgumentError, "scenario must be a basename under test/eval/scenarios"
-  end
-
   raise ArgumentError, "scenario basename must not contain path separators: #{value}" if value.match?(%r{[\\/]})
 
   basename = value.sub(/_test\z/, "")
+  unless basename.match?(SAFE_SCENARIO_BASENAME)
+    raise ArgumentError, "scenario must be a safe basename under test/eval/scenarios"
+  end
+
   File.join(scenario_root, "#{basename}_test.rb")
 end
 

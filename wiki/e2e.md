@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-09
+updated: 2026-06-11
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -45,7 +45,10 @@ grammar as `bin/hive`: bare `--json`, exact truthy assignments
 (`--json=true`/`TRUE`/`t`/`T`), bare negative forms, and exact false
 assignments are moved behind a recognized command. Unsupported assignments such
 as `--json=1` or `--json=yes` are usage errors before the value can become the
-default `run` pattern.
+default `run` pattern. Wrapper-owned error formatting checks the last
+recognized JSON boolean flag rather than any truthy flag, so duplicate flags
+with a final false form, such as `--json --no-json`, emit the human
+`hive-e2e:` stderr path.
 
 ## Layout
 

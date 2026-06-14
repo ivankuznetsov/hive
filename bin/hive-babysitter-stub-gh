@@ -42,6 +42,7 @@ def api_read_only?(rest)
   method = nil
   payload = false
   unsafe_payload = false
+  cache = false
   index = 1
   while index < rest.length
     arg = rest[index]
@@ -66,6 +67,9 @@ def api_read_only?(rest)
       payload = true
       unsafe_payload = true
       index += 2
+    when "--cache"
+      cache = true
+      index += 2
     when /\A-f.+\z/, /\A--raw-field=.+\z/
       payload = true
       index += 1
@@ -81,14 +85,17 @@ def api_read_only?(rest)
       payload = true
       unsafe_payload = true
       index += 1
+    when /\A--cache=.*\z/
+      cache = true
+      index += 1
     else
       index += 1
     end
   end
 
-  return method.casecmp("GET").zero? && !unsafe_payload if method
+  return method.casecmp("GET").zero? && !unsafe_payload && !cache if method
 
-  !payload
+  !payload && !cache
 end
 
 def read_only?(rest)

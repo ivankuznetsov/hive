@@ -105,7 +105,7 @@ task default: :test
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, PR-ready wrap-up, summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |
-| `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration. |
+| `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration, and subsecond JSON `mtime` / `folder_mtime` serialization for daemon baseline comparisons. |
 | `daemon_stale_agent_healing_test.rb` | Status-to-healer integration — real `hive status --json` rows feed `Hive::Daemon::StaleAgentHealer`, pinning stale `AGENT_WORKING` classification, on-disk healing, closed logger events (`marker_healed`, `heal_requeued`, `marker_heal_failed`), `daemon.agent_marker_grace_sec` threading, and the `3-plan` terminal-loss healer writing a real allowlisted dispatch request. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
 | `cli_version_test.rb` | `bin/hive` wrapper contract — top-level `--version`, command-local help after option-bearing invocations (`hive approve --from 2-brainstorm --help`), leading `--json=true`, and malformed `--json=1` / `--json=yes` assignment rejection. |
@@ -137,7 +137,13 @@ The browser layer lives in the Rails app: `web/test/integration/*` (device-flow 
 After adding the sample idea, the golden-path E2E reads the task slug from a
 single current-DOM query and visits the task page directly. It does not retain a
 `.task-row` Capybara element across daemon-driven Turbo replacements, because a
-grid broadcast can detach the row while Playwright is preparing a click.
+grid broadcast can detach the row while Playwright is preparing a click. Before
+submitting the brainstorm answer, it waits for the daemon to classify the
+`needs_input` row and for the current `brainstorm.md` mtime second to pass, so
+the answer write is strictly newer than the daemon's edit-resume baseline even
+on coarse CI filesystems. The production path also depends on
+`hive status --json` preserving subsecond task mtimes; otherwise a newer answer
+written in the same second as the baseline can be reported as older or equal.
 
 The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
 boots a fresh container on a random host port, polls `/health`, asserts the
@@ -258,9 +264,17 @@ task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
 The daemon is preflighted with the exact spawn env via `bin/hive --version`
 before `Process.spawn`, so CI boot failures surface synchronously. In CI that
 env uses `GOLDEN_E2E_BUNDLE_PATH` to force the daemon onto the root bundle
-instead of the Rails app's `web/vendor` bundle. The Telegram leg lives in
-`test/e2e/tg` (real Bot API, secret-gated) and now asserts the /start welcome
-ahead of the idea flow.
+instead of the Rails app's `web/vendor` bundle. After the idea submit, the
+test resolves the task slug from a single current-DOM query and visits the task
+page directly, avoiding a saved `.task-row` element that Turbo may detach while
+the daemon broadcasts grid replacements. Before submitting the brainstorm
+answer, it waits for the daemon's `needs_input` classification and for the
+current `brainstorm.md` mtime second to pass, avoiding equality with the
+daemon's edit-resume baseline on coarse CI filesystems. `status_test.rb` pins
+the matching production contract: JSON task `mtime` and `folder_mtime` keep
+subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
+leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the
+/start welcome ahead of the idea flow.
 
 ## Backlinks
 

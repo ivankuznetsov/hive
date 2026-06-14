@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-07
+updated: 2026-06-14
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive]
 ---
 
@@ -21,7 +21,7 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
     🤖 — add-cache-260424-9a8b          agent_working pid=1234   - 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). The human identity column renders `#id display_name` when available, falls back to `#id slug`, and uses `— slug` when pre-migration/counter-failed tasks have no id. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include both `mtime` (the state-file mtime used for age, sort order, and daemon edit baselines) and `folder_mtime` (the task directory mtime, emitted from `collect_rows` even when the state file exists). `folder_mtime` is useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken.
+`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). The human identity column renders `#id display_name` when available, falls back to `#id slug`, and uses `— slug` when pre-migration/counter-failed tasks have no id. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include both `mtime` (the state-file mtime used for age, sort order, and daemon edit baselines) and `folder_mtime` (the task directory mtime, emitted from `collect_rows` even when the state file exists). Both JSON timestamps are ISO8601 with six fractional digits so daemon consumers preserve the subsecond `File.mtime` ordering they compare against dispatch baselines. `folder_mtime` is useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken.
 
 ## Archived tasks
 
@@ -72,7 +72,7 @@ The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hi
 
 ## How tasks are discovered
 
-For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`. `folder_mtime` is always `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists, otherwise the same directory mtime fallback.
+For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`. `folder_mtime` is always `File.mtime(entry)`; `mtime` is the state-file mtime when the state file exists, otherwise the same directory mtime fallback. JSON serialization must keep subsecond precision for both fields because the daemon persists and compares those mtimes, not wall-clock timestamps.
 
 Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. `collect_rows` also reads each task `.lock`, verifies the holder PID and recorded process start time through `Hive::Lock`, and passes `live_task_lock: true` to `TaskAction` while `hive run` is active even if the stage has not written an `AGENT_WORKING` or `REVIEW_WORKING` marker yet. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
 
@@ -116,7 +116,7 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 
 ## Tests
 
-- `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
+- `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and subsecond JSON task timestamp serialization.
 - `test/unit/commands/status_test.rb` — status row collection, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, old-archive hiding, and archive-mode listing.
 - `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.

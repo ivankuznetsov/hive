@@ -124,8 +124,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # answer written before the reap is swallowed and the resume never
     # fires (recorded in wiki/gaps.md as a real product edge — an operator
     # answering within one daemon tick of the agent finishing strands the
-    # task). The daemon's event log is the observable artifact; polling it
-    # is an explicit wait on a real condition, not a sleep.
+    # task). The daemon's event log and the state file's mtime are the
+    # observable artifacts; waiting on them keeps this out of blind sleeps.
     slug = task_slug
     wait_for_answer_window!(slug)
     answer_field.fill_in with: "Yes — ship it."
@@ -175,8 +175,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
   # baseline is seeded by the first classification tick AFTER the round-1
   # child is reaped. Answering inside that window strands the task
   # (wiki/gaps.md records this as a real product edge). Wait for both
-  # events IN ORDER in the daemon's own log — an explicit wait on the
-  # real condition, not a sleep.
+  # events IN ORDER in the daemon's own log, then wait for a distinct
+  # state-file mtime tick so coarse CI filesystems cannot collapse the
+  # answer write onto the baseline mtime.
   def wait_for_answer_window!(slug, timeout: 60)
     events = File.join(ENV["HIVE_HOME"], "logs", "daemon.log")
     slug_re = Regexp.escape(slug)
@@ -194,6 +195,23 @@ class GoldenPathE2E < ApplicationSystemTestCase
       raise "daemon never opened the answer window for #{slug}" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
       sleep 0.2
+    end
+    wait_for_next_state_file_mtime_tick!(slug)
+  end
+
+  def wait_for_next_state_file_mtime_tick!(slug, timeout: 5)
+    path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", @project,
+                     ".hive-state", "stages", "2-brainstorm", slug, "brainstorm.md")
+    baseline_sec = File.mtime(path).to_i
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      return if Time.now.to_i > baseline_sec
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        raise "state-file mtime second did not advance for #{slug}"
+      end
+
+      sleep 0.05
     end
   end
 

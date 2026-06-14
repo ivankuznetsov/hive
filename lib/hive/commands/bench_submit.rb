@@ -104,7 +104,9 @@ module Hive
         script = File.join(@bench_path, "harness", "extract.rb")
         raise UsageError, "hive-bench extractor not found at #{script}" unless File.file?(script)
 
-        cmd = [ "ruby", "-I#{File.join(@bench_path, 'harness')}", script,
+        # Array-form Open3 — no shell, no injection. -I and its path are
+        # separate args (avoids interpolating into a single token).
+        cmd = [ "ruby", "-I", File.join(@bench_path, "harness"), script,
                "--task-dir", task_dir, "--repo", repo, "--repo-path", repo_path,
                "--out", out_dir, "--plan-author", "claude" ]
         _out, err, status = Open3.capture3(*cmd)

@@ -1,24 +1,27 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-12
+updated: 2026-06-14
 tags: [commands, api]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
 `hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
-documented in [[commands/web]], and the single ClawHub `hive-cli` OpenClaw skill
-whose installed slash command is `/hive`. The Ruby command/API contract lives in
-[[cli]] and the per-command pages. OpenClaw does not add a second runtime and
-does not publish one ClawHub listing per Hive verb.
+documented in [[commands/web]], `hive bench submit` as the hive-bench corpus
+producer, and the single ClawHub `hive-cli` OpenClaw skill whose installed slash
+command is `/hive`. The Ruby command/API contract lives in [[cli]] and the
+per-command pages. OpenClaw does not add a second runtime and does not publish
+one ClawHub listing per Hive verb.
 
 ## Source Files
 
 - `bin/hive`
 - `bin/hv`
 - `bin/hive-e2e`
+- `lib/hive/cli.rb`
+- `lib/hive/commands/bench_submit.rb`
 - `lib/hive/web/**/*.rb`
 - `web/app/views/**`
 - `web/app/assets/**`
@@ -40,8 +43,9 @@ does not publish one ClawHub listing per Hive verb.
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
 `archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
-findings, metrics, update/uninstall, registry maintenance, and `--json`
-envelopes where the command page says they exist.
+findings, metrics, update/uninstall, registry maintenance, the `hive bench
+submit` corpus-submission producer, and `--json` envelopes where the command
+page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
@@ -57,6 +61,12 @@ command argument or task target.
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
 fall through to common Apache Hive paths. See [[operating]] for install-channel
 behavior.
+
+`hive bench submit SLUG` is a CLI-only bridge from completed Hive tasks to the
+separate hive-bench corpus. It resolves a `9-done` task from registered
+projects, runs a local secret-token preflight, delegates extraction to
+hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
+the hive-bench checkout. See [[commands/bench-submit]].
 
 ### OpenClaw / ClawHub
 

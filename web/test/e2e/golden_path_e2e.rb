@@ -118,6 +118,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # --- Brainstorm round 1: the daemon's agent asks, we answer ------------
     # Turbo may replace the grid row while the daemon advances the task, so
     # re-resolve the link if the row detaches during the click.
+    slug = task_slug_from_grid!("Golden path sample idea")
     click_task_link!("Golden path sample idea")
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
@@ -128,7 +129,6 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # answering within one daemon tick of the agent finishing strands the
     # task). The daemon's event log and the state file's mtime are the
     # observable artifacts; waiting on them keeps this out of blind sleeps.
-    slug = task_slug
     wait_for_answer_window!(slug)
     answer_field.fill_in with: "Yes — ship it."
     click_button "Send answers"

@@ -54,6 +54,21 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_usage_error_respects_last_json_boolean_flag
+    with_tmp_global_config do
+      [
+        %w[--json --no-json],
+        %w[--json --json=false]
+      ].each do |flags|
+        out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", *flags)
+
+        assert_equal 64, status.exitstatus, "#{flags.join(" ")}: missing target should be a usage error"
+        assert_empty out, "#{flags.join(" ")}: final false JSON flag must force prose output"
+        assert_match(/Usage: "hive run TARGET"/, err)
+      end
+    end
+  end
+
   private
 
   def without_generated_at(payload)

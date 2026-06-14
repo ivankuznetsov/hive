@@ -42,5 +42,6 @@ preflight, aborting before any PR if a secret is found.
 - The extractor and PR-opening subprocesses use argv/array-form `Open3` calls.
   The extractor `-I` flag and harness path are separate argv entries; the
   remaining Brakeman ignore for `gh pr create` is documented in [[testing]].
-- Tests stub the extractor, PR opener, and secret preflight; live hive-bench /
-  GitHub submission evidence is tracked in [[gaps]].
+- Tests cover both injected seams and the default seam methods using a stub
+  extractor script plus stub `git`/`gh` binaries. Live hive-bench / GitHub
+  submission evidence is tracked in [[gaps]].

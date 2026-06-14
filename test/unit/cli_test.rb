@@ -335,4 +335,24 @@ class HiveCliTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE, status
     assert_equal Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG, payload.fetch("error_kind")
   end
+
+  def test_bench_submit_dispatches_to_command
+    require "hive/commands/bench_submit"
+    with_command_new_stub(Hive::Commands::BenchSubmit) do |calls|
+      Hive::CLI.start([ "bench", "submit", "my-slug-260601-aa11", "--project", "demo" ])
+      ctor = calls.grep(Hash).first
+      assert_equal [ "my-slug-260601-aa11" ], ctor.fetch(:args)
+      assert_equal "demo", ctor.fetch(:kwargs)[:project]
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_bench_unknown_subcommand_warns_and_exits_usage
+    out = +""
+    err = +""
+    out, err = capture_io do
+      assert_raises(SystemExit) { Hive::CLI.start([ "bench", "frobnicate" ]) }
+    end
+    assert_match(/unknown subcommand/, "#{out}#{err}")
+  end
 end

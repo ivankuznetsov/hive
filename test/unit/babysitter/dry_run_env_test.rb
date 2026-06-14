@@ -315,6 +315,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "--web"
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "--web=true"
       assert_stubbed env, "gh", "pr", "view", "42", "--web"
+      assert_stubbed env, "gh", "pr", "checks", "42", "-w"
+      assert_stubbed env, "gh", "pr", "diff", "42", "-w"
+      assert_stubbed env, "gh", "pr", "list", "-w"
       assert_stubbed env, "gh", "repo", "view", "owner/repo", "-w"
 
       refute File.exist?(File.join(dir, "real.log"))

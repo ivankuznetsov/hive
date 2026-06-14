@@ -12,11 +12,13 @@ require_relative "programmable_status_watcher"
 module Hive
   module Eval
     class Harness
-      attr_reader :telegram, :logger, :status_watcher, :child_supervisor, :supervisor, :router
+      attr_reader :telegram, :logger, :status_watcher, :child_supervisor, :dispatch_request_writer,
+                  :supervisor, :router
 
       def initialize(bot_config: nil, telegram: nil, logger: nil, status_watcher: nil,
                      child_supervisor: nil, notification_dispatcher: nil,
-                     conversation_store: nil, now: Time.utc(2026, 5, 24, 8, 0, 0))
+                     conversation_store: nil, dispatch_request_writer: nil,
+                     now: Time.utc(2026, 5, 24, 8, 0, 0))
         @now = now
         @bot_config = default_bot_config.merge(bot_config || {})
         @telegram = telegram || Hive::Eval::FakeTelegram.new(now: -> { current_time })
@@ -24,6 +26,7 @@ module Hive
         @status_watcher = status_watcher || Hive::Eval::ProgrammableStatusWatcher.new
         @child_supervisor = child_supervisor ||
           Hive::Eval::FakeChildSupervisor.new(logger: @logger, now: -> { current_time })
+        @dispatch_request_writer = dispatch_request_writer || Hive::Eval::FakeDispatchRequestWriter.new
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: @bot_config.fetch("conversation_ttl_sec"))
         # Router and Supervisor must share one idea-draft store: the router
@@ -60,6 +63,7 @@ module Hive
           notification_dispatcher: @notification_dispatcher,
           router: @router,
           child_supervisor: @child_supervisor,
+          dispatch_request_writer: @dispatch_request_writer,
           conversation_store: @conversation_store,
           idea_draft_store: @idea_draft_store,
           dry_run: false
@@ -72,6 +76,17 @@ module Hive
 
       def last_sent
         sent.last
+      end
+
+      def dispatched_commands
+        child_commands = @child_supervisor.respond_to?(:commands) ? @child_supervisor.commands : []
+        queued_commands = @dispatch_request_writer.respond_to?(:commands) ? @dispatch_request_writer.commands : []
+        sequence_commands = if @dispatch_request_writer.respond_to?(:sequence_commands)
+          @dispatch_request_writer.sequence_commands
+        else
+          []
+        end
+        child_commands + queued_commands + sequence_commands
       end
 
       def process(update)

@@ -62,6 +62,29 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_new_serializes_hive_state_commit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        lock_paths = []
+
+        with_replaced_singleton_method(
+          Hive::Lock,
+          :with_commit_lock,
+          lambda do |path, &block|
+            lock_paths << path
+            block.call
+          end
+        ) do
+          capture_io { Hive::Commands::New.new(project, "serialized capture").call }
+        end
+
+        assert_equal [ File.join(dir, ".hive-state") ], lock_paths
+      end
+    end
+  end
+
   def test_counter_failure_writes_null_id_and_still_captures
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

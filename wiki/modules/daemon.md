@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-14
+updated: 2026-06-13
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -26,7 +26,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
-| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus non-review terminal agent-loss `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun. `limits_reached` markers (reviewers `REVIEW_ERROR` or single-agent `ERROR`, any stage) self-heal on a cooldown: the writer stamps `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`) and the healer clears them only once `now >= retry_after`, bounded by the same retry budget; cooldown-wait ticks do not burn budget, and a missing/unparseable stamp stays manual. `3-plan` is the special terminal-error case: after any successful terminal `ERROR` clear there, including terminal agent-loss or elapsed `limits_reached`, it queues `hive plan <slug> --from 3-plan` through `DispatchRequestQueue` and logs `heal_requeued`, because an empty markerless `plan.md` otherwise classifies straight back to `:error`. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus non-review terminal agent-loss `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun. `limits_reached` markers (review `REVIEW_ERROR` from reviewers/triage/fix, or single-agent `ERROR` in any stage) self-heal on a cooldown: the writer stamps `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`) and the healer clears them only once `now >= retry_after`, bounded by the same retry budget; cooldown-wait ticks do not burn budget, and a missing/unparseable stamp stays manual. `3-plan` is the special terminal-error case: after any successful terminal `ERROR` clear there, including terminal agent-loss or elapsed `limits_reached`, it queues `hive plan <slug> --from 3-plan` through `DispatchRequestQueue` and logs `heal_requeued`, because an empty markerless `plan.md` otherwise classifies straight back to `:error`. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). Re-spawns fire-and-forget `hive generate-name <folder>` for any row whose `Hive::TaskMeta` `display_name` is nil/blank, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses `kill(0)` liveness plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete` and for a narrow set of finalize `ERROR` rows whose PR can still be retired after merge (`git_status_failed`, `claude_launch_failed`). On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DigestScheduler` | `lib/hive/daemon/digest_scheduler.rb` | Global daily shipped-digest cadence. Persists `last_digested_date` in `<state_home>/digest_state.json`, applies a first-run no-history guard, computes owed local calendar days after midnight, caps catch-up with `digest.max_catchup_days`, and emits one `hive digest --date D --json` dispatch at a time. |
@@ -150,8 +150,9 @@ stage does not move; the only same-stage workflow enqueue is the
    `heal_requeue_failed` with the manual `hive plan ... --from 3-plan`
    remediation instead of `marker_heal_failed`, because the marker is already
    gone and a later healer tick cannot retry that same match. **Usage/credit limits self-heal on
-   a cooldown:** any `limits_reached` marker — the reviewers `REVIEW_ERROR
-   phase=reviewers reason=limits_reached` written by `Stages::Review`, and the
+   a cooldown:** any `limits_reached` marker — review `REVIEW_ERROR`
+   markers written by `Stages::Review` when all reviewers, triage, or fix hit
+   provider usage/credit limits, and the
    single-agent `ERROR reason=limits_reached` written by `ClaudeLauncher` /
    `Agent` (any stage, since a limit can hit brainstorm/plan/execute too) —
    carries a `retry_after` ISO8601 stamp set at write time to `now + cooldown`
@@ -298,9 +299,12 @@ corrupt / newer-schema file degrades to an empty map and the daemon boots
 normally (worst case: one task is re-baselined once). The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
 post-completion refresh, AND prune — so there is no batched loss window
-for the critical value; mtimes are stored at microsecond resolution,
-sufficient given upstream `hive status --json` emits whole-second mtimes.
-The comparison stays mtime-to-mtime, never wall-clock — no clock-skew
+for the critical value; mtimes are stored at microsecond resolution and
+`hive status --json` emits task `mtime` / `folder_mtime` with matching
+microsecond precision. Do not truncate status JSON mtimes: an operator
+answer can land in the same wall-clock second as the daemon baseline, and
+whole-second JSON makes the newer answer compare as older or equal. The
+comparison stays mtime-to-mtime, never wall-clock — no clock-skew
 class of bug, the reason the earlier marker-`ts` approach was rejected
 (see PR #229). The dispatcher prunes entries absent from the live status
 rows once per **successful** tick, **scoped to the projects in

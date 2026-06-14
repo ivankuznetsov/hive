@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: lib/hive/commands/doctor.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-06-11
+updated: 2026-06-14
 tags: [command, preflight, skills, tmux]
 ---
 

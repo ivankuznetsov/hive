@@ -486,18 +486,18 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
-  def test_global_npm_root_returns_first_line_on_success
+  def test_global_npm_root_returns_first_stripped_successful_output_line
     status = Object.new
     status.define_singleton_method(:success?) { true }
-    calls = []
+    captured_cmd = nil
 
-    with_replaced_singleton_method(Open3, :capture3, lambda { |*argv|
-      calls << argv
-      [ "/tmp/pi-global\nignored\n", "", status ]
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*cmd|
+      captured_cmd = cmd
+      [ "  /tmp/npm-root\nignored\n", "", status ]
     }) do
-      assert_equal "/tmp/pi-global", Hive::SkillCheck::Pi.global_npm_root
+      assert_equal "/tmp/npm-root", Hive::SkillCheck::Pi.global_npm_root
     end
-    assert_equal [ [ "npm", "root", "-g" ] ], calls
+    assert_equal [ "npm", "root", "-g" ], captured_cmd
   end
 
   def test_manifest_skill_candidates_expands_jailed_globs

@@ -136,6 +136,10 @@ Uncertainty: this table was refreshed manually from targeted source, dependency-
   (`wait_for_answer_window!`); a product fix would be dispatching on
   first sight when `answers_pending` is already false, or seeding the
   baseline from the round's dispatch mtime instead of the current one.
+  The distinct same-second precision variant is fixed: `StatusConsumer`
+  now re-stats local `state_file` paths so an answer written after the
+  baseline in the same wall-clock second still compares newer than the
+  agent's fractional post-child mtime.
 
 ## Areas the wiki could be expanded
 

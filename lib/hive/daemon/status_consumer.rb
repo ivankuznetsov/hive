@@ -192,16 +192,22 @@ module Hive
       end
 
       def parse_mtime(iso_string, state_file_path)
+        # `hive status --json` serializes mtimes at whole-second ISO8601
+        # precision for the public payload, but the daemon's edit-resume
+        # baseline is captured from File.mtime with subsecond precision.
+        # Prefer the local stat when the path is available so an operator
+        # answer written in the same second as an agent's WAITING marker
+        # still compares newer than the post-child baseline.
+        return File.mtime(state_file_path) if state_file_path && File.exist?(state_file_path)
+
         if iso_string && !iso_string.empty?
           begin
             return Time.parse(iso_string)
           rescue ArgumentError
-            # Fall through to File.mtime
+            nil
           end
         end
-        # If the envelope didn't include mtime, or it didn't parse,
-        # stat the state file directly. nil if the file is gone.
-        File.mtime(state_file_path) if state_file_path && File.exist?(state_file_path)
+        nil
       end
     end
   end

@@ -3,7 +3,7 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-06-12
+updated: 2026-06-13
 tags: [roadmap, status]
 ---
 
@@ -13,10 +13,11 @@ tags: [roadmap, status]
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` replaces the dead `which` delegators. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 
-Recent release/dependency history inspected on 2026-06-12:
+Recent release/dependency/history inspected on 2026-06-13:
 
 | Commit | Area | Notes |
 |--------|------|-------|
+| `b6bba5d6` | Review limit healing | Routes triage/fix phase provider-limit failures through `REVIEW_ERROR reason=limits_reached retry_after=...`, matching the existing reviewers-phase cooldown path instead of terminal `triage_failed` / `fix_failed`. |
 | `64b11b41` | Release | Prepares v0.3.0: sets `Hive::VERSION` and the lockfile path gem to `0.3.0`, points public Linux installer snippets at `v0.3.0`, and adds release notes for hivebox alpha, the first GHCR hivebox image release, session-limit healing, dispatch-request/drop schema v2, golden-path E2E, and Windows installer harness coverage. |
 | `2e307a19` | Dependency lockfile | Relocks the root bundle after the earlier `rack-test` manifest removal; root `Gemfile.lock` no longer lists `rack-test` as a resolved gem or top-level dependency. |
 | `416c8a9c` | Wiki refresh | Documents the patrol native `codex review` reviewer default and associated init/config/review page drift. |

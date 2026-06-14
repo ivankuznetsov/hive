@@ -291,7 +291,8 @@ normally (worst case: one task is re-baselined once). The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
 post-completion refresh, AND prune — so there is no batched loss window
 for the critical value; mtimes are stored at microsecond resolution,
-sufficient given upstream `hive status --json` emits whole-second mtimes.
+sufficient for the daemon's local `File.mtime` baseline comparisons even though
+public `hive status --json` emits whole-second mtimes.
 Because `StatusConsumer` runs on the same host as the project checkout, it
 prefers `File.mtime(row.state_file)` over the public JSON `mtime` string when
 the file still exists. That keeps the policy comparison subsecond-precise:

@@ -156,7 +156,7 @@ def external_launcher_option?(rest)
     %w[workflow view]
   ].include?(rest[0, 2])
 
-  rest.drop(2).any? { |arg| arg == "-w" || arg.start_with?("-w") }
+  rest.drop(2).any? { |arg| arg.start_with?("-") && !arg.start_with?("--") && arg.include?("w") }
 end
 
 rest = stripped_global_options(argv)

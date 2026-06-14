@@ -137,17 +137,33 @@ replay path safety, cleanup retention validation, and the single-dispatch
 invariant for successful JSON commands.
 
 The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Telegram setup guide, and strict blank/@handle chat-ID rejection) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
+After adding the sample idea, the golden-path E2E reads the task slug from a
+single current-DOM query and visits the task page directly. It does not retain a
+`.task-row` Capybara element across daemon-driven Turbo replacements, because a
+grid broadcast can detach the row while Playwright is preparing a click. Before
+submitting the brainstorm answer, it waits for the daemon to classify the
+`needs_input` row and for the current `brainstorm.md` mtime second to pass, so
+the answer write is strictly newer than the daemon's edit-resume baseline even
+on coarse CI filesystems. The production path also depends on
+`hive status --json` preserving subsecond task mtimes; otherwise a newer answer
+written in the same second as the baseline can be reported as older or equal.
 
 The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
 boots a fresh container on a random host port, polls `/health`, asserts the
 ownerless `/login` page is claimable, and verifies unauthenticated `/` is
 owner-gated with a 302. The image's runtime Docker `HEALTHCHECK` is deeper
 than that smoke and hits `/health?deep=1`, so a stale/missing daemon pidfile
-turns the container unhealthy even when Rails is still serving. `.github/workflows/ci.yml` builds a local image and
-runs that smoke on Linux for every push/PR; `.github/workflows/release.yml`
-runs the same smoke against the amd64 image before any GHCR push, then pulls
-the published arm64 image on `macos-15` under Colima and smokes it again. The
-Windows CI surface is `packaging/docker/test-install-box.ps1`: real PowerShell
+turns the container unhealthy even when Rails is still serving.
+`.github/workflows/release.yml` runs that smoke against the amd64 image before
+any GHCR push, then is intended to pull the published arm64 image on `macos-15`
+under Colima and smoke it again. Current `.github/workflows/ci.yml` does not
+build or smoke a local hivebox Docker image on push/PR; it covers the Rails web
+tests, the golden-path browser E2E, and the Windows installer-script harness.
+Commit `abb62aae` records a current hosted-runner failure before the macOS
+Docker smoke starts: `colima start --cpu 2 --memory 4` can die when Lima's VZ VM
+exits, so the macOS leg remains a verification gap until a qemu fallback/retry
+or passing run artifact exists. The Windows CI surface is
+`packaging/docker/test-install-box.ps1`: real PowerShell
 syntax, `$LASTEXITCODE` behavior, and failure-output capture with a stubbed
 Docker CLI for missing-Docker diagnostics, happy-path pull/run argv including
 the default `127.0.0.1:4567:4567` bind, and existing-container refusal. The
@@ -255,9 +271,17 @@ because Turbo can replace the row while the daemon advances the task from
 The daemon is preflighted with the exact spawn env via `bin/hive --version`
 before `Process.spawn`, so CI boot failures surface synchronously. In CI that
 env uses `GOLDEN_E2E_BUNDLE_PATH` to force the daemon onto the root bundle
-instead of the Rails app's `web/vendor` bundle. The Telegram leg lives in
-`test/e2e/tg` (real Bot API, secret-gated) and now asserts the /start welcome
-ahead of the idea flow.
+instead of the Rails app's `web/vendor` bundle. After the idea submit, the
+test resolves the task slug from a single current-DOM query and visits the task
+page directly, avoiding a saved `.task-row` element that Turbo may detach while
+the daemon broadcasts grid replacements. Before submitting the brainstorm
+answer, it waits for the daemon's `needs_input` classification and for the
+current `brainstorm.md` mtime second to pass, avoiding equality with the
+daemon's edit-resume baseline on coarse CI filesystems. `status_test.rb` pins
+the matching production contract: JSON task `mtime` and `folder_mtime` keep
+subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
+leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the
+/start welcome ahead of the idea flow.
 
 ## Backlinks
 

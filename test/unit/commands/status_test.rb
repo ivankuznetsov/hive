@@ -74,7 +74,7 @@ class CommandsStatusTest < Minitest::Test
       archived = tasks.find { |task| task.fetch("slug") == "old-archived-260604-abcd" }
 
       refute_nil archived, "default JSON must keep old archived rows visible to bots and daemons"
-      assert_equal old.utc.iso8601, archived.fetch("folder_mtime")
+      assert_equal old.utc.iso8601(6), archived.fetch("folder_mtime")
     end
   end
 

@@ -290,9 +290,12 @@ corrupt / newer-schema file degrades to an empty map and the daemon boots
 normally (worst case: one task is re-baselined once). The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
 post-completion refresh, AND prune — so there is no batched loss window
-for the critical value; mtimes are stored at microsecond resolution,
-sufficient given upstream `hive status --json` emits whole-second mtimes.
-The comparison stays mtime-to-mtime, never wall-clock — no clock-skew
+for the critical value; mtimes are stored at microsecond resolution and
+`hive status --json` emits task `mtime` / `folder_mtime` with matching
+microsecond precision. Do not truncate status JSON mtimes: an operator
+answer can land in the same wall-clock second as the daemon baseline, and
+whole-second JSON makes the newer answer compare as older or equal. The
+comparison stays mtime-to-mtime, never wall-clock — no clock-skew
 class of bug, the reason the earlier marker-`ts` approach was rejected
 (see PR #229). The dispatcher prunes entries absent from the live status
 rows once per **successful** tick, **scoped to the projects in

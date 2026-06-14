@@ -64,6 +64,33 @@ class StatusTest < Minitest::Test
     end
   end
 
+  def test_status_json_preserves_subsecond_task_mtimes
+    payload = Hive::Commands::Status.new(json: true).send(:task_payload, {
+      stage: "2-brainstorm",
+      slug: "answered-260614-abcd",
+      id: 1,
+      display_name: "Answered",
+      folder: "/tmp/task",
+      state_file: "/tmp/task/brainstorm.md",
+      worktree_path: nil,
+      marker_name: :waiting,
+      marker_attrs: {},
+      mtime: Time.utc(2026, 6, 14, 18, 31, 27, 899_132),
+      folder_mtime: Time.utc(2026, 6, 14, 18, 31, 28, 111_222),
+      claude_pid: nil,
+      claude_pid_alive: nil,
+      live_task_lock: false,
+      action_key: "needs_input",
+      action_label: "Needs your input",
+      suggested_command: "hive brainstorm answered-260614-abcd --from 2-brainstorm",
+      next_action: nil,
+      diagnostic: nil
+    })
+
+    assert_equal "2026-06-14T18:31:27.899132Z", payload["mtime"]
+    assert_equal "2026-06-14T18:31:28.111222Z", payload["folder_mtime"]
+  end
+
   def test_status_text_uses_display_name_and_slug_fallback
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

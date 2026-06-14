@@ -160,5 +160,59 @@ module Hive
         end
       end
     end
+
+    class FakeDispatchRequestWriter
+      Request = Struct.new(:project, :slug, :argv, :chat_id, :update_id, :trigger, :request_id, keyword_init: true)
+      Sequence = Struct.new(:request_id, :remaining_argvs, keyword_init: true)
+
+      attr_reader :writes, :sequences, :discarded_sequences
+
+      def initialize
+        @writes = []
+        @sequences = []
+        @discarded_sequences = []
+        @next_id = 0
+      end
+
+      def generate_request_id
+        @next_id += 1
+        "eval-req-#{@next_id}"
+      end
+
+      def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
+                 trigger: nil, request_id: nil)
+        id = request_id || generate_request_id
+        @writes << Request.new(
+          project: project,
+          slug: slug,
+          argv: Array(argv),
+          chat_id: chat_id,
+          update_id: update_id,
+          trigger: trigger,
+          request_id: id
+        )
+        id
+      end
+
+      def write_sequence!(request_id:, remaining_argvs:)
+        @sequences << Sequence.new(
+          request_id: request_id,
+          remaining_argvs: remaining_argvs.map { |argv| Array(argv) }
+        )
+        true
+      end
+
+      def discard_sequence!(request_id:)
+        @discarded_sequences << request_id
+      end
+
+      def commands
+        @writes.map(&:argv)
+      end
+
+      def sequence_commands
+        @sequences.flat_map(&:remaining_argvs)
+      end
+    end
   end
 end

@@ -109,14 +109,16 @@ class GoldenPathE2E < ApplicationSystemTestCase
     fill_in "New idea", with: "Golden path sample idea"
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    row = find(".task-row", text: "Golden path sample idea", wait: 10)
+    assert_selector ".task-row", text: "Golden path sample idea", wait: 10
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
     # (A manual Force approve here would race the daemon's own advance.)
 
     # --- Brainstorm round 1: the daemon's agent asks, we answer ------------
-    row.find("a", match: :first).click
+    # Turbo may replace the grid row while the daemon advances the task, so
+    # re-resolve the link if the row detaches during the click.
+    click_task_link!("Golden path sample idea")
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
     # Answer only AFTER the daemon has reaped the round-1 child: the edit
@@ -171,6 +173,23 @@ class GoldenPathE2E < ApplicationSystemTestCase
       raise "daemon never opened the answer window for #{slug}" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
       sleep 0.2
+    end
+  end
+
+  def click_task_link!(title, timeout: 10)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      find(".task-row", text: title, wait: 1).find("a", match: :first).click
+      return
+    rescue Capybara::ElementNotFound
+      raise if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.05
+    rescue Playwright::Error => e
+      raise unless e.message.include?("not attached to the DOM")
+      raise if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.05
     end
   end
 

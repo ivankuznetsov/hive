@@ -112,7 +112,7 @@ class HiveEvalS6BrainstormRoundTripTest < Minitest::Test
 
     # Auto-dispatch happened on the last answer; the conversation store is
     # cleared so /done is a no-op safety net but not required.
-    assert_equal [ "hive", "run", SLUG, "--json" ], harness.child_supervisor.commands.last,
+    assert_equal [ "hive", "run", SLUG, "--json" ], harness.dispatched_commands.last,
                  "all-answered must auto-dispatch hive run — operator does not need to send /done"
     state = harness.instance_variable_get(:@conversation_store)
                     .get(chat_id: Hive::Eval::FakeTelegram::DEFAULT_CHAT_ID)

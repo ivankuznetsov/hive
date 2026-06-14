@@ -31,7 +31,7 @@ module Hive
           path,
           token
         ].join("\0")
-        Digest::SHA256.hexdigest(payload)
+        ::Digest::SHA256.hexdigest(payload)
       end
 
       def fixable_confidence?(finding, minimum)

@@ -434,7 +434,7 @@ module Hive
       # so a transient read failure never re-execs.
       def compute_code_fingerprint
         path = Hive::Schemas.method(:schema_path).source_location.first
-        Digest::SHA256.file(path).hexdigest
+        ::Digest::SHA256.file(path).hexdigest
       rescue StandardError
         nil
       end

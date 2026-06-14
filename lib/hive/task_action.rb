@@ -769,7 +769,7 @@ module Hive
     def self.marker_signature(marker)
       attrs = (marker.attrs || {}).sort_by { |key, _value| key.to_s }
                                   .map { |key, value| "#{key}=#{value}" }
-      Digest::SHA256.hexdigest(([ marker.name.to_s ] + attrs).join("\n"))
+      ::Digest::SHA256.hexdigest(([ marker.name.to_s ] + attrs).join("\n"))
     end
 
     def marker_signature

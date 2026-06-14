@@ -138,10 +138,10 @@ invariant for successful JSON commands.
 
 The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Telegram setup guide, and strict blank/@handle chat-ID rejection) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
 After adding the sample idea, the golden-path E2E reads the task slug from a
-single current-DOM query and visits the task page directly. It does not retain a
-`.task-row` Capybara element across daemon-driven Turbo replacements, because a
-grid broadcast can detach the row while Playwright is preparing a click. Before
-submitting the brainstorm answer, it waits for the daemon to classify the
+single current-DOM query before navigation, then re-resolves and retries the
+live task-row link click if Turbo detaches the row while Playwright is preparing
+the click. The captured slug is reused only for the daemon answer-window wait.
+Before submitting the brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so
 the answer write is strictly newer than the daemon's edit-resume baseline even
 on coarse CI filesystems. The production path also depends on

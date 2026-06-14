@@ -135,15 +135,14 @@ class HiveEvalReporterTest < Minitest::Test
 
       refute status.success?
       assert_equal 64, status.exitstatus
-      assert_match(/scenario must be a basename/, err)
+      assert_match(/scenario basename must not contain path separators/, err)
       refute File.exist?(report)
     end
   end
 
   def test_cli_rejects_scenario_with_backslash_path_separator
-    # The backslash branch of scenario_path raises the same
-    # "must be a basename" error as the slash branch (Windows-style
-    # separators are rejected too), distinct from the safe-basename raise.
+    # Windows-style separators are rejected too, distinct from the
+    # safe-basename raise.
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "backslash.json")
 
@@ -154,7 +153,7 @@ class HiveEvalReporterTest < Minitest::Test
 
       refute status.success?
       assert_equal 64, status.exitstatus
-      assert_match(/scenario must be a basename/, err)
+      assert_match(/scenario basename must not contain path separators/, err)
       refute File.exist?(report)
     end
   end
@@ -277,7 +276,7 @@ class HiveEvalReporterTest < Minitest::Test
 
       refute status.success?
       assert_equal 64, status.exitstatus
-      assert_match(/unexpected argument\(s\): definitely-not-a-scenario/, err)
+      assert_match(/unexpected argument: definitely-not-a-scenario/, err)
       assert_match(%r{Usage: bin/hive-eval}, err)
       refute File.exist?(report)
     end

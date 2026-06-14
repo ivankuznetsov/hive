@@ -245,9 +245,10 @@ answered in the browser, ending at the network-free boundary "Ready to
 open PR" with a real commit in a real worktree. Failure artifacts (daemon
 event log, daemon stdout, daemon PID liveness, HIVE_HOME log inventory,
 task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
-The first task-page navigation deliberately re-resolves the grid link on
-stale-element errors because Turbo can replace the row while the daemon
-advances the task from `1-inbox` to `2-brainstorm`.
+The first task-page navigation deliberately re-resolves the grid link through
+brief row-lookup misses or Playwright "not attached to the DOM" click errors
+because Turbo can replace the row while the daemon advances the task from
+`1-inbox` to `2-brainstorm`.
 The daemon is preflighted with the exact spawn env via `bin/hive --version`
 before `Process.spawn`, so CI boot failures surface synchronously. In CI that
 env uses `GOLDEN_E2E_BUNDLE_PATH` to force the daemon onto the root bundle

@@ -1,13 +1,13 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
+source: test/, Rakefile, .rubocop.yml, .github/workflows/{ci,install-smoke,release}.yml, packaging/verify-release.sh, config/brakeman.ignore
 created: 2026-04-25
 updated: 2026-06-14
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, and bundler-audit on top.
+**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e, eval, install-smoke, release-verify, and hivebox image smoke layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, bundler-audit, installer checks, and Docker smoke tests on top.
 
 ## Run all
 

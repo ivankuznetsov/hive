@@ -29,9 +29,13 @@ class HiveEvalCliCaptureTest < Minitest::Test
     harness.when_user_taps("approve:plan:hive:slug-a:2-brainstorm")
 
     assert_equal [ "hive", "plan", "slug-a", "--from", "2-brainstorm",
-                   "--project", "hive", "--json" ], harness.child_supervisor.commands.last
+                   "--project", "hive", "--json" ], harness.dispatched_commands.last
+    assert_equal [ "hive", "plan", "slug-a", "--from", "2-brainstorm",
+                   "--project", "hive", "--json" ], harness.dispatch_request_writer.commands.last
+    assert_empty harness.child_supervisor.commands,
+                 "queue-routable verbs must land in the dispatch request writer"
     # The bot no longer sends a "Queued command pid=..." ack on dispatch.
-    # The capture-side contract is verified by child_supervisor.commands.
+    # The capture-side contract is verified by dispatched_commands.
     assert_nil harness.last_sent, "no Telegram ack should fire on plain dispatch"
   end
 end

@@ -429,7 +429,7 @@ class DiagnosisAgentTest < Minitest::Test
     error = assert_raises(Hive::Error) do
       agent.send(
         :run_with_timeout,
-        [ RbConfig.ruby, "-e", "warn ARGV.fetch(0); exit 2", token ],
+        [ "sh", "-c", "printf '%s\\n' \"$1\" >&2; exit 2", "diagnosis-agent-test", token ],
         Dir.pwd,
         nil,
         2

@@ -34,8 +34,8 @@ rescue OptionParser::ParseError => e
 end
 
 unless remaining.empty?
-  label = remaining.length == 1 ? "argument" : "arguments"
-  warn "hive-eval: unexpected #{label}: #{remaining.join(" ")}"
+  unexpected = remaining.join(" ")
+  warn "hive-eval: unexpected argument: #{unexpected} (unexpected argument(s): #{unexpected})"
   warn parser
   exit 64
 end

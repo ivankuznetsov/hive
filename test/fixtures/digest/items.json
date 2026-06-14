@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "10",
+      "category": "feature",
+      "summary": "Adds the daily digest command."
+    },
+    {
+      "id": "11",
+      "category": "fix",
+      "summary": "Fixes digest escaping for Telegram."
+    }
+  ]
+}

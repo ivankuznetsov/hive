@@ -93,6 +93,7 @@ class HiveCommandsDaemonTest < Minitest::Test
         "update" => update_config,
         "digest" => {
           "enabled" => false,
+          "agent" => nil,
           "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
         }
       },

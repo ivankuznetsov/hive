@@ -45,7 +45,8 @@ module Hive
         "review_triage" => 75,
         "review_fix" => 500,
         "review_browser" => 100,
-        "patrol" => 100
+        "patrol" => 100,
+        "digest" => 50
       },
       "timeout_sec" => {
         "brainstorm" => 1800,
@@ -58,7 +59,8 @@ module Hive
         "review_triage" => 1800,
         "review_fix" => 14400,
         "review_browser" => 3600,
-        "patrol" => 3600
+        "patrol" => 3600,
+        "digest" => 1800
       },
       # Stage-level agent for single-agent stages. The review
       # stage has its own per-role agent fields under "review.{ci,triage,
@@ -390,12 +392,21 @@ module Hive
           ]
         }
       },
+      # Daily shipped digest. The daemon schedules one global `hive digest`
+      # subprocess after each local midnight; the subprocess sends a single
+      # Telegram message across all registered projects.
+      "digest" => {
+        "enabled" => false,
+        "agent" => nil,
+        "max_catchup_days" => 7
+      },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
       # from the global config via load_global_bot. The token lives
       # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
       "bot" => {
         "enabled" => false,
+        "digest_chat_id" => nil,
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
@@ -888,6 +899,38 @@ module Hive
       merged
     end
 
+    def load_global_digest
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["digest"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "digest in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["digest"]), override)
+      validate_digest!({ "digest" => merged }, path)
+      merged
+    end
+
+    def load_global_digest_config
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      merged = merge_defaults(data)
+      merged["bot"] = deep_merge(global_bot_defaults, data["bot"] || {})
+      inject_bot_runtime_path_defaults!(merged)
+      validate!(merged, path)
+      merged
+    end
+
     def load_global_web
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -1162,6 +1205,7 @@ module Hive
       validate_web_config!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
+      validate_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1189,6 +1233,7 @@ module Hive
       web
       babysitter
       patrol
+      digest
       bot
       rebase
     ].freeze
@@ -1927,6 +1972,28 @@ module Hive
       validate_reviewer_entries!(reviewers, "patrol.review.reviewers", source_path)
     end
 
+    def validate_digest!(cfg, source_path)
+      digest = cfg["digest"]
+      return if digest.nil?
+
+      enabled = digest["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "digest.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      validate_agent_name!(digest["agent"], "digest.agent", source_path)
+
+      max_catchup_days = digest["max_catchup_days"]
+      return if max_catchup_days.nil?
+      return if max_catchup_days.is_a?(Integer) && max_catchup_days >= 1
+
+      raise ConfigError,
+            "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 1; " \
+            "got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
+    end
+
     BOT_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
@@ -1960,6 +2027,7 @@ module Hive
       end
 
       validate_bot_allowlist!(bot, source_path)
+      validate_bot_digest_chat_id!(bot, source_path)
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
@@ -1991,6 +2059,16 @@ module Hive
               "bot.chat_id_allowlist[#{idx}] in #{describe_source(source_path)} must be an Integer; " \
               "got #{entry.inspect} (#{entry.class})"
       end
+    end
+
+    def validate_bot_digest_chat_id!(bot, source_path)
+      chat_id = bot["digest_chat_id"]
+      return if chat_id.nil?
+      return if chat_id.is_a?(Integer)
+
+      raise ConfigError,
+            "bot.digest_chat_id in #{describe_source(source_path)} must be an Integer; " \
+            "got #{chat_id.inspect} (#{chat_id.class})"
     end
 
     def validate_bot_numbers!(bot, source_path)

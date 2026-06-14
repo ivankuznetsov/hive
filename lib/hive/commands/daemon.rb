@@ -245,14 +245,7 @@ module Hive
       end
 
       def load_digest_config
-        if Hive::Config.respond_to?(:load_global_digest)
-          Hive::Config.load_global_digest
-        else
-          {
-            "enabled" => false,
-            "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
-          }
-        end
+        Hive::Config.load_global_digest
       end
 
       def stop_daemon

@@ -15,9 +15,10 @@ module Hive
 
     module_function
 
-    def run(date: nil, dry_run: false, cfg: {}, clock: -> { Time.now },
+    def run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now },
             collector: nil, categorizer: nil, sender: nil)
       local_date = date ? Window.parse_date(date) : Window.local_today(now: clock.call) - 1
+      cfg ||= Hive::Config.load_global_digest_config
       collector ||= Collector.new
       sender ||= Sender.new(cfg: cfg)
 

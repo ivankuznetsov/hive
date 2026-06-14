@@ -26,6 +26,7 @@ class HiveDigestRunTest < Minitest::Test
     result = Hive::Digest.run(
       date: Date.new(2026, 6, 13),
       dry_run: false,
+      cfg: {},
       collector: FakeCollector.new({}),
       sender: sender
     )
@@ -42,6 +43,7 @@ class HiveDigestRunTest < Minitest::Test
     result = Hive::Digest.run(
       date: Date.new(2026, 6, 13),
       dry_run: true,
+      cfg: {},
       collector: FakeCollector.new({ "alpha" => [ item ] }),
       categorizer: FakeCategorizer.new(categorized, nil),
       sender: sender
@@ -57,6 +59,7 @@ class HiveDigestRunTest < Minitest::Test
     result = Hive::Digest.run(
       date: Date.new(2026, 6, 13),
       dry_run: false,
+      cfg: {},
       collector: FakeCollector.new({ "alpha" => [ shipped_item ] }),
       categorizer: FakeCategorizer.new(nil, Hive::Digest::ModelError.new("model down")),
       sender: sender
@@ -69,6 +72,7 @@ class HiveDigestRunTest < Minitest::Test
   def test_default_date_is_yesterday_local
     result = Hive::Digest.run(
       dry_run: true,
+      cfg: {},
       clock: -> { Time.local(2026, 6, 14, 0, 10, 0) },
       collector: FakeCollector.new({}),
       sender: FakeSender.new([])

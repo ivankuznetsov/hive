@@ -119,11 +119,61 @@ class BenchSubmitCommandTest < Minitest::Test
 
   def cmd = Hive::Commands::BenchSubmit.new("fix-thing-260601-aa11", bench_path: @bench, projects: projects)
 
-  def test_local_secret_scan_finds_and_passes
+  # A minimal-but-real HiveBench::SecretScan in the fixture bench checkout. The
+  # preflight DELEGATES to this (single source of truth); pattern completeness is
+  # hive-bench's own concern (tested there), so here we only prove that
+  # bench_submit invokes the canonical scanner and parses its findings.
+  def write_bench_scanner(body = nil)
+    dir = File.join(@bench, "validator")
+    FileUtils.mkdir_p(dir)
+    File.write(File.join(dir, "secret_scan.rb"), body || <<~'RUBY')
+      module HiveBench
+        module SecretScan
+          module_function
+          Finding = Data.define(:label, :line, :snippet)
+          PATTERNS = { "github token" => /\bgh[pousr]_[A-Za-z0-9]{20,}\b/ }.freeze
+          def scan_files(paths)
+            paths.flat_map do |path|
+              next [] unless File.file?(path)
+
+              File.read(path).each_line.with_index.flat_map do |line, i|
+                PATTERNS.select { |_l, re| line.match?(re) }
+                        .map { |l, _| Finding.new(label: "#{l} in #{File.basename(path)}", line: i + 1, snippet: line.strip) }
+              end
+            end
+          end
+        end
+      end
+    RUBY
+  end
+
+  def test_local_secret_scan_delegates_to_canonical_bench_scanner
+    write_bench_scanner
     File.write(File.join(@done, "leak.md"), "token = ghp_#{"a" * 36}\n")
     found = cmd.send(:local_secret_scan, [ File.join(@done, "leak.md"), File.join(@done, "plan.md") ])
-    assert(found.any? { |f| f.include?("github token") })
-    assert_empty cmd.send(:local_secret_scan, [ File.join(@done, "plan.md") ])
+
+    assert(found.any? { |f| f.include?("github token") && f.include?("leak.md") }, "delegated finding surfaced")
+    assert_empty cmd.send(:local_secret_scan, [ File.join(@done, "plan.md") ]), "clean spec yields no findings"
+  end
+
+  def test_local_secret_scan_empty_paths_short_circuits
+    assert_empty cmd.send(:local_secret_scan, [])
+  end
+
+  def test_local_secret_scan_requires_the_canonical_scanner
+    # @bench has no validator/secret_scan.rb — must refuse, not fall back weaker.
+    err = assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+      cmd.send(:local_secret_scan, [ File.join(@done, "plan.md") ])
+    end
+    assert_match(/parity with the validator/, err.message)
+  end
+
+  def test_local_secret_scan_raises_when_scanner_errors
+    write_bench_scanner("raise 'boom'\n")
+    err = assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+      cmd.send(:local_secret_scan, [ File.join(@done, "plan.md") ])
+    end
+    assert_match(/secret scan failed/, err.message)
   end
 
   def test_report_json_and_text

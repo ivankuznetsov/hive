@@ -13,6 +13,11 @@ module Hive
     # duplicated) plus a local secret preflight so a contributor never opens a PR
     # that the hive-bench validator would reject for leaked credentials.
     #
+    # The preflight delegates to hive-bench's canonical SecretScan — the exact
+    # module the validator's gate uses — rather than a local pattern copy, so the
+    # local check can never silently drift weaker than the gate that will judge
+    # the PR. There is one pattern set, and it lives in hive-bench.
+    #
     # Locates the hive-bench checkout via HIVE_BENCH_PATH (or ~/Dev/hive-bench).
     # The extractor invocation and the PR open are seams for testing.
     class BenchSubmit
@@ -135,19 +140,29 @@ module Hive
         raise UsageError, "git #{args.first} failed: #{err.strip}" unless status.success?
       end
 
+      # Run hive-bench's own SecretScan (one source of truth) in a child ruby —
+      # array-form, no shell — over the spec paths. Each finding comes back as
+      # "<label> in <file>:<line>". Refuses if the canonical scanner is absent,
+      # rather than fall back to a weaker check that could pass a real secret.
+      RUNNER = <<~'RUBY'
+        require "secret_scan"
+        HiveBench::SecretScan.scan_files(ARGV).each { |f| puts "#{f.label}:#{f.line}" }
+      RUBY
+
       def local_secret_scan(paths)
-        patterns = {
-          "private key" => /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
-          "github token" => /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
-          "openai key" => /\bsk-(?:ant-)?[A-Za-z0-9-]{20,}\b/,
-          "aws key" => /\bAKIA[0-9A-Z]{16}\b/
-        }
-        paths.flat_map do |path|
-          File.read(path).each_line.with_index.filter_map do |line, i|
-            label, = patterns.find { |_l, re| line.match?(re) }
-            "#{label} in #{File.basename(path)}:#{i + 1}" if label
-          end
+        return [] if paths.empty?
+
+        scanner = File.join(@bench_path, "validator", "secret_scan.rb")
+        unless File.file?(scanner)
+          raise UsageError, "hive-bench secret scanner not found at #{scanner} — " \
+                            "can't guarantee parity with the validator; update your hive-bench checkout"
         end
+
+        cmd = [ "ruby", "-I", File.join(@bench_path, "validator"), "-e", RUNNER, "--", *paths ]
+        out, err, status = Open3.capture3(*cmd)
+        raise UsageError, "secret scan failed: #{err.strip}" unless status.success?
+
+        out.each_line.map(&:strip).reject(&:empty?)
       end
 
       def report(entry_dir, pr_url)

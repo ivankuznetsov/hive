@@ -109,14 +109,14 @@ class GoldenPathE2E < ApplicationSystemTestCase
     fill_in "New idea", with: "Golden path sample idea"
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    row = find(".task-row", text: "Golden path sample idea", wait: 10)
+    task_slug = task_slug_from_grid!("Golden path sample idea")
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
     # (A manual Force approve here would race the daemon's own advance.)
 
     # --- Brainstorm round 1: the daemon's agent asks, we answer ------------
-    row.find("a", match: :first).click
+    visit "/tasks/#{@project}/#{task_slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
     # Answer only AFTER the daemon has reaped the round-1 child: the edit
@@ -126,7 +126,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # answering within one daemon tick of the agent finishing strands the
     # task). The daemon's event log is the observable artifact; polling it
     # is an explicit wait on a real condition, not a sleep.
-    slug = current_path.split("/").last
+    slug = task_slug
     wait_for_answer_window!(slug)
     answer_field.fill_in with: "Yes — ship it."
     click_button "Send answers"
@@ -147,6 +147,29 @@ class GoldenPathE2E < ApplicationSystemTestCase
   end
 
   private
+
+  # The status grid is Turbo-replaced while the daemon advances tasks. Read the
+  # slug from a single current-DOM query instead of retaining a Capybara element.
+  def task_slug_from_grid!(title, timeout: 10)
+    title_json = title.to_json
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      slug = page.evaluate_script(<<~JS)
+        (() => {
+          const rows = Array.from(document.querySelectorAll(".task-row"));
+          const row = rows.find((node) => node.textContent.includes(#{title_json}));
+          return row?.querySelector(".task-slug")?.textContent?.trim();
+        })()
+      JS
+      return slug if slug && !slug.empty?
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        raise "task row for #{title.inspect} never exposed a slug"
+      end
+
+      sleep 0.1
+    end
+  end
 
   # The resume watcher only sees edits NEWER than its baseline, and the
   # baseline is seeded by the first classification tick AFTER the round-1

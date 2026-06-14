@@ -7,7 +7,7 @@ updated: 2026-06-14
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, and bundler-audit on top.
+**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e, eval, install-smoke, release-verify, and hivebox image smoke layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, `test/eval/` evaluates the Telegram bot signal contract, and CI layers RuboCop, Brakeman, bundler-audit, installer checks, and Docker smoke tests on top.
 
 ## Run all
 
@@ -99,11 +99,12 @@ task default: :test
 | File | Covers |
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
-| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit. |
+| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
 | `run_open_pr_test.rb` | `hive run` of `5-open-pr/` — push, draft PR creation, idempotent existing-PR path. |
+| `run_review_test.rb` | `hive run` of `6-review/` — pre-flight states, reviewer/triage/fix/browser branching, manual wait and stale/error recovery, auto-commit/guardrail boundaries, and provider-limit marker behavior for reviewers plus triage limit vs non-limit failures. |
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, PR-ready wrap-up, summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |
@@ -135,6 +136,15 @@ command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
 replay path safety, cleanup retention validation, and the single-dispatch
 invariant for successful JSON commands.
+
+The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
+runs `packaging/verify-release.sh --version=v0.1.0` against the published
+release after the pinned-release existence gate. The script itself requires
+`jq` for envelope assertions; CI first uses runner-provided `jq` when present
+and only falls back to apt provisioning when missing. If that fallback's
+`apt-get update` is blocked by transient `packages.microsoft.com` repository
+errors, the workflow disables those Microsoft source files and retries so an
+unrelated third-party apt outage does not hide the verifier's actual behavior.
 
 The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Telegram setup guide, and strict blank/@handle chat-ID rejection) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, and artifact open-state preservation across broadcast-triggered morphs with live content refresh). CI runs them in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
 After adding the sample idea, the golden-path E2E reads the task slug from a

@@ -77,6 +77,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "-C", dir, "push", "origin", "HEAD:feature"
       assert_stubbed env, "git", "commit", "-m", "dry run must not commit"
       assert_stubbed env, "git", "merge", "feature"
+      assert_stubbed env, "git", "branch", "--contains", "HEAD", "-D", "feature"
+      assert_stubbed env, "git", "branch", "-D", "feature", "--contains", "HEAD"
+      assert_stubbed env, "git", "branch", "--show-current", "-m", "old", "new"
+      assert_stubbed env, "git", "branch", "--contains=HEAD", "--set-upstream-to", "origin/main", "feature"
       assert_stubbed env, "git", "config", "user.name", "newvalue", "--get"
       assert_stubbed env, "git", "config", "user.email", "newvalue", "--get-all"
       assert_stubbed env, "git", "config", "commit.gpgsign", "false", "--list"
@@ -173,6 +177,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "git", "config", "--path", "--get", "core.excludesfile"
       assert_passes env, "git", "config", "-z", "--get-all", "remote.origin.fetch"
       assert_passes env, "git", "config", "--type=bool", "--get", "commit.gpgsign"
+      assert_passes env, "git", "branch"
+      assert_passes env, "git", "branch", "--show-current"
+      assert_passes env, "git", "branch", "--contains"
+      assert_passes env, "git", "branch", "--contains", "HEAD"
+      assert_passes env, "git", "branch", "--contains=HEAD"
       assert_passes env, "git", "remote"
       assert_passes env, "git", "remote", "-v"
       assert_passes env, "git", "remote", "show", "-n", "origin"
@@ -234,6 +243,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
+      assert_includes skipped, "git branch --contains HEAD -D feature skipped"
+      assert_includes skipped, "git branch -D feature --contains HEAD skipped"
+      assert_includes skipped, "git branch --show-current -m old new skipped"
+      assert_includes skipped, "git branch --contains=HEAD --set-upstream-to origin/main feature skipped"
       assert_includes skipped, "git config user.name newvalue --get skipped"
       assert_includes skipped, "git config user.email newvalue --get-all skipped"
       assert_includes skipped, "git config commit.gpgsign false --list skipped"
@@ -260,6 +273,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, expected_real_invocation("git", "config", "--path", "--get", "core.excludesfile")
       assert_includes real_invocations, expected_real_invocation("git", "config", "-z", "--get-all", "remote.origin.fetch")
       assert_includes real_invocations, expected_real_invocation("git", "config", "--type=bool", "--get", "commit.gpgsign")
+      assert_includes real_invocations, expected_real_invocation("git", "branch")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--show-current")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--contains")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--contains", "HEAD")
+      assert_includes real_invocations, expected_real_invocation("git", "branch", "--contains=HEAD")
       assert_includes real_invocations, expected_real_invocation("git", "remote")
       assert_includes real_invocations, expected_real_invocation("git", "remote", "-v")
       assert_includes real_invocations, expected_real_invocation("git", "remote", "show", "-n", "origin")

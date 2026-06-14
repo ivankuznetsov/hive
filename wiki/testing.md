@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-12
+updated: 2026-06-14
 tags: [test, minitest, fixtures]
 ---
 
@@ -69,6 +69,7 @@ task default: :test
 | `wiki_log_test.rb` | `Hive::WikiLog` — fragment sorting, generated-block idempotency, stale detection for compiled `wiki/log.md`, and dropping template prose that is not a real legacy `##` entry. |
 | `schema_files_test.rb` | Published JSON schema contracts — current-version schema files exist for every `Hive::Schemas::SCHEMA_VERSIONS` entry, back-compat schema files remain for pinned consumers, producer required-key drift is pinned, `hive-dispatch-request` claimed files remain schema-valid, and every schema filename/version matches its `$id` basename or URN suffix plus `title` version text. |
 | `cli_test.rb` | `Hive::CLI` — command delegation and option threading for the Thor surface, including `hive generate-name` lookup scoping and internal archive recovery flags. |
+| `commands/bench_submit_test.rb` | `Hive::Commands::BenchSubmit` — resolves completed `9-done` tasks from registered projects, derives the source repo from GitHub `origin`, requires `worktree.yml` + `pr.md`, aborts before PR creation on local secret findings, and surfaces missing slugs/checkouts as usage errors. Coverage now includes the default local secret scanner, JSON/text reporting, `run_git`, extractor invocation against a stub `harness/extract.rb`, and PR opening through stub `git`/`gh` binaries; no real hive-bench validator, `git push`, or GitHub PR is exercised. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers and expected-output waits, provider-limit menu classification, signal cleanup, and wrapper argv policy including model/effort pins. |
 | `stages/brainstorm_tmux_sentinel_test.rb` | Claude/tmux sentinel and cleanup behavior — readiness/sentinel delegation, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
@@ -223,6 +224,12 @@ entries before exposing `hive_state_path`; the route constrains `:slug`, and
 the log path still applies `File.basename(params[:slug])` before joining under
 that registry-derived log root. See [[commands/web]] for the task log-tail
 surface.
+
+Commit `c4e2cab5` adds the current `hive bench submit` Brakeman ignore for
+`gh pr create`: `Open3.capture3` is argv-form, and the resolved `9-done` slug
+is interpolated only into PR title/body text. The paired source change splits
+the extractor's `ruby -I` flag and harness path into separate argv elements.
+See [[commands/bench-submit]] for the command surface.
 
 ## Hivebox Golden-Path E2E
 

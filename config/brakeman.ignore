@@ -10,7 +10,7 @@
     },
     {
       "fingerprint": "c5383e38ce67101d42861fc17ef61be803b4270f300f47b186f531104b9bada6",
-      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! \u2014 internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
+      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! — internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
     },
     {
       "fingerprint": "2b04ae09c74c02877b56a2a2a91f97b6363dbd965e1537c105d6781bb785a670",
@@ -35,6 +35,10 @@
     {
       "fingerprint": "2e347323431447c31226b2574bb718f7909484d348ecce84acc43b4ddfaf04c5",
       "note": "False positive. params[:project] never reaches the filesystem raw: find_project! resolves it against the REGISTERED projects allowlist and returns the registry's own hive_state_path; params[:slug] is route-constrained and additionally File.basename()d. The taint laundering through the registry lookup is invisible to static analysis."
+    },
+    {
+      "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
+      "note": "False positive: array-form Open3.capture3 (no shell). slug is a resolved 9-done task slug (ADR-012 regex) interpolated only into the gh PR title/body text, not a shell command. hive bench submit."
     }
   ],
   "updated": "2026-06-03",

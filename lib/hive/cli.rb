@@ -265,6 +265,28 @@ module Hive
       ).call
     end
 
+    desc "bench SUBCOMMAND [SLUG]", "Contribute to hive-bench: `bench submit SLUG` extracts a 9-done task and opens a PR"
+    long_desc <<~DESC
+      Subcommands:
+
+        submit SLUG    Extract the completed (9-done) task SLUG into a hive-bench
+                       corpus entry and open a submission PR. Locates the
+                       hive-bench checkout via HIVE_BENCH_PATH (default
+                       ~/Dev/hive-bench). Runs a local secret/PII preflight and
+                       aborts before opening a PR if anything is found.
+    DESC
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def bench(subcommand, slug = nil)
+      require "hive/commands/bench_submit"
+      case subcommand
+      when "submit"
+        Hive::Commands::BenchSubmit.new(slug, project: options[:project], json: options[:json]).call
+      else
+        warn "hive bench: unknown subcommand '#{subcommand}' (expected: submit)"
+        exit Hive::ExitCodes::USAGE
+      end
+    end
+
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
     def new_task(project, *text_parts)
       require "hive/commands/new"

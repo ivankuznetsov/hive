@@ -185,6 +185,52 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_invalid_row_mtime_without_state_file_returns_nil
+    task = task_row(slug: "missing-mtime", mtime: "not-a-time")
+    task["state_file"] = "/tmp/hive-status-consumer-missing-state-file.md"
+    payload = make_envelope(projects: [ {
+      "name" => "writero",
+      "path" => "/tmp/writero",
+      "hive_state_path" => "/tmp/writero/.hive-state",
+      "tasks" => [ task ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      result = consumer.fetch
+
+      assert result.ok, "expected ok=true; got error #{result.error.inspect}"
+      assert_nil result.rows.first.state_file_mtime
+    end
+  end
+
+  def test_valid_row_mtime_prefers_state_file_precision
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "idea.md")
+      File.write(state_file, "<!-- WAITING -->\n")
+      expected = Time.at(1_800_000_000, 456_789, :microsecond).utc
+      File.utime(expected, expected, state_file)
+
+      task = task_row(slug: "precise-mtime", mtime: expected.utc.iso8601)
+      task["state_file"] = state_file
+      payload = make_envelope(projects: [ {
+        "name" => "writero",
+        "path" => dir,
+        "hive_state_path" => File.join(dir, ".hive-state"),
+        "tasks" => [ task ]
+      } ])
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+        result = consumer.fetch
+
+        assert result.ok, "expected ok=true; got error #{result.error.inspect}"
+        assert_in_delta expected.to_f, result.rows.first.state_file_mtime.to_f, 0.001
+        assert_operator result.rows.first.state_file_mtime.to_f, :>, Time.parse(task.fetch("mtime")).to_f
+      end
+    end
+  end
+
   # ── failure modes ─────────────────────────────────────────────────────
 
   def test_non_zero_exit_returns_not_ok

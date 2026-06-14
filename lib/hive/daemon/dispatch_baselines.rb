@@ -25,13 +25,13 @@ module Hive
     # harmless (flock is advisory and released on process death).
     #
     # mtimes are serialized with `iso8601(6)` — microsecond resolution. That
-    # is sufficient given `hive status --json` emits task mtimes with bare
-    # `iso8601` (whole-second precision) at `Hive::Commands::Status`, so the
-    # LHS of `Policy#decide_edit`'s comparison is already whole-second-
-    # truncated upstream of this file. If status is ever bumped to higher
-    # precision, this serialization must follow (or be moved to two integers
-    # `tv_sec` + `tv_nsec` to stay strictly faithful). The comparison is
-    # mtime-to-mtime, never wall-clock — no clock-skew class of bug.
+    # preserves the daemon's local `File.mtime` baseline precision; the public
+    # `hive status --json` payload is still whole-second ISO8601, but
+    # `StatusConsumer` re-stats local state files before `Policy#decide_edit`
+    # compares them. If baseline precision ever needs nanoseconds, move this
+    # field to two integers (`tv_sec` + `tv_nsec`) to stay strictly faithful.
+    # The comparison is mtime-to-mtime, never wall-clock — no clock-skew class
+    # of bug.
     class DispatchBaselines
       SCHEMA_VERSION = 1
       STALE_TMP_SEC = 60 # only sweep orphan tmp files older than this
@@ -266,8 +266,8 @@ module Hive
         nil
       end
 
-      # Microsecond resolution. See class doc for why µs is sufficient given
-      # `hive status --json`'s upstream whole-second mtime serialization.
+      # Microsecond resolution. See class doc for why persisted baselines keep
+      # more precision than the public `hive status --json` mtime string.
       def timestamp(time)
         time.utc.iso8601(6)
       end

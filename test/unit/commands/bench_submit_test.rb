@@ -100,4 +100,88 @@ class BenchSubmitCommandTest < Minitest::Test
     err = assert_raises(Hive::Commands::BenchSubmit::UsageError) { cmd.call }
     assert_match(/hive-bench checkout not found/, err.message)
   end
+
+  # --- coverage of the default seams (real git + stub binaries, the hive way) ---
+
+  def with_stub_path(git_body: "exit 0", gh_body: "echo https://github.com/ivankuznetsov/hive-bench/pull/9")
+    bin = File.join(@root, "stubbin")
+    FileUtils.mkdir_p(bin)
+    File.write(File.join(bin, "git"), "#!/usr/bin/env bash\n#{git_body}\n")
+    File.write(File.join(bin, "gh"), "#!/usr/bin/env bash\n#{gh_body}\n")
+    FileUtils.chmod(0o755, File.join(bin, "git"))
+    FileUtils.chmod(0o755, File.join(bin, "gh"))
+    old = ENV["PATH"]
+    ENV["PATH"] = "#{bin}:#{old}"
+    yield
+  ensure
+    ENV["PATH"] = old
+  end
+
+  def cmd = Hive::Commands::BenchSubmit.new("fix-thing-260601-aa11", bench_path: @bench, projects: projects)
+
+  def test_local_secret_scan_finds_and_passes
+    File.write(File.join(@done, "leak.md"), "token = ghp_#{"a" * 36}\n")
+    found = cmd.send(:local_secret_scan, [ File.join(@done, "leak.md"), File.join(@done, "plan.md") ])
+    assert(found.any? { |f| f.include?("github token") })
+    assert_empty cmd.send(:local_secret_scan, [ File.join(@done, "plan.md") ])
+  end
+
+  def test_report_json_and_text
+    out_json, = capture_io { Hive::Commands::BenchSubmit.new("s", bench_path: @bench, json: true).send(:report, "/e", "http://pr/1") }
+    assert_includes out_json, "\"pr_url\""
+    out_txt, = capture_io { cmd.send(:report, "/e", "http://pr/2") }
+    assert_includes out_txt, "Submitted"
+  end
+
+  def test_run_git_success_and_failure
+    repo = File.join(@root, "gitrepo")
+    FileUtils.mkdir_p(repo)
+    system("git", "init", "-q", repo, exception: true)
+    cmd.send(:run_git, repo, "status", "--porcelain") # success, no raise
+    assert_raises(Hive::Commands::BenchSubmit::UsageError) { cmd.send(:run_git, repo, "not-a-git-subcommand") }
+  end
+
+  def test_extract_via_hive_bench_runs_the_script
+    FileUtils.mkdir_p(File.join(@bench, "harness"))
+    File.write(File.join(@bench, "harness", "extract.rb"), "exit 0\n")
+    entry = cmd.send(:extract_via_hive_bench, task_dir: @done, repo: "o/r", repo_path: @proj, out_dir: File.join(@bench, "corpus"))
+    assert_equal File.join(@bench, "corpus", "fix-thing-260601-aa11"), entry
+  end
+
+  def test_extract_via_hive_bench_raises_on_failure
+    FileUtils.mkdir_p(File.join(@bench, "harness"))
+    File.write(File.join(@bench, "harness", "extract.rb"), "warn 'boom'; exit 1\n")
+    assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+      cmd.send(:extract_via_hive_bench, task_dir: @done, repo: "o/r", repo_path: @proj, out_dir: File.join(@bench, "corpus"))
+    end
+  end
+
+  def test_extract_via_hive_bench_missing_script
+    assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+      cmd.send(:extract_via_hive_bench, task_dir: @done, repo: "o/r", repo_path: @proj, out_dir: "/x")
+    end
+  end
+
+  def test_open_pr_via_gh_with_stub_binaries
+    with_stub_path do
+      url = cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: File.join(@bench, "corpus", "x"), slug: "fix-thing-260601-aa11")
+      assert_equal "https://github.com/ivankuznetsov/hive-bench/pull/9", url
+    end
+  end
+
+  def test_open_pr_via_gh_raises_when_gh_fails
+    with_stub_path(gh_body: "exit 1") do
+      assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+        cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: "/e", slug: "fix-thing-260601-aa11")
+      end
+    end
+  end
+
+  def test_source_repo_rejects_non_github_origin
+    proj2 = File.join(@root, "proj2")
+    system("git", "init", "-q", proj2, exception: true)
+    system("git", "-C", proj2, "remote", "add", "origin", "https://gitlab.com/x/y.git", exception: true)
+    c = Hive::Commands::BenchSubmit.new("s", bench_path: @bench, projects: [ { "name" => "p2", "path" => proj2 } ])
+    assert_raises(Hive::Commands::BenchSubmit::UsageError) { c.send(:source_repo, proj2) }
+  end
 end

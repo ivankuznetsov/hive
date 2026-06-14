@@ -39,5 +39,8 @@ preflight, aborting before any PR if a secret is found.
   `schema: "hive-bench-submit"`. This schema is not currently registered in
   `Hive::Schemas::SCHEMA_VERSIONS`, and failures still use the normal stderr +
   exit-code path rather than a structured JSON error envelope.
+- The extractor and PR-opening subprocesses use argv/array-form `Open3` calls.
+  The extractor `-I` flag and harness path are separate argv entries; the
+  remaining Brakeman ignore for `gh pr create` is documented in [[testing]].
 - Tests stub the extractor, PR opener, and secret preflight; live hive-bench /
   GitHub submission evidence is tracked in [[gaps]].

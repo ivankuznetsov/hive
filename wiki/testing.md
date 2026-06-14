@@ -225,6 +225,12 @@ the log path still applies `File.basename(params[:slug])` before joining under
 that registry-derived log root. See [[commands/web]] for the task log-tail
 surface.
 
+Commit `c4e2cab5` adds the current `hive bench submit` Brakeman ignore for
+`gh pr create`: `Open3.capture3` is argv-form, and the resolved `9-done` slug
+is interpolated only into PR title/body text. The paired source change splits
+the extractor's `ruby -I` flag and harness path into separate argv elements.
+See [[commands/bench-submit]] for the command surface.
+
 ## Hivebox Golden-Path E2E
 
 `web/test/e2e/golden_path_e2e.rb` (deliberately not `*_test.rb` — the

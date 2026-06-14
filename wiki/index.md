@@ -23,6 +23,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands]] — `wiki/commands.md`
 - [[commands/approve]] — `wiki/commands/approve.md`
 - [[commands/babysit]] — `wiki/commands/babysit.md`
+- [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
 - [[commands/bot]] — `wiki/commands/bot.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`

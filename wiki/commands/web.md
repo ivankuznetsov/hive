@@ -204,7 +204,8 @@ lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, and artifact
 open-state preservation across pushed morphs with live content refresh. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
-rubocop.
+rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden
+path's daemon/Turbo row-replacement retry contract is covered in [[testing]].
 
 `web/script/record_box_demo.rb` is a manual demo recorder, not a test. It
 stages a temporary local repo, boots the real Rails app and real `hive daemon`,

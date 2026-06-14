@@ -179,8 +179,10 @@ def read_only_remote?(rest)
   case args.first
   when "show"
     args.shift
-    args.shift if args.first == "-n"
-    args.all? { |arg| !arg.start_with?("-") }
+    return false unless args.first == "-n"
+
+    args.shift
+    !args.empty? && args.all? { |arg| !arg.start_with?("-") }
   when "get-url"
     args.shift
     args.shift while [ "--push", "--all" ].include?(args.first)
@@ -188,6 +190,17 @@ def read_only_remote?(rest)
   else
     false
   end
+end
+
+def read_only_branch?(rest)
+  args = rest[1..] || []
+  return true if args.empty?
+  return true if args == [ "--show-current" ]
+  return true if args == [ "--contains" ]
+  return true if args.length == 2 && args.first == "--contains" && !args.last.start_with?("-")
+  return true if args.length == 1 && args.first.start_with?("--contains=") && args.first.length > "--contains=".length
+
+  false
 end
 
 def read_only_config?(rest)
@@ -211,7 +224,7 @@ end
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
-    rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")
+    read_only_branch?(rest)
   when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
        "rev-list", "rev-parse", "show", "status"
     true

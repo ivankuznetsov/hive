@@ -302,6 +302,27 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_api_cache_flags_are_skipped_without_writing_cache
+    with_tmp_dir do |dir|
+      cache_dir = File.join(dir, "cache")
+      log_path = File.join(dir, "skipped.log")
+      real_gh = cache_writing_gh_binary(dir, "real-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path,
+        "XDG_CACHE_HOME" => cache_dir
+      }
+
+      assert_stubbed env, "gh", "api", "--method", "GET", "--cache", "1h", "rate_limit"
+      assert_stubbed env, "gh", "api", "--method=GET", "--cache=1h", "rate_limit"
+
+      refute_path_exists File.join(cache_dir, "gh")
+      skipped = File.read(log_path)
+      assert_includes skipped, "gh api --method GET --cache 1h rate_limit skipped"
+      assert_includes skipped, "gh api --method=GET --cache=1h rate_limit skipped"
+    end
+  end
+
   def test_gh_stub_skips_browser_launch_flags
     with_tmp_dir do |dir|
       real_gh = recording_binary(dir, "real-gh")
@@ -522,6 +543,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def cache_writing_gh_binary(dir, name)
+    path = File.join(dir, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      require "fileutils"
+      cache_path = File.join(ENV.fetch("XDG_CACHE_HOME"), "gh")
+      FileUtils.mkdir_p(cache_path)
+      File.write(File.join(cache_path, "api-cache"), ARGV.join(" "))
     RUBY
     FileUtils.chmod("+x", path)
     path

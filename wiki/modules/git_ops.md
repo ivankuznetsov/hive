@@ -3,11 +3,11 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-05-22T13:30:00Z
+updated: 2026-06-14
 tags: [git, init, commit]
 ---
 
-**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, commit managed llm-wiki bootstrap files during `hive init`, and run `git add && git commit` inside the hive-state worktree.
+**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, commit managed llm-wiki bootstrap files during `hive init`, and stage scoped changes before committing inside the hive-state worktree.
 
 ## Constants
 
@@ -85,13 +85,15 @@ Stages the managed llm-wiki context paths written by `Hive::LlmWikiBootstrap`:
 
 If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise returns `:nothing_to_commit`. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately.
 
-## `hive_commit(stage_name:, slug:, action:)`
+## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false)`
 
-Stage runners produce a `commit:` field; `Commands::Run` calls this method inside the per-project commit lock.
+Records a hive-state audit commit. `GitOps` does not acquire the project commit lock itself; durable command callers wrap this method in `Hive::Lock.with_commit_lock(<hive_state_path>)` when concurrent writers can touch the same `.hive-state` worktree. Current locked callers include `Commands::Run`, `Commands::New`, `Commands::Approve`, `Commands::Markers`, `Commands::Drop`, and `Commands::Migrate`. `Hive::DisplayName::Generator` is a best-effort exception: it writes `meta.yml`, calls `hive_commit`, and swallows `Hive::GitError` if that commit loses a race.
 
-1. `git -C <hive_state_path> add .` (only the hive-state worktree, never master).
-2. `git diff --cached --quiet`. If exit 0 (nothing staged), return `:nothing_to_commit`.
-3. Otherwise commit with message `hive: <stage_name>/<slug> <action>` and return `:committed`.
+1. Build the message `hive: <stage_name>/<slug> <action>`, plus an optional second body paragraph when `body:` is present.
+2. With no `pathspecs:`, stage only `stages/<stage_name>/<slug>` when that directory exists, plus `logs/` when present. This avoids sweeping unrelated sibling-task changes into the commit.
+3. With `pathspecs:`, stage each explicit hive-state-relative pathspec via `git add -A -- <pathspec>` only when the path exists or is already tracked, so deletion commits work without untracked sibling leakage.
+4. `git diff --cached --quiet`. If exit 0 (nothing staged), return `:nothing_to_commit`.
+5. Otherwise commit and return `:committed`; `allow_empty: true` adds `--allow-empty`.
 
 Empty diffs are silently skipped (e.g. an `inbox.run!` that deliberately does nothing).
 

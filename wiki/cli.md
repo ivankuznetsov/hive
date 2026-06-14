@@ -25,7 +25,10 @@ reason. Accepted boolean forms match Thor's exact grammar: bare `--json`, exact
 truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
 (`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
 assignments such as `--json=1` or `--json=yes` exit with usage before their
-values can be treated as a command argument or task target.
+values can be treated as a command argument or task target. When the wrapper
+itself catches a usage error, JSON-vs-prose mode is decided from the last
+recognized JSON boolean flag in argv, so a trailing false form such as
+`--no-json` or `--json=false` overrides an earlier `--json`.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested

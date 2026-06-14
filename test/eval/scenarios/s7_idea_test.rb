@@ -45,8 +45,8 @@ class HiveEvalS7IdeaTest < Minitest::Test
 
     when_user_taps(hive_button[:callback_data])
 
-    assert_empty harness.child_supervisor.commands,
-                 "tapping a project must NOT dispatch a child command — commit waits for Done/Skip"
+    assert_empty harness.dispatched_commands,
+                 "tapping a project must NOT dispatch a command — commit waits for Done/Skip"
 
     collector = harness.last_sent
     assert_match(/Send any files now/, collector.text,
@@ -63,8 +63,8 @@ class HiveEvalS7IdeaTest < Minitest::Test
 
     assert_match(/Captured your idea in hive/, harness.last_sent.text,
                  "tapping Done must commit the idea and confirm capture")
-    assert_empty harness.child_supervisor.commands,
-                 "idea commit runs in-process (Hive::Commands::New), never as a child command"
+    assert_empty harness.dispatched_commands,
+                 "idea commit runs in-process (Hive::Commands::New), never as a dispatched command"
 
     assert_all_messages_typed
     assert_no_duplicates(window_sec: 300)
@@ -99,7 +99,7 @@ class HiveEvalS7IdeaTest < Minitest::Test
     assert_equal "Send the idea text in your next message.", harness.last_sent.text
     assert_nil harness.last_sent.reply_markup,
                "the text-capture prompt must not carry an inline keyboard"
-    assert_empty harness.child_supervisor.commands,
-                 "the text-capture prompt must not dispatch any child command"
+    assert_empty harness.dispatched_commands,
+                 "the text-capture prompt must not dispatch any command"
   end
 end

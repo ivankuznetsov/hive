@@ -4,6 +4,7 @@ require "time"
 require "erb"
 require "hive/config"
 require "hive/git_ops"
+require "hive/lock"
 require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
@@ -118,7 +119,9 @@ module Hive
         end
 
         ops = Hive::GitOps.new(project["path"])
-        ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured")
+        Hive::Lock.with_commit_lock(hive_state) do
+          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured")
+        end
         spawn_name_generator(task_dir)
 
         puts "hive: captured #{idea_path}"

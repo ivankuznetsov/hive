@@ -14,40 +14,34 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
-  "rebase-status" => { schema: "hive-rebase-status", error_kind: "invalid_task_path" },
-  "brainstorm" => {
-    schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "brainstorm" }
-  },
-  "plan" => { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "plan" } },
-  "develop" => {
-    schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "develop" }
-  },
-  "open-pr" => {
-    schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "open-pr" }
-  },
-  "pr" => { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "open-pr" } },
-  "review" => { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "review" } },
-  "artifacts" => {
-    schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "artifacts" }
-  },
-  "finalize" => {
-    schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "finalize" }
-  },
-  "archive" => { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "archive" } },
+  "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
   "approve" => { schema: "hive-approve", error_kind: "invalid_task_path" },
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "accept-finding" => {
-    schema: "hive-findings", error_kind: "invalid_task_path", extras: { "operation" => "accept" }
+    schema: "hive-findings",
+    error_kind: "invalid_task_path",
+    extras: { "operation" => "accept" }
   },
   "reject-finding" => {
-    schema: "hive-findings", error_kind: "invalid_task_path", extras: { "operation" => "reject" }
+    schema: "hive-findings",
+    error_kind: "invalid_task_path",
+    extras: { "operation" => "reject" }
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
-  "patrol" => { schema: "hive-patrol", error_kind: "error" }
-}.freeze
+  "pr" => {
+    schema: "hive-stage-action",
+    error_kind: "invalid_task_path",
+    extras: { "verb" => "open-pr" }
+  }
+}.merge(
+  STAGE_ACTION_USAGE_COMMANDS.to_h do |command|
+    [ command, { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => command } } ]
+  end
+).freeze
 
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
@@ -79,7 +73,7 @@ def rewrite_help_flag!(argv)
 end
 
 def json_requested?(argv)
-  argv.any? { |arg| JSON_TRUE_OPTIONS.include?(arg) }
+  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_unsupported_json_assignments!(argv)
@@ -94,31 +88,35 @@ def json_usage_error_contract(argv)
   JSON_USAGE_ERROR_CONTRACTS[command]
 end
 
-def emit_json_usage_error(argv, error)
-  contract = json_usage_error_contract(argv)
-  return false unless contract && json_requested?(argv)
-
+def json_usage_error_payload(contract, error)
   schema = contract.fetch(:schema)
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
-  payload = if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
-    Hive::Schemas::ErrorEnvelope.build(
+  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    return Hive::Schemas::ErrorEnvelope.build(
       schema: schema,
       error: error,
       error_kind: error_kind,
       extras: extras
     )
-  else
-    {
-      "schema" => schema,
-      "ok" => false,
-      "error_class" => error.class.name.split("::").last,
-      "error_kind" => error_kind,
-      "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-      "message" => error.message
-    }.merge(extras)
   end
-  puts JSON.generate(payload)
+
+  {
+    "schema" => schema,
+    "schema_version" => contract.fetch(:schema_version, 1),
+    "ok" => false,
+    "error_class" => error.class.name.split("::").last,
+    "error_kind" => error_kind,
+    "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+    "message" => error.message
+  }.merge(extras)
+end
+
+def emit_json_usage_error(argv, error)
+  contract = json_usage_error_contract(argv)
+  return false unless contract && json_requested?(argv)
+
+  puts JSON.generate(json_usage_error_payload(contract, error))
   true
 rescue Errno::EPIPE, JSON::GeneratorError
   true

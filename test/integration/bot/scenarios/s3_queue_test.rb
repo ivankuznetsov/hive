@@ -22,11 +22,12 @@ class HiveBotScenarioQueueTest < Minitest::Test
 
     text = telegram.messages.last[:text]
     assert_match(/4 active tasks/, text)
-    assert_match(/Brainstorm a… — Brainstorm/, text)
-    assert_match(/Review a… — Brainstorm/, text)
-    assert_match(/PR a… — Brainstorm/, text)
+    assert_match(/Brainstorm a… — — — Brainstorm/, text)
+    assert_match(/Review a… — — — Brainstorm/, text)
+    assert_match(/PR a… — — — Brainstorm/, text)
     refute_match(/hive\/brainstorm-a/, text)
     refute_match(/archived-a/, text)
+    assert_equal :html, telegram.messages.last[:parse_mode]
 
     # Actionable rows now carry inline callback buttons (Telegram text links
     # can't carry the slug). brainstorm-a/-b → answer; pr-a → approve;
@@ -100,7 +101,7 @@ class HiveBotScenarioQueueTest < Minitest::Test
 
   def row(slug:, action:, marker:)
     Row.new(project: "hive", slug: slug, stage: "2-brainstorm", action: action,
-            action_label: action.tr("_", " "), marker: marker, attrs: {})
+            action_label: action.tr("_", " "), marker: marker, attrs: {}, pr_url: nil)
   end
 
   def update(text)

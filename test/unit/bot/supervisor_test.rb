@@ -8,15 +8,16 @@ class HiveBotSupervisorTest < Minitest::Test
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
+                   :id, :display_name, :pr_url,
                    keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
-    def send_message(chat_id:, text:, reply_markup: nil)
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
       raise raise_on_send if raise_on_send
 
-      messages << { chat_id: chat_id, text: text, reply_markup: reply_markup }
+      messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
     end
 
     def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
@@ -238,9 +239,11 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
-          action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil)
+          action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil,
+          id: nil, display_name: nil, pr_url: nil)
     Row.new(project: project, slug: slug, stage: stage, action: action,
-            action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic)
+            action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic,
+            id: id, display_name: display_name, pr_url: pr_url)
   end
 
 
@@ -1435,12 +1438,36 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @supervisor.send(:render_queue, rows)
 
     assert_includes text, "12 active tasks"
-    assert_includes text, "Task 0… — Plan"
+    assert_includes text, "Task 0… — — — Plan"
     assert_includes text, "+ 2 more tasks"
     refute_includes text, "hive/task-0"
     refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
+  end
+
+  def test_render_queue_adds_clickable_pr_link_and_escapes_html
+    rows = [
+      row(
+        slug: "fix-login-260615-abcd",
+        id: 12,
+        display_name: "Fix <Login> & More",
+        stage: "6-review",
+        pr_url: "https://github.com/example/repo/pull/561"
+      )
+    ]
+
+    text = @supervisor.send(:render_queue, rows)
+
+    assert_includes text, "#12 Fix &lt;Login&gt; &amp; More"
+    assert_includes text, '<a href="https://github.com/example/repo/pull/561">#561</a>'
+    assert_includes text, " — Review"
+  end
+
+  def test_safe_send_message_forwards_parse_mode
+    @supervisor.send(:safe_send_message, chat_id: 42, text: "<b>hi</b>", parse_mode: :html)
+
+    assert_equal :html, @telegram.messages.last.fetch(:parse_mode)
   end
 
   def test_status_keyboard_has_callback_button_per_actionable_row_type
@@ -1506,6 +1533,7 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil pid
     assert_empty @child_supervisor.dispatched
     assert_includes @telegram.messages.last.fetch(:text), "1 active task"
+    assert_equal :html, @telegram.messages.last.fetch(:parse_mode)
     # ready_to_develop row → an approve button on the /status reply.
     callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
     assert_includes callbacks, "approve:develop:hive:alpha:3-plan"
@@ -1561,7 +1589,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
 
     text = @telegram.messages.last.fetch(:text)
-    assert_includes text, "Beta… — Plan"
+    assert_includes text, "Beta… — — — Plan"
     refute_includes text, "Alpha"
     # Only the project-filtered row contributes a button.
     callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }

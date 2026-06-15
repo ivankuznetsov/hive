@@ -116,10 +116,11 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # (A manual Force approve here would race the daemon's own advance.)
 
     # --- Brainstorm round 1: the daemon's agent asks, we answer ------------
-    # Turbo may replace the grid row while the daemon advances the task, so
-    # re-resolve the link if the row detaches during the click.
+    # Turbo may replace the grid row while the daemon advances the task. Read
+    # the slug from the current DOM, then navigate directly instead of holding
+    # a row element across live updates.
     slug = task_slug_from_grid!("Golden path sample idea")
-    click_task_link!("Golden path sample idea")
+    visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
     # Answer only AFTER the daemon has reaped the round-1 child: the edit
@@ -212,23 +213,6 @@ class GoldenPathE2E < ApplicationSystemTestCase
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
         raise "state-file mtime second did not advance for #{slug}"
       end
-
-      sleep 0.05
-    end
-  end
-
-  def click_task_link!(title, timeout: 10)
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
-    loop do
-      find(".task-row", text: title, wait: 1).find("a", match: :first).click
-      return
-    rescue Capybara::ElementNotFound
-      raise if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-
-      sleep 0.05
-    rescue Playwright::Error => e
-      raise unless e.message.include?("not attached to the DOM")
-      raise if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
       sleep 0.05
     end

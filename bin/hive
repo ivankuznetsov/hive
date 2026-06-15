@@ -56,6 +56,24 @@ def normalize_leading_json_options!(argv)
   argv.insert(cmd_idx + 1, *leading)
 end
 
+def new_text_start_index(argv)
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return nil unless cmd_idx && argv[cmd_idx] == "new"
+
+  project_idx = argv.each_index.find do |idx|
+    next false if idx <= cmd_idx
+
+    arg = argv[idx]
+    next false if JSON_BOOLEAN_OPTIONS.include?(arg)
+    next false if arg.start_with?("-")
+
+    true
+  end
+  return nil unless project_idx
+
+  project_idx + 1
+end
+
 # Thor only honours `--help` *before* the subcommand name (`hive help approve`);
 # `hive approve --help` would be consumed as the TARGET positional. Intercept
 # the help flag before Thor dispatch so the convention agents try first works.
@@ -65,11 +83,25 @@ def rewrite_help_flag!(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return unless cmd_idx
 
-  help_idx = argv[(cmd_idx + 1)..]&.index { |a| a == "--help" || a == "-h" }
+  text_start_idx = new_text_start_index(argv)
+  help_idx = argv.each_index.find do |idx|
+    next false if idx <= cmd_idx
+    next false if text_start_idx && idx >= text_start_idx
+
+    argv[idx] == "--help" || argv[idx] == "-h"
+  end
   return unless help_idx
 
   cmd = argv[cmd_idx]
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
+end
+
+def terminate_new_text_options!(argv)
+  text_start_idx = new_text_start_index(argv)
+  return unless text_start_idx && text_start_idx < argv.length
+  return if argv[text_start_idx] == "--"
+
+  argv.insert(text_start_idx, "--")
 end
 
 def json_requested?(argv)
@@ -77,7 +109,12 @@ def json_requested?(argv)
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  text_start_idx = new_text_start_index(argv)
+  arg = argv.each_with_index.find do |candidate, idx|
+    next false if text_start_idx && idx >= text_start_idx
+
+    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
+  end&.first
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
@@ -126,6 +163,7 @@ begin
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_json_options!(ARGV)
   rewrite_help_flag!(ARGV)
+  terminate_new_text_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)

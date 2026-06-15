@@ -40,3 +40,13 @@ Constraints:
 - Do not write outside the task folder or worktree.
 - Do not include `.env`, secrets, tokens, or unrelated file contents in the PR
   body.
+
+## Completion — REQUIRED, and the last thing you do
+
+The hive runner detects this stage as complete ONLY from the terminal marker
+below, never from your process exiting or returning to an idle prompt. You are
+NOT done until `pr.md` ends with this exact line — write it even if the PR was
+already open and there was nothing new to create, and do not stop, idle, or
+yield until it is present. No other line may follow it.
+
+<!-- COMPLETE pr_url=<url> is_draft=true -->

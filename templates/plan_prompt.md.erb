@@ -29,3 +29,14 @@ Constraints:
 - Do not run code in the project worktree — execution happens in the next stage.
 - The trailing marker must be exactly one of `<!-- WAITING -->` or
   `<!-- COMPLETE -->`.
+
+## Completion — REQUIRED, and the last thing you do
+
+The hive runner detects this stage ONLY from the terminal marker on the last
+line of `plan.md`, never from your process exiting or returning to an idle
+prompt. You are NOT done until `plan.md` ends with exactly one terminal marker —
+`<!-- WAITING -->` if any follow-up question remains, otherwise the exact line
+below. Write it even if you believe the plan is already finished, and do not
+stop, idle, or yield until it is present. No other line may follow it.
+
+<!-- COMPLETE -->

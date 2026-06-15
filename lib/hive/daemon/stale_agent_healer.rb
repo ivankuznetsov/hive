@@ -57,10 +57,16 @@ module Hive
     # rerunning finalize. `reason=tmux_session_terminated` and
     # `reason=agent_orphaned` markers describe a lost agent session in ANY
     # stage — not a task-domain failure — and stage reruns resume from the
-    # on-disk artifacts.
+    # on-disk artifacts. A `reason=timeout` on `5-open-pr` or `7-artifacts`
+    # (TIMEOUT_RECOVERABLE_STAGES) is the narrow case where the agent finished
+    # its work but returned to idle without stamping the terminal marker, so the
+    # wait timed out; it recovers EXACTLY ONCE (TIMEOUT_RECOVERY_LIMIT) because
+    # re-running those two stages is side-effect-safe — 5-open-pr re-enters its
+    # already-open arm (returns :complete without a second PR) and 7-artifacts
+    # idempotently re-collects into artifact.md.
     # Clearing those specific markers lets the normal daemon dispatch
-    # rerun the stage up to the configured limit (default 3) before
-    # leaving the marker red for manual recovery. There is no healer-side
+    # rerun the stage up to the configured limit (default 3, or 1 for timeout)
+    # before leaving the marker red for manual recovery. There is no healer-side
     # backoff between those retries — the only thing spacing them is the
     # stage's own re-dispatch runtime, not any delay enforced here.
     #
@@ -85,6 +91,11 @@ module Hive
     class StaleAgentHealer
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
       ERROR_AUTO_RECOVERY_LIMIT = 3
+      # `reason=timeout` recovers EXACTLY ONCE, and only on the two stages whose
+      # re-entry is provably idempotent — far lower than the agent-loss budget
+      # because a timeout means "I ran and didn't finish", not "I was interrupted".
+      TIMEOUT_RECOVERY_LIMIT = 1
+      TIMEOUT_RECOVERABLE_STAGES = %w[5-open-pr 7-artifacts].freeze
 
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
@@ -164,8 +175,9 @@ module Hive
         marker_reason = marker_reason(row)
         heal_label = error_heal_label(row, marker_reason)
         recovery_key = error_auto_recovery_key(row, reason: marker_reason)
+        recovery_limit = error_auto_recovery_limit_for(marker_reason)
         attempts = @error_auto_recoveries[recovery_key]
-        if attempts >= @error_auto_recovery_limit
+        if attempts >= recovery_limit
           log_recovery_exhausted_once(
             @error_recovery_exhausted,
             recovery_key,
@@ -173,7 +185,7 @@ module Hive
             reason: heal_label,
             marker_reason: marker_reason,
             attempts: attempts,
-            max_attempts: @error_auto_recovery_limit,
+            max_attempts: recovery_limit,
             remediation: error_recovery_remediation(row, marker_reason)
           )
           return
@@ -204,7 +216,7 @@ module Hive
                       marker_reason: marker_reason,
                       state_file: row.state_file,
                       attempts: attempts,
-                      max_attempts: @error_auto_recovery_limit)
+                      max_attempts: recovery_limit)
         # Every 3-plan heal needs the explicit requeue — limits_reached
         # cooldown heals leave the same markerless empty plan.md as agent
         # loss does (PR review P2 #7).
@@ -270,6 +282,21 @@ module Hive
         # ticks do NOT consume the retry budget.
         return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
 
+        # A `reason=timeout` on the two side-effect-safe stages recovers EXACTLY
+        # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work but returned
+        # to idle without stamping the terminal marker, so the wait timed out.
+        # Clearing the marker re-dispatches the stage, which is safe to re-run:
+        # 5-open-pr re-enters its already-open arm (open_pr_already_open) and
+        # returns :complete without spawning a second PR; 7-artifacts re-runs its
+        # agent, which only (idempotently) rewrites the artifact.md summary — the
+        # timeout means :complete was never stamped, so artifacts does NOT hit
+        # its own :complete short-circuit, it just re-collects. Stage-gated
+        # because other stages' timeouts are NOT safe to blindly re-run, and
+        # bounded to one attempt because a timeout (unlike a lost session) means
+        # "I ran and didn't finish" — retry once, then leave it red for manual
+        # recovery.
+        return true if reason == "timeout" && TIMEOUT_RECOVERABLE_STAGES.include?(row.stage.to_s)
+
         # Agent-loss reasons heal in every stage EXCEPT 6-review: a lost
         # tmux session or orphaned agent is environmental wherever it
         # happens (the sweep-kills-the-server bug took out parallel
@@ -286,8 +313,15 @@ module Hive
       def error_heal_label(row, reason)
         return "finalize_unpushed_commits" if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
         return "limits_reached" if reason == "limits_reached"
+        return "stage_timeout" if reason == "timeout"
 
         "terminal_agent_loss"
+      end
+
+      # `reason=timeout` is capped at a single re-entry; every other auto-
+      # recoverable error reason shares the agent-loss budget (default 3).
+      def error_auto_recovery_limit_for(reason)
+        reason == "timeout" ? TIMEOUT_RECOVERY_LIMIT : @error_auto_recovery_limit
       end
 
       def error_recovery_remediation(row, reason)
@@ -300,6 +334,12 @@ module Hive
         if reason == "limits_reached"
           return "the usage/credit limit did not clear after #{@error_auto_recovery_limit} cooldown " \
                  "retries — top up credits or wait for the window to reset, then rerun #{row.stage} " \
+                 "(`#{command}`) or run `hive markers clear`"
+        end
+
+        if reason == "timeout"
+          return "the #{row.stage} agent finished but did not stamp its completion marker before the " \
+                 "stage timeout; it was retried once and timed out again — rerun #{row.stage} " \
                  "(`#{command}`) or run `hive markers clear`"
         end
 

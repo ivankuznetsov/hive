@@ -234,7 +234,8 @@ module Hive
         succeeded = []
         targets.each do |chat_id|
           @telegram.send_message(chat_id: chat_id, text: notification.text,
-                                 reply_markup: notification.keyboard)
+                                 reply_markup: notification.keyboard,
+                                 parse_mode: notification.parse_mode)
           succeeded << chat_id
         rescue StandardError => e
           @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)

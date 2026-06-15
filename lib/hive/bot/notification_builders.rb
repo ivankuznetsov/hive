@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "shellwords"
 require "hive"
+require "hive/bot/format"
 require "hive/bot/title_formatter"
 require "hive/markers"
 
@@ -93,12 +94,25 @@ module Hive
         verb = verb_for_action(row.action)
         return nil unless verb
 
+        text = header(row) + "\nReady for #{verb}."
+        parse_mode = nil
+        if row.action.to_s == "ready_for_review"
+          pr_link = Hive::Bot::Format.html_pr_link(row.respond_to?(:pr_url) ? row.pr_url : nil)
+          if pr_link
+            text = "#{Hive::Bot::Format.html_escape(header(row))}\n" \
+                   "Ready for #{Hive::Bot::Format.html_escape(verb)}.\n" \
+                   "PR: #{pr_link}"
+            parse_mode = :html
+          end
+        end
+
         Notification.new(
-          text: header(row) + "\nReady for #{verb}.",
+          text: text,
           keyboard: [
             [ button("Approve", "approve:#{verb}:#{row.project}:#{row.slug}:#{row.stage}") ],
             [ button("Reject", "reject:#{row.project}:#{row.slug}") ]
-          ]
+          ],
+          parse_mode: parse_mode
         )
       end
 
@@ -396,7 +410,11 @@ module Hive
         registry.shift while registry.size > CALLBACK_REGISTRY_MAX
       end
 
-      Notification = Data.define(:text, :keyboard)
+      Notification = Data.define(:text, :keyboard, :parse_mode) do
+        def initialize(text:, keyboard:, parse_mode: nil)
+          super
+        end
+      end
     end
   end
 end

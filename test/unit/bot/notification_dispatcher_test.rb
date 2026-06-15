@@ -9,7 +9,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          id: nil, display_name: nil)
+          id: nil, display_name: nil, pr_url: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -21,7 +21,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       action: action,
       action_label: "Needs your input",
       folder: "/tmp/#{slug}",
-      suggested_command: "hive brainstorm #{slug}"
+      suggested_command: "hive brainstorm #{slug}",
+      pr_url: pr_url
     )
   end
 
@@ -661,6 +662,22 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     labels = telegram.messages.last[:reply_markup].flatten.map { |b| b[:text] }
     assert_includes labels, "Approve"
     assert_includes labels, "Reject"
+  end
+
+  def test_ready_for_review_forwards_html_parse_mode
+    d = dispatcher(daemon_enabled: ->(_project) { false })
+    d.process_rows([
+      row(
+        action: "ready_for_review",
+        marker: "complete",
+        stage: "5-open-pr",
+        pr_url: "https://github.com/example/repo/pull/561"
+      )
+    ])
+
+    assert_equal :html, telegram.messages.last.fetch(:parse_mode)
+    assert_includes telegram.messages.last.fetch(:text),
+                    '<a href="https://github.com/example/repo/pull/561">#561</a>'
   end
 
   def test_multi_chat_fanout_delivers_to_all_allowed_chats

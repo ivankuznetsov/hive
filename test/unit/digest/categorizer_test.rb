@@ -26,8 +26,8 @@ class HiveDigestCategorizerTest < Minitest::Test
       path = File.join(dir, "items.json")
       File.write(path, JSON.dump({
         "items" => [
-          { "id" => "10", "category" => "mystery", "summary" => "Odd row" },
-          { "id" => "11", "category" => "patrol", "summary" => "Runs maintenance." }
+          { "id" => "alpha/10", "category" => "mystery", "summary" => "Odd row" },
+          { "id" => "alpha/11", "category" => "patrol", "summary" => "Runs maintenance." }
         ]
       }))
       grouped = {
@@ -101,16 +101,59 @@ class HiveDigestCategorizerTest < Minitest::Test
     )
 
     assert_includes prompt, "Hive's daily shipped digest for 2026-06-13"
-    assert_includes prompt, "Item id: 10"
+    assert_includes prompt, "Item id: alpha/10"
     assert_includes prompt, "/tmp/digest-items.json"
     assert_includes prompt, "Full body."
   end
 
+  def test_cross_project_pr_number_collision_keeps_summaries_distinct
+    with_tmp_dir do |dir|
+      path = File.join(dir, "items.json")
+      # Two projects shipped PR #10 on the same day. Project-scoped ids keep
+      # their model summaries from overwriting each other in the output map.
+      File.write(path, JSON.dump({
+        "items" => [
+          { "id" => "alpha/10", "category" => "feature", "summary" => "Alpha PR 10." },
+          { "id" => "beta/10", "category" => "fix", "summary" => "Beta PR 10." }
+        ]
+      }))
+      grouped = {
+        "alpha" => [ item(pr_number: 10, pr_title: "Alpha title") ],
+        "beta" => [ item(pr_number: 10, pr_title: "Beta title", project_name: "beta") ]
+      }
+
+      result = Hive::Digest::Categorizer.map_output_file(path, grouped: grouped, logger: nil)
+
+      assert_equal "Alpha PR 10.", result.fetch("alpha").first.summary
+      assert_equal "Beta PR 10.", result.fetch("beta").first.summary
+    end
+  end
+
+  def test_agent_name_fallback_chain
+    assert_equal "codex",
+                 Hive::Digest::Categorizer.new(cfg: { "digest" => { "agent" => "codex" } }).send(:agent_name)
+    assert_equal "pi",
+                 Hive::Digest::Categorizer.new(cfg: { "patrol" => { "agent" => "pi" } }).send(:agent_name)
+    assert_equal "claude", Hive::Digest::Categorizer.new(cfg: {}).send(:agent_name)
+  end
+
+  def test_budget_and_timeout_fallback_chain
+    tuned = Hive::Digest::Categorizer.new(
+      cfg: { "budget_usd" => { "digest" => 12 }, "timeout_sec" => { "digest" => 34 } }
+    )
+    assert_equal 12, tuned.send(:budget_usd)
+    assert_equal 34, tuned.send(:timeout_sec)
+
+    defaulted = Hive::Digest::Categorizer.new(cfg: {})
+    assert_equal Hive::Digest::Categorizer::DEFAULT_BUDGET_USD, defaulted.send(:budget_usd)
+    assert_equal Hive::Digest::Categorizer::DEFAULT_TIMEOUT_SEC, defaulted.send(:timeout_sec)
+  end
+
   private
 
-  def item(pr_number:, pr_title:, pr_body: "body")
+  def item(pr_number:, pr_title:, pr_body: "body", project_name: "alpha")
     Hive::Digest::ShippedItem.new(
-      project_name: "alpha",
+      project_name: project_name,
       slug: "slug-#{pr_number}",
       display_name: "Task #{pr_number}",
       pr_url: "https://example.test/pulls/#{pr_number}",

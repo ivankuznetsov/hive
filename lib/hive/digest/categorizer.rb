@@ -6,6 +6,7 @@ require "securerandom"
 require "hive/agent"
 require "hive/agent_profiles"
 require "hive/config"
+require "hive/digest/categories"
 require "hive/digest/errors"
 require "hive/digest/shipped_item"
 require "hive/digest/window"
@@ -14,13 +15,27 @@ require "hive/stages/base"
 
 module Hive
   module Digest
-    CategorizedItem = Data.define(:item, :category, :summary)
+    CategorizedItem = Data.define(:item, :category, :summary) do
+      # Guard the type's invariants at the boundary so no caller can mint
+      # an item with an unknown category (which the renderer would drop)
+      # or a blank summary (which would render an empty changelog line).
+      def initialize(item:, category:, summary:)
+        unless Categories::VALID.include?(category)
+          raise ArgumentError, "digest category must be one of #{Categories::VALID.inspect}; got #{category.inspect}"
+        end
+        raise ArgumentError, "digest summary must not be blank" if summary.to_s.strip.empty?
+
+        super
+      end
+    end
 
     class Categorizer
-      VALID_CATEGORIES = %w[feature fix patrol].freeze
-      DEFAULT_CATEGORY = "feature".freeze
+      VALID_CATEGORIES = Categories::VALID
+      DEFAULT_CATEGORY = Categories::DEFAULT
       DEFAULT_BUDGET_USD = 50
       DEFAULT_TIMEOUT_SEC = 1800
+      # Keep at most this many per-run scratch dirs under <state_home>/digest/runs.
+      RUN_DIR_RETENTION = 20
 
       RunnerTask = Data.define(:folder, :project_root, :state_file, :log_dir, :slug, :stage_name)
 
@@ -60,7 +75,8 @@ module Hive
       class << self
         def parse_result!(result, output_path:, grouped:, logger: Logger.new($stderr))
           unless result.is_a?(Hash) && result[:status] == :ok
-            raise ModelError, "digest categorizer failed: #{agent_error_message(result)}"
+            raise_model_error("digest categorizer failed: #{agent_error_message(result)}",
+                              output_path: output_path, logger: logger)
           end
 
           map_output_file(output_path, grouped: grouped, logger: logger)
@@ -68,18 +84,22 @@ module Hive
 
         def map_output_file(output_path, grouped:, logger: Logger.new($stderr))
           unless File.exist?(output_path) && File.size(output_path).positive?
-            raise ModelError, "digest categorizer output missing or empty: #{output_path}"
+            raise_model_error("digest categorizer output missing or empty: #{output_path}",
+                              output_path: output_path, logger: logger)
           end
 
           doc = JSON.parse(File.read(output_path))
           map_document(doc, grouped: grouped, logger: logger)
         rescue JSON::ParserError => e
-          raise ModelError, "digest categorizer output was not valid JSON: #{e.message}"
+          raise_model_error("digest categorizer output was not valid JSON: #{e.message}",
+                            output_path: output_path, logger: logger)
         end
 
         def map_document(doc, grouped:, logger: Logger.new($stderr))
           rows = doc.is_a?(Hash) ? doc["items"] : nil
-          raise ModelError, "digest categorizer JSON must contain an items array" unless rows.is_a?(Array)
+          unless rows.is_a?(Array)
+            raise ModelError, "digest categorizer JSON must contain an items array"
+          end
 
           by_id = rows.each_with_object({}) do |row, memo|
             next unless row.is_a?(Hash)
@@ -95,6 +115,17 @@ module Hive
 
         private
 
+        # Raise a ModelError whose message names the run dir and its log
+        # dir, and mirror it to the operator log, so a failed digest is
+        # debuggable without hunting for the scratch folder. The
+        # user-facing Telegram notice stays short (see Renderer.failed).
+        def raise_model_error(message, output_path:, logger:)
+          run_dir = File.dirname(output_path.to_s)
+          detailed = "#{message} (run dir: #{run_dir}; logs: #{File.join(run_dir, 'logs')})"
+          logger&.error(detailed)
+          raise ModelError, detailed
+        end
+
         def agent_error_message(result)
           return result.inspect unless result.is_a?(Hash)
 
@@ -104,14 +135,15 @@ module Hive
         def categorized_item(item, row, logger:)
           category = row && row["category"].to_s
           summary = row && row["summary"].to_s.strip
+          category_valid = !category.nil? && VALID_CATEGORIES.include?(category)
           if row.nil?
             log_warning(logger, "digest categorizer omitted item #{item.categorizer_id}; using default")
-          elsif !VALID_CATEGORIES.include?(category)
+          elsif !category_valid
             log_warning(logger, "digest categorizer returned invalid category #{category.inspect} " \
                                 "for item #{item.categorizer_id}; using default")
           end
 
-          category = DEFAULT_CATEGORY unless VALID_CATEGORIES.include?(category)
+          category = DEFAULT_CATEGORY unless category_valid
           summary = default_summary(item) if summary.to_s.empty?
           CategorizedItem.new(item: item, category: category, summary: summary)
         end
@@ -137,9 +169,27 @@ module Hive
       def run_dir(date)
         local_date = Window.parse_date(date)
         root = @run_root || File.join(Hive::Paths.state_home, "digest", "runs")
+        FileUtils.mkdir_p(root)
+        prune_old_runs(root)
         dir = File.join(root, "#{local_date.iso8601}-#{SecureRandom.hex(4)}")
         FileUtils.mkdir_p(dir)
         dir
+      end
+
+      # Bound the per-run scratch dirs (items.json / state.yml / logs):
+      # they would otherwise accumulate one folder per day forever. Keep
+      # the most recent RUN_DIR_RETENTION by mtime and drop the rest.
+      def prune_old_runs(root)
+        dirs = Dir.children(root)
+                  .map { |name| File.join(root, name) }
+                  .select { |path| File.directory?(path) }
+        return if dirs.size <= RUN_DIR_RETENTION
+
+        dirs.sort_by { |path| File.mtime(path) }
+            .first(dirs.size - RUN_DIR_RETENTION)
+            .each { |path| FileUtils.rm_rf(path) }
+      rescue SystemCallError => e
+        @logger&.warn("digest: run-dir prune failed under #{root}: #{e.message}")
       end
 
       def runner_task(output_path:, date:)

@@ -63,6 +63,25 @@ class HiveDigestRendererTest < Minitest::Test
     assert_equal "• Adds digest\\. — Digest item", line
   end
 
+  def test_render_line_escapes_link_breaking_chars_in_url
+    line = Hive::Digest::Renderer.render_line(
+      categorized("feature", "Adds digest.", display_name: "Digest item",
+                  pr_url: "https://example.test/foo(bar)\\baz")
+    )
+
+    # Inside the link destination, ')' and '\' must be escaped; '(' is left
+    # alone. One un-escaped ')' would otherwise close the link early and
+    # fail the whole day's MarkdownV2 send.
+    assert_includes line, "bar\\)"
+    assert_includes line, "\\\\baz"
+  end
+
+  def test_category_order_matches_shared_constant
+    assert_equal Hive::Digest::Categories::ORDERED, Hive::Digest::Renderer::CATEGORY_ORDER
+    assert_equal Hive::Digest::Categories::VALID,
+                 Hive::Digest::Renderer::CATEGORY_ORDER.map(&:first)
+  end
+
   private
 
   def categorized(category, summary, display_name: "Task", pr_number: 10, pr_url: nil)

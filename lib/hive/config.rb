@@ -899,7 +899,11 @@ module Hive
       merged
     end
 
-    def load_global_digest
+    # The `digest` block only (enabled / agent / max_catchup_days), merged
+    # over defaults. Used by the daemon scheduler. Distinct from
+    # `load_global_digest_config`, which returns the FULL merged config
+    # (incl. `bot`) for the digest runner.
+    def load_global_digest_block
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
@@ -1987,11 +1991,13 @@ module Hive
 
       max_catchup_days = digest["max_catchup_days"]
       return if max_catchup_days.nil?
-      return if max_catchup_days.is_a?(Integer) && max_catchup_days >= 1
+      # 0 = unbounded catch-up (DigestScheduler#apply_catchup_cap treats it
+      # as "no cap"); negatives are clamped to 0 there, so reject them here.
+      return if max_catchup_days.is_a?(Integer) && max_catchup_days >= 0
 
       raise ConfigError,
-            "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 1; " \
-            "got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
+            "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 0 " \
+            "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
     end
 
     BOT_NUMERIC_BOUNDS = [

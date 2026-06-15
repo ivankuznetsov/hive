@@ -40,6 +40,39 @@ class HiveDigestShipTimesTest < Minitest::Test
     end
   end
 
+  def test_matches_action_on_non_done_stage_via_suffix_fallback
+    with_state_repo do |repo|
+      # No "hive: 9-done/<slug> pr_finalized" exact commit exists, so the
+      # finalize-stage commit must still match via the suffix fallback.
+      commit(repo, "2026-06-12T08:00:00Z", "hive: 8-finalize/suffix-260612-abcd pr_finalized")
+
+      assert_equal Time.utc(2026, 6, 12, 8, 0, 0),
+                   Hive::Digest::ShipTimes.new.shipped_at(hive_state_path: repo, slug: "suffix-260612-abcd")
+    end
+  end
+
+  def test_fixed_string_grep_tolerates_regex_metacharacters_in_slug
+    with_state_repo do |repo|
+      # An unbalanced '[' is an invalid regex; without -F the git --grep
+      # would exit non-zero and the item would be silently dropped.
+      slug = "weird-[260612-abcd"
+      commit(repo, "2026-06-12T07:00:00Z", "hive: 9-done/#{slug} archived")
+
+      assert_equal Time.utc(2026, 6, 12, 7, 0, 0),
+                   Hive::Digest::ShipTimes.new.shipped_at(hive_state_path: repo, slug: slug)
+    end
+  end
+
+  def test_raises_git_error_when_git_log_fails
+    with_tmp_dir do |not_a_repo|
+      error = assert_raises(Hive::GitError) do
+        Hive::Digest::ShipTimes.new.shipped_at(hive_state_path: not_a_repo, slug: "demo-260612-abcd")
+      end
+
+      assert_match(/git log/, error.message)
+    end
+  end
+
   private
 
   def with_state_repo

@@ -78,6 +78,13 @@ module Hive
         []
       end
 
+      # Public view of how `send_message` would split `text` into
+      # Telegram-sized chunks, so callers that need per-chunk delivery
+      # visibility (e.g. the digest sender) can drive the loop themselves.
+      def message_chunks(text)
+        split_message(text)
+      end
+
       def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
         chunks = split_message(text)
         chunks.map.with_index do |chunk, idx|

@@ -21,7 +21,7 @@ through `Hive::Config.load_global_digest_config`.
 |-----|---------|
 | `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil)` | Orchestrates collection, categorization/rendering, and delivery. Defaults `cfg` via `Config.load_global_digest_config`. Returns `Result(status:, date:, message:, delivery:)`. |
 | `Digest::Window.local_today`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
-| `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` and chooses the first ship commit by action preference: `pr_finalized`, `archived`, then approval into `9-done`. |
+| `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
 | `Digest::Collector#for_date(date)` | Scans registered projects and builds grouped `ShippedItem` rows from `9-done` task folders, `meta.yml`, `pr.md`, and ship times. |
 | `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. |
 | `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items, defaulting bad/missing categories safely. |
@@ -115,11 +115,16 @@ hive digest --date YYYY-MM-DD --json
 The due model is local-date based: at any tick, the most recent completed
 local day is `Window.local_today(now:) - 1`. Missing state is a first-run guard
 that initializes the cursor to that completed day without sending history.
-After downtime, owed days dispatch oldest-first, one per child completion, and
-`digest.max_catchup_days` (default `7`) skips/logs the oldest excess days.
-The dispatcher runs this global scheduler before the status fetch and bypasses
-per-project daemon gates; successful child exit advances the cursor, while a
-non-zero exit clears the pending marker but leaves the cursor for retry.
+After downtime, owed days dispatch oldest-first, one per successful child
+completion, and `digest.max_catchup_days` (default `7`, `0` = unbounded)
+skips/logs the oldest excess days. The dispatcher runs this global scheduler
+before the status fetch and bypasses per-project daemon gates, but still gates
+the dispatch through the concurrency controller (tagged `kind: :digest`, off
+the task caps, at most one in flight). A successful child exit advances the
+cursor; a non-zero exit clears the pending marker, leaves the cursor for retry,
+and records an escalating failure backoff (`60`/`300`/`900`s) so the same date
+is **not** re-dispatched every tick. `digest.enabled` / `max_catchup_days` are
+re-read on SIGHUP (the scheduler is reconfigured in place within one tick).
 
 ## Tests
 

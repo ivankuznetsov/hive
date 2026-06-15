@@ -45,6 +45,22 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_equal "digest body", payload.fetch("message")
   end
 
+  def test_json_ok_is_false_for_failed_notice
+    output = StringIO.new
+    runner = Runner.new([], result(status: :failed_notice, message: "fail"))
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      json: true,
+      runner: runner,
+      output: output
+    ).call
+
+    payload = JSON.parse(output.string)
+    assert_equal false, payload.fetch("ok"), "a failed digest must report ok=false"
+    assert_equal "failed_notice", payload.fetch("status")
+  end
+
   def test_invalid_date_raises_config_error
     command = Hive::Commands::Digest.new(date: "13-06-2026", dry_run: true, runner: Runner.new([], nil))
 

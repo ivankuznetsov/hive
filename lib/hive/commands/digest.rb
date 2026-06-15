@@ -46,7 +46,9 @@ module Hive
 
       def json_payload(result)
         {
-          "ok" => true,
+          # Derive from status so a machine consumer can tell a delivered
+          # digest from one that fell back to a failure notice.
+          "ok" => result.status != :failed_notice,
           "schema" => "hive-digest",
           "date" => result.date.iso8601,
           "status" => result.status.to_s,

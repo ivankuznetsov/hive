@@ -245,7 +245,7 @@ module Hive
       end
 
       def load_digest_config
-        Hive::Config.load_global_digest
+        Hive::Config.load_global_digest_block
       end
 
       def stop_daemon

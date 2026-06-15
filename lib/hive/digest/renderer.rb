@@ -1,17 +1,23 @@
 require "date"
+require "hive/digest/categories"
 require "hive/digest/categorizer"
 require "hive/digest/window"
 
 module Hive
   module Digest
     module Renderer
-      CATEGORY_ORDER = [
-        [ "feature", "New features" ],
-        [ "fix", "Fixes" ],
-        [ "patrol", "Patrol tasks" ]
-      ].freeze
+      # Shares the single ordered category set with the categorizer
+      # (see Hive::Digest::Categories) so an accepted category can never
+      # be silently dropped here for want of a render section.
+      CATEGORY_ORDER = Categories::ORDERED
 
       RESERVED_MDV2 = /([\\_*\[\]()~`>#+\-=|{}.!])/
+
+      # Inside a MarkdownV2 inline link destination only ')' and '\'
+      # are special and must be escaped; every other URL character is
+      # passed through untouched (Telegram MarkdownV2 spec). One
+      # malformed URL would otherwise fail the whole day's send_message.
+      RESERVED_LINK_TARGET = /([\\)])/
 
       module_function
 
@@ -54,8 +60,12 @@ module Hive
         summary = escape_mdv2(entry.summary)
         label = escape_mdv2(item.display_label)
         target = item.pr_url.to_s
-        link = target.empty? ? label : "[#{label}](#{target})"
+        link = target.empty? ? label : "[#{label}](#{escape_link_target(target)})"
         "• #{summary} — #{link}"
+      end
+
+      def escape_link_target(url)
+        url.to_s.gsub(RESERVED_LINK_TARGET) { "\\#{$1}" }
       end
     end
   end

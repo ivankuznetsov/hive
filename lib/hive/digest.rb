@@ -11,7 +11,18 @@ require "hive/digest/sender"
 
 module Hive
   module Digest
-    Result = Data.define(:status, :date, :message, :delivery)
+    Result = Data.define(:status, :date, :message, :delivery) do
+      STATUSES = %i[empty sent failed_notice].freeze
+
+      # Guard the status invariant at the boundary: only the three known
+      # outcomes are constructible, so a typo'd symbol can't slip through.
+      def initialize(status:, date:, message:, delivery:)
+        raise ArgumentError, "digest status must be one of #{STATUSES.inspect}; got #{status.inspect}" \
+          unless STATUSES.include?(status)
+
+        super
+      end
+    end
 
     module_function
 
@@ -27,15 +38,22 @@ module Hive
         if empty_grouped?(grouped)
           [ Renderer.empty, :empty ]
         else
+          # Resolve the recipient + token BEFORE the paid categorizer
+          # run so a missing chat_id / unset token fails fast instead of
+          # wasting a full LLM run (and, with the scheduler's backoff,
+          # hot-looping it). Skipped for dry-run, which never sends.
+          sender.preflight! unless dry_run
           render_digest(grouped, local_date, cfg, categorizer)
         end
 
       delivery = sender.deliver(message, dry_run: dry_run)
       Result.new(status: status, date: local_date, message: message, delivery: delivery)
     rescue ModelError
-      message = Renderer.failed(local_date || date)
-      delivery = (sender || Sender.new(cfg: cfg)).deliver(message, dry_run: dry_run)
-      Result.new(status: :failed_notice, date: local_date || Window.parse_date(date), message: message, delivery: delivery)
+      # `local_date` and `sender` are always assigned above before any
+      # categorization can raise ModelError, so no nil-fallbacks needed.
+      message = Renderer.failed(local_date)
+      delivery = sender.deliver(message, dry_run: dry_run)
+      Result.new(status: :failed_notice, date: local_date, message: message, delivery: delivery)
     end
 
     def empty_grouped?(grouped)

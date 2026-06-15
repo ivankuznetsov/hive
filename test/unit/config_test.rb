@@ -2678,7 +2678,7 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_digest_honors_overrides
+  def test_load_global_digest_block_honors_overrides
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
@@ -2688,7 +2688,7 @@ class ConfigTest < Minitest::Test
           max_catchup_days: 3
       YAML
 
-      cfg = Hive::Config.load_global_digest
+      cfg = Hive::Config.load_global_digest_block
 
       assert_equal true, cfg["enabled"]
       assert_equal "codex", cfg["agent"]
@@ -2696,14 +2696,28 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_digest_rejects_bad_shapes_and_values
+  def test_load_global_digest_block_allows_zero_max_catchup_days_as_unbounded
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          max_catchup_days: 0
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal 0, cfg["max_catchup_days"]
+    end
+  end
+
+  def test_load_global_digest_block_rejects_bad_shapes_and_values
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         digest: enabled
       YAML
 
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest }
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
       assert_match(/digest.*must be a Hash/, err.message)
 
       File.write(File.join(home, "config.yml"), <<~YAML)
@@ -2712,17 +2726,17 @@ class ConfigTest < Minitest::Test
           enabled: sometimes
       YAML
 
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest }
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
       assert_match(/digest\.enabled.*must be a boolean/, err.message)
 
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         digest:
-          max_catchup_days: 0
+          max_catchup_days: -1
       YAML
 
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest }
-      assert_match(/digest\.max_catchup_days.*>= 1/, err.message)
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
+      assert_match(/digest\.max_catchup_days.*>= 0/, err.message)
     end
   end
 

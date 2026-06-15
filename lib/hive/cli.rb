@@ -499,6 +499,12 @@ module Hive
 
       Without --date, uses the local calendar day that just ended. Use
       --dry-run to print the composed message instead of sending Telegram.
+
+      The run reports one of three outcomes (the `status` field with
+      --json): `empty` — nothing shipped that day, so no agent runs and a
+      short "nothing shipped" notice is sent; `sent` — a normal digest was
+      categorized and delivered; `failed_notice` — the categorizer agent
+      failed, so a short failure notice is sent instead (`ok` is false).
     DESC
     option :date, type: :string, desc: "local calendar date to digest (YYYY-MM-DD)"
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"

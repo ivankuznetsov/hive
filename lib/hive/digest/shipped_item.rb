@@ -10,9 +10,12 @@ module Hive
       :pr_body,
       :shipped_at
     ) do
+      # Project-scoped so the categorizer's id→row map can't collide when
+      # two registered projects ship a PR with the same number (or the
+      # same slug) on the same day — without the project prefix the later
+      # item would overwrite the earlier one's model summary.
       def categorizer_id
-        value = pr_number || slug
-        value.to_s
+        "#{project_name}/#{pr_number || slug}"
       end
 
       def display_label

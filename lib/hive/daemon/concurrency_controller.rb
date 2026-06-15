@@ -122,11 +122,23 @@ module Hive
         :ok
       end
 
-      # Number of running task-kind dispatches (patrol scans excluded),
-      # optionally scoped to one project.
+      # Gate for the global daily digest dispatch. Like patrol scans, the
+      # digest runs on its OWN budget (tagged `kind: :digest`, excluded
+      # from the task caps below) so it never holds a task slot or pushes
+      # the daemon transiently past `max_concurrent_runs`. At most one
+      # digest child runs at a time.
+      #   :ok | :digest_in_flight
+      def can_dispatch_digest?(now: Time.now)
+        return :digest_in_flight if @running.any? { |_pid, entry| entry[:kind] == :digest }
+
+        :ok
+      end
+
+      # Number of running task-kind dispatches (patrol scans and the global
+      # digest excluded), optionally scoped to one project.
       def task_running_count(project: nil)
         @running.count do |_pid, entry|
-          next false if entry[:kind] == :patrol_scan
+          next false if entry[:kind] == :patrol_scan || entry[:kind] == :digest
 
           project.nil? || entry[:project] == project
         end

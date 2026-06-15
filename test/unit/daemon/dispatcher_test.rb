@@ -164,6 +164,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def complete(date:, exit_code:, now:)
       @completed << { date: date, exit_code: exit_code, now: now }
     end
+
+    def cancel(date:)
+      @cancelled ||= []
+      @cancelled << date
+    end
+
+    attr_reader :cancelled
+
+    def reconfigure(enabled:, max_catchup_days:); end
   end
 
   # ── construction helpers ───────────────────────────────────────────────
@@ -287,6 +296,45 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "digest", sup.spawned.first[:stage]
     event = logger.events.find { |name, _attrs| name == :dispatched }
     assert_equal "digest", event.last.fetch(:trigger)
+    # The per-project enable gate is OFF (project_enabled: false). A
+    # project-scoped dispatch would have been skipped; the digest must
+    # bypass it entirely, so there is no project-disabled skip for it.
+    refute logger.events.any? { |name, attrs| name == :skipped && attrs[:action] == "digest" },
+           "global digest must bypass the per-project enable gate, not be skipped by it"
+    refute logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "digest" },
+           "an idle controller must not block the global digest"
+  end
+
+  def test_digest_dispatch_blocked_when_one_already_in_flight
+    dispatcher, sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
+      rows: [], with_digest_scheduler: true
+    )
+    # A digest child for the same date is already tracked by the
+    # controller (a prior tick's dispatch that hasn't completed). The
+    # backstop must refuse a second dispatch and release the pending marker.
+    ctrl.record_dispatch(
+      pid: 999, project: "digest", slug: "2026-06-13", stage: "digest",
+      command: "hive digest --date 2026-06-13 --json", started_at: T0 - 5,
+      state_file_mtime: nil, kind: :digest
+    )
+    digest.next_dispatches = [
+      {
+        project: "digest",
+        slug: "2026-06-13",
+        stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_mtime: nil,
+        state_file_path: nil,
+        hive_state_path: nil
+      }
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned, "must not double-dispatch a digest already in flight"
+    assert_equal [ "2026-06-13" ], digest.cancelled
+    assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "digest" },
+           "a blocked digest dispatch must emit a :blocked event"
   end
 
   def test_digest_scheduler_completes_on_digest_child_exit

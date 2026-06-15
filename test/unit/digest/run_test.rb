@@ -15,6 +15,8 @@ class HiveDigestRunTest < Minitest::Test
   end
 
   FakeSender = Struct.new(:deliveries) do
+    def preflight! = nil
+
     def deliver(text, dry_run:)
       deliveries << { text: text, dry_run: dry_run }
       Hive::Digest::Sender::SendResult.new(chat_id: nil, responses: [], dry_run: dry_run, text: text)
@@ -51,7 +53,11 @@ class HiveDigestRunTest < Minitest::Test
 
     assert_equal :sent, result.status
     assert_equal true, sender.deliveries.first.fetch(:dry_run)
-    assert_includes sender.deliveries.first.fetch(:text), "[Task](https://example.test/pulls/10)"
+    # Assert the categorized summary and display label reached the message,
+    # not the renderer's exact link markdown (which renderer_test owns).
+    delivered = sender.deliveries.first.fetch(:text)
+    assert_includes delivered, "Adds digest"
+    assert_includes delivered, "Task"
   end
 
   def test_model_error_sends_failed_notice

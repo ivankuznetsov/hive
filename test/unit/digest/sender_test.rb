@@ -1,4 +1,6 @@
 require "test_helper"
+require "stringio"
+require "logger"
 require "hive/digest/sender"
 
 class HiveDigestSenderTest < Minitest::Test
@@ -31,6 +33,54 @@ class HiveDigestSenderTest < Minitest::Test
 
     assert result.dry_run
     assert_equal "hello", result.text
+  end
+
+  def test_preflight_raises_before_any_send_when_recipient_missing
+    sender = Hive::Digest::Sender.new(cfg: { "bot" => { "chat_id_allowlist" => [] } })
+
+    assert_raises(Hive::ConfigError) { sender.preflight! }
+  end
+
+  def test_preflight_raises_when_token_missing
+    sender = Hive::Digest::Sender.new(cfg: { "bot" => { "digest_chat_id" => 123 } })
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => nil) do
+      assert_raises(Hive::ConfigError) { sender.preflight! }
+    end
+  end
+
+  def test_preflight_passes_when_recipient_and_token_present
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
+      sender = Hive::Digest::Sender.new(cfg: { "bot" => { "digest_chat_id" => 123 } })
+
+      assert_nil sender.preflight!
+    end
+  end
+
+  def test_partial_chunk_failure_logs_delivered_count_and_raises
+    delivered = []
+    client = Object.new
+    client.define_singleton_method(:message_chunks) { |_text| %w[chunk-a chunk-b] }
+    client.define_singleton_method(:send_message) do |chat_id:, text:, parse_mode:|
+      raise "boom on second chunk" if text == "chunk-b"
+
+      delivered << text
+      [ { "message_id" => 1 } ]
+    end
+    buf = StringIO.new
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
+      sender = Hive::Digest::Sender.new(
+        cfg: { "bot" => { "digest_chat_id" => 123 } },
+        telegram_factory: ->(token:, logger:) { client },
+        logger: Logger.new(buf)
+      )
+
+      assert_raises(RuntimeError) { sender.deliver("ignored", dry_run: false) }
+    end
+
+    assert_equal [ "chunk-a" ], delivered, "the already-accepted chunk must not be resent in this attempt"
+    assert_includes buf.string, "partial delivery"
   end
 
   def test_send_uses_telegram_markdown_v2

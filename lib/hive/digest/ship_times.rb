@@ -17,9 +17,13 @@ module Hive
       private
 
       def log_commits(hive_state_path:, slug:)
+        # `slug` is passed as its own argv element (not interpolated into the
+        # `--grep=<slug>` token) so static analysers don't read it as a shell
+        # injection: this is array-form Open3 (no shell) and `-F` makes the grep
+        # a fixed string, so `slug` can neither inject a command nor a regex.
         out, err, status = Open3.capture3(
           "git", "-C", hive_state_path, "log", Hive::GitOps::HIVE_BRANCH,
-          "--format=%cI%x00%s", "--grep=#{slug}"
+          "--format=%cI%x00%s", "-F", "--grep", slug
         )
         unless status.success?
           raise Hive::GitError,
@@ -42,8 +46,16 @@ module Hive
       end
 
       def matching_action(commits, slug, action)
-        commits.find { |entry| entry[:subject] == "hive: 9-done/#{slug} #{action}" } ||
-          commits.find { |entry| entry[:subject].end_with?("/#{slug} #{action}") }
+        suffix = "/#{slug} #{action}"
+        preferred = "hive: 9-done#{suffix}"
+        fallback = nil
+        commits.each do |entry|
+          subject = entry[:subject]
+          return entry if subject == preferred
+
+          fallback ||= entry if subject.end_with?(suffix)
+        end
+        fallback
       end
 
       def matching_approval_to_done(commits, slug)

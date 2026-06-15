@@ -1,4 +1,5 @@
 require "date"
+require "logger"
 require "hive/config"
 require "hive/digest/window"
 require "hive/digest/shipped_item"
@@ -13,10 +14,12 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      ship_times: ShipTimes.new,
-                     clock: -> { Time.now })
+                     clock: -> { Time.now },
+                     logger: Logger.new($stderr))
         @registry = registry
         @ship_times = ship_times
         @clock = clock
+        @logger = logger
       end
 
       def for_date(date)
@@ -55,7 +58,12 @@ module Hive
           pr_body: body,
           shipped_at: shipped_at
         )
-      rescue Hive::GitError
+      rescue Hive::GitError => e
+        # A failing `git log` on this project's hive/state would otherwise
+        # make every shipped item silently vanish (or yield a false
+        # "Nothing shipped today"). Log the dropped task so a corrupt or
+        # missing-branch repo is visible to the operator.
+        @logger&.warn("digest collector: dropping #{entry.fetch('name')}/#{File.basename(folder)}: #{e.message}")
         nil
       end
 
@@ -68,15 +76,24 @@ module Hive
         else
           content.strip
         end
-      rescue SystemCallError, IOError
+      rescue SystemCallError, IOError => e
+        # A correctable pr.md read problem degrades the item to its
+        # default summary; surface it instead of failing silently.
+        @logger&.warn("digest collector: degraded pr.md read for #{path}: #{e.message}")
         ""
       end
 
+      # hive-generated pr.md always opens with a boilerplate "## Summary"
+      # heading, which carries no signal over display_name — skip it and
+      # fall back so the prompt/title shows the task name, not "Summary".
       def pr_title(body, fallback)
         heading = body.each_line.find { |line| line.match?(/\A\s{0,3}\#{1,6}\s+\S/) }
         return fallback.to_s if heading.nil?
 
-        heading.sub(/\A\s{0,3}\#{1,6}\s+/, "").strip
+        title = heading.sub(/\A\s{0,3}\#{1,6}\s+/, "").strip
+        return fallback.to_s if title.casecmp?("summary")
+
+        title
       end
     end
   end

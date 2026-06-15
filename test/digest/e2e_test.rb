@@ -37,6 +37,33 @@ class HiveDigestE2ETest < Minitest::Test
 
       assert_equal :sent, result.status
       assert_message_id result.delivery.responses.first
+
+      # IU6: the live model's categorized output must cover EVERY fixture item.
+      # The display_name substring checks below render as the link LABEL
+      # regardless of model output, and an empty {"items":[]} still yields
+      # status: :sent with fallback summaries — so neither proves the model
+      # ran. Inspect the categorizer's raw items.json to prove it did.
+      items_files = Dir[File.join(Hive::Paths.state_home, "digest", "runs", "*", "items.json")]
+      assert_equal 1, items_files.size, "the categorizer must write exactly one items.json"
+      rows = JSON.parse(File.read(items_files.first)).fetch("items")
+      ids = rows.map { |row| row["id"] }
+      assert_includes ids, "alpha/10", "the model output must cover the first fixture item"
+      assert_includes ids, "alpha/11", "the model output must cover the second fixture item"
+      rows.each do |row|
+        assert Hive::Digest::Categories.valid?(row["category"].to_s),
+               "the live model must assign a valid category to #{row['id']}"
+        refute row["summary"].to_s.strip.empty?,
+               "the live model must write a non-empty summary for #{row['id']}"
+      end
+
+      # Prove the rendered digest used the MODEL's summary, not the pr_title
+      # fallback, for at least one item — an empty model response would
+      # otherwise pass via the default (fallback) summaries.
+      fallbacks = collector.for_date(Date.new(2026, 6, 13)).values.flatten.map { |item| item.pr_title.to_s.strip }
+      model_summaries = rows.map { |row| row["summary"].to_s.strip }
+      assert(model_summaries.any? { |summary| !fallbacks.include?(summary) },
+             "at least one rendered summary must be the model's own, not a pr_title fallback")
+
       assert_includes result.message, "Feature: Digest command"
       assert_includes result.message, "Fix: Escaping"
     end

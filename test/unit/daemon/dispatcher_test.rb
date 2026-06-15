@@ -1776,6 +1776,24 @@ def test_dry_run_reaps_pseudo_children_and_logs_completion
   refute_nil event
 end
 
+def test_dry_run_reap_completes_digest_so_scheduler_unwedges
+  dispatcher, _sup, _ctrl, _logger, _mw, _patrol, digest = make_dispatcher(
+    rows: [], dry_run: true, with_digest_scheduler: true
+  )
+  child = ChildExit.new(
+    pid: -1, exit_code: 0, project: "digest", slug: "2026-06-13", stage: "digest",
+    command: "hive digest --date 2026-06-13 --json", state_file_path: nil,
+    started_at: T0, finished_at: T0, json_envelope: nil
+  )
+  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
+
+  dispatcher.tick(now: T0)
+
+  assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed,
+               "a dry-run digest reap must clear the scheduler's pending marker, " \
+               "or the dry-run daemon wedges after the first digest"
+end
+
 def test_archive_dispatch_reenqueue_errors_are_logged_as_fatal
   dispatcher, _sup, ctrl, logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
   ctrl.instance_variable_set(:@max_concurrent_runs, 1)

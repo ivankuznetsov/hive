@@ -600,4 +600,18 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     refute c.project_dropped?("digest"),
            "a digest ConfigError must not drop a phantom 'digest' project"
   end
+
+  def test_digest_dispatch_does_not_leak_a_daily_count_entry
+    c = make
+    # record_completion early-returns for :digest before dec_daily, so a
+    # counted dispatch would leave one never-read [project, date] entry per
+    # day. The digest must consume no daily slot in the first place.
+    dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
+    assert_equal 0, c.daily_count_for("digest", T0),
+                 "a digest dispatch must not consume (and then leak) a daily-count slot"
+
+    c.record_completion(pid: 100, exit_code: 0, completed_at: T0)
+    assert_equal 0, c.daily_count_for("digest", T0),
+                 "no residual daily-count entry may survive a completed digest"
+  end
 end

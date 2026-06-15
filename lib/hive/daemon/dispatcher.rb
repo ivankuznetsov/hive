@@ -698,6 +698,20 @@ module Hive
           @controller.record_completion(
             pid: entry.pid, exit_code: entry.exit_code, completed_at: now
           )
+          # Mirror reap_completed's digest hook: a dry-run digest pseudo-child
+          # must also clear the scheduler's `@pending` marker, or `tick`
+          # returns [] forever (`@pending.any?`) and the dry-run daemon wedges
+          # after dispatching the digest exactly once. Isolate the disk I/O the
+          # same way the sibling branch does.
+          if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
+            begin
+              @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+            rescue StandardError => e
+              @logger.event(:fatal,
+                            message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
+                            keeping_previous: true)
+            end
+          end
           @logger.event(:child_exited,
                         pid: entry.pid, exit_code: entry.exit_code,
                         project: entry.project, slug: entry.slug, stage: entry.stage,

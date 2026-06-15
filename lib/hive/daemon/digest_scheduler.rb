@@ -56,8 +56,10 @@ module Hive
         owed = owed_days(last, completed_day)
         return [] if owed.empty?
 
+        # apply_catchup_cap returns `owed` unchanged or its non-empty tail
+        # (max_catchup_days >= 1 on the capping branch), so the post-cap result
+        # is always non-empty here — no second emptiness guard is reachable.
         owed = apply_catchup_cap(owed)
-        return [] if owed.empty?
 
         date = owed.first
         @pending[date.iso8601] = true

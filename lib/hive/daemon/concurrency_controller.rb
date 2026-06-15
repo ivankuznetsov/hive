@@ -199,7 +199,12 @@ module Hive
           state_file_mtime_at_dispatch: state_file_mtime,
           kind: kind
         }
-        @daily_counts[[ project, started_at.to_date ]] += 1
+        # The digest runs on its own gate (can_dispatch_digest?), which reads
+        # NO daily counts, and record_completion early-returns for :digest
+        # before the TEMPFAIL refund (dec_daily). A counted digest dispatch
+        # would therefore leak one never-read [project, date] entry per
+        # calendar day, so skip the increment for symmetry with that refund.
+        @daily_counts[[ project, started_at.to_date ]] += 1 unless kind == :digest
         if state_file_mtime
           @last_dispatched_mtime[[ project, slug ]] = state_file_mtime
           persist_dispatch_baselines!

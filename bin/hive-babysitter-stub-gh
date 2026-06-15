@@ -3,9 +3,30 @@
 
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  File.open(path, "a") { |file| file.puts("[dry-run] gh #{argv.join(' ')} skipped") }
-rescue SystemCallError
-  nil
+  message = "[dry-run] gh #{escaped_argv(argv)} skipped"
+  append_skip_log(path) { |file| file.puts(message) }
+rescue SystemCallError, IOError => e
+  warn "[dry-run] failed to write skip log #{path}: #{e.message}"
+end
+
+def append_skip_log(path)
+  raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+
+  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW, 0o600) do |file|
+    stat = file.stat
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+
+    yield file
+  end
+end
+
+def escaped_argv(argv)
+  argv.map { |arg| escape_control_chars(arg) }.join(" ")
+end
+
+def escape_control_chars(arg)
+  arg.to_s.gsub(/[\x00-\x1f\x7f]/) { |char| "\\x%02X" % char.ord }
 end
 
 argv = ARGV.dup
@@ -163,7 +184,7 @@ rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest)
   log_skip(argv)
-  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  warn "[dry-run] gh #{escaped_argv(argv)} skipped"
   exit 0
 end
 

@@ -67,7 +67,7 @@ module Hive
 
       def project_slug(project_root)
         base = File.basename(project_root).gsub(/[^A-Za-z0-9_.-]/, "-")
-        "#{base}-#{Digest::SHA256.hexdigest(project_root)[0, 8]}"
+        "#{base}-#{::Digest::SHA256.hexdigest(project_root)[0, 8]}"
       end
     end
   end

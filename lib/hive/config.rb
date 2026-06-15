@@ -45,7 +45,8 @@ module Hive
         "review_triage" => 75,
         "review_fix" => 500,
         "review_browser" => 100,
-        "patrol" => 100
+        "patrol" => 100,
+        "digest" => 50
       },
       "timeout_sec" => {
         "brainstorm" => 1800,
@@ -58,7 +59,8 @@ module Hive
         "review_triage" => 1800,
         "review_fix" => 14400,
         "review_browser" => 3600,
-        "patrol" => 3600
+        "patrol" => 3600,
+        "digest" => 1800
       },
       # Stage-level agent for single-agent stages. The review
       # stage has its own per-role agent fields under "review.{ci,triage,
@@ -295,9 +297,21 @@ module Hive
         # the actual SIGKILL can land up to one poll interval late, and
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
+        #
+        # The `digest` verb ships a non-zero DEFAULT cap (every other verb
+        # stays at `child_timeout_sec`=0/disabled) because the digest holds
+        # the single global digest slot (can_dispatch_digest?): a child that
+        # wedges on an unbounded leg — a hung `ship_times` `git log`, or a
+        # black-holed Telegram socket — would otherwise pin that slot forever
+        # and silently disable ALL future digests until a daemon restart. A
+        # reaped child exits non-zero, so DigestScheduler retries the date on
+        # backoff. 3600s sits well above the categorizer's own agent cap
+        # (timeout_sec.digest, default 1800) so it never kills a healthy run;
+        # raise it alongside a raised timeout_sec.digest, or set it to 0 to
+        # disable.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => {},
+        "child_verb_timeouts" => { "digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -390,12 +404,21 @@ module Hive
           ]
         }
       },
+      # Daily shipped digest. The daemon schedules one global `hive digest`
+      # subprocess after each local midnight; the subprocess sends a single
+      # Telegram message across all registered projects.
+      "digest" => {
+        "enabled" => false,
+        "agent" => nil,
+        "max_catchup_days" => 7
+      },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
       # from the global config via load_global_bot. The token lives
       # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
       "bot" => {
         "enabled" => false,
+        "digest_chat_id" => nil,
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
@@ -888,6 +911,42 @@ module Hive
       merged
     end
 
+    # The `digest` block only (enabled / agent / max_catchup_days), merged
+    # over defaults. Used by the daemon scheduler. Distinct from
+    # `load_global_digest_config`, which returns the FULL merged config
+    # (incl. `bot`) for the digest runner.
+    def load_global_digest_block
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["digest"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "digest in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["digest"]), override)
+      validate_digest!({ "digest" => merged }, path)
+      merged
+    end
+
+    def load_global_digest_config
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      merged = merge_defaults(data)
+      merged["bot"] = deep_merge(global_bot_defaults, data["bot"] || {})
+      inject_bot_runtime_path_defaults!(merged)
+      validate!(merged, path)
+      merged
+    end
+
     def load_global_web
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -1162,6 +1221,7 @@ module Hive
       validate_web_config!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
+      validate_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1189,6 +1249,7 @@ module Hive
       web
       babysitter
       patrol
+      digest
       bot
       rebase
     ].freeze
@@ -1927,6 +1988,54 @@ module Hive
       validate_reviewer_entries!(reviewers, "patrol.review.reviewers", source_path)
     end
 
+    def validate_digest!(cfg, source_path)
+      # budget_usd.digest / timeout_sec.digest feed straight into the
+      # categorizer's Hive::Agent. Validate them even when the `digest` block
+      # is absent (they are independent top-level keys).
+      validate_digest_resource!(cfg, "budget_usd", source_path)
+      validate_digest_resource!(cfg, "timeout_sec", source_path)
+
+      digest = cfg["digest"]
+      return if digest.nil?
+
+      enabled = digest["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "digest.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      validate_agent_name!(digest["agent"], "digest.agent", source_path)
+
+      max_catchup_days = digest["max_catchup_days"]
+      return if max_catchup_days.nil?
+      # 0 = unbounded catch-up (DigestScheduler#apply_catchup_cap treats it
+      # as "no cap"); negatives are clamped to 0 there, so reject them here.
+      return if max_catchup_days.is_a?(Integer) && max_catchup_days >= 0
+
+      raise ConfigError,
+            "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 0 " \
+            "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
+    end
+
+    # The categorizer reads cfg.dig("budget_usd"|"timeout_sec", "digest") and
+    # passes the value straight to Hive::Agent (max_budget_usd / timeout_sec).
+    # A non-numeric or non-positive value would otherwise pass config load and
+    # crash the categorizer mid-run instead of producing a handled config error
+    # up front. Both keys are optional — the categorizer falls back to its
+    # DEFAULT_* constants when absent (a 0 is rejected, not treated as a
+    # fallback, since `value || DEFAULT` keeps 0).
+    def validate_digest_resource!(cfg, group, source_path)
+      value = cfg.dig(group, "digest")
+      return if value.nil?
+
+      unless value.is_a?(Numeric) && value.positive?
+        raise ConfigError,
+              "#{group}.digest in #{describe_source(source_path)} must be a positive number; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+    end
+
     BOT_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
@@ -1960,6 +2069,7 @@ module Hive
       end
 
       validate_bot_allowlist!(bot, source_path)
+      validate_bot_digest_chat_id!(bot, source_path)
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
@@ -1991,6 +2101,16 @@ module Hive
               "bot.chat_id_allowlist[#{idx}] in #{describe_source(source_path)} must be an Integer; " \
               "got #{entry.inspect} (#{entry.class})"
       end
+    end
+
+    def validate_bot_digest_chat_id!(bot, source_path)
+      chat_id = bot["digest_chat_id"]
+      return if chat_id.nil?
+      return if chat_id.is_a?(Integer)
+
+      raise ConfigError,
+            "bot.digest_chat_id in #{describe_source(source_path)} must be an Integer; " \
+            "got #{chat_id.inspect} (#{chat_id.class})"
     end
 
     def validate_bot_numbers!(bot, source_path)

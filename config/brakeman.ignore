@@ -10,7 +10,7 @@
     },
     {
       "fingerprint": "c5383e38ce67101d42861fc17ef61be803b4270f300f47b186f531104b9bada6",
-      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! — internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
+      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! \u2014 internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
     },
     {
       "fingerprint": "2b04ae09c74c02877b56a2a2a91f97b6363dbd965e1537c105d6781bb785a670",
@@ -39,6 +39,10 @@
     {
       "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
       "note": "False positive: array-form Open3.capture3 (no shell). slug is a resolved 9-done task slug (ADR-012 regex) interpolated only into the gh PR title/body text, not a shell command. hive bench submit."
+    },
+    {
+      "fingerprint": "a11d1f5701bcc1ab87021515e2fdf48ea34cd74a6c848aea5f04da176726f86e",
+      "note": "False positive: array-form Open3.capture3 (no shell) \u2014 slug is passed as its own discrete argv element immediately after a standalone `--grep` flag (not interpolated into a `--grep=<slug>` token), so it cannot inject a command; `-F` makes it a fixed string, so at worst it is a benign literal git-log grep, and matches are re-filtered by exact substring on the subject afterward. slug is a controlled hive task slug."
     }
   ],
   "updated": "2026-06-03",

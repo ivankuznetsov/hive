@@ -122,11 +122,23 @@ module Hive
         :ok
       end
 
-      # Number of running task-kind dispatches (patrol scans excluded),
-      # optionally scoped to one project.
+      # Gate for the global daily digest dispatch. Like patrol scans, the
+      # digest runs on its OWN budget (tagged `kind: :digest`, excluded
+      # from the task caps below) so it never holds a task slot or pushes
+      # the daemon transiently past `max_concurrent_runs`. At most one
+      # digest child runs at a time.
+      #   :ok | :digest_in_flight
+      def can_dispatch_digest?(now: Time.now)
+        return :digest_in_flight if @running.any? { |_pid, entry| entry[:kind] == :digest }
+
+        :ok
+      end
+
+      # Number of running task-kind dispatches (patrol scans and the global
+      # digest excluded), optionally scoped to one project.
       def task_running_count(project: nil)
         @running.count do |_pid, entry|
-          next false if entry[:kind] == :patrol_scan
+          next false if entry[:kind] == :patrol_scan || entry[:kind] == :digest
 
           project.nil? || entry[:project] == project
         end
@@ -187,7 +199,12 @@ module Hive
           state_file_mtime_at_dispatch: state_file_mtime,
           kind: kind
         }
-        @daily_counts[[ project, started_at.to_date ]] += 1
+        # The digest runs on its own gate (can_dispatch_digest?), which reads
+        # NO daily counts, and record_completion early-returns for :digest
+        # before the TEMPFAIL refund (dec_daily). A counted digest dispatch
+        # would therefore leak one never-read [project, date] entry per
+        # calendar day, so skip the increment for symmetry with that refund.
+        @daily_counts[[ project, started_at.to_date ]] += 1 unless kind == :digest
         if state_file_mtime
           @last_dispatched_mtime[[ project, slug ]] = state_file_mtime
           persist_dispatch_baselines!
@@ -235,6 +252,15 @@ module Hive
       def record_completion(pid:, exit_code:, completed_at: Time.now)
         entry = @running.delete(pid)
         return unless entry
+
+        # The global digest runs on its own scheduler-level backoff and is
+        # gated by `can_dispatch_digest?`, which consults NONE of the
+        # per-(project, slug) maps below. Recording cooldown/transient/
+        # quarantine/dropped state for it would leak one never-read entry per
+        # unique ISO-date slug (unbounded, failure-only growth) and falsely
+        # tag a phantom "digest" project as dropped. Freeing the slot above
+        # is the only bookkeeping the digest needs here.
+        return if entry[:kind] == :digest
 
         key = [ entry[:project], entry[:slug] ]
 

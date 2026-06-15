@@ -26,7 +26,7 @@ module Hive
     def snapshot(root, names = ORCHESTRATOR_OWNED)
       names.each_with_object({}) do |name, h|
         path = File.join(root, name)
-        h[name] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
+        h[name] = File.exist?(path) ? ::Digest::SHA256.hexdigest(File.read(path)) : nil
       end
     end
 

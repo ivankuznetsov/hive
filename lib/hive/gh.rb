@@ -8,6 +8,11 @@ module Hive
     NETWORK_TIMEOUT_SEC = 60
     POLL_INTERVAL_SEC = 0.05
 
+    # Leading YAML frontmatter block of a hive-authored pr.md. Capture group
+    # 1 is the YAML body (used by #pr_frontmatter); #pr_body strips the whole
+    # match. One definition so the two readers can't drift.
+    FRONTMATTER_DELIMITER = /\A---\s*\n(.*?)\n---\s*\n/m
+
     CommandStatus = Struct.new(:exitstatus, keyword_init: true) do
       def success?
         exitstatus == 0
@@ -310,13 +315,25 @@ module Hive
       return {} unless File.exist?(path)
 
       content = File.read(path)
-      return {} unless content =~ /\A---\s*\n(.*?)\n---\s*\n/m
+      return {} unless content =~ FRONTMATTER_DELIMITER
 
       parsed = YAML.safe_load(Regexp.last_match(1)) || {}
       parsed.is_a?(Hash) ? parsed : {}
     rescue Psych::Exception => e
       warn "hive: pr.md frontmatter unparseable (#{e.class}: #{e.message}); treating as empty"
       {}
+    end
+
+    # Return the pr.md body — the file content with any leading YAML
+    # frontmatter block stripped and surrounding whitespace trimmed.
+    # Owns the `---…---` delimiter so callers (e.g. the digest collector)
+    # don't re-encode the frontmatter format a second time. Returns "" when
+    # the file is absent; read/permission errors propagate as
+    # SystemCallError/IOError so callers that must degrade can rescue them.
+    def pr_body(path)
+      return "" unless File.exist?(path)
+
+      File.read(path).sub(FRONTMATTER_DELIMITER, "").strip
     end
 
     # Scan the agent-authored state-file plus the remote PR body for

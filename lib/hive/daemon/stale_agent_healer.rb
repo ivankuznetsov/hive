@@ -543,7 +543,7 @@ module Hive
         path = reviewer_errors_path(row)
         return reason.to_s unless path
 
-        Digest::SHA256.hexdigest(File.read(path))
+        ::Digest::SHA256.hexdigest(File.read(path))
       rescue SystemCallError
         reason.to_s
       end

@@ -10,10 +10,10 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 78
+Page count: 80
 Updated: 2026-06-15
 
-Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init`'s normal-vs-patrol reviewer split and project-global Claude model/effort pins, `hive patrol` handoff into `6-review`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
+Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init`'s normal-vs-patrol reviewer split and project-global Claude model/effort pins, `hive patrol` handoff into `6-review`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
 
 ## Pages
 
@@ -26,6 +26,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
 - [[commands/bot]] — `wiki/commands/bot.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
+- [[commands/digest]] — `wiki/commands/digest.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
 - [[commands/drop]] — `wiki/commands/drop.md`
 - [[commands/findings]] — `wiki/commands/findings.md`
@@ -61,6 +62,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/config]] — `wiki/modules/config.md`
 - [[modules/daemon]] — `wiki/modules/daemon.md`
 - [[modules/diagnosis_agent]] — `wiki/modules/diagnosis_agent.md`
+- [[modules/digest]] — `wiki/modules/digest.md`
 - [[modules/events]] — `wiki/modules/events.md`
 - [[modules/execute_waiting_action]] — `wiki/modules/execute_waiting_action.md`
 - [[modules/findings]] — `wiki/modules/findings.md`

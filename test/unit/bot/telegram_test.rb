@@ -142,6 +142,19 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal 10, sends.last.last[:text].length
   end
 
+  def test_message_chunks_exposes_the_same_split_used_by_send_message
+    api = FakeApi.new
+    text = "x" * (Hive::Bot::Telegram::MAX_MESSAGE_CHARS + 10)
+
+    chunks = telegram(api).message_chunks(text)
+
+    assert_equal 2, chunks.size,
+                 "message_chunks must expose the per-chunk split so callers (the digest sender) can drive delivery"
+    assert_equal Hive::Bot::Telegram::MAX_MESSAGE_CHARS, chunks.first.length
+    assert_equal 10, chunks.last.length
+    assert_empty api.calls, "message_chunks must only compute the split, never send"
+  end
+
   def test_edit_message_reply_markup
     api = FakeApi.new
 

@@ -16,6 +16,8 @@ class ConfigTest < Minitest::Test
                  "deprecated execute_review key must be absent from DEFAULTS"
       assert_equal 100, cfg["budget_usd"]["patrol"]
       assert_equal 3600, cfg["timeout_sec"]["patrol"]
+      assert_equal 50, cfg["budget_usd"]["digest"]
+      assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal dir, cfg["project_root"]
     end
   end
@@ -2320,7 +2322,10 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      assert_equal({},    cfg.dig("daemon", "child_verb_timeouts"))
+      # The digest verb ships a non-zero default cap so a wedged digest child
+      # can't pin the single global digest slot forever; every other verb
+      # stays at the (disabled) child_timeout_sec default.
+      assert_equal({ "digest" => 3600 }, cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
 
@@ -2348,6 +2353,10 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal 10800, cfg.dig("daemon", "child_verb_timeouts", "review")
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
+      # A user override deep-merges with the seeded default, so the digest
+      # wedge backstop survives an operator setting other verb timeouts.
+      assert_equal 3600,  cfg.dig("daemon", "child_verb_timeouts", "digest"),
+                   "an operator override must not wipe the default digest verb timeout"
     end
   end
 
@@ -2663,6 +2672,137 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # ── Daily digest global settings ─────────────────────────────────────
+
+  def test_load_returns_documented_digest_defaults_when_key_absent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("digest", "enabled")
+      assert_nil cfg.dig("digest", "agent")
+      assert_equal 7, cfg.dig("digest", "max_catchup_days")
+      assert_nil cfg.dig("bot", "digest_chat_id")
+    end
+  end
+
+  def test_load_global_digest_block_honors_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          enabled: true
+          agent: codex
+          max_catchup_days: 3
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal true, cfg["enabled"]
+      assert_equal "codex", cfg["agent"]
+      assert_equal 3, cfg["max_catchup_days"]
+    end
+  end
+
+  def test_load_global_digest_block_allows_zero_max_catchup_days_as_unbounded
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          max_catchup_days: 0
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal 0, cfg["max_catchup_days"]
+    end
+  end
+
+  def test_load_global_digest_block_rejects_bad_shapes_and_values
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest: enabled
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
+      assert_match(/digest.*must be a Hash/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
+      assert_match(/digest\.enabled.*must be a boolean/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          max_catchup_days: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
+      assert_match(/digest\.max_catchup_days.*>= 0/, err.message)
+    end
+  end
+
+  def test_load_global_digest_config_merges_bot_and_agent_limits
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          enabled: true
+        budget_usd:
+          digest: 12
+        timeout_sec:
+          digest: 34
+        bot:
+          digest_chat_id: 12345
+      YAML
+
+      cfg = Hive::Config.load_global_digest_config
+
+      assert_equal true, cfg.dig("digest", "enabled")
+      assert_equal 12, cfg.dig("budget_usd", "digest")
+      assert_equal 34, cfg.dig("timeout_sec", "digest")
+      assert_equal 12_345, cfg.dig("bot", "digest_chat_id")
+      assert_equal File.join(home, "logs", "bot.log"), cfg.dig("bot", "log_file")
+    end
+  end
+
+  def test_load_global_digest_config_rejects_non_positive_budget_and_timeout
+    {
+      "budget_usd" => "budget_usd.digest",
+      "timeout_sec" => "timeout_sec.digest"
+    }.each do |group, label|
+      with_tmp_global_config do |home|
+        File.write(File.join(home, "config.yml"), <<~YAML)
+          registered_projects: []
+          digest:
+            enabled: true
+          #{group}:
+            digest: 0
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message,
+                     "a non-positive #{label} must be rejected at config load, not crash the categorizer")
+      end
+
+      with_tmp_global_config do |home|
+        File.write(File.join(home, "config.yml"), <<~YAML)
+          registered_projects: []
+          #{group}:
+            digest: "lots"
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message)
+      end
+    end
+  end
+
   # ── Telegram bot global settings ──────────────────────────────────────
 
   def test_load_returns_documented_bot_defaults_when_key_absent
@@ -2788,6 +2928,19 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
       assert_match(/bot.chat_id_allowlist\[0\].*Integer/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_string_digest_chat_id
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          digest_chat_id: "12345"
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.digest_chat_id.*Integer/, err.message)
     end
   end
 

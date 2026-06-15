@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-12
+updated: 2026-06-14
 tags: [command, daemon, automation, json]
 ---
 
@@ -18,7 +18,9 @@ complete finalize rows or for two whitelisted stale finalize errors. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
 recovery markers, and 8-finalize while the PR is still open on GitHub; selected
 retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
-normal policy dispatch.
+normal policy dispatch. When global `digest.enabled: true`, the same daemon
+also schedules one non-project-scoped `hive digest --date <day> --json` child
+after local midnight for the daily shipped digest.
 
 ## Subcommands
 
@@ -45,6 +47,28 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
 | `queue`    | Read-only inspection of the dispatch-request queue the bot/web producers and `3-plan` healer write and the daemon consumes. Runs in the CLI process (no daemon contact); reads the same `<state_home>/dispatch_requests/` directory. Current pending request files use `hive-dispatch-request.v2`, whose `requestor` enum is `bot|healer`; older/wrong versions are reported as malformed and pruned like other bad files. `list` (default) prints each pending request with `request_id  age  project/slug  verb` plus `[EXPIRED]` / `[NOT-ALLOWLISTED]` flags and any malformed files. `show <id>` dumps one request's full payload (errors with exit 1 if the id is unknown; missing id is a USAGE error). `prune` removes expired + malformed request files (the daemon also does this lazily on its own tick) and reports the count. With `--json`, emits a `hive-daemon-queue.v1` envelope (`action`, `requests[]`, `request`, `malformed[]`, `pruned_count`). Unknown actions, missing `show` request ids, and unexpected queue-command exceptions emit the schema's `ErrorPayload` arm with `ok:false`, `error_kind` (`unknown_action` / `missing_request_id` / `internal`), and `message` before exiting non-zero. Claimed in-flight requests (`*.json.claimed`) are intentionally not listed — they are daemon-managed; see [[modules/daemon]] §"At-most-once dispatch via atomic claim". |
+
+## Global Digest
+
+Daily digest scheduling is global config, not project enrollment:
+
+```yaml
+digest:
+  enabled: false
+  agent: null
+  max_catchup_days: 7
+bot:
+  digest_chat_id: null
+```
+
+`hive daemon start` loads this block via `Hive::Config.load_global_digest_block` and
+wires `Hive::Daemon::DigestScheduler`. The scheduler stores its cursor in
+`<state_home>/digest_state.json`, initializes to the most recently completed
+local day on first run without backfilling history, dispatches missed days
+oldest-first one at a time, retries non-zero exits by leaving the cursor
+behind, and logs `digest_catchup_skipped` when missed history exceeds
+`digest.max_catchup_days`. The child command is always
+`hive digest --date YYYY-MM-DD --json`; see [[commands/digest]].
 
 ## What the daemon dispatches
 
@@ -126,7 +150,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02). `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
-| `child_verb_timeouts` | `{}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). |
+| `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). The `digest` verb ships a non-zero default (3600s) because a wedged digest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable all future digests until restart; user overrides deep-merge, so setting other verbs keeps the digest default. Raise it alongside a raised `timeout_sec.digest` (default 1800), or set `{digest: 0}` to disable. |
 | `child_kill_grace_sec` | 30 | SIGTERM→SIGKILL escalation window for a timed-out child. Min 0 (0 = SIGKILL immediately after TERM). |
 | `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
 | `log_max_bytes` | 10485760 | 10 MB rotation threshold. |

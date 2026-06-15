@@ -36,6 +36,11 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 1,
       "hive-patrol-finding" => 1,
+      # Global daily shipped digest (`hive digest --json`). The success
+      # envelope carries the delivery outcome (status/date/message); hard
+      # failures use stderr + exit code, and the Thor-usage error path
+      # emits the shared error envelope (see JSON_USAGE_ERROR_CONTRACTS).
+      "hive-digest" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,

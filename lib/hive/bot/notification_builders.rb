@@ -77,11 +77,11 @@ module Hive
         return legacy_stage_dirs_fingerprint(row) if legacy_stage_dirs?(row)
 
         normalized_attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, normalized_attrs ]))
+        ::Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, normalized_attrs ]))
       end
 
       def legacy_stage_dirs_fingerprint(row)
-        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker ]))
+        ::Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker ]))
       end
 
       def recovery?(row)
@@ -366,7 +366,7 @@ module Hive
         return callback_data if callback_data.bytesize <= CALLBACK_DATA_MAX
 
         prefix, _ = callback_data.split(":", 2)
-        digest = Digest::SHA256.hexdigest(callback_data)[0, 16]
+        digest = ::Digest::SHA256.hexdigest(callback_data)[0, 16]
         prune_registry!
         registry[digest] = [ callback_data, Time.now ]
         "##{prefix}:#{digest}"

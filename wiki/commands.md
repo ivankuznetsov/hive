@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-06-15
 tags: [commands, api]
@@ -10,8 +10,9 @@ tags: [commands, api]
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
 `hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
 documented in [[commands/web]], `hive bench submit` as the hive-bench corpus
-producer, and the single ClawHub `hive-cli` OpenClaw skill whose installed slash
-command is `/hive`. The Ruby command/API contract lives in [[cli]] and the
+producer, `hive digest` as the daily shipped digest producer, and the single
+ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
+The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
 one ClawHub listing per Hive verb.
 
@@ -22,6 +23,9 @@ one ClawHub listing per Hive verb.
 - `bin/hive-e2e`
 - `lib/hive/cli.rb`
 - `lib/hive/commands/bench_submit.rb`
+- `lib/hive/commands/digest.rb`
+- `lib/hive/digest.rb`
+- `lib/hive/digest/**/*.rb`
 - `lib/hive/web/**/*.rb`
 - `web/app/views/**`
 - `web/app/assets/**`
@@ -44,8 +48,8 @@ one ClawHub listing per Hive verb.
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
 `archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
 findings, metrics, update/uninstall, registry maintenance, the `hive bench
-submit` corpus-submission producer, and `--json` envelopes where the command
-page says they exist.
+submit` corpus-submission producer, the `hive digest` shipped-digest producer,
+and `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
@@ -72,6 +76,12 @@ separate hive-bench corpus. It resolves a `9-done` task from registered
 projects, runs a local secret-token preflight, delegates extraction to
 hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
 the hive-bench checkout. See [[commands/bench-submit]].
+
+`hive digest` is the CLI bridge to `Hive::Digest`: it builds the daily shipped
+digest for one local calendar date, with dry-run and success JSON output. It
+does not create task-state commits. The daemon can schedule it as a global,
+non-project-scoped child after local midnight when `digest.enabled: true`. See
+[[commands/digest]] and [[modules/digest]].
 
 ### OpenClaw / ClawHub
 
@@ -152,3 +162,4 @@ contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 - [[operating]]
 - [[e2e]]
 - [[commands/web]]
+- [[commands/digest]]

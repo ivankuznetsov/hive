@@ -2617,7 +2617,7 @@ module Hive
       # local file the user just edited; `Digest::SHA1.file` does a
       # single read and never raises on bytes (no encoding work).
       def file_content_hash(path)
-        Digest::SHA1.file(path).hexdigest
+        ::Digest::SHA1.file(path).hexdigest
       rescue SystemCallError, IOError
         nil
       end

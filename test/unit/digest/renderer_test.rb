@@ -1,0 +1,142 @@
+require "test_helper"
+require "hive/digest/renderer"
+require "hive/digest/shipped_item"
+require "hive/digest/categorizer"
+
+class HiveDigestRendererTest < Minitest::Test
+  def test_renders_projects_and_categories_in_fixed_order
+    grouped = {
+      "alpha" => [
+        categorized("fix", "Fixes a crash.", display_name: "fix(api): Repair crash", pr_number: 20),
+        categorized("feature", "Adds the digest.", display_name: "feat: Add digest", pr_number: 21),
+        categorized("patrol", "Runs maintenance.", display_name: "patrol: Refresh docs", pr_number: 22)
+      ],
+      "beta" => [
+        categorized("feature", "Adds beta support.", display_name: "Beta support", pr_number: 23)
+      ]
+    }
+
+    message = Hive::Digest::Renderer.render(grouped)
+
+    assert_match(/\A\*alpha\*/, message)
+    assert message.index("_New features_") < message.index("_Fixes_")
+    assert message.index("_Fixes_") < message.index("_Patrol tasks_")
+    assert_includes message, "• Adds the digest\\. — [feat: Add digest](https://example.test/pulls/21)"
+    assert_includes message, "• Fixes a crash\\. — [fix\\(api\\): Repair crash](https://example.test/pulls/20)"
+    assert_includes message, "*beta*"
+  end
+
+  def test_omits_empty_categories_and_projects
+    grouped = {
+      "alpha" => [],
+      "beta" => [ categorized("fix", "Fixes it.", pr_number: 24) ]
+    }
+
+    message = Hive::Digest::Renderer.render(grouped)
+
+    refute_includes message, "*alpha*"
+    refute_includes message, "_New features_"
+    assert_includes message, "*beta*"
+    assert_includes message, "_Fixes_"
+  end
+
+  def test_empty_input_renders_nothing_shipped_message
+    assert_equal "Nothing shipped today 🌙", Hive::Digest::Renderer.render({})
+    assert_equal "Nothing shipped today 🌙", Hive::Digest::Renderer.empty
+  end
+
+  def test_failed_notice_renders_date
+    assert_equal "⚠️ Shipped digest for 2026\\-06\\-13 failed to generate\\.",
+                 Hive::Digest::Renderer.failed(Date.new(2026, 6, 13))
+  end
+
+  def test_escape_mdv2_escapes_reserved_dynamic_text
+    raw = "_*[]()~`>#+-=|{}.!"
+
+    assert_equal "\\_\\*\\[\\]\\(\\)\\~\\`\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!",
+                 Hive::Digest::Renderer.escape_mdv2(raw)
+  end
+
+  def test_line_with_missing_url_keeps_display_name_without_link
+    line = Hive::Digest::Renderer.render_line(
+      categorized("feature", "Adds digest.", display_name: "Digest item", pr_url: "")
+    )
+
+    assert_equal "• Adds digest\\. — Digest item", line
+  end
+
+  def test_render_line_escapes_link_breaking_chars_in_url
+    line = Hive::Digest::Renderer.render_line(
+      categorized("feature", "Adds digest.", display_name: "Digest item",
+                  pr_url: "https://example.test/foo(bar)\\baz")
+    )
+
+    # Inside the link destination, ')' and '\' must be escaped; '(' is left
+    # alone. One un-escaped ')' would otherwise close the link early and
+    # fail the whole day's MarkdownV2 send.
+    assert_includes line, "bar\\)"
+    assert_includes line, "\\\\baz"
+  end
+
+  def test_category_order_matches_shared_constant
+    assert_equal Hive::Digest::Categories::ORDERED, Hive::Digest::Renderer::CATEGORY_ORDER
+    assert_equal Hive::Digest::Categories::VALID,
+                 Hive::Digest::Renderer::CATEGORY_ORDER.map(&:first)
+  end
+
+  def test_truncate_summary_is_a_noop_within_the_cap
+    text = "a" * Hive::Digest::Renderer::MAX_SUMMARY_LENGTH
+
+    assert_equal text, Hive::Digest::Renderer.truncate_summary(text)
+  end
+
+  def test_truncate_summary_caps_an_overlong_summary_with_an_ellipsis
+    over = "b" * (Hive::Digest::Renderer::MAX_SUMMARY_LENGTH + 50)
+
+    truncated = Hive::Digest::Renderer.truncate_summary(over)
+
+    assert_equal Hive::Digest::Renderer::MAX_SUMMARY_LENGTH, truncated.length,
+                 "an overlong model summary must be capped so the escaped line stays under the chunk boundary"
+    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
+  end
+
+  def test_truncate_label_caps_an_overlong_label_with_an_ellipsis
+    over = "c" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 50)
+
+    truncated = Hive::Digest::Renderer.truncate_label(over)
+
+    assert_equal Hive::Digest::Renderer::MAX_LABEL_LENGTH, truncated.length,
+                 "an overlong display label must be capped so the escaped link line stays under the boundary"
+    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
+  end
+
+  def test_render_line_bounds_an_overlong_label
+    over = "d" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 500)
+    rendered = Hive::Digest::Renderer.render(
+      { "alpha" => [ categorized("feature", "Adds digest.", display_name: over) ] }
+    )
+
+    # The label inside the link must be bounded (≤ cap, plus MarkdownV2 escapes
+    # which at most double it) so the whole line can't approach 4096.
+    label_in_link = rendered[/\[([^\]]*)\]/, 1]
+    refute_nil label_in_link
+    assert_operator label_in_link.length, :<=, Hive::Digest::Renderer::MAX_LABEL_LENGTH * 2,
+                    "an overlong label must be truncated before escaping into the link"
+  end
+
+  private
+
+  def categorized(category, summary, display_name: "Task", pr_number: 10, pr_url: nil)
+    item = Hive::Digest::ShippedItem.new(
+      project_name: "alpha",
+      slug: "slug-#{pr_number}",
+      display_name: display_name,
+      pr_url: pr_url.nil? ? "https://example.test/pulls/#{pr_number}" : pr_url,
+      pr_number: pr_number,
+      pr_title: display_name,
+      pr_body: "body",
+      shipped_at: Time.utc(2026, 6, 13, 12)
+    )
+    Hive::Digest::CategorizedItem.new(item: item, category: category, summary: summary)
+  end
+end

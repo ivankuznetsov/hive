@@ -1,20 +1,22 @@
 require "lipgloss"
 require "hive/commands/status"
 require "hive/dependencies"
+require "hive/pr"
 require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/views/format"
+require "hive/tui/views/hyperlink"
 
 module Hive
   module Tui
     module Views
       # Pure view function: `Views::TasksPane.render(model, width:) →
       # String`. Right pane of the v2 two-pane layout — renders the
-      # scoped task list as a 5-column compact table inside a bordered
+      # scoped task list as a compact table inside a bordered
       # box. Replaces v1's project-grouped section format; project
       # context now lives in the left pane (Views::ProjectsPane).
       #
-      # Columns: icon · id · display name · stage · status · age. Within each
+      # Columns: icon · id · PR · display name · stage · status · age. Within each
       # project, rows are sorted by `Hive::Commands::Status::ACTION_LABEL_ORDER`
       # at Snapshot construction time, so "Ready to plan" appears above
       # "Agent running" within the same project. At ★ All projects
@@ -58,15 +60,16 @@ module Hive
         DEFAULT_ICON = "  ".freeze
 
         # Column widths (excluding 1-cell separators between columns).
-        # The table consumes `inner_width` minus five separators (5 cells)
-        # and fixed icon/id/stage/status/age columns. name is the elastic column —
+        # The table consumes `inner_width` minus six separators (6 cells)
+        # and fixed icon/id/pr/stage/status/age columns. name is the elastic column —
         # it absorbs any extra width and is left-truncated when narrow.
         ICON_WIDTH = 2
         ID_WIDTH = 4
+        PR_WIDTH = 6
         STAGE_WIDTH = 12
         STATUS_WIDTH = 36
         AGE_WIDTH = 4
-        SEPARATORS = 5 # spaces between the 6 columns
+        SEPARATORS = 6 # spaces between the 7 columns
 
         module_function
 
@@ -142,27 +145,29 @@ module Hive
           snap.visible_projection(scope: model.scope, filter: model.filter)
         end
 
-        # Below `inner_width = ICON+ID+STAGE+STATUS+AGE+SEPARATORS+name_min`
-        # (~48 cells) the 5-column layout overflows. Drop columns in
+        # Below `inner_width = ICON+ID+PR+STAGE+STATUS+AGE+SEPARATORS+name_min`
+        # (~60 cells) the full layout overflows. Drop columns in
         # priority order — first stage (mostly redundant with status),
         # then status — to keep the line within `inner_width` even on
-        # very narrow terminals. The dropped columns silently shrink to
-        # zero width; row-line builder pads with the remaining widths.
+        # very narrow terminals. The PR column is fixed and never drops.
+        # The dropped columns silently shrink to zero width; row-line
+        # builder pads with the remaining widths.
         def compute_layout(inner_width)
           name_min = 8
-          fixed_full = ICON_WIDTH + ID_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
+          fixed_full = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
           if inner_width >= fixed_full + name_min
-            { name: inner_width - fixed_full, stage: STAGE_WIDTH, status: STATUS_WIDTH }
-          elsif inner_width >= ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4 + name_min
-            # Drop the stage column; separators reduce from 4 to 3.
-            width_without_name = ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4
-            { name: inner_width - width_without_name, stage: 0, status: STATUS_WIDTH }
-          elsif inner_width >= ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3 + name_min
+            { name: inner_width - fixed_full, pr: PR_WIDTH, stage: STAGE_WIDTH, status: STATUS_WIDTH }
+          elsif inner_width >= ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + 5 + name_min
+            # Drop the stage column; separators reduce from 6 to 5.
+            { name: inner_width - (ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + 5),
+              pr: PR_WIDTH, stage: 0, status: STATUS_WIDTH }
+          elsif inner_width >= ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + 4 + name_min
             # Drop both stage and status.
-            { name: inner_width - (ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3), stage: 0, status: 0 }
+            { name: inner_width - (ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + 4),
+              pr: PR_WIDTH, stage: 0, status: 0 }
           else
             # Floor at name_min; row will overflow visually but won't crash.
-            { name: name_min, stage: 0, status: 0 }
+            { name: name_min, pr: PR_WIDTH, stage: 0, status: 0 }
           end
         end
 
@@ -170,15 +175,25 @@ module Hive
           highlighted = highlight?(model, project_idx, row_idx)
           icon = Format.ljust_cells(ICONS.fetch(row.action_key.to_s, DEFAULT_ICON), ICON_WIDTH)
           id = Format.rjust_cells(row.id ? row.id.to_s : "—", ID_WIDTH)
+          pr = pr_cell(row, layout[:pr])
           name = Format.ljust_cells(display_name(row), layout[:name])
           age = Format.rjust_cells(Format.age(row.age_seconds), AGE_WIDTH)
-          parts = [ icon, id, name ]
+          parts = [ icon, id, pr, name ]
           parts << Format.ljust_cells(row.stage.to_s, layout[:stage]) if layout[:stage].positive?
           parts << Format.ljust_cells(status_label(row), layout[:status]) if layout[:status].positive?
           parts << age
           line = parts.join(" ")
           colored = Styles.for_action_key(row.action_key).render(line)
           highlighted ? Styles::CURSOR_HIGHLIGHT.render(colored) : colored
+        end
+
+        def pr_cell(row, width)
+          token = Hive::Pr.number(row.pr_url) || "—"
+          cell = Format.rjust_cells(token, width)
+          return cell if token == "—"
+
+          linked = Hyperlink.osc8(token, row.pr_url, enabled: $stdout.tty?)
+          cell.sub(/#{Regexp.escape(token)}\z/, linked)
         end
 
         def status_label(row)

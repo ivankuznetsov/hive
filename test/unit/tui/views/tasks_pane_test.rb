@@ -14,6 +14,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 action_label: "Ready to plan", age: 120,
                 marker: "complete", attrs: {},
                 id: 42, display_name: nil,
+                pr_url: nil,
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
@@ -30,6 +31,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
+      "pr_url" => pr_url,
       "marker" => marker,
       "attrs" => attrs,
       "mtime" => mtime,
@@ -111,20 +113,36 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   # ---- Column rendering ----
 
-  def test_renders_5_columns_per_row
+  def test_renders_pr_column_after_id
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "abc-001", id: 7, display_name: "Readable Task", stage: "3-plan",
-                  action_label: "Needs your input", age: 90)
+                  action_label: "Needs your input", age: 90,
+                  pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "   7",             "id column must render"
+    assert_match(/\s7\s+#561\s+Readable Task/, out,
+                 "PR number must render between id and display name")
     assert_includes out, "Readable Task",    "display name column must render"
     refute_includes out, "abc-001",          "slug must not render when a display name is present"
     assert_includes out, "3-plan",           "stage column must render"
     assert_includes out, "Needs your input", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_renders_dash_pr_column_without_url
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "abc-001", id: 7, display_name: "Readable Task")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_match(/\s7\s+—\s+Readable Task/, out,
+                 "rows without a PR must keep the fixed PR column with a dash")
   end
 
   def test_name_column_falls_back_to_slug_when_display_name_missing
@@ -704,8 +722,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   # ---- compute_layout adaptive column dropping ----
-  # The full 6-column layout needs ~71 inner cells (icon=2, id=4,
-  # stage=12, status=36, age=4, separators=5, name_min=8). Below that, columns
+  # The full 7-column layout needs ~78 inner cells (icon=2, id=4,
+  # pr=6, stage=12, status=36, age=4, separators=6, name_min=8). Below that, columns
   # drop in priority order: stage first (mostly redundant with status),
   # then status. These tests pin each branch so a future refactor of
   # the threshold values can't silently regress narrow-terminal
@@ -715,20 +733,23 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   def test_compute_layout_full_columns_at_wide_inner_width
     layout = Hive::Tui::Views::TasksPane.compute_layout(80)
     assert_operator layout[:name], :>=, 8
+    assert_equal 6, layout[:pr]
     assert_equal 12, layout[:stage]
     assert_equal 36, layout[:status]
   end
 
   def test_compute_layout_drops_stage_at_medium_narrow_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(60)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(70)
+    assert_equal 6, layout[:pr], "PR column must never drop"
     assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
     assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
     assert_operator layout[:name], :>=, 8
   end
 
   def test_compute_layout_drops_stage_and_status_at_very_narrow_width
-    # Even narrower — only icon, id, name, age fit.
-    layout = Hive::Tui::Views::TasksPane.compute_layout(24)
+    # Even narrower — only icon, id, PR, name, age fit.
+    layout = Hive::Tui::Views::TasksPane.compute_layout(35)
+    assert_equal 6, layout[:pr], "PR column must survive the narrowest fitted branch"
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
     assert_operator layout[:name], :>=, 8
@@ -736,9 +757,10 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def test_compute_layout_floors_slug_below_extreme_minimum
     # Below the very-narrow threshold: floor at name_min, dropping all
-    # but icon/id/name/age. Visual overflow is acknowledged — but no crash.
+    # but icon/id/PR/name/age. Visual overflow is acknowledged — but no crash.
     layout = Hive::Tui::Views::TasksPane.compute_layout(10)
     assert_equal 8, layout[:name]
+    assert_equal 6, layout[:pr]
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
   end

@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
 updated: 2026-06-18
-tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies]
+tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
 **TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker and `meta.yml`, resolves same-project task dependencies, and prints human task identities grouped by the next useful action. Status scans tolerate normal stage-move races: vanished task folders are skipped, and duplicate-slug rows are collapsed only when one duplicate folder has already disappeared. Normal text status hides `9-done` tasks whose row `mtime` is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
@@ -14,14 +14,18 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 ```
 <project_name>
   Ready to brainstorm
-    ⏸ #42 Add inbox filter             waiting                  hive brainstorm add-inbox-filter-260424-7a3b 2h ago
+    ⏸ #42  —     Add inbox filter      waiting                  hive brainstorm add-inbox-filter-260424-7a3b 2h ago
   Ready to develop
-    ✓ #43 Refactor auth flow           complete                 hive develop refactor-auth-260423-1c2d 1d ago
+    ✓ #43  #561  Refactor auth flow    complete                 hive develop refactor-auth-260423-1c2d 1d ago
   Agent running
-    🤖 — add-cache-260424-9a8b          agent_working pid=1234   - 5m ago
+    🤖 —    —     add-cache-260424-9a8b agent_working pid=1234   - 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). The human identity column renders `#id display_name` when available, falls back to `#id slug`, and uses `— slug` when pre-migration/counter-failed tasks have no id. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include both `mtime` (the state-file mtime used for age, sort order, and daemon edit baselines) and `folder_mtime` (the task directory mtime, emitted from `collect_rows` even when the state file exists). Both JSON timestamps are ISO8601 with six fractional digits so daemon consumers preserve the subsecond `File.mtime` ordering they compare against dispatch baselines. `folder_mtime` is useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken. Dependency fields are also present on every task row: `depends_on`, `blocked_by`, `dependency_stage`, and `blocked`; text and TUI rows append `⏸ blocked by <slug> (<stage>)` or `(unresolved)` when `blocked` is true. The daemon consumes that `blocked` boolean directly.
+`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). The human identity column renders `#id PR display_name` when available, falls back to `#id PR slug`, and uses `— PR slug` when pre-migration/counter-failed tasks have no id. The PR slot is fixed-width: rows with no parseable PR URL render `—`, while pull-request URLs render `#<number>` and become OSC 8 hyperlinks only when stdout is a TTY. Commands and internal paths continue to use the slug. Raw slug, id, display name, stage, folder, and timestamps remain available in `--json`. JSON rows include both `mtime` (the state-file mtime used for age, sort order, and daemon edit baselines) and `folder_mtime` (the task directory mtime, emitted from `collect_rows` even when the state file exists). Both JSON timestamps are ISO8601 with six fractional digits so daemon consumers preserve the subsecond `File.mtime` ordering they compare against dispatch baselines. `folder_mtime` is useful for consumers that need folder-level aging, especially archived task rows where the terminal marker file may not reflect later directory-level activity.
+
+Rows also include `pr_url`: once a task reaches `5-open-pr` or later, status reads `<task>/pr.md` frontmatter through `Hive::Gh.pr_frontmatter` and emits a stripped non-empty `pr_url`; before a PR exists, or when `pr.md` is missing, blank, or malformed, the field is `null`. This is a sibling task-payload field, not copied out of marker attrs, so consumers do not need to scrape `<!-- COMPLETE pr_url=... -->`.
+
+JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken. Dependency fields are also present on every task row: `depends_on`, `blocked_by`, `dependency_stage`, and `blocked`; text and TUI rows append `⏸ blocked by <slug> (<stage>)` or `(unresolved)` when `blocked` is true. The daemon consumes that `blocked` boolean directly.
 
 ## Archived tasks
 
@@ -29,7 +33,7 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 
 The filter applies only to human daily surfaces: default `hive status` text and the TUI grid. Default `hive status --json` stays unfiltered so bots, daemons, and agents continue to see every task row. Text status prints `… and N archived >3d ago (hive archive to view)` when rows were hidden.
 
-`hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and currently render the slug identity rather than the `#id display_name` column used by daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
+`hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 
@@ -45,7 +49,7 @@ When the field is non-empty, the text output prints a warning under the project 
 
 The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
-The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hive:schema:status:v2`. Task `id` / `display_name` fields bumped the status schema to v3 and the diagnose schema to v2. Dependency fields bumped `hive-status` to v4; `blocked` is required while `depends_on`, `blocked_by`, and `dependency_stage` are nullable.
+The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hive:schema:status:v2`. Task `id` / `display_name` fields bumped the status schema to v3 and the diagnose schema to v2. Dependency fields bumped `hive-status` to v4; `blocked` is required while `depends_on`, `blocked_by`, and `dependency_stage` are nullable. `folder_mtime` and `pr_url` are part of the current `hive-status` task payload.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -66,7 +70,7 @@ The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hi
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
 - Old `9-done` rows → hidden from text output by age alone, regardless of marker state, with the per-project summary line above.
-- Daily task identity is left-padded to 42 chars; state label to 24 chars; then the suggested command and humanised age. Archive-mode rows left-pad the slug to 36 chars. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
+- Daily and archive-mode task identity is left-padded to 49 chars; it includes id, fixed-width PR token, and display name/slug. State label is left-padded to 24 chars, followed by the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.
 
@@ -119,7 +123,7 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
-- `test/unit/commands/status_test.rb` — status row collection, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, old-archive hiding, and archive-mode listing.
+- `test/unit/commands/status_test.rb` — status row collection, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, and archive-mode listing.
 - `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 

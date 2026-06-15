@@ -18,6 +18,15 @@ module Hive
         result = @runner.run(date: local_date, dry_run: @dry_run)
         emit(result)
         result
+      rescue Hive::Error => e
+        # A bad --date raises Hive::ConfigError, which Thor never sees (it is
+        # not a Thor::Error), so bin/hive's JSON_USAGE_ERROR_CONTRACTS path
+        # never fires for it. Emit the in-command JSON error envelope here —
+        # mirroring ~10 sibling commands — before re-raising, so an agent
+        # parsing --json stdout gets a structured error on the most common
+        # usage mistake. Non-JSON output and the exit code are unchanged.
+        emit_error_envelope(e) if @json
+        raise
       end
 
       private
@@ -60,8 +69,24 @@ module Hive
           "date" => result.date.iso8601,
           "status" => result.status.to_s,
           "dry_run" => @dry_run,
+          # The recipient the send actually resolved (nil on a dry-run, which
+          # resolves none) — surfaced for post-send auditability. Optional in
+          # the schema, so older consumers that ignore it stay compatible.
+          "chat_id" => result.delivery&.chat_id,
           "message" => @dry_run ? result.message : nil
         }
+      end
+
+      def emit_error_envelope(error)
+        @output.puts JSON.generate(
+          "schema" => "hive-digest",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest"),
+          "ok" => false,
+          "error_class" => error.class.name.split("::").last,
+          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "internal",
+          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+          "message" => error.message
+        )
       end
     end
   end

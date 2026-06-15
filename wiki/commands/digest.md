@@ -69,11 +69,9 @@ Human output:
 - Dry-run: prints the composed message body.
 - Real send: prints `hive digest: <status> for <date>`.
 
-`--json` always prints a delivery document (not a separate JSON error
-envelope): a model failure still prints this shape with `ok: false` and
-`status: "failed_notice"`. It is "success-only" only in that *hard* failures
-(a bad `--date`, a Telegram send error) surface on stderr + a non-zero exit
-code rather than as a JSON document.
+`--json` prints a delivery document for empty/sent/failed_notice: a model
+failure still prints this shape with `ok: false` and `status:
+"failed_notice"`.
 
 ```json
 {
@@ -83,16 +81,31 @@ code rather than as a JSON document.
   "date": "2026-06-13",
   "status": "sent",
   "dry_run": true,
+  "chat_id": 12345,
   "message": "..."
 }
 ```
 
 `message` is included only for dry-run output; real-send JSON sets it to
-`null`. `hive-digest` is registered in `Hive::Schemas::SCHEMA_VERSIONS` (v1)
-and published under `schemas/hive-digest.v1.json`. A malformed invocation
-caught before command dispatch (e.g. an unknown flag) emits the shared error
-envelope via `JSON_USAGE_ERROR_CONTRACTS`; other hard failures stay on the
-stderr + exit-code path.
+`null`. `chat_id` is the recipient the send resolved (`null` on a dry-run);
+it is an optional field, so older consumers that ignore it stay compatible.
+`hive-digest` is registered in `Hive::Schemas::SCHEMA_VERSIONS` (v1) and
+published under `schemas/hive-digest.v1.json`.
+
+Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
+
+- a bad `--date` raises `Hive::ConfigError` and the command emits the
+  envelope itself (`error_kind: "config"`, exit 78) before re-raising;
+- a malformed invocation caught before dispatch (unknown flag / malformed
+  `--json`) emits via `JSON_USAGE_ERROR_CONTRACTS` (`error_kind: "usage"`,
+  exit 64).
+
+A Telegram send error that occurs mid-delivery still stays on the stderr +
+non-zero exit-code path without an envelope.
+
+Exit codes: `0` empty/sent/failed_notice (a notice was delivered); `78` bad
+`--date` or missing chat config; `64` bad flags / malformed `--json`; `70`
+unexpected internal error.
 
 ## Config And Auth
 

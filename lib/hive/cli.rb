@@ -491,7 +491,9 @@ module Hive
     end
 
     desc "digest", "Generate and send the daily shipped digest"
-    long_desc <<~DESC
+    # wrap: false so the Examples / Exit codes blocks keep their line breaks
+    # instead of being reflowed into one paragraph.
+    long_desc <<~DESC, wrap: false
       Collects tasks that shipped on the requested local calendar date
       across all registered projects, asks the configured digest agent to
       write friendly changelog lines, and sends a Telegram MarkdownV2 message
@@ -506,6 +508,23 @@ module Hive
       short "nothing shipped" notice is sent; `sent` — a normal digest was
       categorized and delivered; `failed_notice` — the categorizer agent
       failed, so a short failure notice is sent instead (`ok` is false).
+
+      With --json, emits the hive-digest (v1) envelope: a SuccessPayload
+      (ok/status/date/dry_run/chat_id/message) for empty/sent/failed_notice,
+      or an ErrorPayload (ok:false/error_kind/exit_code/message) for a bad
+      --date (error_kind=config) or bad flags (error_kind=usage).
+
+      Examples:
+        hive digest                          # yesterday, send to Telegram
+        hive digest --date 2026-06-13        # a specific local day
+        hive digest --dry-run                # print the composed message, send nothing
+        hive digest --date 2026-06-13 --json # machine-readable hive-digest envelope
+
+      Exit codes:
+        0  empty / sent / failed_notice (a notice was delivered)
+        78 bad --date or missing chat config (Hive::ConfigError)
+        64 bad flags / malformed --json (Thor usage error)
+        70 unexpected internal error
     DESC
     option :date, type: :string, desc: "local calendar date to digest (YYYY-MM-DD)"
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"

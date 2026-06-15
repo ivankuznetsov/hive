@@ -81,6 +81,47 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_match(/YYYY-MM-DD/, error.message)
   end
 
+  def test_json_emits_error_envelope_on_bad_date_then_reraises
+    output = StringIO.new
+    command = Hive::Commands::Digest.new(
+      date: "13-06-2026", json: true, runner: Runner.new([], nil), output: output
+    )
+
+    assert_raises(Hive::ConfigError) { command.call }
+
+    payload = JSON.parse(output.string)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal "config", payload.fetch("error_kind")
+    assert_equal "ConfigError", payload.fetch("error_class")
+    assert_equal Hive::ExitCodes::CONFIG, payload.fetch("exit_code")
+    assert_match(/YYYY-MM-DD/, payload.fetch("message"))
+  end
+
+  def test_bad_date_without_json_emits_no_envelope
+    output = StringIO.new
+    command = Hive::Commands::Digest.new(date: "13-06-2026", runner: Runner.new([], nil), output: output)
+
+    assert_raises(Hive::ConfigError) { command.call }
+    assert_equal "", output.string,
+                 "without --json the command must not print a JSON envelope (bare stderr only)"
+  end
+
+  def test_json_payload_includes_resolved_chat_id
+    output = StringIO.new
+    delivery = Hive::Digest::Sender::SendResult.new(
+      chat_id: 4242, responses: [], dry_run: false, text: "body"
+    )
+    runner = Runner.new(
+      [], Hive::Digest::Result.new(status: :sent, date: Date.new(2026, 6, 13), message: "body", delivery: delivery)
+    )
+
+    Hive::Commands::Digest.new(date: "2026-06-13", json: true, runner: runner, output: output).call
+
+    assert_equal 4242, JSON.parse(output.string).fetch("chat_id"),
+                 "the --json envelope must surface the resolved chat_id for post-send auditability"
+  end
+
   def test_well_formed_but_impossible_date_raises_config_error
     # Passes the YYYY-MM-DD shape check but Window.parse_date raises a
     # Date::Error (an ArgumentError subclass) the command must translate.

@@ -19,7 +19,11 @@ class HiveDigestRunTest < Minitest::Test
 
     def deliver(text, dry_run:)
       deliveries << { text: text, dry_run: dry_run }
-      Hive::Digest::Sender::SendResult.new(chat_id: nil, responses: [], dry_run: dry_run, text: text)
+      # Honor SendResult's invariant: a real send carries a resolved chat_id,
+      # only a dry-run leaves it nil.
+      Hive::Digest::Sender::SendResult.new(
+        chat_id: dry_run ? nil : 1, responses: [], dry_run: dry_run, text: text
+      )
     end
   end
 

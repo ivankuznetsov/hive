@@ -45,6 +45,13 @@ class HiveDigestSenderTest < Minitest::Test
     end
   end
 
+  def test_send_result_guard_rejects_a_real_send_without_a_chat_id
+    error = assert_raises(ArgumentError) do
+      Hive::Digest::Sender::SendResult.new(chat_id: nil, responses: [], dry_run: false, text: "x")
+    end
+    assert_match(/must carry a chat_id/, error.message)
+  end
+
   def test_preflight_raises_before_any_send_when_recipient_missing
     sender = Hive::Digest::Sender.new(cfg: { "bot" => { "chat_id_allowlist" => [] } })
 

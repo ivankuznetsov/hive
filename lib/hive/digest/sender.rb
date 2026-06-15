@@ -6,11 +6,18 @@ require "hive/paths"
 module Hive
   module Digest
     class Sender
+      # `responses` and `text` exist for test/observability — the e2e asserts a
+      # real Telegram message_id off `responses` and `text` echoes the sent
+      # body; neither is part of the `hive digest --json` envelope, so their
+      # absence from json_payload is intentional, not a bug.
       SendResult = Data.define(:chat_id, :responses, :dry_run, :text) do
-        # A dry-run never resolves a recipient, so carrying a chat_id on a
-        # dry-run result is a contradiction — guard it at the boundary.
+        # The dry_run flag and the presence of a chat_id must agree: a dry-run
+        # never resolves a recipient, and a real send always carries the one it
+        # resolved (see #deliver). Guard BOTH directions at the boundary so
+        # "a real send always has a recipient" is structural, not incidental.
         def initialize(chat_id:, responses:, dry_run:, text:)
           raise ArgumentError, "dry-run digest send result must not carry a chat_id" if dry_run && !chat_id.nil?
+          raise ArgumentError, "a real digest send result must carry a chat_id" if !dry_run && chat_id.nil?
 
           super
         end
@@ -52,9 +59,12 @@ module Hive
               "bot.digest_chat_id or bot.chat_id_allowlist[0] must be configured before sending digest"
       end
 
+      # Internal helper for resolve_chat_id only; not part of the public
+      # surface (callers use resolve_chat_id / preflight!).
       def self.blank?(value)
         value.nil? || (value.respond_to?(:empty?) && value.empty?)
       end
+      private_class_method :blank?
 
       private
 
@@ -62,11 +72,13 @@ module Hive
       # failure logs exactly how many chunks Telegram already accepted.
       # On a mid-stream failure we do NOT resend the already-accepted
       # chunks within this invocation, then re-raise. The subprocess exits
-      # non-zero and the daemon's DigestScheduler retries the whole date on
-      # a later tick — delivery is at-least-once across restarts (a rare
-      # multi-chunk mid-stream failure can duplicate the earlier chunks),
-      # which is the plan's accepted recovery model; cross-process chunk
-      # de-duplication would be out of proportion to that failure mode.
+      # non-zero and the daemon's DigestScheduler re-owes and re-dispatches
+      # the whole date on a later tick — once the failure backoff expires
+      # (in-process) or after a restart — so delivery is at-least-once across
+      # retries (a rare multi-chunk mid-stream failure can duplicate the
+      # earlier chunks), which is the plan's accepted recovery model;
+      # cross-process chunk de-duplication would be out of proportion to
+      # that failure mode.
       def send_in_chunks(client, chat_id, text)
         chunks = client.respond_to?(:message_chunks) ? client.message_chunks(text) : [ text ]
         responses = []

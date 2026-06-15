@@ -11,6 +11,10 @@ require "hive/digest/sender"
 
 module Hive
   module Digest
+    # `delivery` (a Sender::SendResult) exists for test/observability — the
+    # e2e asserts a real Telegram message_id off `delivery.responses`. It is
+    # not part of the `hive digest --json` envelope, so its absence from
+    # Commands::Digest#json_payload is intentional, not a bug.
     Result = Data.define(:status, :date, :message, :delivery) do
       STATUSES = %i[empty sent failed_notice].freeze
 

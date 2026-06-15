@@ -21,6 +21,16 @@ module Hive
     DEFAULT_COLS = 200
     DEFAULT_ROWS = 50
     DEFAULT_PROMPT_SUBMIT_DELAY_SEC = 0.2
+    # Upper bound on how long to wait for a pasted prompt to finish
+    # rendering before submitting; if the pane never stabilizes we submit
+    # anyway rather than stranding the prompt.
+    DEFAULT_PROMPT_SETTLE_TIMEOUT_SEC = 30.0
+    # Consecutive identical pane-tail captures that mean the bracketed
+    # paste has finished rendering into the input box.
+    PROMPT_SETTLE_STABLE_POLLS = 2
+    # Tail bytes compared between polls — enough to include the input box
+    # region at the bottom of the pane.
+    PROMPT_SETTLE_CAPTURE_BYTES = 4096
     DEFAULT_COMMAND_TIMEOUT_SEC = 10.0
 
     attr_reader :name, :cwd, :env
@@ -76,7 +86,14 @@ module Hive
         # instead of keeping the prompt multi-line. The explicit
         # send_keys("Enter") below is the single, intended submit.
         run_tmux("paste-buffer", "-d", "-r", "-b", buffer_name, "-t", target_pane)
-        sleep prompt_submit_delay_sec
+        # A large bracketed paste renders into the agent's input box over
+        # many frames. A fixed sleep here let `Enter` fire mid-ingest on
+        # big prompts, so the submit was swallowed and the prompt sat
+        # STAGED — the agent never started and the stage burned its whole
+        # timeout (observed: review triage with ~30 paste chunks idling
+        # 15+ min). Wait until the pane stops changing (paste fully
+        # rendered) before the single submit so `Enter` always lands.
+        wait_for_paste_to_settle
         # If tmux disappears here, the prompt was pasted but never submitted.
         # Surface the typed failure immediately instead of waiting for stage timeout.
         send_keys("Enter")
@@ -126,6 +143,40 @@ module Hive
 
     def prompt_submit_delay_sec
       Float(ENV.fetch("HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC", DEFAULT_PROMPT_SUBMIT_DELAY_SEC.to_s))
+    end
+
+    def prompt_settle_timeout_sec
+      Float(ENV.fetch("HIVE_TMUX_PROMPT_SETTLE_TIMEOUT_SEC", DEFAULT_PROMPT_SETTLE_TIMEOUT_SEC.to_s))
+    end
+
+    # Poll the pane until its tail stops changing across
+    # PROMPT_SETTLE_STABLE_POLLS consecutive captures — i.e. the bracketed
+    # paste has finished rendering into the input box — then return so the
+    # caller's single `Enter` submits a settled prompt. The poll interval
+    # is `prompt_submit_delay_sec`. Bounded by `prompt_settle_timeout_sec`:
+    # if the pane never stabilizes, or a capture fails, submit anyway
+    # rather than stranding the prompt (a real server loss then surfaces
+    # on the `send_keys("Enter")` that follows).
+    def wait_for_paste_to_settle
+      deadline = Time.now + prompt_settle_timeout_sec
+      previous = nil
+      stable = 0
+      loop do
+        sleep prompt_submit_delay_sec
+        begin
+          current = capture_pane_tail(bytes: PROMPT_SETTLE_CAPTURE_BYTES)
+        rescue Hive::TmuxError
+          return
+        end
+        if current == previous
+          stable += 1
+          return if stable >= PROMPT_SETTLE_STABLE_POLLS
+        else
+          stable = 0
+        end
+        previous = current
+        return if Time.now >= deadline
+      end
     end
 
     def target_pane

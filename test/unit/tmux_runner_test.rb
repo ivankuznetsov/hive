@@ -143,6 +143,119 @@ class TmuxRunnerTest < Minitest::Test
     end
   end
 
+  def test_send_prompt_waits_for_paste_to_settle_before_enter
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "tmux.log")
+      counter = File.join(dir, "cap.count")
+      fake = write_fake_tmux(dir, <<~RUBY)
+        #!/usr/bin/env ruby
+        args = ARGV.dup
+        args.shift(2) if args.first == "-L"
+        File.open(#{log_path.dump}, "a") { |log| log.puts(args.join(" ")) }
+        case args.first
+        when "capture-pane"
+          n = (File.read(#{counter.dump}) rescue "0").to_i
+          File.write(#{counter.dump}, (n + 1).to_s)
+          # First two captures differ (paste still rendering); then stable.
+          STDOUT.write(n < 2 ? "render-\#{n}" : "settled")
+          exit 0
+        else
+          exit 0
+        end
+      RUBY
+      runner = Hive::TmuxRunner.new(
+        name: unique_name("settle"), cwd: dir, tmux_bin: fake, socket_name: @socket_name
+      )
+
+      submitted = with_env("HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC" => "0") do
+        runner.send_prompt("big prompt")
+      end
+      assert submitted
+
+      lines = File.readlines(log_path).map(&:strip)
+      captures = lines.count { |line| line.split.first == "capture-pane" }
+      send_index = lines.rindex { |line| line.split.first == "send-keys" }
+      last_capture_index = lines.rindex { |line| line.split.first == "capture-pane" }
+
+      assert_operator captures, :>=, 3,
+                      "must keep polling capture-pane until the paste stops changing; got #{captures}"
+      assert send_index, "must submit with send-keys"
+      assert_operator last_capture_index, :<, send_index,
+                      "Enter must be sent only AFTER the pane settles"
+      assert_match(/Enter/, lines.fetch(send_index))
+    end
+  end
+
+  def test_send_prompt_submits_at_deadline_when_pane_never_settles
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "tmux.log")
+      counter = File.join(dir, "cap.count")
+      fake = write_fake_tmux(dir, <<~RUBY)
+        #!/usr/bin/env ruby
+        args = ARGV.dup
+        args.shift(2) if args.first == "-L"
+        File.open(#{log_path.dump}, "a") { |log| log.puts(args.join(" ")) }
+        case args.first
+        when "capture-pane"
+          n = (File.read(#{counter.dump}) rescue "0").to_i
+          File.write(#{counter.dump}, (n + 1).to_s)
+          STDOUT.write("frame-\#{n}") # always changing — never settles
+          exit 0
+        else
+          exit 0
+        end
+      RUBY
+      runner = Hive::TmuxRunner.new(
+        name: unique_name("nosettle"), cwd: dir, tmux_bin: fake, socket_name: @socket_name
+      )
+
+      submitted = with_env(
+        "HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC" => "0",
+        "HIVE_TMUX_PROMPT_SETTLE_TIMEOUT_SEC" => "0.05"
+      ) do
+        runner.send_prompt("big prompt")
+      end
+      assert submitted, "must still submit at the settle deadline even if the pane never stabilizes"
+
+      lines = File.readlines(log_path).map(&:strip)
+      assert(lines.any? { |line| line.split.first == "send-keys" && line.include?("Enter") },
+             "Enter must still be sent once the settle deadline passes")
+    end
+  end
+
+  def test_send_prompt_submits_when_pane_capture_fails
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "tmux.log")
+      fake = write_fake_tmux(dir, <<~RUBY)
+        #!/usr/bin/env ruby
+        args = ARGV.dup
+        args.shift(2) if args.first == "-L"
+        File.open(#{log_path.dump}, "a") { |log| log.puts(args.join(" ")) }
+        case args.first
+        when "capture-pane"
+          warn "no server running on /tmp/tmux-test"
+          exit 1
+        else
+          exit 0
+        end
+      RUBY
+      runner = Hive::TmuxRunner.new(
+        name: unique_name("capfail"), cwd: dir, tmux_bin: fake, socket_name: @socket_name
+      )
+
+      submitted = with_env("HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC" => "0") do
+        runner.send_prompt("hi")
+      end
+      assert submitted, "a failed pane capture must fall back to submitting, not raise"
+
+      lines = File.readlines(log_path).map(&:strip)
+      assert(lines.any? { |line| line.split.first == "capture-pane" },
+             "must attempt at least one capture before falling back")
+      assert(lines.any? { |line| line.split.first == "send-keys" && line.include?("Enter") },
+             "must still send Enter after a capture failure")
+    end
+  end
+
   def test_capture_pane_tail_returns_bounded_output
     with_tmp_dir do |dir|
       runner = runner(name: unique_name("tail"), cwd: dir)

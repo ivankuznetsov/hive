@@ -53,6 +53,7 @@ module Hive
         :folder,
         :state_file,
         :worktree_path,
+        :pr_url,
         :marker,
         :attrs,
         :mtime,
@@ -79,7 +80,7 @@ module Hive
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
         def initialize(id: nil, display_name: nil, worktree_path: nil,
-                       folder_mtime: nil, live_task_lock: false,
+                       pr_url: nil, folder_mtime: nil, live_task_lock: false,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, **rest)
@@ -89,6 +90,7 @@ module Hive
                 dependency_stage: dependency_stage,
                 blocked: blocked,
                 worktree_path: worktree_path,
+                pr_url: pr_url,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
@@ -155,6 +157,7 @@ module Hive
           folder: payload["folder"],
           state_file: payload["state_file"],
           worktree_path: payload["worktree_path"],
+          pr_url: payload["pr_url"],
           marker: payload["marker"],
           attrs: payload["attrs"],
           mtime: payload["mtime"],

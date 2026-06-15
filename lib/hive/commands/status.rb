@@ -10,6 +10,8 @@ require "hive/dependencies"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
+require "hive/gh"
+require "hive/pr"
 
 module Hive
   module Commands
@@ -213,6 +215,7 @@ module Hive
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
+          "pr_url" => row[:pr_url],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
@@ -500,6 +503,7 @@ module Hive
                 folder: entry,
                 state_file: task.state_file,
                 worktree_path: worktree_path,
+                pr_url: pr_url_for(task),
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
@@ -625,6 +629,16 @@ module Hive
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
         row[:blocked] = false
+      end
+
+      def pr_url_for(task)
+        return nil if task.stage_index < 5
+
+        value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        value = value.to_s.strip
+        value.empty? ? nil : value
+      rescue StandardError
+        nil
       end
 
       # The production glob over a stage dir's task folders, extracted into its

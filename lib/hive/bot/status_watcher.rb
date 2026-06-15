@@ -6,11 +6,11 @@ module Hive
   module Bot
     class StatusWatcher
       Row = Data.define(:project, :project_path, :hive_state_path, :slug, :id, :display_name, :stage, :marker,
-                        :attrs, :folder, :state_file, :state_file_mtime, :age_seconds,
+                        :attrs, :folder, :state_file, :pr_url, :state_file_mtime, :age_seconds,
                         :action, :action_label, :suggested_command, :next_action, :diagnostic) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
                        stage: nil, marker: nil, attrs: {}, folder: nil,
-                       state_file: nil, state_file_mtime: nil, age_seconds: nil,
+                       state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
                        action: nil, action_label: nil, suggested_command: nil,
                        next_action: nil, diagnostic: nil)
           super
@@ -275,6 +275,7 @@ module Hive
               attrs: task["attrs"] || {},
               folder: task["folder"],
               state_file: task["state_file"],
+              pr_url: task["pr_url"],
               state_file_mtime: parse_mtime(task["mtime"], task["state_file"], now: now),
               age_seconds: task["age_seconds"],
               action: task["action"],

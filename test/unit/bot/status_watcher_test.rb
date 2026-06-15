@@ -58,6 +58,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       "display_name" => "Readable Row",
       "folder" => "/tmp/hive/.hive-state/stages/2-brainstorm/#{slug}",
       "state_file" => "/tmp/hive/.hive-state/stages/2-brainstorm/#{slug}/brainstorm.md",
+      "pr_url" => nil,
       "marker" => marker,
       "attrs" => attrs,
       "mtime" => Time.now.utc.iso8601,
@@ -73,7 +74,10 @@ class HiveBotStatusWatcherTest < Minitest::Test
   end
 
   def test_fetch_parses_status_rows
-    with_fake_status(JSON.generate(envelope([ task(slug: "s1") ]))) do |bin|
+    status_task = task(slug: "s1")
+    status_task["pr_url"] = "https://github.com/example/repo/pull/561"
+
+    with_fake_status(JSON.generate(envelope([ status_task ]))) do |bin|
       result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
 
       assert result.ok, result.error
@@ -83,6 +87,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "s1", row.slug
       assert_equal 42, row.id
       assert_equal "Readable Row", row.display_name
+      assert_equal "https://github.com/example/repo/pull/561", row.pr_url
       assert_equal "waiting", row.marker
       assert_equal "needs_input", row.action
       assert_nil row.diagnostic

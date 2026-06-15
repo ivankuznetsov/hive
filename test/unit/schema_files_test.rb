@@ -167,6 +167,7 @@ class SchemaFilesTest < Minitest::Test
       blocked: false,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
+      pr_url: nil,
       marker_name: :waiting,
       marker_attrs: {},
       mtime: Time.now,

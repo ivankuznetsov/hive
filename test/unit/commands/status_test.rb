@@ -78,6 +78,62 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_populates_pr_url_from_pr_md_frontmatter_in_review_stage
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "6-review", "review-task-260615-abcd")
+      pr_url = "https://github.com/example/repo/pull/561"
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- REVIEW_WAITING escalations=1 pass=1 -->\n")
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        pr_url: #{pr_url}
+        ---
+        # Pull request
+      MD
+
+      payload = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ])
+      task = payload.fetch("projects").first.fetch("tasks").find do |candidate|
+        candidate.fetch("slug") == "review-task-260615-abcd"
+      end
+
+      assert_equal "6-review", task.fetch("stage")
+      assert_equal pr_url, task.fetch("pr_url")
+      assert_nil task.fetch("attrs")["pr_url"],
+                 "pr_url is a sibling JSON field, not marker attrs from task.md"
+    end
+  end
+
+  def test_json_payload_emits_nil_pr_url_before_open_pr_and_for_blank_or_malformed_pr_md
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      early = File.join(hive_state, "stages", "2-brainstorm", "early-task-260615-abcd")
+      blank = File.join(hive_state, "stages", "5-open-pr", "blank-pr-260615-abcd")
+      malformed = File.join(hive_state, "stages", "6-review", "malformed-pr-260615-abcd")
+      FileUtils.mkdir_p(early)
+      FileUtils.mkdir_p(blank)
+      FileUtils.mkdir_p(malformed)
+      File.write(File.join(early, "brainstorm.md"), "<!-- WAITING -->\n")
+      File.write(File.join(blank, "pr.md"), "<!-- COMPLETE -->\n")
+      File.write(File.join(malformed, "task.md"), "<!-- REVIEW_WAITING escalations=1 pass=1 -->\n")
+      File.write(File.join(malformed, "pr.md"), "---\npr_url: [unclosed\n---\n<!-- COMPLETE -->\n")
+
+      payload = nil
+      _out, _err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ])
+      end
+      tasks = payload.fetch("projects").first.fetch("tasks")
+
+      assert_nil tasks.find { |task| task.fetch("slug") == "early-task-260615-abcd" }.fetch("pr_url")
+      assert_nil tasks.find { |task| task.fetch("slug") == "blank-pr-260615-abcd" }.fetch("pr_url")
+      assert_nil tasks.find { |task| task.fetch("slug") == "malformed-pr-260615-abcd" }.fetch("pr_url")
+    end
+  end
+
   # #270: a held brainstorm exposes its unanswered-question count so a
   # consumer can tell "daemon is holding this" from "broken". Every other
   # row reports 0.

@@ -61,6 +61,19 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_equal "failed_notice", payload.fetch("status")
   end
 
+  def test_blank_date_defers_default_to_the_runner
+    # With no --date the command must pass `date: nil` so Hive::Digest.run
+    # owns the single "local day that just ended" default — it must NOT
+    # compute its own default here (that duplication is what we removed).
+    output = StringIO.new
+    runner = Runner.new([], result(status: :empty, message: "Nothing shipped today 🌙"))
+
+    Hive::Commands::Digest.new(date: nil, dry_run: true, runner: runner, output: output).call
+
+    assert_nil runner.calls.first.fetch(:date),
+               "a blank --date must defer the default to the runner, not be computed in the command"
+  end
+
   def test_invalid_date_raises_config_error
     command = Hive::Commands::Digest.new(date: "13-06-2026", dry_run: true, runner: Runner.new([], nil))
 

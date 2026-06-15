@@ -23,7 +23,11 @@ module Hive
       private
 
       def parse_date
-        return Hive::Digest::Window.previous_local_day if @date.to_s.empty?
+        # No --date: defer to Hive::Digest.run, which owns the single
+        # "local day that just ended" default (and its injectable clock).
+        # Computing it here too would duplicate that default across two
+        # sites that could drift.
+        return nil if @date.to_s.empty?
 
         unless @date.to_s.match?(/\A\d{4}-\d{2}-\d{2}\z/)
           raise Hive::ConfigError, "hive digest: --date must be YYYY-MM-DD; got #{@date.inspect}"

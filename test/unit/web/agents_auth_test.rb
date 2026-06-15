@@ -62,6 +62,30 @@ class AgentsAuthTest < Minitest::Test
     assert_nil auth.output_for("missing"), "an unknown session id yields nil"
   end
 
+  def test_output_for_returns_render_safe_utf8_for_binary_pty_output
+    auth = Hive::Web::AgentsAuth.new
+    # Raw PTY bytes (readpartial returns ASCII-8BIT): an ANSI clear-line
+    # sequence, a box-drawing glyph, and a lone UTF-8 continuation byte left
+    # when a 4096-byte read splits a multibyte char. The trailing \xE2 makes
+    # the buffer invalid UTF-8 — exactly what raised Encoding::CompatibilityError
+    # when the <pre> view interpolated it (the login-status 500).
+    binary = +"".b
+    binary << "\e[2K".b << "█".b << " login".b << "\xE2".b
+    refute binary.dup.force_encoding(Encoding::UTF_8).valid_encoding?,
+           "fixture must be invalid UTF-8 so the test actually exercises the scrub"
+    session = Hive::Web::AgentsAuth::Session.new(id: "s", agent: "claude", output: binary, done: false)
+    auth.instance_variable_get(:@sessions)["s"] = session
+
+    out = auth.output_for("s")
+
+    assert_equal Encoding::UTF_8, out.encoding, "output_for must hand the view a UTF-8 string"
+    assert out.valid_encoding?, "invalid bytes must be scrubbed so the <pre> view can't raise"
+    # Faithful reproduction of the failing render: a UTF-8 buffer absorbing
+    # the value. With a binary buffer this raised Encoding::CompatibilityError.
+    rendered = (+"<pre>").force_encoding(Encoding::UTF_8) << out
+    assert_includes rendered, "login", "scrubbing must preserve the legible CLI text"
+  end
+
   def test_start_rejects_when_too_many_logins_are_in_flight
     auth = Hive::Web::AgentsAuth.new
     sessions = auth.instance_variable_get(:@sessions)

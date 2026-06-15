@@ -35,6 +35,18 @@ module Hive
         pr_url, pr_error = pr_url_or_error(task)
         return pr_error if pr_error
 
+        # If the PR already merged out-of-band (e.g. squash-merged while the
+        # task was still mid-pipeline), finalization is moot — the merged PR is
+        # final. Short-circuit to complete instead of running the body-refresh
+        # agent or tripping verify_state!'s unpushed-commits guard on a now-
+        # stale branch. Mirrors open_pr's open_pr_already_merged recovery; fixes
+        # the recurring "merged PR stranded in 8-finalize" failure.
+        if pr_already_merged?(pr_url, cfg)
+          Hive::Markers.set(task.state_file, :complete,
+                            pr_url: pr_url, is_draft: "false", merged: "true")
+          return { commit: "finalize_already_merged", status: :complete }
+        end
+
         # Authenticate first so an auth-related push failure surfaces
         # as a clear "gh not authenticated" hard-fail (Plan R5)
         # instead of a generic git push error.
@@ -124,6 +136,15 @@ module Hive
           exit 1
         end
         pointer
+      end
+
+      # True when the PR already merged out-of-band. A GhError (gh not yet
+      # authenticated, or a transient lookup failure) returns false so finalize
+      # falls through to its normal path rather than skipping it on a flaky read.
+      def pr_already_merged?(pr_url, cfg)
+        Hive::Gh.pr_state(pr_url, cfg: cfg) == "MERGED"
+      rescue Hive::GhError
+        false
       end
 
       def pr_url_or_error(task)

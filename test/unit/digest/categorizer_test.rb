@@ -118,6 +118,37 @@ class HiveDigestCategorizerTest < Minitest::Test
     assert_includes prompt, "Full body."
   end
 
+  def test_prompt_fences_every_per_item_data_field_and_drops_pr_url
+    grouped = {
+      "alpha" => [
+        item(pr_number: 10, pr_title: "Build digest", pr_body: "Full body.", display_name: "Shiny task")
+      ]
+    }
+    categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: Dir.mktmpdir, logger: nil)
+
+    prompt = categorizer.render_prompt(grouped, date: Date.new(2026, 6, 13), output_path: "/tmp/x.json")
+
+    # pr_url (attacker-influenceable, same provenance as pr_body) is no longer
+    # interpolated: the categorizer never used it; the renderer reads it from
+    # pr.md for the link, so it is not an un-fenced injection slot anymore.
+    refute_includes prompt, "PR URL:"
+    refute_includes prompt, "https://example.test/pulls/10",
+                    "the unused, attacker-influenceable PR URL must not reach the prompt"
+
+    # Every per-item DATA field (project, display name, PR title, PR body) is
+    # fenced in the per-spawn nonce tag, so none is an un-fenced injection slot.
+    tag = prompt[/<(user_supplied_[0-9a-f]+)>/, 1]
+    refute_nil tag, "the prompt must use a per-spawn nonce tag"
+    assert_equal prompt.scan("<#{tag}>").count, prompt.scan("</#{tag}>").count,
+                 "every opened nonce fence must be closed"
+    assert_includes prompt, "Project:\n<#{tag}>\nalpha\n</#{tag}>"
+    assert_includes prompt, "Display name:\n<#{tag}>\nShiny task\n</#{tag}>"
+    assert_includes prompt, "PR title:\n<#{tag}>\nBuild digest\n</#{tag}>"
+    assert_includes prompt, "PR body:\n<#{tag}>\nFull body.\n</#{tag}>"
+    # The id stays outside the fence as the join key the model echoes back.
+    assert_includes prompt, "Item id: alpha/10"
+  end
+
   def test_unknown_category_warns_through_the_logger
     with_tmp_dir do |dir|
       path = File.join(dir, "items.json")

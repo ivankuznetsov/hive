@@ -410,6 +410,14 @@ module Hive
         registry.shift while registry.size > CALLBACK_REGISTRY_MAX
       end
 
+      # The only valid `parse_mode` values: nil = plain text, :html =
+      # Telegram HTML (the one mode in which `<a>` markup renders as a link
+      # rather than literal text). Documented as a closed set so a future
+      # HTML message — e.g. an `:html` recovery/reminder rebuild — has a
+      # named contract to follow and can't accidentally ship raw `<a>` tags
+      # as plain text by leaving parse_mode at its nil default.
+      PARSE_MODES = [ nil, :html ].freeze
+
       Notification = Data.define(:text, :keyboard, :parse_mode) do
         def initialize(text:, keyboard:, parse_mode: nil)
           super

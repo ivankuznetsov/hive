@@ -13,7 +13,17 @@ module Hive
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
                        action: nil, action_label: nil, suggested_command: nil,
                        next_action: nil, diagnostic: nil)
-          super
+          # Explicit-keyword super (matching Snapshot::Row) rather than the
+          # bare positional form, so a future member-order change in the
+          # Data.define above can't silently misbind constructor arguments.
+          super(
+            project: project, project_path: project_path, hive_state_path: hive_state_path,
+            slug: slug, id: id, display_name: display_name, stage: stage, marker: marker,
+            attrs: attrs, folder: folder, state_file: state_file, pr_url: pr_url,
+            state_file_mtime: state_file_mtime, age_seconds: age_seconds, action: action,
+            action_label: action_label, suggested_command: suggested_command,
+            next_action: next_action, diagnostic: diagnostic
+          )
         end
       end
 

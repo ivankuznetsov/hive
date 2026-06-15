@@ -73,6 +73,9 @@ module Hive
         # predate PR #84 finding #8 can keep their existing Row.new
         # calls; production code in build_row always passes the value
         # explicitly. New tests should pass it explicitly too.
+        # pr_url defaults to nil so payloads / test factories that predate
+        # the PR-link feature keep building Row without it; production
+        # payloads always emit the value (string or null) explicitly.
         # live_task_lock defaults to false so older JSON payloads (and
         # tests written before issue #144) keep classifying correctly;
         # production payloads always emit the boolean explicitly.

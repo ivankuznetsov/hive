@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-14
+updated: 2026-06-15
 tags: [commands, api]
 ---
 
@@ -55,8 +55,11 @@ uses for boolean options. Leading `--json`, `--json=true`/`TRUE`/`t`/`T`, and
 false forms such as `--no-json`, `--skip-json`, or `--json=false` move behind
 the command before dispatch; unsupported assignments such as `--json=1` or
 `--json=yes` fail as usage errors before the assigned value can become a
-command argument or task target. Wrapper-owned usage errors use the last
-recognized JSON boolean flag, so `--json --no-json` and
+command argument or task target. `hive new` is the wrapper-level text-tail
+exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
+`--json=...` tokens are treated as literal task text, with `bin/hive` inserting
+`--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
+errors use the last recognized JSON boolean flag, so `--json --no-json` and
 `--json --json=false` choose human prose instead of an error envelope.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the

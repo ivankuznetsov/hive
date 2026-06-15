@@ -2014,4 +2014,138 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       end
     end
   end
+
+  # ---- reason=timeout single bounded re-entry (U2) ----
+
+  def test_recovers_timeout_once_on_idempotent_stages
+    # 5-open-pr / 7-artifacts: the agent did the work (PR already open;
+    # artifact.md on disk) but never stamped the marker, so the wait timed out.
+    # Clearing the timeout ERROR re-dispatches into the stage's idempotent
+    # :complete short-circuit.
+    %w[5-open-pr 7-artifacts].each_with_index do |stage, index|
+      with_marker_file do |state_file|
+        marker_id = "t-#{index}"
+        File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=#{marker_id} timeout_sec=1800 -->\n")
+        pre_clear_mtime = NOW - 4242 - index
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          mtime: pre_clear_mtime,
+          stage: stage,
+          marker: "error",
+          marker_attrs: { "reason" => "timeout", "marker_id" => marker_id },
+          action: "error",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        heal_event = @logger.events.reverse.find { |e| e[0] == :marker_healed }
+        refute_nil heal_event, "#{stage} timeout must log marker_healed"
+        assert_equal "stage_timeout", heal_event[1][:reason]
+        assert_equal "timeout", heal_event[1][:marker_reason]
+        assert_equal stage, heal_event[1][:stage]
+        assert_equal 1, heal_event[1][:attempts]
+        assert_equal 1, heal_event[1][:max_attempts], "timeout is capped at one re-entry"
+        assert Hive::Markers.current(state_file).none?,
+               "#{stage} timeout ERROR should clear so the daemon re-dispatches the stage"
+      end
+    end
+    assert_empty @request_queue.requests,
+                 "open_pr/artifacts re-enter via the markerless edit-resume path; only 3-plan requeues"
+  end
+
+  def test_timeout_not_recovered_outside_idempotent_stages
+    # Other stages' timeouts are NOT safe to blindly re-run.
+    %w[3-plan 4-execute 8-finalize 6-review].each do |stage|
+      with_marker_file do |state_file|
+        File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t -->\n")
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          stage: stage,
+          marker: "error",
+          marker_attrs: { "reason" => "timeout", "marker_id" => "t" },
+          action: "error",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        refute(@logger.events.any? { |name, _| name == :marker_healed },
+               "#{stage} timeout must NOT auto-recover (re-entry there is not side-effect-safe)")
+        assert_match(/ERROR reason=timeout/, File.read(state_file))
+      end
+    end
+  end
+
+  def test_timeout_caps_at_one_retry_even_when_general_budget_is_higher
+    # @healer uses the default error_auto_recovery_limit (3); timeout must still
+    # cap at 1 via the per-reason limit, then stay red for manual recovery.
+    with_marker_file do |state_file|
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "5-open-pr",
+        marker: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "t" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t -->\n")
+      heal([ row ])
+      refute_match(/ERROR/, File.read(state_file), "first timeout heals")
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t -->\n")
+      heal([ row ])
+
+      assert_match(/ERROR reason=timeout/, File.read(state_file),
+                   "a second timeout stays red — capped at one re-entry")
+      assert_equal 1, @logger.events.count { |name, _| name == :marker_healed }
+      exhausted = @logger.events.select { |name, _| name == :marker_heal_exhausted }
+      assert_equal 1, exhausted.size
+      assert_equal "stage_timeout", exhausted.first[1][:reason]
+      assert_equal "timeout", exhausted.first[1][:marker_reason]
+      assert_equal 1, exhausted.first[1][:attempts]
+      assert_equal 1, exhausted.first[1][:max_attempts]
+      assert_match(/did not stamp its completion marker/, exhausted.first[1][:remediation])
+      assert_match(/rerun 5-open-pr/, exhausted.first[1][:remediation])
+    end
+  end
+
+  def test_timeout_budget_keys_on_stage_reason_not_marker_id
+    with_marker_file do |state_file|
+      first = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "t-a" },
+        action: "error",
+        live_task_lock: false
+      )
+      second = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "7-artifacts",
+        marker: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "t-b" },
+        action: "error",
+        live_task_lock: false
+      )
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t-a -->\n")
+      heal([ first ])
+      refute_match(/ERROR/, File.read(state_file))
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=timeout marker_id=t-b -->\n")
+      heal([ second ])
+
+      assert_match(/ERROR reason=timeout marker_id=t-b/, File.read(state_file),
+                   "a fresh timeout marker_id must not earn a fresh budget")
+      assert_equal 1, @logger.events.count { |name, _| name == :marker_healed }
+      assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
+    end
+  end
 end

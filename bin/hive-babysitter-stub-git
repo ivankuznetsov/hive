@@ -164,7 +164,8 @@ def unsafe_env?
   # exec-capable seam (this is a denylist of the known offenders, not an exhaustive bar):
   #   * GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND / GIT_SSH / GIT_PROXY_COMMAND each name a command
   #     git execs directly (the older GIT_SSH / GIT_PROXY_COMMAND siblings are as dangerous as
-  #     the newer GIT_SSH_COMMAND).
+  #     the newer GIT_SSH_COMMAND). GIT_ASKPASS / SSH_ASKPASS name credential-prompt helpers
+  #     that git or ssh can exec during authenticated remote reads.
   #   * GIT_CONFIG_PARAMETERS is git's one-shot config channel — it carries the same
   #     exec-capable keys (diff.external, core.fsmonitor, aliases, …) as a leading `-c`.
   #   * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject those keys as well.
@@ -174,6 +175,7 @@ def unsafe_env?
   # auto-spawn a pager, so guarding it would only over-block legitimate reads.
   return true if env_set?("GIT_EXTERNAL_DIFF")
   return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
+  return true if env_set?("GIT_ASKPASS") || env_set?("SSH_ASKPASS")
   return true if env_set?("GIT_PROXY_COMMAND")
   return true if env_set?("GIT_CONFIG_PARAMETERS")
   return true if env_set?("GIT_CONFIG_GLOBAL") || env_set?("GIT_CONFIG_SYSTEM")
@@ -272,7 +274,7 @@ def hardened_passthrough_argv(argv, rest)
     passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
   end
 
-  [ "-c", "core.fsmonitor=false", *passthrough ]
+  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", *passthrough ]
 end
 
 unsafe_global, rest = split_global_options(argv)
@@ -293,7 +295,7 @@ end
 # write files if these env vars or config files reach real git, and argv
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
-%w[GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND].each { |key| ENV.delete(key) }
+%w[GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL

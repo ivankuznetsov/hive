@@ -208,9 +208,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env.merge(
         "GIT_CONFIG_PARAMETERS" => "'diff.external=touch /tmp/hive-cfgparams-pwn'"
       ), "git", "diff"
-      # GIT_SSH / GIT_PROXY_COMMAND are the older exec-capable siblings of GIT_SSH_COMMAND —
-      # each names a program git execs — and must skip on the network-reaching reads they hit.
+      # GIT_SSH / GIT_PROXY_COMMAND are the older exec-capable siblings of GIT_SSH_COMMAND,
+      # and askpass helpers are credential-prompt programs git/ssh can exec during remote reads.
       assert_stubbed env.merge("GIT_SSH" => "touch /tmp/hive-gitssh-pwn"), "git", "remote", "show", "origin"
+      assert_stubbed env.merge("GIT_ASKPASS" => "touch /tmp/hive-askpass-pwn"), "git", "remote", "show", "origin"
+      assert_stubbed env.merge("SSH_ASKPASS" => "touch /tmp/hive-ssh-askpass-pwn"), "git", "remote", "show", "origin"
       assert_stubbed env.merge("GIT_PROXY_COMMAND" => "touch /tmp/hive-proxy-pwn"), "git", "status"
       # GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM repoint config at an attacker-written file that
       # can re-enable diff.external / core.pager / aliases, so a set value must skip.
@@ -318,6 +320,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=core.pager=HIVE_TEST_PAGER log --oneline skipped"
       assert_includes skipped, "git --paginate log --oneline skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch /tmp/hive-pager-pwn needle skipped"
+      assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
@@ -643,7 +646,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       passthrough.insert(index + 1, "--no-ext-diff", "--no-textconv")
     end
 
-    "real-git #{([ "-c", "core.fsmonitor=false" ] + passthrough).join(' ')}"
+    "real-git #{([ "-c", "core.fsmonitor=false", "-c", "core.askPass=" ] + passthrough).join(' ')}"
   end
 
   def git_subcommand_index(args)

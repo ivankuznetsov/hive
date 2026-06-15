@@ -31,7 +31,11 @@ def escaped_argv(argv)
 end
 
 def escape_control_chars(arg)
-  arg.to_s.gsub(/[\x00-\x1f\x7f]/) { |char| "\\x%02X" % char.ord }
+  # Scan bytes, not characters: argv can carry non-UTF-8 bytes (git paths, agent-supplied
+  # messages), and a UTF-8 `gsub` would raise ArgumentError on an invalid sequence — crashing
+  # log_skip before its `rescue` and dropping the skip-log record. Binary-encode first so the
+  # regex matches control bytes byte-by-byte; high bytes pass through unescaped, as before.
+  arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
 argv = ARGV.dup

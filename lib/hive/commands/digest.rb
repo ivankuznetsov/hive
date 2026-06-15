@@ -23,7 +23,7 @@ module Hive
       private
 
       def parse_date
-        return Hive::Digest::Window.local_today - 1 if @date.to_s.empty?
+        return Hive::Digest::Window.previous_local_day if @date.to_s.empty?
 
         unless @date.to_s.match?(/\A\d{4}-\d{2}-\d{2}\z/)
           raise Hive::ConfigError, "hive digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
@@ -50,6 +50,9 @@ module Hive
           # digest from one that fell back to a failure notice.
           "ok" => result.status != :failed_notice,
           "schema" => "hive-digest",
+          # Versioned like every other --json envelope; fetched from the
+          # single SCHEMA_VERSIONS registry so the two can't drift.
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest"),
           "date" => result.date.iso8601,
           "status" => result.status.to_s,
           "dry_run" => @dry_run,

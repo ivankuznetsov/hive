@@ -67,7 +67,12 @@ module Hive
       def complete(date:, exit_code:, now: @clock.call)
         local_date = Hive::Digest::Window.parse_date(date)
         @pending.delete(local_date.iso8601)
-        unless exit_code.to_i.zero?
+        # ChildSupervisor reports a nil exit status for a signalled child
+        # (killed by SIGTERM/SIGKILL on shutdown or timeout). `nil.to_i` is
+        # 0, so a bare `exit_code.to_i.zero?` would treat a killed digest as
+        # a success and silently advance the cursor past that date. Treat a
+        # nil (signalled / unknown) exit as a failure so the day is retried.
+        unless exit_code && exit_code.to_i.zero?
           record_failure(now)
           return
         end
@@ -101,12 +106,13 @@ module Hive
       def record_failure(now)
         count = (@failure&.fetch(:count, 0)).to_i + 1
         interval = FAILURE_BACKOFF_SCHEDULE[[ count - 1, FAILURE_BACKOFF_SCHEDULE.size - 1 ].min]
-        @failure = { count: count, next_eligible_at: now + interval }
+        next_eligible_at = now + interval
+        @failure = { count: count, next_eligible_at: next_eligible_at }
         @logger&.event(
           :digest_failure_backoff,
           failures: count,
           retry_after_sec: interval,
-          next_eligible_at: now.utc.iso8601
+          next_eligible_at: next_eligible_at.utc.iso8601
         )
       end
 
@@ -149,9 +155,24 @@ module Hive
         return {} unless File.exist?(@state_path)
 
         parsed = JSON.parse(File.read(@state_path))
-        parsed.is_a?(Hash) ? parsed : {}
-      rescue JSON::ParserError, SystemCallError
+        return parsed if parsed.is_a?(Hash)
+
+        # Valid JSON but the wrong shape (e.g. an array). Treating it as a
+        # silent first-run would reset the cursor forward and permanently
+        # skip every owed un-digested day, so surface it to the operator.
+        log_state_unreadable("expected a JSON object, got #{parsed.class}")
         {}
+      rescue JSON::ParserError, SystemCallError => e
+        # A corrupt/truncated/unreadable digest_state.json would otherwise be
+        # swallowed to {} and `tick` would treat it as first-run, silently
+        # resetting the cursor to yesterday and skipping owed days with zero
+        # operator signal. Emit a distinct event before degrading.
+        log_state_unreadable("#{e.class}: #{e.message}")
+        {}
+      end
+
+      def log_state_unreadable(reason)
+        @logger&.event(:digest_state_unreadable, path: @state_path, error: reason)
       end
 
       def write_state(data)

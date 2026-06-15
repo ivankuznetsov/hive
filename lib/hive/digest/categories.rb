@@ -18,6 +18,13 @@ module Hive
       # The category assigned when the model omits a row or returns an
       # unknown value.
       DEFAULT = VALID.first.freeze
+
+      # Single validity predicate shared by the CategorizedItem boundary
+      # guard and the categorizer's default-and-warn path, so the two can't
+      # drift on what counts as an accepted category.
+      def self.valid?(category)
+        VALID.include?(category)
+      end
     end
   end
 end

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-digest.v1.json",
+  "title": "hive digest output (v1)",
+  "description": "Stable contract emitted by `hive digest --json`. The success envelope reports the delivery outcome for one local day's shipped digest (status/date/message). It is 'success-only' in that hard failures (bad --date, Telegram send error) surface on stderr + a non-zero exit code rather than a JSON error envelope; a model failure still prints a SuccessPayload with ok:false and status=failed_notice. The Thor usage-error path (bad flags) emits the shared ErrorPayload via JSON_USAGE_ERROR_CONTRACTS.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "date",
+        "status",
+        "dry_run",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-digest" },
+        "schema_version": { "const": 1 },
+        "ok": {
+          "type": "boolean",
+          "description": "true unless the digest fell back to a failure notice (status=failed_notice)."
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "The local calendar day the digest covers (ISO YYYY-MM-DD)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["empty", "sent", "failed_notice"],
+          "description": "empty = nothing shipped that day; sent = categorized digest delivered; failed_notice = the categorizer raised a ModelError and a short failure notice was sent instead."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "true when invoked with --dry-run; nothing was sent to Telegram."
+        },
+        "message": {
+          "type": ["string", "null"],
+          "description": "The rendered digest text on a --dry-run (so a caller can preview it); null on a real send."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Matches every other hive-* error envelope."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage",
+            "config",
+            "internal"
+          ],
+          "description": "usage = malformed invocation caught before command dispatch (exit 64). config = bad --date / missing chat config (exit 78). internal = uncategorised crash (exit 70)."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 64, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 78=CONFIG."
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

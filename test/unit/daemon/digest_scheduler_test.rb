@@ -1,11 +1,16 @@
 require "test_helper"
 require "hive/daemon/digest_scheduler"
+require "hive/daemon/logger"
 
 class HiveDaemonDigestSchedulerTest < Minitest::Test
   include HiveTestHelper
 
   T0 = Time.utc(2026, 6, 14, 0, 0, 30)
 
+  # Validate event names against the REAL daemon Logger allowlist so a
+  # scheduler emitting an unregistered event (which a production
+  # Hive::Daemon::Logger would reject with ArgumentError, crashing the
+  # tick) is caught here instead of passing against a permissive stub.
   class StubLogger
     attr_reader :events
 
@@ -14,6 +19,10 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
     end
 
     def event(name, **attrs)
+      unless Hive::Daemon::Logger::EVENTS.include?(name)
+        raise ArgumentError, "unregistered daemon log event in test: #{name.inspect}"
+      end
+
       @events << [ name, attrs ]
     end
   end
@@ -172,6 +181,124 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
       write_state(dir, "last_digested_date" => "2026-06-12")
 
       assert_empty scheduler(dir, enabled: false).tick(now: T0)
+    end
+  end
+
+  def test_backoff_clamps_at_final_tier_after_repeated_failures
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+
+      # Four consecutive failures: 60s, 300s, then clamp at the final 900s
+      # tier. Without the `[count - 1, size - 1].min` clamp the fourth would
+      # index past the schedule and raise on `now + nil`.
+      4.times { |i| scheduler.complete(date: "2026-06-13", exit_code: 1, now: T0 + i) }
+
+      windows = logger.events.select { |name, _| name == :digest_failure_backoff }
+                      .map { |_, attrs| attrs.fetch(:retry_after_sec) }
+      assert_equal [ 60, 300, 900, 900 ], windows,
+                   "the third and later consecutive failures must clamp at the 900s ceiling"
+    end
+  end
+
+  def test_backoff_logs_next_eligible_at_as_now_plus_interval
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+
+      scheduler.complete(date: "2026-06-13", exit_code: 1, now: T0)
+
+      event = logger.events.find { |name, _| name == :digest_failure_backoff }.last
+      assert_equal((T0 + 60).utc.iso8601, event.fetch(:next_eligible_at),
+                   "next_eligible_at must be the future retry time (now + interval), not the failure time")
+    end
+  end
+
+  def test_nil_exit_code_is_treated_as_failure_not_silent_skip
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: true)
+
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+      # A signalled child (SIGTERM/SIGKILL on shutdown or timeout) reports a
+      # nil exit status; treating it as success would advance the cursor and
+      # silently skip the date.
+      scheduler.complete(date: "2026-06-13", exit_code: nil, now: T0 + 1)
+
+      assert_equal "2026-06-12", state(dir).fetch("last_digested_date"),
+                   "a nil (signalled) exit must be a failure, not a silent cursor advance"
+    end
+  end
+
+  def test_complete_does_not_regress_cursor_for_an_older_date
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-13")
+      scheduler = scheduler(dir, enabled: true)
+
+      # A late/duplicate success for an OLDER date must not rewind the cursor.
+      scheduler.complete(date: "2026-06-10", exit_code: 0, now: T0)
+
+      assert_equal "2026-06-13", state(dir).fetch("last_digested_date"),
+                   "completion must never regress the cursor below its current value"
+    end
+  end
+
+  def test_reconfigure_enables_a_disabled_scheduler_in_place
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: false)
+
+      assert_empty scheduler.tick(now: T0), "a disabled scheduler dispatches nothing"
+
+      scheduler.reconfigure(enabled: true, max_catchup_days: 7)
+
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug),
+                   "reconfigure must enable dispatch within one tick"
+    end
+  end
+
+  def test_reconfigure_can_disable_an_enabled_scheduler
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: true)
+
+      scheduler.reconfigure(enabled: false, max_catchup_days: 7)
+
+      assert_empty scheduler.tick(now: T0), "reconfigure(enabled: false) must stop dispatch"
+    end
+  end
+
+  def test_cancel_releases_pending_without_recording_a_failure
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: true)
+
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+      assert scheduler.pending?("2026-06-13")
+
+      scheduler.cancel(date: "2026-06-13")
+
+      refute scheduler.pending?("2026-06-13"), "cancel must clear the pending marker"
+      # No failure recorded → no backoff window, so the next tick re-dispatches
+      # the same date immediately.
+      assert_equal "2026-06-13", scheduler.tick(now: T0 + 1).first.fetch(:slug),
+                   "a cancelled (never-run) date must be re-evaluated with no backoff"
+    end
+  end
+
+  def test_corrupt_state_emits_unreadable_event
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "digest_state.json"), "{ not valid json")
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+
+      scheduler.tick(now: T0)
+
+      assert(logger.events.any? { |name, _| name == :digest_state_unreadable },
+             "a corrupt digest_state.json must surface a :digest_state_unreadable event " \
+             "instead of silently resetting the cursor")
     end
   end
 

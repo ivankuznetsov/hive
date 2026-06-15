@@ -494,8 +494,9 @@ module Hive
     long_desc <<~DESC
       Collects tasks that shipped on the requested local calendar date
       across all registered projects, asks the configured digest agent to
-      write friendly changelog lines, and sends one Telegram MarkdownV2
-      message to the configured digest chat.
+      write friendly changelog lines, and sends a Telegram MarkdownV2 message
+      (split into multiple messages when it exceeds Telegram's length limit)
+      to the configured digest chat.
 
       Without --date, uses the local calendar day that just ended. Use
       --dry-run to print the composed message instead of sending Telegram.

@@ -42,6 +42,41 @@ class HiveDigestE2ETest < Minitest::Test
     end
   end
 
+  # The failed-notice MarkdownV2 path is the exact class of bug the escaping
+  # exists to prevent, so exercise it against the REAL Telegram API: force a
+  # ModelError (the only realistic trigger we can't summon from a live model
+  # deterministically) but let the real Sender render + deliver the notice.
+  def test_live_telegram_failed_notice_when_categorizer_raises
+    with_tmp_global_config do |home|
+      project = create_project(home, "alpha")
+      slug = create_done_task(project, "feature-260613-abcd",
+                              display_name: "Feature: Digest command", pr_number: 10)
+      write_global_config(home, [ project ])
+      collector = Hive::Digest::Collector.new(
+        registry: -> { [ project ] },
+        ship_times: FakeShipTimes.new(
+          { [ project.fetch("hive_state_path"), slug ] => Time.utc(2026, 6, 13, 12) }
+        )
+      )
+      failing_categorizer = Object.new
+      def failing_categorizer.categorize(_grouped, date:)
+        raise Hive::Digest::ModelError, "categorizer unavailable (live failed-notice test)"
+      end
+
+      result = Hive::Digest.run(
+        date: Date.new(2026, 6, 13),
+        collector: collector,
+        categorizer: failing_categorizer,
+        cfg: Hive::Config.load_global_digest_config
+      )
+
+      assert_equal :failed_notice, result.status
+      assert_includes result.message, "failed"
+      # Telegram accepted the MarkdownV2-escaped failure notice for real.
+      assert_message_id result.delivery.responses.first
+    end
+  end
+
   def test_live_telegram_empty_digest
     with_tmp_global_config do |home|
       project = create_project(home, "alpha")

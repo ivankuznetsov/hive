@@ -1,6 +1,5 @@
 require "date"
 require "hive/digest/categories"
-require "hive/digest/categorizer"
 require "hive/digest/window"
 
 module Hive
@@ -10,6 +9,14 @@ module Hive
       # (see Hive::Digest::Categories) so an accepted category can never
       # be silently dropped here for want of a render section.
       CATEGORY_ORDER = Categories::ORDERED
+
+      # Telegram hard-caps a message at 4096 chars; the chunker cuts on that
+      # boundary, and a cut landing between a MarkdownV2 `\` and the char it
+      # escapes produces an invalid escape → a 400 that fails the whole send.
+      # Model summaries are not length-bounded, so cap each one well under the
+      # limit (MarkdownV2 escaping at most doubles the length) BEFORE escaping,
+      # so a single rendered line can never approach the chunk boundary.
+      MAX_SUMMARY_LENGTH = 600
 
       RESERVED_MDV2 = /([\\_*\[\]()~`>#+\-=|{}.!])/
 
@@ -57,11 +64,22 @@ module Hive
 
       def render_line(entry)
         item = entry.item
-        summary = escape_mdv2(entry.summary)
+        summary = escape_mdv2(truncate_summary(entry.summary))
         label = escape_mdv2(item.display_label)
         target = item.pr_url.to_s
         link = target.empty? ? label : "[#{label}](#{escape_link_target(target)})"
         "• #{summary} — #{link}"
+      end
+
+      # Bound an untrusted, length-unbounded model summary so the escaped
+      # line stays well under Telegram's 4096-char chunk boundary. Truncate
+      # on the raw text (before escaping) so a cut can never split a `\x`
+      # MarkdownV2 escape pair.
+      def truncate_summary(text)
+        text = text.to_s
+        return text if text.length <= MAX_SUMMARY_LENGTH
+
+        "#{text[0, MAX_SUMMARY_LENGTH - 1].rstrip}…"
       end
 
       def escape_link_target(url)

@@ -6,6 +6,18 @@ class HiveDigestCategorizerTest < Minitest::Test
 
   FIXTURE = File.expand_path("../../fixtures/digest/items.json", __dir__)
 
+  class CapturingLogger
+    attr_reader :warnings
+
+    def initialize
+      @warnings = []
+    end
+
+    def warn(message)
+      @warnings << message
+    end
+  end
+
   def test_maps_canned_json_to_categorized_items_by_pr_number
     grouped = {
       "alpha" => [
@@ -104,6 +116,66 @@ class HiveDigestCategorizerTest < Minitest::Test
     assert_includes prompt, "Item id: alpha/10"
     assert_includes prompt, "/tmp/digest-items.json"
     assert_includes prompt, "Full body."
+  end
+
+  def test_unknown_category_warns_through_the_logger
+    with_tmp_dir do |dir|
+      path = File.join(dir, "items.json")
+      File.write(path, JSON.dump({
+        "items" => [ { "id" => "alpha/10", "category" => "mystery", "summary" => "Odd row" } ]
+      }))
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Fallback title") ] }
+      logger = CapturingLogger.new
+
+      Hive::Digest::Categorizer.map_output_file(path, grouped: grouped, logger: logger)
+
+      assert(logger.warnings.any? { |m| m.include?("invalid category") && m.include?("alpha/10") },
+             "an unknown category must warn — the only operator signal the model misbehaved")
+    end
+  end
+
+  def test_missing_row_warns_through_the_logger
+    with_tmp_dir do |dir|
+      path = File.join(dir, "items.json")
+      File.write(path, JSON.dump({ "items" => [] }))
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Fallback title") ] }
+      logger = CapturingLogger.new
+
+      Hive::Digest::Categorizer.map_output_file(path, grouped: grouped, logger: logger)
+
+      assert(logger.warnings.any? { |m| m.include?("omitted item") && m.include?("alpha/10") },
+             "an omitted item must warn so a half-bad model run leaves a trace")
+    end
+  end
+
+  def test_duplicate_id_warns_and_last_write_wins
+    with_tmp_dir do |dir|
+      path = File.join(dir, "items.json")
+      File.write(path, JSON.dump({
+        "items" => [
+          { "id" => "alpha/10", "category" => "feature", "summary" => "First." },
+          { "id" => "alpha/10", "category" => "fix", "summary" => "Second wins." }
+        ]
+      }))
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Title") ] }
+      logger = CapturingLogger.new
+
+      result = Hive::Digest::Categorizer.map_output_file(path, grouped: grouped, logger: logger)
+
+      assert_equal "Second wins.", result.fetch("alpha").first.summary
+      assert(logger.warnings.any? { |m| m.include?("duplicate id") && m.include?("alpha/10") },
+             "a duplicate model id must warn — it is attacker-steerable last-write-wins")
+    end
+  end
+
+  def test_categorized_item_guard_rejects_unknown_category_and_blank_summary
+    shipped = item(pr_number: 10, pr_title: "Title")
+    assert_raises(ArgumentError) do
+      Hive::Digest::CategorizedItem.new(item: shipped, category: "mystery", summary: "ok")
+    end
+    assert_raises(ArgumentError) do
+      Hive::Digest::CategorizedItem.new(item: shipped, category: "feature", summary: "   ")
+    end
   end
 
   def test_cross_project_pr_number_collision_keeps_summaries_distinct

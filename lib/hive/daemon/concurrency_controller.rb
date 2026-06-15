@@ -248,6 +248,15 @@ module Hive
         entry = @running.delete(pid)
         return unless entry
 
+        # The global digest runs on its own scheduler-level backoff and is
+        # gated by `can_dispatch_digest?`, which consults NONE of the
+        # per-(project, slug) maps below. Recording cooldown/transient/
+        # quarantine/dropped state for it would leak one never-read entry per
+        # unique ISO-date slug (unbounded, failure-only growth) and falsely
+        # tag a phantom "digest" project as dropped. Freeing the slot above
+        # is the only bookkeeping the digest needs here.
+        return if entry[:kind] == :digest
+
         key = [ entry[:project], entry[:slug] ]
 
         case exit_code

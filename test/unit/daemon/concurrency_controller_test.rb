@@ -559,4 +559,45 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
                    "a project missing from the scope must keep its baselines"
     end
   end
+
+  # ── global digest: separate budget + no per-date state leak ─────────────
+
+  def test_can_dispatch_digest_is_ok_until_a_digest_is_in_flight
+    c = make
+    assert_equal :ok, c.can_dispatch_digest?(now: T0)
+
+    dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
+    assert_equal :digest_in_flight, c.can_dispatch_digest?(now: T0),
+                 "at most one digest child may be in flight at a time"
+  end
+
+  def test_digest_kind_does_not_consume_a_task_slot
+    c = make(global: 1, per_project: 1)
+    # A running digest must not eat the single task slot, mirroring patrol scans.
+    dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
+    assert_equal :ok, c.can_dispatch?(project: "alpha", slug: "s1", now: T0),
+                 "the global digest runs off the task caps and must not block task dispatch"
+  end
+
+  def test_failed_digest_completion_does_not_leak_per_date_cooldown_or_quarantine
+    c = make
+    dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
+    # A non-zero, non-CONFIG exit on a normal task would accrue cooldown/
+    # transient state keyed on [project, slug]; the digest's unique ISO-date
+    # slug would make that grow unbounded and never be read by the digest gate.
+    c.record_completion(pid: 100, exit_code: 1, completed_at: T0)
+
+    refute c.quarantined?(project: "digest", slug: "2026-06-13")
+    assert_equal :ok, c.can_dispatch_digest?(now: T0),
+                 "the freed digest slot must be reusable with no residual per-date state"
+  end
+
+  def test_config_exit_digest_completion_does_not_drop_a_phantom_project
+    c = make
+    dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0)
+
+    refute c.project_dropped?("digest"),
+           "a digest ConfigError must not drop a phantom 'digest' project"
+  end
 end

@@ -12,13 +12,18 @@ module Hive
     class Collector
       DONE_STAGE = "9-done".freeze
 
+      # Generous per-item cap on the PR body inlined into the categorizer
+      # prompt. Preserves the full body for a normal PR while bounding a
+      # pathological pr.md (or a day with many items) so it can't blow the
+      # model's context window / per-run budget and degrade the WHOLE
+      # global digest to the generic failure notice.
+      MAX_PR_BODY_LENGTH = 8_000
+
       def initialize(registry: -> { Hive::Config.registered_projects },
                      ship_times: ShipTimes.new,
-                     clock: -> { Time.now },
                      logger: Logger.new($stderr))
         @registry = registry
         @ship_times = ship_times
-        @clock = clock
         @logger = logger
       end
 
@@ -58,29 +63,30 @@ module Hive
           pr_body: body,
           shipped_at: shipped_at
         )
-      rescue Hive::GitError => e
-        # A failing `git log` on this project's hive/state would otherwise
-        # make every shipped item silently vanish (or yield a false
-        # "Nothing shipped today"). Log the dropped task so a corrupt or
-        # missing-branch repo is visible to the operator.
+      rescue Hive::GitError, SystemCallError, IOError => e
+        # A failing `git log` on this project's hive/state — or an
+        # unreadable/directory-shaped pr.md surfacing as SystemCallError/
+        # IOError from Hive::Gh.pr_frontmatter (TOCTOU vs. a concurrent
+        # archive/drop or a permission flip) — would otherwise abort the
+        # WHOLE multi-project digest. Degrade just this one task and log
+        # the drop so a corrupt repo / unreadable file is visible.
         @logger&.warn("digest collector: dropping #{entry.fetch('name')}/#{File.basename(folder)}: #{e.message}")
         nil
       end
 
       def pr_body(path)
-        return "" unless File.exist?(path)
-
-        content = File.read(path)
-        if content =~ /\A---\s*\n.*?\n---\s*\n/m
-          content.sub(/\A---\s*\n.*?\n---\s*\n/m, "").strip
-        else
-          content.strip
-        end
+        truncate_body(Hive::Gh.pr_body(path))
       rescue SystemCallError, IOError => e
         # A correctable pr.md read problem degrades the item to its
         # default summary; surface it instead of failing silently.
         @logger&.warn("digest collector: degraded pr.md read for #{path}: #{e.message}")
         ""
+      end
+
+      def truncate_body(body)
+        return body if body.length <= MAX_PR_BODY_LENGTH
+
+        "#{body[0, MAX_PR_BODY_LENGTH].rstrip}\n\n[... pr.md body truncated for digest ...]"
       end
 
       # hive-generated pr.md always opens with a boilerplate "## Summary"

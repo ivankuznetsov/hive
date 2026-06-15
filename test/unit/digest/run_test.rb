@@ -75,6 +75,14 @@ class HiveDigestRunTest < Minitest::Test
     assert_includes sender.deliveries.first.fetch(:text), "2026\\-06\\-13 failed"
   end
 
+  def test_result_guard_rejects_an_unknown_status
+    assert_raises(ArgumentError) do
+      Hive::Digest::Result.new(
+        status: :bogus, date: Date.new(2026, 6, 13), message: "x", delivery: nil
+      )
+    end
+  end
+
   def test_default_date_is_yesterday_local
     result = Hive::Digest.run(
       dry_run: true,

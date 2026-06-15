@@ -28,9 +28,9 @@ Options:
 | Option | Behavior |
 |--------|----------|
 | `--date YYYY-MM-DD` | Digest this local calendar date. Invalid formats raise `Hive::ConfigError`. |
-| omitted `--date` | Uses the local calendar day that just ended: `Hive::Digest::Window.local_today - 1`. |
+| omitted `--date` | Uses the local calendar day that just ended via `Hive::Digest::Window.previous_local_day`. |
 | `--dry-run` | Avoids Telegram auth/chat lookup and prints the composed message. |
-| `--json` | Emits a small success JSON document instead of prose. |
+| `--json` | Emits a small versioned JSON delivery document instead of prose. |
 
 ## Behavior
 
@@ -46,14 +46,18 @@ Options:
    today" message and no agent is spawned.
 4. If items shipped, `Digest::Categorizer` renders `templates/digest_prompt.md.erb`,
    spawns the resolved `AgentProfile` with `status_mode: :output_file_exists`,
-   requires an `items.json` output, then maps rows back by PR number or slug.
-   Allowed categories are `feature`, `fix`, and `patrol`; missing/invalid rows
-   default to `feature` with a fallback summary.
+   requires an `items.json` output, then maps rows back by the project-scoped
+   categorizer id (`<project_name>/<pr_number>`, or `<project_name>/<slug>` when
+   there is no PR number) so two projects sharing a PR number on one day don't
+   collide. Allowed categories are `feature`, `fix`, and `patrol`;
+   missing/invalid/duplicate-id rows log a warning and default to `feature`
+   with a fallback summary.
 5. `Digest::Renderer` groups by project, renders categories in fixed order
    (`New features`, `Fixes`, `Patrol tasks`), escapes Telegram MarkdownV2
    dynamic text, and links to PR URLs when present.
-6. `Digest::Sender` sends the message with `parse_mode: :markdown_v2`, or
-   returns the text without credentials in dry-run mode.
+6. `Digest::Sender` sends the message with `parse_mode: :markdown_v2` (one
+   `send_message` per chunk above Telegram's 4096-char limit), or returns the
+   text without credentials in dry-run mode.
 
 If categorization raises `Hive::Digest::ModelError`, `Hive::Digest.run` sends
 a failed-generation notice for the date and returns `status: :failed_notice`.
@@ -65,12 +69,17 @@ Human output:
 - Dry-run: prints the composed message body.
 - Real send: prints `hive digest: <status> for <date>`.
 
-`--json` output is success-only and unversioned:
+`--json` always prints a delivery document (not a separate JSON error
+envelope): a model failure still prints this shape with `ok: false` and
+`status: "failed_notice"`. It is "success-only" only in that *hard* failures
+(a bad `--date`, a Telegram send error) surface on stderr + a non-zero exit
+code rather than as a JSON document.
 
 ```json
 {
   "ok": true,
   "schema": "hive-digest",
+  "schema_version": 1,
   "date": "2026-06-13",
   "status": "sent",
   "dry_run": true,
@@ -79,9 +88,11 @@ Human output:
 ```
 
 `message` is included only for dry-run output; real-send JSON sets it to
-`null`. `hive-digest` is not registered in `Hive::Schemas::SCHEMA_VERSIONS`,
-and command failures still use the top-level `bin/hive` stderr + exit-code
-path rather than a JSON error envelope.
+`null`. `hive-digest` is registered in `Hive::Schemas::SCHEMA_VERSIONS` (v1)
+and published under `schemas/hive-digest.v1.json`. A malformed invocation
+caught before command dispatch (e.g. an unknown flag) emits the shared error
+envelope via `JSON_USAGE_ERROR_CONTRACTS`; other hard failures stay on the
+stderr + exit-code path.
 
 ## Config And Auth
 

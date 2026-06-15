@@ -198,9 +198,19 @@ module Hive
 
         # 1e. Global daily shipped digest. This is not project-scoped and
         # does not depend on the status snapshot, so it runs before status
-        # fetch and bypasses per-project daemon gates.
-        @digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
-          dispatch_digest(digest_dispatch, now: now)
+        # fetch and bypasses per-project daemon gates. Wrapped like the
+        # sibling self-heal ops below: `tick` does disk I/O (first-run seed
+        # + catch-up-cap `write_state`), and an unguarded SystemCallError
+        # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
+        # trip the unit's restart-loop cap.
+        begin
+          @digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
+            dispatch_digest(digest_dispatch, now: now)
+          end
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "digest_scheduler.tick raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
         end
 
         # 2. Fetch status
@@ -557,15 +567,30 @@ module Hive
                           envelope_ok: entry.json_envelope&.dig("ok"))
             notify_dispatch_result(entry, meta, now: now) unless continuation
           end
-          @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
-          if entry.exit_code == Hive::ExitCodes::CONFIG
+          # The global digest is a pseudo-project ("digest"), not a real
+          # registry entry. A digest ConfigError (exit 78) is handled by the
+          # scheduler's own backoff (below); dropping a phantom "digest"
+          # project would emit a misleading :project_dropped event and leave
+          # a permanent phantom entry the digest gate never consults.
+          if entry.exit_code == Hive::ExitCodes::CONFIG &&
+             entry.stage != Hive::Daemon::DigestScheduler::DIGEST_STAGE
+            @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
             @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
           end
           if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
-            @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+            # `complete` advances the cursor via `write_state`; isolate its
+            # disk I/O so an ENOSPC/EROFS fault on the digest can't crash the
+            # reap (and with it the whole poll loop).
+            begin
+              @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+            rescue StandardError => e
+              @logger.event(:fatal,
+                            message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
+                            keeping_previous: true)
+            end
           end
         end
         entries.any?
@@ -1060,7 +1085,14 @@ module Hive
           kind: :digest
         )
       rescue StandardError => e
-        @digest_scheduler&.complete(date: date, exit_code: 1, now: now) if date
+        # If dispatch_command already spawned + recorded the child before
+        # raising, `reap_completed` will call `complete` on its exit. Calling
+        # `complete` here too would record a SECOND failure for one logical
+        # dispatch, double-incrementing the backoff count. Only complete when
+        # no child is in flight for this date (spawn failed before recording).
+        if date && !@controller.running_task?(project: project, slug: date)
+          @digest_scheduler&.complete(date: date, exit_code: 1, now: now)
+        end
         @logger.event(:fatal, message: "digest dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)
       end

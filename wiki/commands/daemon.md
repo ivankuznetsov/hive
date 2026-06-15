@@ -61,7 +61,7 @@ bot:
   digest_chat_id: null
 ```
 
-`hive daemon start` loads this block via `Hive::Config.load_global_digest` and
+`hive daemon start` loads this block via `Hive::Config.load_global_digest_block` and
 wires `Hive::Daemon::DigestScheduler`. The scheduler stores its cursor in
 `<state_home>/digest_state.json`, initializes to the most recently completed
 local day on first run without backfilling history, dispatches missed days

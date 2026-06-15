@@ -4,7 +4,7 @@
 series through `ab35b657` added the public `hive digest` Thor command,
 `Hive::Commands::Digest`, `Hive::Digest::Sender`, and daemon-side
 `Hive::Daemon::DigestScheduler`. Current workspace source also adds the global
-digest config plumbing (`Config.load_global_digest`,
+digest config plumbing (`Config.load_global_digest_block`,
 `Config.load_global_digest_config`, `digest.*`, and `bot.digest_chat_id`). Read
 `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]],
 [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "routes

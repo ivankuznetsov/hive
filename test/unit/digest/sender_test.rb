@@ -1,6 +1,8 @@
 require "test_helper"
 require "stringio"
+require "json"
 require "logger"
+require "hive/bot/logger"
 require "hive/digest/sender"
 
 class HiveDigestSenderTest < Minitest::Test
@@ -35,6 +37,12 @@ class HiveDigestSenderTest < Minitest::Test
     assert_equal "hello", result.text
   end
 
+  def test_send_result_guard_rejects_chat_id_on_a_dry_run
+    assert_raises(ArgumentError) do
+      Hive::Digest::Sender::SendResult.new(chat_id: 123, responses: [], dry_run: true, text: "x")
+    end
+  end
+
   def test_preflight_raises_before_any_send_when_recipient_missing
     sender = Hive::Digest::Sender.new(cfg: { "bot" => { "chat_id_allowlist" => [] } })
 
@@ -57,43 +65,60 @@ class HiveDigestSenderTest < Minitest::Test
     end
   end
 
-  def test_partial_chunk_failure_logs_delivered_count_and_raises
-    delivered = []
-    client = Object.new
-    client.define_singleton_method(:message_chunks) { |_text| %w[chunk-a chunk-b] }
-    client.define_singleton_method(:send_message) do |chat_id:, text:, parse_mode:|
-      raise "boom on second chunk" if text == "chunk-b"
+  def test_partial_chunk_failure_records_send_failure_event_and_raises
+    with_tmp_dir do |dir|
+      delivered = []
+      client = Object.new
+      client.define_singleton_method(:message_chunks) { |_text| %w[chunk-a chunk-b] }
+      client.define_singleton_method(:send_message) do |chat_id:, text:, parse_mode:|
+        raise "boom on second chunk" if text == "chunk-b"
 
-      delivered << text
-      [ { "message_id" => 1 } ]
+        delivered << text
+        [ { "message_id" => 1 } ]
+      end
+      # Use the REAL bot logger (closed #event enum, no #error). A stdlib
+      # Logger would have masked the production NoMethodError this guards:
+      # the digest sender is wired with a Hive::Bot::Logger in production.
+      logger = Hive::Bot::Logger.new(path: File.join(dir, "bot.log"))
+
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
+        sender = Hive::Digest::Sender.new(
+          cfg: { "bot" => { "digest_chat_id" => 123 } },
+          telegram_factory: ->(token:, logger:) { client },
+          logger: logger
+        )
+
+        assert_raises(RuntimeError) { sender.deliver("ignored", dry_run: false) }
+      end
+      logger.close
+
+      assert_equal [ "chunk-a" ], delivered,
+                   "the already-accepted chunk must not be resent in this attempt"
+      line = File.read(File.join(dir, "bot.log")).lines.find { |l| l.include?("send_failure") }
+      refute_nil line, "a :send_failure event must be recorded for the partial delivery"
+      event = JSON.parse(line)
+      assert_equal "digest", event["context"]
+      assert_equal 1, event["accepted_chunks"]
+      assert_equal 2, event["total_chunks"]
+      assert_equal 2, event["failed_chunk"]
     end
-    buf = StringIO.new
-
-    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
-      sender = Hive::Digest::Sender.new(
-        cfg: { "bot" => { "digest_chat_id" => 123 } },
-        telegram_factory: ->(token:, logger:) { client },
-        logger: Logger.new(buf)
-      )
-
-      assert_raises(RuntimeError) { sender.deliver("ignored", dry_run: false) }
-    end
-
-    assert_equal [ "chunk-a" ], delivered, "the already-accepted chunk must not be resent in this attempt"
-    assert_includes buf.string, "partial delivery"
   end
 
   def test_send_uses_telegram_markdown_v2
-    sent = []
-    telegram = Struct.new(:sent) do
+    # Keep the two captured concerns distinct: factory wiring (token/logger)
+    # vs. the actual send args. The previous single `sent` array conflated
+    # them and relied on first/last ordering.
+    sends = []
+    factory_calls = []
+    telegram = Struct.new(:sends) do
       def send_message(chat_id:, text:, parse_mode:)
-        sent << { chat_id: chat_id, text: text, parse_mode: parse_mode }
+        sends << { chat_id: chat_id, text: text, parse_mode: parse_mode }
         [ { "message_id" => 1 } ]
       end
     end
     factory = lambda { |token:, logger:|
-      sent << { token: token, logger: logger }
-      telegram.new(sent)
+      factory_calls << { token: token, logger: logger }
+      telegram.new(sends)
     }
 
     with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
@@ -105,8 +130,9 @@ class HiveDigestSenderTest < Minitest::Test
       result = sender.deliver("hello", dry_run: false)
 
       assert_equal 123, result.chat_id
-      assert_equal({ chat_id: 123, text: "hello", parse_mode: :markdown_v2 }, sent.last)
-      assert_equal "token", sent.first.fetch(:token)
     end
+
+    assert_equal "token", factory_calls.first.fetch(:token)
+    assert_equal({ chat_id: 123, text: "hello", parse_mode: :markdown_v2 }, sends.last)
   end
 end

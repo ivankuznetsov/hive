@@ -170,9 +170,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @cancelled << date
     end
 
-    attr_reader :cancelled
+    attr_reader :cancelled, :reconfigured
 
-    def reconfigure(enabled:, max_catchup_days:); end
+    def reconfigure(enabled:, max_catchup_days:)
+      @reconfigured ||= []
+      @reconfigured << { enabled: enabled, max_catchup_days: max_catchup_days }
+    end
   end
 
   # ── construction helpers ───────────────────────────────────────────────
@@ -358,6 +361,71 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0)
 
     assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed
+  end
+
+  def test_digest_config_exit_does_not_drop_phantom_digest_project
+    dispatcher, _sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
+      rows: [], with_digest_scheduler: true
+    )
+    sup = dispatcher.instance_variable_get(:@supervisor)
+    sup.next_exits = [
+      ChildExit.new(
+        pid: 123, exit_code: Hive::ExitCodes::CONFIG,
+        project: "digest", slug: "2026-06-13", stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_path: nil, started_at: T0 - 5, finished_at: T0, json_envelope: nil
+      )
+    ]
+
+    dispatcher.tick(now: T0)
+
+    refute ctrl.project_dropped?("digest"),
+           "a digest ConfigError must not drop a phantom 'digest' project"
+    refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "digest" },
+           "a digest ConfigError must not emit a misleading :project_dropped event"
+    # The scheduler still hears the failure so its own backoff applies.
+    assert_equal [ { date: "2026-06-13", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ],
+                 digest.completed
+  end
+
+  def test_digest_dispatch_spawn_error_records_exactly_one_failed_completion
+    dispatcher, sup, _ctrl, logger, _mw, _patrol, digest = make_dispatcher(
+      rows: [], with_digest_scheduler: true
+    )
+    digest.next_dispatches = [
+      {
+        project: "digest", slug: "2026-06-13", stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
+      }
+    ]
+    # Spawn fails before the child is recorded (fork exhaustion, etc.).
+    sup.define_singleton_method(:spawn) { |**_| raise Errno::EAGAIN, "fork failed" }
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ { date: "2026-06-13", exit_code: 1, now: T0 } ], digest.completed,
+                 "a digest spawn failure must record exactly one failed completion (no double-count)"
+    assert logger.events.any? { |name, attrs| name == :fatal && attrs[:message].to_s.include?("digest dispatch error") },
+           "the spawn failure must be surfaced as a :fatal log event"
+  end
+
+  def test_reload_config_reconfigures_digest_scheduler
+    dispatcher, _sup, _ctrl, _logger, _mw, _patrol, digest = make_dispatcher(
+      rows: [], with_digest_scheduler: true
+    )
+    original = Hive::Config.method(:load_global_digest_block)
+    Hive::Config.define_singleton_method(:load_global_digest_block) do
+      { "enabled" => true, "max_catchup_days" => 3 }
+    end
+    begin
+      dispatcher.send(:reload_config!)
+    ensure
+      Hive::Config.define_singleton_method(:load_global_digest_block, &original)
+    end
+
+    assert_equal({ enabled: true, max_catchup_days: 3 }, digest.reconfigured&.last,
+                 "SIGHUP reload must push the reloaded digest config into the scheduler")
   end
 
   def test_dispatches_later_pipeline_stages_first

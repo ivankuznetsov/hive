@@ -42,7 +42,7 @@
     },
     {
       "fingerprint": "a11d1f5701bcc1ab87021515e2fdf48ea34cd74a6c848aea5f04da176726f86e",
-      "note": "False positive: array-form Open3.capture3 (no shell) \u2014 slug is interpolated only into the git --grep=<slug> argv token, so it cannot inject a command; at worst it is a benign git-log grep regex, and matches are re-filtered by exact substring on subject afterward. slug is a controlled hive task slug."
+      "note": "False positive: array-form Open3.capture3 (no shell) \u2014 slug is passed as its own discrete argv element immediately after a standalone `--grep` flag (not interpolated into a `--grep=<slug>` token), so it cannot inject a command; `-F` makes it a fixed string, so at worst it is a benign literal git-log grep, and matches are re-filtered by exact substring on the subject afterward. slug is a controlled hive task slug."
     }
   ],
   "updated": "2026-06-03",

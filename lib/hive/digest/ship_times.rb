@@ -46,16 +46,13 @@ module Hive
       end
 
       def matching_action(commits, slug, action)
+        # Match the newest commit whose subject ends with "/<slug> <action>".
+        # The previous exact-match `"hive: 9-done/<slug> <action>"` tie-break
+        # was dead for the PRIMARY pr_finalized action — those commits are
+        # written by the 8-finalize stage, never 9-done — and redundant for
+        # the archived fallback (the end_with? match already resolves it).
         suffix = "/#{slug} #{action}"
-        preferred = "hive: 9-done#{suffix}"
-        fallback = nil
-        commits.each do |entry|
-          subject = entry[:subject]
-          return entry if subject == preferred
-
-          fallback ||= entry if subject.end_with?(suffix)
-        end
-        fallback
+        commits.find { |entry| entry[:subject].end_with?(suffix) }
       end
 
       def matching_approval_to_done(commits, slug)

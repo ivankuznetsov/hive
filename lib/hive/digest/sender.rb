@@ -60,9 +60,13 @@ module Hive
 
       # Send the digest one Telegram chunk at a time so a mid-stream
       # failure logs exactly how many chunks Telegram already accepted.
-      # That partial-delivery signal lets an operator avoid blindly
-      # re-sending a digest whose earlier chunks already landed (a plain
-      # full resend would duplicate them).
+      # On a mid-stream failure we do NOT resend the already-accepted
+      # chunks within this invocation, then re-raise. The subprocess exits
+      # non-zero and the daemon's DigestScheduler retries the whole date on
+      # a later tick — delivery is at-least-once across restarts (a rare
+      # multi-chunk mid-stream failure can duplicate the earlier chunks),
+      # which is the plan's accepted recovery model; cross-process chunk
+      # de-duplication would be out of proportion to that failure mode.
       def send_in_chunks(client, chat_id, text)
         chunks = client.respond_to?(:message_chunks) ? client.message_chunks(text) : [ text ]
         responses = []
@@ -71,9 +75,18 @@ module Hive
             Array(client.send_message(chat_id: chat_id, text: chunk, parse_mode: :markdown_v2))
           )
         rescue StandardError => e
-          logger&.error(
-            "digest sender: partial delivery — #{idx} of #{chunks.size} chunk(s) accepted " \
-            "before chunk #{idx + 1} failed (#{e.class}: #{e.message}); not auto-resending accepted chunks"
+          # Hive::Bot::Logger exposes only #event (closed enum); a plain
+          # #error call would raise NoMethodError and mask the real send
+          # failure. Record the partial-delivery context as a structured
+          # :send_failure event instead.
+          logger&.event(
+            :send_failure,
+            context: "digest",
+            accepted_chunks: idx,
+            total_chunks: chunks.size,
+            failed_chunk: idx + 1,
+            error_class: e.class.name,
+            error: e.message
           )
           raise
         end

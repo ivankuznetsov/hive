@@ -29,8 +29,9 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
 
 # Daily shipped digest. When enabled, the daemon schedules one global
-# `hive digest` subprocess after local midnight; it sends a single Telegram
-# MarkdownV2 message to bot.digest_chat_id, or the first allowlisted chat.
+# `hive digest` subprocess after local midnight; it sends a Telegram
+# MarkdownV2 message (chunked into several messages when it exceeds Telegram's
+# length limit) to bot.digest_chat_id, or the first allowlisted chat.
 #
 # digest:
 #   enabled: false

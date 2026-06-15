@@ -20,13 +20,13 @@ through `Hive::Config.load_global_digest_config`.
 | API | Purpose |
 |-----|---------|
 | `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil)` | Orchestrates collection, categorization/rendering, and delivery. Defaults `cfg` via `Config.load_global_digest_config`. Returns `Result(status:, date:, message:, delivery:)`. |
-| `Digest::Window.local_today`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
+| `Digest::Window.local_today`, `previous_local_day`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. `previous_local_day(now:)` is the shared "yesterday local" default used by both the CLI command and `Digest.run`. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
 | `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
 | `Digest::Collector#for_date(date)` | Scans registered projects and builds grouped `ShippedItem` rows from `9-done` task folders, `meta.yml`, `pr.md`, and ship times. |
 | `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. |
 | `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items, defaulting bad/missing categories safely. |
 | `Digest::Renderer.render`, `.empty`, `.failed`, `.escape_mdv2` | Builds Telegram MarkdownV2 text. |
-| `Digest::Sender#deliver(text, dry_run:)` | Returns dry-run text or sends one Telegram MarkdownV2 message. |
+| `Digest::Sender#deliver(text, dry_run:)` | Returns dry-run text or sends the Telegram MarkdownV2 message (chunked into one `send_message` per chunk above Telegram's 4096-char limit). |
 
 `Digest::Result#status` is one of:
 
@@ -52,9 +52,13 @@ Collection is deliberately tolerant of incomplete task artifacts:
 
 - Missing `meta.yml` falls back to the folder basename for slug/display name.
 - Missing `pr.md` leaves PR URL/body blank.
-- Malformed PR frontmatter is handled by `Hive::Gh.pr_frontmatter`.
-- `Hive::GitError` while building one item drops that item rather than failing
-  the whole digest.
+- Malformed PR frontmatter is handled by `Hive::Gh.pr_frontmatter`; the body
+  is read via the shared `Hive::Gh.pr_body` helper (one definition of the
+  `---…---` frontmatter delimiter) and capped to a generous per-item length so
+  one oversized `pr.md` can't blow the categorizer's context/budget.
+- `Hive::GitError` — or an unreadable/directory-shaped `pr.md` surfacing as
+  `SystemCallError`/`IOError` from `Hive::Gh.pr_frontmatter` — while building
+  one item drops that item rather than failing the whole multi-project digest.
 
 ## Categorizer Contract
 
@@ -65,9 +69,14 @@ one row per shipped item and asks it to write JSON to an exact output path:
 {"items":[{"id":"<id>","category":"feature|fix|patrol","summary":"One sentence."}]}
 ```
 
-IDs are `pr_number` when present, otherwise the task slug. `pr_body` is wrapped
-in the normal per-spawn `user_supplied_<hex>` tag from `Hive::Stages::Base`.
-The categorizer runs with:
+IDs are project-scoped via `ShippedItem#categorizer_id`: `<project_name>/<pr_number>`
+when a PR number is present, otherwise `<project_name>/<slug>`. The mandatory
+`project_name/` prefix keeps two projects that ship the same PR number (or slug)
+on one day from colliding onto a single key in the id→row map. Both the PR
+**title** and the `pr_body` are wrapped in the per-spawn `user_supplied_<hex>`
+tag from `Hive::Stages::Base`, and the prompt instructs the model to treat
+everything inside those tags as untrusted data rather than instructions. The
+categorizer runs with:
 
 - `status_mode: :output_file_exists`
 - `expected_output: <run_dir>/items.json`
@@ -82,9 +91,10 @@ Agent selection and limits come from the supplied `cfg` hash:
 - `timeout_sec.digest`, default `1800`.
 
 The output mapper is fail-closed on missing/empty/malformed JSON, but
-row-level model mistakes are tolerated: an omitted item or invalid category
-logs a warning, uses category `feature`, and falls back to the PR title or
-display label for summary when needed.
+row-level model mistakes are tolerated: an omitted item, invalid category, or
+duplicate model id logs a warning (falling back to `$stderr` when no logger is
+wired, so the signal can't be configured away), uses category `feature`, and
+falls back to the PR title or display label for summary when needed.
 
 ## Delivery Contract
 
@@ -98,6 +108,14 @@ Real delivery builds `Hive::Bot::Telegram` with
 ```ruby
 send_message(chat_id: chat_id, text: text, parse_mode: :markdown_v2)
 ```
+
+`send_in_chunks` splits a digest longer than Telegram's 4096-char limit into
+one `send_message` call per chunk. A mid-stream chunk failure is recorded as a
+structured `:send_failure` event on the bot logger (which exposes only
+`#event`, not `#error`) and re-raised; the daemon scheduler then retries the
+whole date on a later tick (at-least-once delivery across restarts). The
+renderer caps each model summary well under the limit so a single rendered
+line can never split a MarkdownV2 escape across a chunk boundary.
 
 The default log path is `cfg.dig("bot", "log_file")` or
 `<state_home>/logs/bot.log`, sharing the bot logger surface.

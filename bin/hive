@@ -32,6 +32,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
     extras: { "operation" => "reject" }
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
+  "digest" => { schema: "hive-digest", error_kind: "usage" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",

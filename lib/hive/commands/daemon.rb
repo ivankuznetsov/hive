@@ -147,7 +147,10 @@ module Hive
         # etc.) actually take effect. PR-40 review P1 #2: this used to
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
-        digest_cfg = load_digest_config
+        # Read the global digest block directly (mirrors the SIGHUP reload
+        # path in Dispatcher#reload_config!, which also calls the config
+        # method straight) so the two stay symmetric.
+        digest_cfg = Hive::Config.load_global_digest_block
         config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update, "digest" => digest_cfg }
 
         # Build the logger BEFORE the controller so both the controller and
@@ -242,10 +245,6 @@ module Hive
         reexec_argv = [ "daemon", "start" ]
         reexec_argv << "--dry-run" if @dry_run
         Kernel.method(:exec).call(Process.argv0, *reexec_argv)
-      end
-
-      def load_digest_config
-        Hive::Config.load_global_digest_block
       end
 
       def stop_daemon

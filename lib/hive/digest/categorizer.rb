@@ -20,7 +20,7 @@ module Hive
       # an item with an unknown category (which the renderer would drop)
       # or a blank summary (which would render an empty changelog line).
       def initialize(item:, category:, summary:)
-        unless Categories::VALID.include?(category)
+        unless Categories.valid?(category)
           raise ArgumentError, "digest category must be one of #{Categories::VALID.inspect}; got #{category.inspect}"
         end
         raise ArgumentError, "digest summary must not be blank" if summary.to_s.strip.empty?
@@ -37,7 +37,7 @@ module Hive
       # Keep at most this many per-run scratch dirs under <state_home>/digest/runs.
       RUN_DIR_RETENTION = 20
 
-      RunnerTask = Data.define(:folder, :project_root, :state_file, :log_dir, :slug, :stage_name)
+      RunnerTask = Data.define(:folder, :state_file, :log_dir, :slug, :stage_name)
 
       TemplateBindings = Struct.new(
         :date, :items, :output_path, :user_supplied_tag,
@@ -105,7 +105,16 @@ module Hive
             next unless row.is_a?(Hash)
 
             id = row["id"].to_s
-            memo[id] = row unless id.empty?
+            next if id.empty?
+
+            # Last-write-wins on a duplicate id silently drops the first
+            # row's category/summary. Combined with attacker-influenceable
+            # PR text this is steerable, so surface it rather than swallow.
+            if memo.key?(id)
+              log_warning(logger, "digest categorizer returned a duplicate id #{id.inspect}; " \
+                                  "using the last occurrence")
+            end
+            memo[id] = row
           end
 
           grouped.transform_values do |items|
@@ -135,7 +144,10 @@ module Hive
         def categorized_item(item, row, logger:)
           category = row && row["category"].to_s
           summary = row && row["summary"].to_s.strip
-          category_valid = !category.nil? && VALID_CATEGORIES.include?(category)
+          # Single source of validity (Categories.valid?) shared with the
+          # CategorizedItem boundary guard, so the default-and-warn path
+          # here can't drift from what the type accepts.
+          category_valid = Categories.valid?(category)
           if row.nil?
             log_warning(logger, "digest categorizer omitted item #{item.categorizer_id}; using default")
           elsif !category_valid
@@ -156,7 +168,15 @@ module Hive
         end
 
         def log_warning(logger, message)
-          logger&.warn(message)
+          # Fall back to $stderr when no logger is wired so the "model
+          # omitted / miscategorized an item — using default" signal can't
+          # be silently configured away: a half-bad model run would
+          # otherwise produce a plausible digest with no operator trace.
+          if logger
+            logger.warn(message)
+          else
+            Kernel.warn(message)
+          end
         end
       end
 
@@ -196,7 +216,6 @@ module Hive
         folder = File.dirname(output_path)
         RunnerTask.new(
           folder: folder,
-          project_root: folder,
           state_file: File.join(folder, "state.yml"),
           log_dir: File.join(folder, "logs"),
           slug: "digest-#{Window.parse_date(date).iso8601}",

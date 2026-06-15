@@ -1,7 +1,7 @@
 ---
 title: Background-spawn dispatch and signal-aware marker healing for headless TUI agents
 date: 2026-04-28
-last_refreshed: 2026-04-29
+last_refreshed: 2026-06-15
 category: architecture-patterns
 module: Hive::Tui
 problem_type: architecture_pattern
@@ -184,4 +184,8 @@ single re-entry is safe — open-pr re-enters `open_pr_already_open` (no second 
 and artifacts idempotently re-collects `artifact.md` — and is bounded by the same
 `[project, slug, stage, reason]` budget so it can never loop. All other stages and
 all other timeout cases remain manual-only. See
-`docs/plans/2026-06-15-001-fix-tmux-marker-completion-hardening-plan.md`.
+`lib/hive/daemon/stale_agent_healer.rb`,
+`test/unit/daemon/stale_agent_healer_test.rb`, and
+`test/integration/daemon_stale_agent_healing_test.rb`; no committed
+`docs/plans/2026-06-15-001-fix-tmux-marker-completion-hardening-plan.md` file
+was present during the 2026-06-15 wiki refresh.

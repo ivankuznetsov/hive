@@ -28,6 +28,12 @@ that `reason=timeout` is never auto-healed: the carve-out is narrow (two stages
 whose re-entry is provably idempotent) and bounded (one attempt). See the
 refinement note appended to that learning.
 
-Plan: `docs/plans/2026-06-15-001-fix-tmux-marker-completion-hardening-plan.md`.
-The separate primary fix (a nudge-on-idle inside `wait_for_terminal_marker`)
-remains tracked on its own.
+Implementation evidence: commits `f06ff172`, `cc10b0b1`, and `027f92eb`;
+`templates/{open_pr,artifacts,finalize,plan}_prompt.md.erb`;
+`lib/hive/daemon/stale_agent_healer.rb`;
+`test/unit/templates/marker_last_line_test.rb`;
+`test/unit/daemon/stale_agent_healer_test.rb`; and
+`test/integration/daemon_stale_agent_healing_test.rb`.
+No committed `docs/plans/2026-06-15-001-fix-tmux-marker-completion-hardening-plan.md`
+file was present during the 2026-06-15 wiki refresh. The separate primary fix
+(a nudge-on-idle inside `wait_for_terminal_marker`) remains tracked on its own.

@@ -22,6 +22,14 @@ class HiveDigestShippedItemTest < Minitest::Test
     assert_equal "alpha/demo-260613-abcd", item.categorizer_id
   end
 
+  def test_display_label_falls_back_to_slug_for_a_whitespace_only_display_name
+    item = build(slug: "demo-260613-abcd")
+    item = item.with(display_name: "   \t ")
+
+    assert_equal "demo-260613-abcd", item.display_label,
+                 "a whitespace-only display_name must fall back to slug, not render a blank label"
+  end
+
   private
 
   def build(project_name: "alpha", slug: "slug-1", pr_number: 10)

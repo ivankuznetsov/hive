@@ -37,8 +37,11 @@ module Hive
         "#{project_name}/#{pr_number || slug}"
       end
 
+      # Strip-based blank check for parity with the constructor and renderer:
+      # a whitespace-only display_name must fall back to slug rather than
+      # render as a visible blank label.
       def display_label
-        display_name.to_s.empty? ? slug.to_s : display_name.to_s
+        display_name.to_s.strip.empty? ? slug.to_s : display_name.to_s
       end
     end
   end

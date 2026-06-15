@@ -192,10 +192,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # the file-writing `--output` long form must still skip — narrowing the guard must not
       # re-allow the write form.
       assert_stubbed env, "git", "ls-files", "--output", "/tmp/hive-lsfiles-output-pwn"
-      # The env-var config path bypasses every argv guard above: GIT_EXTERNAL_DIFF /
-      # GIT_SSH_COMMAND name a command git execs directly, and GIT_CONFIG_COUNT +
-      # GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject the same exec-capable keys as `-c`. An
-      # otherwise-allowlisted read like `git diff` must skip, fail-closed, when they are set.
+      # The env-var config path bypasses every argv guard above: GIT_EXEC_PATH redirects git to
+      # attacker-controlled helper binaries, GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND name a command
+      # git execs directly, and GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject the
+      # same exec-capable keys as `-c`. An otherwise-allowlisted read like `git diff` must skip,
+      # fail-closed, when they are set.
+      assert_stubbed env.merge("GIT_EXEC_PATH" => "/tmp/hive-git-exec-path-pwn"), "git", "status"
       assert_stubbed env.merge("GIT_EXTERNAL_DIFF" => "touch /tmp/hive-extdiff-pwn"), "git", "diff"
       assert_stubbed env.merge("GIT_SSH_COMMAND" => "touch /tmp/hive-ssh-pwn"), "git", "ls-files"
       assert_stubbed env.merge(
@@ -501,6 +503,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       assert status.success?, err
       assert_equal "GIT_OPTIONAL_LOCKS=0\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_git_stub_skips_exec_path_remote_helpers
+    with_tmp_git_repo do |dir|
+      helper_dir = File.join(dir, "helpers")
+      FileUtils.mkdir_p(helper_dir)
+      pwn_path = File.join(dir, "remote-helper-ran")
+      helper = executable_touch_binary(helper_dir, "git-remote-https", pwn_path)
+      run!("git", "-C", dir, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
+
+      env = real_git_env(dir).merge("GIT_EXEC_PATH" => helper_dir)
+      _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "remote", "show", "origin")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] git -C #{dir} remote show origin skipped"
+      refute_path_exists pwn_path, "#{helper} executed during dry-run passthrough"
     end
   end
 

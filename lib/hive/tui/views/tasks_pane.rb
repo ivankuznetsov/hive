@@ -65,6 +65,11 @@ module Hive
         # it absorbs any extra width and is left-truncated when narrow.
         ICON_WIDTH = 2
         ID_WIDTH = 4
+        # Width of the PR column (`#NNN`). Kept in sync by convention with
+        # `Hive::Commands::Status::TEXT_PR_WIDTH` — the two surfaces have
+        # independent layout systems (deliberately not a shared constant),
+        # so a width change here must be mirrored there. PR numbers ≥ 100000
+        # overflow/truncate this cell on purpose; the plan accepts that cap.
         PR_WIDTH = 6
         STAGE_WIDTH = 12
         STATUS_WIDTH = 36
@@ -154,17 +159,20 @@ module Hive
         # builder pads with the remaining widths.
         def compute_layout(inner_width)
           name_min = 8
-          fixed_full = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
+          # Bind each branch's fixed (non-name) column cost to a local so the
+          # guard threshold and the `name:` subtraction can never drift out
+          # of sync — they read the same value by construction.
+          fixed_full     = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
+          fixed_no_stage = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + 5
+          fixed_minimal  = ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + 4
           if inner_width >= fixed_full + name_min
             { name: inner_width - fixed_full, pr: PR_WIDTH, stage: STAGE_WIDTH, status: STATUS_WIDTH }
-          elsif inner_width >= ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + 5 + name_min
+          elsif inner_width >= fixed_no_stage + name_min
             # Drop the stage column; separators reduce from 6 to 5.
-            { name: inner_width - (ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + 5),
-              pr: PR_WIDTH, stage: 0, status: STATUS_WIDTH }
-          elsif inner_width >= ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + 4 + name_min
+            { name: inner_width - fixed_no_stage, pr: PR_WIDTH, stage: 0, status: STATUS_WIDTH }
+          elsif inner_width >= fixed_minimal + name_min
             # Drop both stage and status.
-            { name: inner_width - (ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + 4),
-              pr: PR_WIDTH, stage: 0, status: 0 }
+            { name: inner_width - fixed_minimal, pr: PR_WIDTH, stage: 0, status: 0 }
           else
             # Floor at name_min; row will overflow visually but won't crash.
             { name: name_min, pr: PR_WIDTH, stage: 0, status: 0 }
@@ -192,8 +200,18 @@ module Hive
           cell = Format.rjust_cells(token, width)
           return cell if token == "—"
 
-          linked = Hyperlink.osc8(token, row.pr_url, enabled: $stdout.tty?)
-          cell.sub(/#{Regexp.escape(token)}\z/, linked)
+          # rjust_cells truncates an over-width token ("#100000" → "#1000…"
+          # at width 6; the plan accepts the >99999 cap). Wrap the
+          # *displayed* token — the cell's trailing non-space run — rather
+          # than the pre-truncation `token`, so the OSC 8 link survives
+          # truncation instead of being silently dropped. Splice by slice
+          # (no String#sub backreference interpretation, no per-row regex
+          # compile). Leading padding is rjust spaces only; the displayed
+          # token (`#NNN`/`#NNN…`) never contains a space.
+          pad_len = cell.length - cell.lstrip.length
+          displayed = cell[pad_len..]
+          linked = Hyperlink.osc8(displayed, row.pr_url, enabled: $stdout.tty?)
+          cell[0...pad_len] + linked
         end
 
         def status_label(row)

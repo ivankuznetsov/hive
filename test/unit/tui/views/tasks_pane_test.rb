@@ -58,6 +58,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                                   filter: filter)
   end
 
+  # Run the block with `$stdout.tty?` reporting true so the OSC 8 path in
+  # Hyperlink/pr_cell is exercised. Swaps in a tty-reporting StringIO and
+  # restores the original $stdout afterward.
+  def with_tty_stdout
+    original = $stdout
+    io = StringIO.new
+    io.define_singleton_method(:tty?) { true }
+    $stdout = io
+    yield
+  ensure
+    $stdout = original
+  end
+
   # ---- Title / scope ----
 
   def test_title_says_all_projects_when_scope_zero
@@ -143,6 +156,34 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
     assert_match(/\s7\s+—\s+Readable Task/, out,
                  "rows without a PR must keep the fixed PR column with a dash")
+  end
+
+  # Exercises the TTY/OSC 8 `pr_cell` path directly: the TUI render
+  # pipeline routes rows through lipgloss, which rewrites ANSI under a tty,
+  # so the link contract is pinned on pr_cell itself. The rjust padding
+  # must stay OUTSIDE the hyperlink so the cell keeps its fixed visible
+  # width.
+  def test_pr_cell_wraps_token_and_keeps_padding_outside_link_under_tty
+    row = Struct.new(:pr_url).new("https://github.com/example/repo/pull/561")
+
+    out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
+
+    assert_equal "  \e]8;;https://github.com/example/repo/pull/561\e\\#561\e]8;;\e\\", out,
+                 "two rjust spaces stay outside the OSC 8 link; the link wraps the #561 token"
+  end
+
+  # Over-width PR pin (plan accepts the >99999 width cap): rjust_cells
+  # truncates "#100000" to the 6-cell column and the OSC 8 link must wrap
+  # the *displayed* (truncated) token instead of being silently dropped —
+  # the bug the pre-fix `cell.sub(/#token\z/)` produced once truncation
+  # changed the suffix.
+  def test_pr_cell_wraps_displayed_truncated_token_for_over_width_pr_under_tty
+    row = Struct.new(:pr_url).new("https://github.com/example/repo/pull/100000")
+
+    out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
+
+    assert_equal "\e]8;;https://github.com/example/repo/pull/100000\e\\#1000…\e]8;;\e\\", out,
+                 "over-width PR must still emit the link, wrapping the truncated #1000… token"
   end
 
   def test_name_column_falls_back_to_slug_when_display_name_missing

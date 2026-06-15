@@ -2771,6 +2771,38 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_digest_config_rejects_non_positive_budget_and_timeout
+    {
+      "budget_usd" => "budget_usd.digest",
+      "timeout_sec" => "timeout_sec.digest"
+    }.each do |group, label|
+      with_tmp_global_config do |home|
+        File.write(File.join(home, "config.yml"), <<~YAML)
+          registered_projects: []
+          digest:
+            enabled: true
+          #{group}:
+            digest: 0
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message,
+                     "a non-positive #{label} must be rejected at config load, not crash the categorizer")
+      end
+
+      with_tmp_global_config do |home|
+        File.write(File.join(home, "config.yml"), <<~YAML)
+          registered_projects: []
+          #{group}:
+            digest: "lots"
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message)
+      end
+    end
+  end
+
   # ── Telegram bot global settings ──────────────────────────────────────
 
   def test_load_returns_documented_bot_defaults_when_key_absent

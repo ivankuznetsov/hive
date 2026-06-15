@@ -1989,6 +1989,12 @@ module Hive
     end
 
     def validate_digest!(cfg, source_path)
+      # budget_usd.digest / timeout_sec.digest feed straight into the
+      # categorizer's Hive::Agent. Validate them even when the `digest` block
+      # is absent (they are independent top-level keys).
+      validate_digest_resource!(cfg, "budget_usd", source_path)
+      validate_digest_resource!(cfg, "timeout_sec", source_path)
+
       digest = cfg["digest"]
       return if digest.nil?
 
@@ -2010,6 +2016,24 @@ module Hive
       raise ConfigError,
             "digest.max_catchup_days in #{describe_source(source_path)} must be an integer >= 0 " \
             "(0 = unbounded); got #{max_catchup_days.inspect} (#{max_catchup_days.class})"
+    end
+
+    # The categorizer reads cfg.dig("budget_usd"|"timeout_sec", "digest") and
+    # passes the value straight to Hive::Agent (max_budget_usd / timeout_sec).
+    # A non-numeric or non-positive value would otherwise pass config load and
+    # crash the categorizer mid-run instead of producing a handled config error
+    # up front. Both keys are optional — the categorizer falls back to its
+    # DEFAULT_* constants when absent (a 0 is rejected, not treated as a
+    # fallback, since `value || DEFAULT` keeps 0).
+    def validate_digest_resource!(cfg, group, source_path)
+      value = cfg.dig(group, "digest")
+      return if value.nil?
+
+      unless value.is_a?(Numeric) && value.positive?
+        raise ConfigError,
+              "#{group}.digest in #{describe_source(source_path)} must be a positive number; " \
+              "got #{value.inspect} (#{value.class})"
+      end
     end
 
     BOT_NUMERIC_BOUNDS = [

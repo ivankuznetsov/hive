@@ -268,6 +268,43 @@ class TriageTest < Minitest::Test
     end
   end
 
+  # --- bare per-agent fallbacks align with DEFAULTS ----------------------
+  #
+  # When a cfg reaches triage without `budget_usd`/`timeout_sec` for
+  # review_triage, the bare `||` fallbacks must match the values
+  # Config::DEFAULTS carries (75 / 1800) — the same generous budget every
+  # sibling review stage gets. The old 15/300 outliers meant a config
+  # built outside Config.load (which always deep-merges DEFAULTS) would
+  # silently starve triage. Seam the spawn wrapper to capture the resolved
+  # kwargs without launching an agent.
+  def test_bare_fallbacks_match_defaults_when_cfg_omits_review_triage_keys
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+                 "## Nit\n- [ ] x: y\n")
+
+      cfg = default_cfg
+      cfg.delete("budget_usd")
+      cfg.delete("timeout_sec")
+
+      captured = {}
+      replacement = lambda do |_task, _cfg, **kwargs|
+        captured = kwargs
+        { status: :ok, log_label: "review-triage-pass01" }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude!, replacement) do
+        result = Hive::Stages::Review::Triage.run!(cfg: cfg, ctx: ctx)
+        assert_equal :ok, result.status
+      end
+
+      assert_equal 1800, captured[:timeout_sec],
+                   "triage timeout fallback must match DEFAULTS review_triage (1800), not the old 300"
+      assert_equal 75, captured[:max_budget_usd],
+                   "triage budget fallback must match DEFAULTS review_triage (75), not the old 15"
+    end
+  end
+
   # --- agent failure ----------------------------------------------------
 
   def test_missing_escalations_file_returns_error

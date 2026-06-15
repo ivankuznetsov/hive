@@ -23,6 +23,42 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_pins_real_binaries_against_command_local_overrides
+    with_tmp_dir do |dir|
+      recording_binary(dir, "git")
+      recording_binary(dir, "gh")
+      pwn_git = recording_binary(dir, "pwn-git")
+      pwn_gh = recording_binary(dir, "pwn-gh")
+
+      with_env("PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          _out, git_err, git_status = Open3.capture3(
+            { "HIVE_BABYSITTER_REAL_GIT" => pwn_git },
+            "git",
+            "status",
+            "--short"
+          )
+          _out, gh_err, gh_status = Open3.capture3(
+            { "HIVE_BABYSITTER_REAL_GH" => pwn_gh },
+            "gh",
+            "repo",
+            "view",
+            "owner/repo"
+          )
+
+          assert git_status.success?, git_err
+          assert gh_status.success?, gh_err
+        end
+      end
+
+      real_invocations = File.read(File.join(dir, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false -c core.askPass= status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+      refute_includes real_invocations, "pwn-git"
+      refute_includes real_invocations, "pwn-gh"
+    end
+  end
+
   def test_stubs_refuse_symlinked_skip_log
     with_tmp_dir do |dir|
       target = File.join(dir, "target.log")

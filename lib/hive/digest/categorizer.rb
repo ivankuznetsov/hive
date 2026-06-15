@@ -30,11 +30,13 @@ module Hive
     end
 
     class Categorizer
-      VALID_CATEGORIES = Categories::VALID
       DEFAULT_CATEGORY = Categories::DEFAULT
       DEFAULT_BUDGET_USD = 50
       DEFAULT_TIMEOUT_SEC = 1800
-      # Keep at most this many per-run scratch dirs under <state_home>/digest/runs.
+      # Keep roughly this many per-run scratch dirs under
+      # <state_home>/digest/runs. Transiently RETENTION + 1: prune_old_runs
+      # runs before the current run's dir is created, so the new dir is the
+      # (RETENTION + 1)th until the next run prunes back down.
       RUN_DIR_RETENTION = 20
 
       RunnerTask = Data.define(:folder, :state_file, :log_dir, :slug, :stage_name)
@@ -58,6 +60,20 @@ module Hive
         task = runner_task(output_path: output_path, date: date)
         result = agent_for(task, prompt, output_path).run!
         self.class.parse_result!(result, output_path: output_path, grouped: grouped, logger: @logger)
+      rescue SystemCallError => e
+        # A broken digest.agent config (a missing/misnamed binary raises
+        # Errno::ENOENT straight from Process.spawn — Agent#run! does not
+        # rescue it) or a scratch-dir disk fault (mkdir_p in run_dir) raises a
+        # SystemCallError that would otherwise escape Hive::Digest.run's
+        # ModelError-only rescue: the user would get NO "digest failed" notice,
+        # only a stderr/daemon-event trace, so a persistent agent-config typo
+        # would silently never deliver. Convert agent spawn/run + scratch-dir
+        # failures to ModelError so the existing failed-notice path fires.
+        # Scoped to SystemCallError on purpose — parse/output failures already
+        # raise ModelError via parse_result!, and a blanket StandardError
+        # rescue would mask genuine bugs as a benign "digest failed".
+        @logger&.error("digest categorizer agent run failed: #{e.class}: #{e.message}")
+        raise ModelError, "digest categorizer could not run the agent: #{e.class}: #{e.message}"
       end
 
       def render_prompt(grouped, date:, output_path:)

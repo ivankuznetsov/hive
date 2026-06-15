@@ -249,6 +249,31 @@ class HiveDigestCategorizerTest < Minitest::Test
     end
   end
 
+  def test_agent_spawn_failure_becomes_a_model_error
+    with_tmp_dir do |run_root|
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: nil)
+
+      spawn_failing = lambda do |**_kw|
+        agent = Object.new
+        # Models a missing/misnamed digest.agent binary: Process.spawn raises
+        # Errno::ENOENT straight out of Agent#run! (which does not rescue it).
+        agent.define_singleton_method(:run!) { raise Errno::ENOENT, "No such file - claude" }
+        agent
+      end
+
+      error = with_replaced_singleton_method(Hive::Agent, :new, spawn_failing) do
+        assert_raises(Hive::Digest::ModelError) do
+          categorizer.categorize(grouped, date: "2026-06-15")
+        end
+      end
+
+      assert_match(/could not run the agent/, error.message)
+      assert_match(/ENOENT/, error.message,
+                   "a broken agent binary must surface as a ModelError so the failed-notice path fires")
+    end
+  end
+
   def test_map_document_rejects_a_non_array_items_field
     error = assert_raises(Hive::Digest::ModelError) do
       Hive::Digest::Categorizer.map_document({ "items" => "not-an-array" }, grouped: {}, logger: nil)

@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-05-25
+updated: 2026-06-15
 tags: [stage, pr, github]
 ---
 
@@ -22,7 +22,7 @@ tags: [stage, pr, github]
 3. If a MERGED PR exists for the current local `HEAD` (`headRefOid` match), write `pr.md` with `merged=true`, secret-scan it, write `summary.md`, and finish without spawning an agent.
 4. Push the branch with `git push -u origin <branch>`.
 5. Render `templates/open_pr_prompt.md.erb` with the plan and execute output wrapped in a per-spawn `<user_supplied>` nonce.
-6. Spawn the open-pr agent in the worktree. The prompt invokes `/ce-commit-push-pr`, requires `gh pr create --draft`, forbids another push, and requires `pr.md` frontmatter with `pr_url` / `pr_number`.
+6. Spawn the open-pr agent in the worktree. The prompt invokes `/ce-commit-push-pr`, requires `gh pr create --draft`, forbids another push, requires `pr.md` frontmatter with `pr_url` / `pr_number`, and ends with a required completion section that makes the `<!-- COMPLETE pr_url=... is_draft=true -->` marker the last line.
 7. Secret-scan the resulting `pr.md` and PR body before returning success.
 
 ## Marker → commit action
@@ -31,6 +31,7 @@ tags: [stage, pr, github]
 - Existing OPEN PR → `open_pr_already_open` with `idempotent=true`.
 - Existing MERGED PR for local HEAD → `open_pr_already_merged` with `merged=true` and `summary.md` written.
 - Secret scan failure → `ERROR reason=secret_in_pr_body` or `ERROR reason=secret_scan_fetch_failed`.
+- `ERROR reason=timeout` is daemon-retryable once when no live task lock exists. This covers tmux marker-skip stranding after the PR was externally created but `pr.md` was not stamped complete; `Hive::Daemon::StaleAgentHealer` clears the marker with a marker-id guard and a one-shot `stage_timeout` budget, then the normal dispatch path re-enters the existing-OPEN-PR branch without creating a second PR.
 
 ## Backlinks
 

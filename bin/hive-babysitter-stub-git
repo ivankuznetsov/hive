@@ -3,7 +3,8 @@
 
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  File.open(path, "a") { |file| file.puts("[dry-run] git #{argv.join(' ')} skipped") }
+  message = "[dry-run] git #{escaped_argv(argv)} skipped"
+  append_skip_log(path) { |file| file.puts(message) }
 rescue SystemCallError, IOError => e
   # The command is still skipped (stderr below preserves the human-visible signal), but the
   # persistent audit log just developed an invisible gap; surface the cause instead of
@@ -11,6 +12,30 @@ rescue SystemCallError, IOError => e
   # write/flush failure cannot escape, crash the stub, and drop the audit record. Name the
   # target path so the operator knows which log location (the override or the default) failed.
   warn "[dry-run] failed to write skip log #{path}: #{e.message}"
+end
+
+def append_skip_log(path)
+  raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+
+  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW, 0o600) do |file|
+    stat = file.stat
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+
+    yield file
+  end
+end
+
+def escaped_argv(argv)
+  argv.map { |arg| escape_control_chars(arg) }.join(" ")
+end
+
+def escape_control_chars(arg)
+  # Scan bytes, not characters: argv can carry non-UTF-8 bytes (git paths, agent-supplied
+  # messages), and a UTF-8 `gsub` would raise ArgumentError on an invalid sequence — crashing
+  # log_skip before its `rescue` and dropping the skip-log record. Binary-encode first so the
+  # regex matches control bytes byte-by-byte; high bytes pass through unescaped, as before.
+  arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
 argv = ARGV.dup
@@ -139,7 +164,8 @@ def unsafe_env?
   # exec-capable seam (this is a denylist of the known offenders, not an exhaustive bar):
   #   * GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND / GIT_SSH / GIT_PROXY_COMMAND each name a command
   #     git execs directly (the older GIT_SSH / GIT_PROXY_COMMAND siblings are as dangerous as
-  #     the newer GIT_SSH_COMMAND).
+  #     the newer GIT_SSH_COMMAND). GIT_ASKPASS / SSH_ASKPASS name credential-prompt helpers
+  #     that git or ssh can exec during authenticated remote reads.
   #   * GIT_CONFIG_PARAMETERS is git's one-shot config channel — it carries the same
   #     exec-capable keys (diff.external, core.fsmonitor, aliases, …) as a leading `-c`.
   #   * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject those keys as well.
@@ -149,6 +175,7 @@ def unsafe_env?
   # auto-spawn a pager, so guarding it would only over-block legitimate reads.
   return true if env_set?("GIT_EXTERNAL_DIFF")
   return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
+  return true if env_set?("GIT_ASKPASS") || env_set?("SSH_ASKPASS")
   return true if env_set?("GIT_PROXY_COMMAND")
   return true if env_set?("GIT_CONFIG_PARAMETERS")
   return true if env_set?("GIT_CONFIG_GLOBAL") || env_set?("GIT_CONFIG_SYSTEM")
@@ -247,14 +274,14 @@ def hardened_passthrough_argv(argv, rest)
     passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
   end
 
-  [ "-c", "core.fsmonitor=false", *passthrough ]
+  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", *passthrough ]
 end
 
 unsafe_global, rest = split_global_options(argv)
 
 if unsafe_global || unsafe_command_options?(rest) || unsafe_env? || !read_only?(rest)
   log_skip(argv)
-  warn "[dry-run] git #{argv.join(' ')} skipped"
+  warn "[dry-run] git #{escaped_argv(argv)} skipped"
   exit 0
 end
 
@@ -268,7 +295,7 @@ end
 # write files if these env vars or config files reach real git, and argv
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
-%w[GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND].each { |key| ENV.delete(key) }
+%w[GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL

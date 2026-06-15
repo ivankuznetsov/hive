@@ -23,6 +23,46 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_stubs_refuse_symlinked_skip_log
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target.log")
+      link = File.join(dir, "skipped.log")
+      File.write(target, "existing\n")
+      File.symlink(target, link)
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => link }
+
+      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "through-link")
+      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+
+      assert git_status.success?, git_err
+      assert gh_status.success?, gh_err
+      assert_equal "existing\n", File.read(target)
+      assert_includes git_err, "[dry-run] failed to write skip log #{link}:"
+      assert_includes gh_err, "[dry-run] failed to write skip log #{link}:"
+    end
+  end
+
+  def test_stubs_escape_control_characters_in_skip_log
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
+
+      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "line\nbreak")
+      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "line\nbreak")
+
+      assert git_status.success?, git_err
+      assert gh_status.success?, gh_err
+      assert_includes git_err, "git commit -m line\\x0Abreak skipped"
+      assert_includes gh_err, "gh pr comment 42 --body line\\x0Abreak skipped"
+      skipped = File.read(log_path)
+      assert_includes skipped, "git commit -m line\\x0Abreak skipped"
+      assert_includes skipped, "gh pr comment 42 --body line\\x0Abreak skipped"
+      refute_includes skipped, "line\nbreak"
+      refute_includes git_err, "line\nbreak"
+      refute_includes gh_err, "line\nbreak"
+    end
+  end
+
   def test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands
     with_tmp_dir do |dir|
       real_gh = recording_binary(dir, "real-gh")
@@ -168,9 +208,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env.merge(
         "GIT_CONFIG_PARAMETERS" => "'diff.external=touch /tmp/hive-cfgparams-pwn'"
       ), "git", "diff"
-      # GIT_SSH / GIT_PROXY_COMMAND are the older exec-capable siblings of GIT_SSH_COMMAND —
-      # each names a program git execs — and must skip on the network-reaching reads they hit.
+      # GIT_SSH / GIT_PROXY_COMMAND are the older exec-capable siblings of GIT_SSH_COMMAND,
+      # and askpass helpers are credential-prompt programs git/ssh can exec during remote reads.
       assert_stubbed env.merge("GIT_SSH" => "touch /tmp/hive-gitssh-pwn"), "git", "remote", "show", "origin"
+      assert_stubbed env.merge("GIT_ASKPASS" => "touch /tmp/hive-askpass-pwn"), "git", "remote", "show", "origin"
+      assert_stubbed env.merge("SSH_ASKPASS" => "touch /tmp/hive-ssh-askpass-pwn"), "git", "remote", "show", "origin"
       assert_stubbed env.merge("GIT_PROXY_COMMAND" => "touch /tmp/hive-proxy-pwn"), "git", "status"
       # GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM repoint config at an attacker-written file that
       # can re-enable diff.external / core.pager / aliases, so a set value must skip.
@@ -278,6 +320,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=core.pager=HIVE_TEST_PAGER log --oneline skipped"
       assert_includes skipped, "git --paginate log --oneline skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch /tmp/hive-pager-pwn needle skipped"
+      assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
@@ -603,7 +646,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       passthrough.insert(index + 1, "--no-ext-diff", "--no-textconv")
     end
 
-    "real-git #{([ "-c", "core.fsmonitor=false" ] + passthrough).join(' ')}"
+    "real-git #{([ "-c", "core.fsmonitor=false", "-c", "core.askPass=" ] + passthrough).join(' ')}"
   end
 
   def git_subcommand_index(args)

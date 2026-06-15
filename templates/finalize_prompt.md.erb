@@ -43,3 +43,13 @@ Constraints:
   scan and `gh pr ready` both succeed.
 - Do not include `.env`, secrets, tokens, or unrelated file contents in the PR
   body.
+
+## Completion — REQUIRED, and the last thing you do
+
+The hive runner detects this stage as complete ONLY from the terminal marker in
+`pr.md`, never from your process exiting or returning to an idle prompt. You are
+NOT done until `pr.md` ends with this exact line — write it even if the PR body
+was already correct, and do not stop, idle, or yield until it is present. No
+other line may follow it.
+
+<!-- COMPLETE pr_url=<%= pr_url %> is_draft=false -->

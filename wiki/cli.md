@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-06-15
 tags: [cli, api]
 ---
 
@@ -25,10 +25,13 @@ reason. Accepted boolean forms match Thor's exact grammar: bare `--json`, exact
 truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
 (`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
 assignments such as `--json=1` or `--json=yes` exit with usage before their
-values can be treated as a command argument or task target. When the wrapper
-itself catches a usage error, JSON-vs-prose mode is decided from the last
-recognized JSON boolean flag in argv, so a trailing false form such as
-`--no-json` or `--json=false` overrides an earlier `--json`.
+values can be treated as a command argument or task target. The scan stops at
+the `hive new` text boundary: after `hive new PROJECT`, dash-prefixed tokens
+such as `--help` and unsupported-looking `--json=...` assignments are literal
+task text, and the wrapper inserts `--` before that tail so Thor does not parse
+it as options. When the wrapper itself catches a usage error, JSON-vs-prose mode
+is decided from the last recognized JSON boolean flag in argv, so a trailing
+false form such as `--no-json` or `--json=false` overrides an earlier `--json`.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested
@@ -95,7 +98,7 @@ schema with `error_kind: "error"`.
 - `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `bench submit`, `digest`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v2` (v1 remains loadable by explicit schema version for pinned consumers); `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`; `bench submit` emits an unversioned `hive-bench-submit` success document and keeps failures on stderr + exit code; `digest` emits an unversioned `hive-digest` success document and also keeps failures on stderr + exit code.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
-- `bin/hive` normalizes leading Thor-style JSON boolean forms such as `--json=true status` or `--no-json status` to command-local options and rejects unsupported `--json=<value>` assignments before Thor can leave the value behind as a positional.
+- `bin/hive` normalizes leading Thor-style JSON boolean forms such as `--json=true status` or `--no-json status` to command-local options and rejects unsupported `--json=<value>` assignments before Thor can leave the value behind as a positional. For `hive new`, that rejection and the command-local help rewrite stop once `PROJECT` has been found; the remaining argv is task text and is protected with a `--` sentinel before Thor dispatch.
 
 ## Exit-code contract (`Hive::ExitCodes`)
 

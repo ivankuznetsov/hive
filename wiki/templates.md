@@ -3,11 +3,11 @@ title: ERB Templates
 type: reference
 source: templates/
 created: 2026-04-25
-updated: 2026-06-08
+updated: 2026-06-15
 tags: [template, erb, prompt]
 ---
 
-**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, final PR wrap-up, and the shipped-digest categorizer prompt. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
+**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, final PR wrap-up, and the shipped-digest categorizer prompt. Agent-owned tmux-stage templates now finish with an explicit required completion section that makes the terminal marker the literal final instruction. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
 
 ## Rendering helper
 
@@ -43,6 +43,20 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `finalize_summary.md.erb` | `Stages::Finalize.run!` fallback summary renderer | `summary`, `pr_url`, `commits`, `review`, `open_escalations` |
 | `pr_body.md.erb` | legacy body-shape helper retained for compatibility | `summary`, `test_plan`, `task_folder` |
 
+## Terminal-marker completion prompts
+
+The runner determines completion for agent-owned marker files from the marker
+written into the state file, not from the agent process returning to an idle
+prompt. The tmux-sensitive agent-owned templates `plan_prompt.md.erb`,
+`open_pr_prompt.md.erb`, `artifacts_prompt.md.erb`, and
+`finalize_prompt.md.erb` therefore end with a "Completion - REQUIRED" section
+that tells the agent to write the exact terminal marker as the last line and not
+yield until that marker exists.
+
+`execute_prompt.md.erb` and `review_prompt.md.erb` are intentionally excluded
+because those stages are runner-owned marker paths: the runner stamps `task.md`,
+and their prompts continue to forbid the agent from writing the stage marker.
+
 ## Prompt-injection boundary policy
 
 Every user-supplied content blob in prompt templates is wrapped with the per-spawn nonce tag (ADR-019):
@@ -68,4 +82,4 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[modules/digest]]
 - [[architecture]]
 
-<!-- updated: 2026-06-14 -->
+<!-- updated: 2026-06-15 -->

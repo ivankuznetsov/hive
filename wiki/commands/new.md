@@ -1,9 +1,9 @@
 ---
 title: hive new
 type: command
-source: lib/hive/commands/new.rb, templates/idea.md.erb
+source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-06-15
 tags: [command, capture, slug, task-id, commit-lock]
 ---
 
@@ -16,6 +16,14 @@ hive new PROJECT TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into `idea.md`. Empty text raises `Hive::Error("missing task text")`.
+
+After `PROJECT`, the executable wrapper treats the rest of argv as task text
+even when tokens look like wrapper controls. `hive new PROJECT add --help docs`
+captures `add --help docs` instead of rendering help, and
+`hive new PROJECT literal --json=yes text` captures the malformed-looking JSON
+assignment literally instead of failing the wrapper boolean grammar. Wrapper
+options before the project boundary are still parsed normally; this special
+case applies only to the text tail after the registered project argument.
 
 The human stdout surface is still plain text:
 

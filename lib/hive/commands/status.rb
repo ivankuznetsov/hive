@@ -20,7 +20,17 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      # Width of the text-mode PR column (`#NNN`, right-justified). Kept in
+      # sync by convention with `Hive::Tui::Views::TasksPane::PR_WIDTH` — the
+      # two surfaces have independent layout systems (deliberately not a
+      # shared constant), so a width change here must be mirrored there.
+      # PR numbers ≥ 100000 (7+ chars) overflow this cell on purpose; the
+      # plan accepts that cap.
       TEXT_PR_WIDTH = 6
+      # Total visible width of the identity column (`#id  #PR display-name`).
+      # Hand-derived budget: must stay ≥ widest id (`#NNNN`) + 1 space +
+      # TEXT_PR_WIDTH + 1 space + a reasonable display-name allowance, so it
+      # has to grow if TEXT_PR_WIDTH grows.
       TEXT_IDENTITY_WIDTH = 49
 
       ICON = {
@@ -401,7 +411,7 @@ module Hive
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
             state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
-            puts "    #{r[:icon]} #{display_identity_with_pr(r).ljust(TEXT_IDENTITY_WIDTH)} " \
+            puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
           end
         end
@@ -428,7 +438,7 @@ module Hive
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
           state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
-          puts "    #{row[:icon]} #{display_identity_with_pr(row).ljust(TEXT_IDENTITY_WIDTH)} " \
+          puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
                "#{state.ljust(24)} #{command} #{row[:age]}"
         end
       end
@@ -441,23 +451,27 @@ module Hive
         puts "  … and #{hidden_count} archived >3d ago (hive archive to view)"
       end
 
-      def display_identity(row)
+      # Identity column = `#id  #PR display-name`, padded to `width` visible
+      # cells. The OSC8 hyperlink for the PR token is spliced in AFTER the
+      # padding (plan U3: "pad the plain token first, then wrap") because
+      # String#ljust counts the ~45 invisible escape bytes and would
+      # otherwise add zero padding in a TTY, collapsing every column to the
+      # right of the task name. Mirrors the visible-width discipline
+      # Views::TasksPane uses via Format.rjust_cells. The PR token sits at a
+      # fixed offset (`#id ` + rjust padding), so we splice by offset rather
+      # than a global `sub` — clearer, no per-row regex compile, and no
+      # backreference footgun, and it cannot match the token inside the name.
+      def display_identity_with_pr(row, width)
         id = row[:id] ? "##{row[:id]}" : "—"
-        "#{id} #{row[:display_name] || row[:slug]}"
-      end
-
-      def display_identity_with_pr(row)
-        id = row[:id] ? "##{row[:id]}" : "—"
-        "#{id} #{pr_cell(row)} #{row[:display_name] || row[:slug]}"
-      end
-
-      def pr_cell(row)
         token = Hive::Pr.number(row[:pr_url]) || "—"
-        cell = token.rjust(TEXT_PR_WIDTH)
-        return cell if token == "—"
+        pr_cell = token.rjust(TEXT_PR_WIDTH)
+        name = row[:display_name] || row[:slug]
+        padded = "#{id} #{pr_cell} #{name}".ljust(width)
+        return padded if token == "—"
 
         linked = Hive::Tui::Views::Hyperlink.osc8(token, row[:pr_url], enabled: $stdout.tty?)
-        cell.sub(/#{Regexp.escape(token)}\z/, linked)
+        token_start = id.length + 1 + (pr_cell.length - token.length)
+        padded[0...token_start] + linked + padded[(token_start + token.length)..]
       end
 
       def dependency_indicator(row)
@@ -656,7 +670,22 @@ module Hive
         value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
         value = value.to_s.strip
         value.empty? ? nil : value
-      rescue StandardError
+      rescue Errno::ENOENT
+        # pr.md vanished mid-scan — a TOCTOU race with a stage-move rename
+        # (Hive::Gh.pr_frontmatter guards a missing file with File.exist?, so
+        # a plain absent pr.md returns {} and never reaches here). Degrade to
+        # "no PR"; the row's other in-folder reads in collect_rows handle a
+        # genuine folder move via their own ENOENT contract.
+        nil
+      rescue SystemCallError => e
+        # Any other I/O fault reading pr.md (EACCES/ENOTDIR/ESTALE/…): warn so
+        # the inconsistency is visible (mirrors task_lock_holder's .lock
+        # reader) but still degrade rather than crash this poll-heavy
+        # surface, preserving the plan's never-crash-on-bad-pr.md contract.
+        # Narrowed from a blanket `rescue StandardError` so genuine
+        # programmer errors (e.g. a NoMethodError if pr_frontmatter's return
+        # shape changes) surface as exit-70 instead of being silently hidden.
+        warn "hive: status: failed to read pr.md at #{File.join(task.folder, 'pr.md')}: #{e.class}: #{e.message}"
         nil
       end
 

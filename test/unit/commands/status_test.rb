@@ -1081,6 +1081,45 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # Guards the High alignment bug: in a TTY the PR token is wrapped in
+  # ~45 invisible OSC 8 escape bytes, so padding must be computed on the
+  # *visible* width (plan U3: pad first, splice the link after). We assert
+  # both that the link is emitted AND that stripping the escapes yields
+  # output byte-identical to the non-tty render — i.e. column alignment is
+  # preserved. Without this every status text test runs under capture_io
+  # (non-tty), so the enabled OSC 8 path is never exercised.
+  def test_render_project_tty_keeps_column_alignment_while_emitting_osc8_link
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      review = File.join(hive_state, "stages", "6-review", "review-task-260615-abcd")
+      FileUtils.mkdir_p(review)
+      Hive::TaskMeta.write(review, id: 12, slug: "review-task-260615-abcd", display_name: "Fix Login")
+      File.write(File.join(review, "task.md"), "<!-- REVIEW_WAITING escalations=1 pass=1 -->\n")
+      File.write(File.join(review, "pr.md"), <<~MD)
+        ---
+        pr_url: https://github.com/example/repo/pull/561
+        ---
+      MD
+
+      non_tty, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      tty, = capture_io do
+        $stdout.define_singleton_method(:tty?) { true }
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_match(%r{\e\]8;;https://github.com/example/repo/pull/561\e\\#561\e\]8;;\e\\}, tty,
+                   "tty render must emit the OSC 8 hyperlink for the PR token")
+
+      stripped = tty.gsub(/\e\]8;;[^\e]*\e\\/, "")
+      assert_equal non_tty, stripped,
+                   "stripping OSC 8 escapes from the tty render must reproduce the non-tty " \
+                   "layout exactly — visible column widths must not shift"
+    end
+  end
+
   def test_archive_mode_prints_pr_number_after_id
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

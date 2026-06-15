@@ -148,4 +148,34 @@ class AgentLimitTest < Minitest::Test
   ensure
     original.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
+
+  # Regression for task 47: a finalize agent describing a scrollable-TUI help
+  # feature ("scroll limit reached", "window limit") tripped a false
+  # limits_reached wall via the old bare `/limit (?:reached|exceeded|reset)/i`.
+  # Healthy agent OUTPUT must never classify as a usage wall.
+  def test_does_not_classify_ui_feature_limit_text_as_a_wall
+    [
+      "The viewport scrolls until the scroll limit is reached at the bottom.",
+      "Help now shows one window at a time; the page limit reset on resize.",
+      "| Viewport | window limit reached | ows |",
+      "re-clamped on resize so a shrink keeps a valid position"
+    ].each do |line|
+      refute Hive::AgentLimit.limit_reached?(line),
+             "UI/feature text must not classify as a usage wall: #{line.inspect}"
+    end
+  end
+
+  def test_detects_usage_credit_and_time_window_walls
+    [
+      "usage limit reached",
+      "credit limit exceeded",
+      "token limit reached for this request",
+      "5-hour limit reached",
+      "weekly limit reached",
+      "account limit reached"
+    ].each do |line|
+      assert Hive::AgentLimit.limit_reached?(line),
+             "a real provider wall must still classify: #{line.inspect}"
+    end
+  end
 end

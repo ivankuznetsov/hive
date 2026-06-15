@@ -51,7 +51,14 @@ module Hive
       /\b(?:http|status|response)[:=\s-]*429\b/i,
       /\b429\b[^\n]{0,40}(?:too many|rate limit|quota|requests)/i,
       /resource[_\s-]*exhausted/i,
-      /limit (?:reached|exceeded|reset)/i,
+      # Was a bare `/limit (?:reached|exceeded|reset)/i`, which matched ANY
+      # "<x> limit reached" — including healthy agent OUTPUT. A finalize agent
+      # describing a scrollable-TUI feature ("scroll limit reached", "window
+      # limit") tripped a false `limits_reached` wall (task 47). Require a
+      # usage/billing/rate qualifier so only a real provider wall matches; UI
+      # limits (scroll/window/viewport/page/buffer/line) no longer do. Honors
+      # the file's "never classify on text that can sit in a healthy pane" rule.
+      %r{(?:usage|rate|api|token|context|message|request|session|spend|spending|credit|quota|account|subscription|\d+[\s-]?hour|hourly|daily|weekly|monthly)[\s-]?limit (?:reached|exceeded|reset)}i,
       /(?:daily|monthly|usage|spend|spending) limit/i,
       /billing[^\n]{0,80}(?:credit|quota|limit)/i
     ].freeze

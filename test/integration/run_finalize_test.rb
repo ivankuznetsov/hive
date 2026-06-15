@@ -618,4 +618,41 @@ class RunFinalizeTest < Minitest::Test
       end
     end
   end
+
+  # A PR merged out-of-band (squash-merged while the task was still
+  # mid-pipeline) must finalize-complete via the short-circuit, NOT run the
+  # body-refresh agent or trip the unpushed-commits guard — the recurring
+  # "merged PR stranded in 8-finalize" failure.
+  def test_finalize_short_circuits_when_pr_already_merged
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+
+        with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
+          capture_io { Hive::Commands::Run.new(task_dir).call }
+        end
+
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name, "a merged PR must finalize-complete via the short-circuit"
+        assert_equal "true", marker.attrs["merged"]
+        assert_equal "false", marker.attrs["is_draft"]
+        refute_match(/arg=ready/, gh_argv_log, "merged short-circuit must not run `gh pr ready`")
+        refute File.exist?(File.join(task_dir, "summary.md")),
+               "merged short-circuit skips the body-refresh agent, so no summary.md"
+      end
+    end
+  end
+
+  def test_pr_already_merged_classifies_state_and_falls_through_on_error
+    with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
+      assert Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
+    end
+    with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "OPEN" }) do
+      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
+    end
+    with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { raise Hive::GhError, "boom" }) do
+      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {}),
+             "a GhError on the state lookup must fall through to the normal finalize path"
+    end
+  end
 end

@@ -3,9 +3,34 @@
 
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  File.open(path, "a") { |file| file.puts("[dry-run] gh #{argv.join(' ')} skipped") }
-rescue SystemCallError
-  nil
+  message = "[dry-run] gh #{escaped_argv(argv)} skipped"
+  append_skip_log(path) { |file| file.puts(message) }
+rescue SystemCallError, IOError => e
+  warn "[dry-run] failed to write skip log #{path}: #{e.message}"
+end
+
+def append_skip_log(path)
+  raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+
+  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW, 0o600) do |file|
+    stat = file.stat
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+
+    yield file
+  end
+end
+
+def escaped_argv(argv)
+  argv.map { |arg| escape_control_chars(arg) }.join(" ")
+end
+
+def escape_control_chars(arg)
+  # Scan bytes, not characters: argv can carry non-UTF-8 bytes (agent-supplied messages), and
+  # a UTF-8 `gsub` would raise ArgumentError on an invalid sequence — crashing log_skip before
+  # its `rescue` and dropping the skip-log record. Binary-encode first so the regex matches
+  # control bytes byte-by-byte; high bytes pass through unescaped, as before.
+  arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
 argv = ARGV.dup
@@ -33,7 +58,7 @@ end
 # nil value (a trailing `-F` with no argument) and an empty split result, which
 # would otherwise raise `NoMethodError` on `nil.start_with?`.
 def field_uses_file?(value)
-  value.to_s.split("=", 2).last.to_s.start_with?("@")
+  value.to_s.sub(/\A=/, "").split("=", 2).last.to_s.start_with?("@")
 end
 
 def api_read_only?(rest)
@@ -42,6 +67,7 @@ def api_read_only?(rest)
   method = nil
   payload = false
   unsafe_payload = false
+  cache = false
   index = 1
   while index < rest.length
     arg = rest[index]
@@ -58,6 +84,8 @@ def api_read_only?(rest)
     when "-f", "--raw-field"
       payload = true
       index += 2
+    when "--cache", /\A--cache=/
+      return false
     when "-F", "--field"
       payload = true
       unsafe_payload ||= field_uses_file?(rest[index + 1])
@@ -65,6 +93,9 @@ def api_read_only?(rest)
     when "--input"
       payload = true
       unsafe_payload = true
+      index += 2
+    when "--cache"
+      cache = true
       index += 2
     when /\A-f.+\z/, /\A--raw-field=.+\z/
       payload = true
@@ -81,14 +112,42 @@ def api_read_only?(rest)
       payload = true
       unsafe_payload = true
       index += 1
+    when /\A--cache=.*\z/
+      cache = true
+      index += 1
     else
       index += 1
     end
   end
 
-  return method.casecmp("GET").zero? && !unsafe_payload if method
+  return method.casecmp("GET").zero? && !unsafe_payload && !cache if method
 
-  !payload
+  !payload && !cache
+end
+
+# `gh auth status` exposes `-t`/`--show-token` (boolean) alongside the boolean
+# `-a`/`--active` and the value-taking `-h`/`--hostname`. gh (pflag) clusters
+# boolean shorthands, so `-at`, `-ta`, `-ath`, ... all reveal the token even
+# though they never equal a bare `-t`. We mirror pflag's left-to-right cluster
+# consumption: `t` reveals the token, while `h` swallows the rest of the cluster
+# as its hostname value (so trailing chars after `h` are data, not flags).
+def auth_status_shows_token?(arg)
+  return true if arg == "--show-token" || arg.start_with?("--show-token=")
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  arg[1..].each_char do |char|
+    case char
+    when "t" then return true
+    when "h" then return false
+    end
+  end
+  false
+end
+
+def auth_status_read_only?(rest)
+  return false unless rest[1] == "status"
+
+  rest.drop(2).none? { |arg| auth_status_shows_token?(arg) }
 end
 
 def read_only?(rest)
@@ -96,7 +155,7 @@ def read_only?(rest)
   when "api"
     api_read_only?(rest)
   when "auth"
-    rest[1] == "status"
+    auth_status_read_only?(rest)
   when "pr"
     %w[checks diff list status view].include?(rest[1])
   when "run"
@@ -112,16 +171,24 @@ end
 
 def external_launcher_option?(rest)
   return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
-  return false unless [%w[pr view], %w[repo view], %w[run view], %w[workflow view]].include?(rest[0, 2])
+  return false unless [
+    %w[pr checks],
+    %w[pr diff],
+    %w[pr list],
+    %w[pr view],
+    %w[repo view],
+    %w[run view],
+    %w[workflow view]
+  ].include?(rest[0, 2])
 
-  rest.drop(2).any? { |arg| arg == "-w" || arg.start_with?("-w") }
+  rest.drop(2).any? { |arg| arg.start_with?("-") && !arg.start_with?("--") && arg.include?("w") }
 end
 
 rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest)
   log_skip(argv)
-  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  warn "[dry-run] gh #{escaped_argv(argv)} skipped"
   exit 0
 end
 
@@ -131,5 +198,8 @@ if real.empty?
   exit 127
 end
 
-%w[GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY].each { |key| ENV.delete(key) }
+%w[
+  GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
+  GH_CONFIG_DIR XDG_CONFIG_HOME
+].each { |key| ENV.delete(key) }
 exec(real, *argv)

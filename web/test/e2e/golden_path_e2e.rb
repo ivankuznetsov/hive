@@ -109,14 +109,18 @@ class GoldenPathE2E < ApplicationSystemTestCase
     fill_in "New idea", with: "Golden path sample idea"
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    row = find(".task-row", text: "Golden path sample idea", wait: 10)
+    assert_selector ".task-row", text: "Golden path sample idea", wait: 10
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
     # (A manual Force approve here would race the daemon's own advance.)
 
     # --- Brainstorm round 1: the daemon's agent asks, we answer ------------
-    row.find("a", match: :first).click
+    # Turbo may replace the grid row while the daemon advances the task. Read
+    # the slug from the current DOM, then navigate directly instead of holding
+    # a row element across live updates.
+    slug = task_slug_from_grid!("Golden path sample idea")
+    visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
     # Answer only AFTER the daemon has reaped the round-1 child: the edit
@@ -124,9 +128,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # answer written before the reap is swallowed and the resume never
     # fires (recorded in wiki/gaps.md as a real product edge — an operator
     # answering within one daemon tick of the agent finishing strands the
-    # task). The daemon's event log is the observable artifact; polling it
-    # is an explicit wait on a real condition, not a sleep.
-    slug = current_path.split("/").last
+    # task). The daemon's event log and the state file's mtime are the
+    # observable artifacts; waiting on them keeps this out of blind sleeps.
     wait_for_answer_window!(slug)
     answer_field.fill_in with: "Yes — ship it."
     click_button "Send answers"
@@ -148,12 +151,36 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
   private
 
+  # The status grid is Turbo-replaced while the daemon advances tasks. Read the
+  # slug from a single current-DOM query instead of retaining a Capybara element.
+  def task_slug_from_grid!(title, timeout: 10)
+    title_json = title.to_json
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      slug = page.evaluate_script(<<~JS)
+        (() => {
+          const rows = Array.from(document.querySelectorAll(".task-row"));
+          const row = rows.find((node) => node.textContent.includes(#{title_json}));
+          return row?.querySelector(".task-slug")?.textContent?.trim();
+        })()
+      JS
+      return slug if slug && !slug.empty?
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        raise "task row for #{title.inspect} never exposed a slug"
+      end
+
+      sleep 0.1
+    end
+  end
+
   # The resume watcher only sees edits NEWER than its baseline, and the
   # baseline is seeded by the first classification tick AFTER the round-1
   # child is reaped. Answering inside that window strands the task
   # (wiki/gaps.md records this as a real product edge). Wait for both
-  # events IN ORDER in the daemon's own log — an explicit wait on the
-  # real condition, not a sleep.
+  # events IN ORDER in the daemon's own log, then wait for a distinct
+  # state-file mtime tick so coarse CI filesystems cannot collapse the
+  # answer write onto the baseline mtime.
   def wait_for_answer_window!(slug, timeout: 60)
     events = File.join(ENV["HIVE_HOME"], "logs", "daemon.log")
     slug_re = Regexp.escape(slug)
@@ -171,6 +198,23 @@ class GoldenPathE2E < ApplicationSystemTestCase
       raise "daemon never opened the answer window for #{slug}" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
       sleep 0.2
+    end
+    wait_for_next_state_file_mtime_tick!(slug)
+  end
+
+  def wait_for_next_state_file_mtime_tick!(slug, timeout: 5)
+    path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", @project,
+                     ".hive-state", "stages", "2-brainstorm", slug, "brainstorm.md")
+    baseline_sec = File.mtime(path).to_i
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      return if Time.now.to_i > baseline_sec
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        raise "state-file mtime second did not advance for #{slug}"
+      end
+
+      sleep 0.05
     end
   end
 

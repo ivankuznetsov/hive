@@ -3,7 +3,7 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-06-08
+updated: 2026-06-14
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
@@ -44,14 +44,14 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 8. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
 9. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).
 
-## JSON contract (`schema = "hive-stage-action"`, version 1)
+## JSON contract (`schema = "hive-stage-action"`, version 2)
 
 ### Success
 
 ```json
 {
   "schema": "hive-stage-action",
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "verb": "plan",
   "phase": "promoted_and_ran",
@@ -76,7 +76,7 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 ```json
 {
   "schema": "hive-stage-action",
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
   "verb": "plan",
   "error_class": "WrongStage",
@@ -90,7 +90,7 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 
 In JSON mode, the inner Approve and Run are quieted so the envelope is a single parseable document. In text mode, Approve and Run emit their normal prose since that output is intended for humans.
 
-External consumers can validate against `schemas/hive-stage-action.v1.json`; resolve via `Hive::Schemas.schema_path("hive-stage-action")`.
+External consumers can validate the current contract through `Hive::Schemas.schema_path("hive-stage-action")`, which resolves to `schemas/hive-stage-action.v2.json`; `schemas/hive-stage-action.v1.json` remains in tree for pinned legacy consumers.
 
 ## Idempotency contract
 

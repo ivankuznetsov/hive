@@ -14,6 +14,34 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
+JSON_USAGE_ERROR_CONTRACTS = {
+  "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
+  "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
+  "approve" => { schema: "hive-approve", error_kind: "invalid_task_path" },
+  "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
+  "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
+  "accept-finding" => {
+    schema: "hive-findings",
+    error_kind: "invalid_task_path",
+    extras: { "operation" => "accept" }
+  },
+  "reject-finding" => {
+    schema: "hive-findings",
+    error_kind: "invalid_task_path",
+    extras: { "operation" => "reject" }
+  },
+  "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
+  "pr" => {
+    schema: "hive-stage-action",
+    error_kind: "invalid_task_path",
+    extras: { "verb" => "open-pr" }
+  }
+}.merge(
+  STAGE_ACTION_USAGE_COMMANDS.to_h do |command|
+    [ command, { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => command } } ]
+  end
+).freeze
 
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
@@ -28,6 +56,24 @@ def normalize_leading_json_options!(argv)
   argv.insert(cmd_idx + 1, *leading)
 end
 
+def new_text_start_index(argv)
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return nil unless cmd_idx && argv[cmd_idx] == "new"
+
+  project_idx = argv.each_index.find do |idx|
+    next false if idx <= cmd_idx
+
+    arg = argv[idx]
+    next false if JSON_BOOLEAN_OPTIONS.include?(arg)
+    next false if arg.start_with?("-")
+
+    true
+  end
+  return nil unless project_idx
+
+  project_idx + 1
+end
+
 # Thor only honours `--help` *before* the subcommand name (`hive help approve`);
 # `hive approve --help` would be consumed as the TARGET positional. Intercept
 # the help flag before Thor dispatch so the convention agents try first works.
@@ -37,19 +83,38 @@ def rewrite_help_flag!(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return unless cmd_idx
 
-  help_idx = argv[(cmd_idx + 1)..]&.index { |a| a == "--help" || a == "-h" }
+  text_start_idx = new_text_start_index(argv)
+  help_idx = argv.each_index.find do |idx|
+    next false if idx <= cmd_idx
+    next false if text_start_idx && idx >= text_start_idx
+
+    argv[idx] == "--help" || argv[idx] == "-h"
+  end
   return unless help_idx
 
   cmd = argv[cmd_idx]
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
+def terminate_new_text_options!(argv)
+  text_start_idx = new_text_start_index(argv)
+  return unless text_start_idx && text_start_idx < argv.length
+  return if argv[text_start_idx] == "--"
+
+  argv.insert(text_start_idx, "--")
+end
+
 def json_requested?(argv)
-  argv.any? { |arg| JSON_TRUE_OPTIONS.include?(arg) }
+  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  text_start_idx = new_text_start_index(argv)
+  arg = argv.each_with_index.find do |candidate, idx|
+    next false if text_start_idx && idx >= text_start_idx
+
+    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
+  end&.first
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
@@ -57,27 +122,38 @@ end
 
 def json_usage_error_contract(argv)
   command = argv.find { |arg| !arg.start_with?("-") }
-  case command
-  when "run"
-    [ "hive-run", "invalid_task_path" ]
-  when "approve"
-    [ "hive-approve", "invalid_task_path" ]
-  when "markers"
-    [ "hive-markers-clear", "invalid_task_path" ]
+  JSON_USAGE_ERROR_CONTRACTS[command]
+end
+
+def json_usage_error_payload(contract, error)
+  schema = contract.fetch(:schema)
+  error_kind = contract.fetch(:error_kind)
+  extras = contract.fetch(:extras, {})
+  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    return Hive::Schemas::ErrorEnvelope.build(
+      schema: schema,
+      error: error,
+      error_kind: error_kind,
+      extras: extras
+    )
   end
+
+  {
+    "schema" => schema,
+    "schema_version" => contract.fetch(:schema_version, 1),
+    "ok" => false,
+    "error_class" => error.class.name.split("::").last,
+    "error_kind" => error_kind,
+    "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+    "message" => error.message
+  }.merge(extras)
 end
 
 def emit_json_usage_error(argv, error)
   contract = json_usage_error_contract(argv)
   return false unless contract && json_requested?(argv)
 
-  schema, error_kind = contract
-  payload = Hive::Schemas::ErrorEnvelope.build(
-    schema: schema,
-    error: error,
-    error_kind: error_kind
-  )
-  puts JSON.generate(payload)
+  puts JSON.generate(json_usage_error_payload(contract, error))
   true
 rescue Errno::EPIPE, JSON::GeneratorError
   true
@@ -87,6 +163,7 @@ begin
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_json_options!(ARGV)
   rewrite_help_flag!(ARGV)
+  terminate_new_text_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)

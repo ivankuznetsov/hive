@@ -1,10 +1,10 @@
 ---
 title: hive new
 type: command
-source: lib/hive/commands/new.rb, templates/idea.md.erb
+source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-06-08
-tags: [command, capture, slug, task-id]
+updated: 2026-06-15
+tags: [command, capture, slug, task-id, commit-lock]
 ---
 
 **TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, scaffolds `<hive-state>/stages/1-inbox/<slug>/idea.md` plus `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
@@ -16,6 +16,14 @@ hive new PROJECT TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into `idea.md`. Empty text raises `Hive::Error("missing task text")`.
+
+After `PROJECT`, the executable wrapper treats the rest of argv as task text
+even when tokens look like wrapper controls. `hive new PROJECT add --help docs`
+captures `add --help docs` instead of rendering help, and
+`hive new PROJECT literal --json=yes text` captures the malformed-looking JSON
+assignment literally instead of failing the wrapper boolean grammar. Wrapper
+options before the project boundary are still parsed normally; this special
+case applies only to the text tail after the registered project argument.
 
 The human stdout surface is still plain text:
 
@@ -66,7 +74,7 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
    Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing `<!-- WAITING -->` (so `1-inbox` shows ⏸ in `hive status`, even though `hive run` there is inert).
 5. If attachments were supplied, copy them into `assets/` beside `idea.md`.
 6. Allocate a monotonic task id via `Hive::TaskCounter.next!` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
-7. `Hive::GitOps#hive_commit(stage_name: "1-inbox", slug:, action: "captured")` on `hive/state`. Diff-empty commits are skipped silently.
+7. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: "1-inbox", slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
 8. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; if the task still has a blank sidecar name later, a running daemon retries the same command from `Hive::Daemon::DisplayNameBackfiller`.
 9. Print `hive: captured <path>` and the `mv ... && hive run ...` next-step hint.
 
@@ -84,7 +92,7 @@ display_name:
 
 ## Tests
 
-- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, `meta.yml` capture, counter-lock fallback, display-name subprocess spawning, and the captured commit.
+- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, `meta.yml` capture, counter-lock fallback, the per-project commit-lock wrapper, display-name subprocess spawning, and the captured commit.
 - `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
 
 ## Backlinks

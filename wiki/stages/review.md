@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-06-11
+updated: 2026-06-13
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -23,7 +23,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 | `:review_complete` | print "already complete; run `hive artifacts` or move this folder to 7-artifacts/", return |
 | `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
 | `:review_stale` | warn; user clears/re-runs if highest pass lacks `escalations-NN.md`, otherwise trims `reviews/` then clears/re-runs |
-| `:review_error` | warn with attrs; user investigates then `hive markers clear FOLDER --name REVIEW_ERROR` and re-runs |
+| `:review_error` | warn with attrs; most reasons require user investigation then `hive markers clear FOLDER --name REVIEW_ERROR` and re-run. `reason=limits_reached` is the cooldown exception: when the marker carries `retry_after`, the daemon healer can clear it after the usage window. |
 | `:review_waiting` | resume — skip Phase 2/3, jump straight to Phase 4 with the user's manually-ticked `[x]` marks |
 | no `worktree.yml` | exit 1 (must come from 4-execute) |
 | `worktree.yml` points at deleted path | exit 1 with `git worktree prune` recovery hint |
@@ -87,6 +87,8 @@ Spawns a triage agent with all per-reviewer files for the current pass concatena
 
 Plan / worktree.yml / task.md are SHA-256 protected around the triage spawn (ADR-013); tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 
+If the triage spawn returns an error whose captured message matches `Hive::AgentLimit.limit_reached?`, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>` instead of the terminal `triage_failed` marker. The daemon healer treats that like the reviewers-phase limit marker and retries after the cooldown. Non-limit triage failures, including timeouts with no provider-limit text, still write `reason=triage_failed` and remain manual.
+
 Escalations land in `reviews/escalations-<NN>.md` — every line that triage left as `[ ]` gets copied here as a digest for the user.
 
 The escalations digest is mirrored to the PR with the same publisher path and duplicate-header guard.
@@ -102,7 +104,7 @@ The escalations digest is mirrored to the PR with the same publisher path and du
 
 Spawns the fix agent (`cfg.review.fix.agent`, default `claude`) with the concatenated `[x]` lines from every per-reviewer file for the current pass, wrapped in the `<user_supplied>` nonce. Answered escalation body and answer prose is preserved as `[source] >>> ...` context lines so markdown checkboxes inside a user answer cannot inflate `Hive-Fix-Findings`. The fix prompt requires git trailers on every commit (`Hive-Task-Slug`, `Hive-Fix-Pass`, `Hive-Fix-Findings`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase: fix`) — consumed by `hive metrics rollback-rate` (U14). Phase 4 first checks pre-existing worktree dirt: any residue is auto-committed through `CleanExit` with `Hive-Auto-Commit-Reason: pre_fix_dirty_worktree`, the worktree is rechecked, and only a failed status/commit path still prevents the fix agent from running. This pre-fix snapshot intentionally bypasses the shared `review.fix.auto_commit.scope_check` allowlist so out-of-scope residue is preserved before a new fix actor mutates the branch; ordinary stage-exit residue and finalize-entry backstops still use the stricter scope check. If Hive cannot read Git status before or after the fix agent, it records `REVIEW_ERROR phase=fix reason=fix_status_check_failed`; status JSON, bot recovery, and the TUI detail view treat that marker as manual-only because clearing and rerunning would re-enter the same unreadable worktree. If `review.fix.auto_commit.sign_policy: fail` is set and `commit.gpgsign=true`, Hive pauses before staging with `REVIEW_ERROR phase=fix reason=fix_auto_commit_sign_policy_failed`; otherwise, if a successful fix agent starts from a clean snapshot point and exits with uncommitted worktree changes, the runner stages those changes, reads `git diff --cached --name-only -z`, and rejects paths outside `review.fix.auto_commit.scope_check.allowed_paths` or inside `denied_paths` before writing Hive trailers. Scope-check failure unstages and yields `REVIEW_ERROR phase=fix reason=fix_auto_commit_scope_failed`; allowed staged paths are committed with the same trailers before guardrail evaluation, using the worktree's normal signing config by default. `review.fix.auto_commit.sign_policy: bypass` forces unsigned automation commits, and `Hive-Fix-Findings` comes from the accepted-findings collector count rather than reparsing the rendered prompt text. The scope-check / sign-policy / git-commit primitives live in `Hive::Stages::AutoCommit` (a pure module — no instance state) so Review and `CleanExit` share one implementation; `Review::AUTO_COMMIT_*` constants are preserved as aliases for external readers.
 
-Plan / worktree.yml / task.md are SHA-256 protected around the fix spawn; tampering → `REVIEW_ERROR phase=fix reason=fix_tampered`.
+Plan / worktree.yml / task.md are SHA-256 protected around the fix spawn; tampering → `REVIEW_ERROR phase=fix reason=fix_tampered`. If the fix agent exits with provider-limit text in its captured error message, the runner writes `REVIEW_ERROR phase=fix reason=limits_reached retry_after=<iso8601>` through the same `mark_review_phase_failure` helper used by triage; ordinary fix-agent errors still write `reason=fix_failed`.
 
 After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 / U13) takes `git diff base..head` of the new commits and walks it once, dispatching each line to the configured pattern set:
 
@@ -169,7 +171,7 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 
 ## Tests
 
-- `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap.
+- `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap, reviewers all-limit markers, and triage limit vs non-limit failure classification.
 - `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` — phase-level unit coverage.
 - `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, and patrol-task selection of `patrol.review.reviewers`.
 - `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior.

@@ -59,7 +59,7 @@ class HiveEvalS8AutofixTest < Minitest::Test
     assert_nil harness.telegram.edits.first.reply_markup,
                "edit_message_reply_markup with nil clears the keyboard"
 
-    argvs = harness.child_supervisor.commands
+    argvs = harness.dispatched_commands
     assert_equal 2, argvs.length, "tap must dispatch exactly two commands: markers clear, then the retry verb"
     assert_equal [ "hive", "markers", "clear", "stuck-260525-abcd",
                    "--name", "REVIEW_ERROR", "--project", "hive",

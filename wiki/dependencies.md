@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-13
+updated: 2026-06-14
 tags: [dependencies, gems, runtime]
 ---
 
@@ -102,9 +102,12 @@ The codebase leans heavily on stdlib (no extra gems for these):
 | `SecureRandom.hex` | 4-char slug suffix and unique global-config tempfile names | `commands/new.rb`, `config.rb` |
 | `Digest::SHA256` | Reviewer-tamper detection on `plan.md` / `worktree.yml` | `stages/execute.rb` |
 | `Time.now.utc.iso8601` | Lock timestamps, marker `started=`, `worktree.yml#created_at` | `lock.rb`, `agent.rb`, `worktree.rb` |
-| `/proc/<pid>/stat` (Linux) | PID-reuse defence in stale-lock detection | `lock.rb#process_start_time` |
+| `/proc/<pid>/stat` / `ps -o lstart=` | PID-reuse defence in stale-lock detection | `lock.rb#process_start_time` |
 
-The `/proc/<pid>/stat` reliance is Linux-specific. macOS would need a `ps -o lstart= -p <pid>` fallback (noted as a known limitation in the plan but not implemented in MVP).
+PID start-time capture uses `/proc/<pid>/stat` field 22 on Linux and falls
+back to `ps -o lstart= -p <pid>` on macOS/BSD-style hosts or containers without
+a readable `/proc`. It returns nil only when neither source works, leaving
+stale-lock handling to the live-PID check alone.
 
 ## External CLI dependencies
 

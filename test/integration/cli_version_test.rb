@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "rbconfig"
+require "hive/commands/init"
 
 class CliVersionTest < Minitest::Test
   include HiveTestHelper
@@ -54,7 +55,66 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_usage_error_respects_last_json_boolean_flag
+    with_tmp_global_config do
+      [
+        %w[--json --no-json],
+        %w[--json --json=false]
+      ].each do |flags|
+        out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", *flags)
+
+        assert_equal 64, status.exitstatus, "#{flags.join(" ")}: missing target should be a usage error"
+        assert_empty out, "#{flags.join(" ")}: final false JSON flag must force prose output"
+        assert_match(/Usage: "hive run TARGET"/, err)
+      end
+    end
+  end
+
+  def test_bin_hive_new_treats_help_flag_as_task_text_after_project
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", project, "add", "--help", "docs")
+
+      assert status.success?, "hive new should capture --help as text after PROJECT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      refute_includes out, "Usage:"
+      assert_new_idea_includes(dir, "add --help docs")
+    end
+  end
+
+  def test_bin_hive_new_treats_json_assignment_as_task_text_after_project
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", project, "literal", "--json=yes", "text")
+
+      assert status.success?, "hive new should capture --json=yes as text after PROJECT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      refute_match(/invalid boolean value for --json/, err)
+      assert_new_idea_includes(dir, "literal --json=yes text")
+    end
+  end
+
   private
+
+  def with_cli_project
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        yield dir, File.basename(dir)
+      end
+    end
+  end
+
+  def run_bin_hive(*args)
+    Open3.capture3(
+      { "HIVE_BIN" => "/nonexistent/hive" },
+      RbConfig.ruby, "-Ilib", "bin/hive", *args
+    )
+  end
+
+  def assert_new_idea_includes(dir, text)
+    idea_paths = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*", "idea.md")]
+    assert_equal 1, idea_paths.size, "expected one captured idea, got #{idea_paths.inspect}"
+    assert_includes File.read(idea_paths.first), text
+  end
 
   def without_generated_at(payload)
     payload.reject { |key, _value| key == "generated_at" }

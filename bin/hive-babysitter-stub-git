@@ -3,7 +3,8 @@
 
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  File.open(path, "a") { |file| file.puts("[dry-run] git #{argv.join(' ')} skipped") }
+  message = "[dry-run] git #{escaped_argv(argv)} skipped"
+  append_skip_log(path) { |file| file.puts(message) }
 rescue SystemCallError, IOError => e
   # The command is still skipped (stderr below preserves the human-visible signal), but the
   # persistent audit log just developed an invisible gap; surface the cause instead of
@@ -11,6 +12,30 @@ rescue SystemCallError, IOError => e
   # write/flush failure cannot escape, crash the stub, and drop the audit record. Name the
   # target path so the operator knows which log location (the override or the default) failed.
   warn "[dry-run] failed to write skip log #{path}: #{e.message}"
+end
+
+def append_skip_log(path)
+  raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+
+  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW, 0o600) do |file|
+    stat = file.stat
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+
+    yield file
+  end
+end
+
+def escaped_argv(argv)
+  argv.map { |arg| escape_control_chars(arg) }.join(" ")
+end
+
+def escape_control_chars(arg)
+  # Scan bytes, not characters: argv can carry non-UTF-8 bytes (git paths, agent-supplied
+  # messages), and a UTF-8 `gsub` would raise ArgumentError on an invalid sequence — crashing
+  # log_skip before its `rescue` and dropping the skip-log record. Binary-encode first so the
+  # regex matches control bytes byte-by-byte; high bytes pass through unescaped, as before.
+  arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
 argv = ARGV.dup
@@ -181,8 +206,10 @@ def read_only_remote?(rest)
   case args.first
   when "show"
     args.shift
-    args.shift if args.first == "-n"
-    args.all? { |arg| !arg.start_with?("-") }
+    return false unless args.first == "-n"
+
+    args.shift
+    !args.empty? && args.all? { |arg| !arg.start_with?("-") }
   when "get-url"
     args.shift
     args.shift while [ "--push", "--all" ].include?(args.first)
@@ -190,6 +217,17 @@ def read_only_remote?(rest)
   else
     false
   end
+end
+
+def read_only_branch?(rest)
+  args = rest[1..] || []
+  return true if args.empty?
+  return true if args == [ "--show-current" ]
+  return true if args == [ "--contains" ]
+  return true if args.length == 2 && args.first == "--contains" && !args.last.start_with?("-")
+  return true if args.length == 1 && args.first.start_with?("--contains=") && args.first.length > "--contains=".length
+
+  false
 end
 
 def read_only_config?(rest)
@@ -213,7 +251,7 @@ end
 def read_only?(rest)
   case rest.first.to_s
   when "branch"
-    rest.length == 1 || rest.include?("--show-current") || rest.include?("--contains")
+    read_only_branch?(rest)
   when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
        "rev-list", "rev-parse", "show", "status"
     true
@@ -243,7 +281,7 @@ unsafe_global, rest = split_global_options(argv)
 
 if unsafe_global || unsafe_command_options?(rest) || unsafe_env? || !read_only?(rest)
   log_skip(argv)
-  warn "[dry-run] git #{argv.join(' ')} skipped"
+  warn "[dry-run] git #{escaped_argv(argv)} skipped"
   exit 0
 end
 

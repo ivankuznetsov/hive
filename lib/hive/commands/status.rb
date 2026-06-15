@@ -12,6 +12,7 @@ require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
+require "hive/tui/views/hyperlink"
 
 module Hive
   module Commands
@@ -19,6 +20,8 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      TEXT_PR_WIDTH = 6
+      TEXT_IDENTITY_WIDTH = 49
 
       ICON = {
         none: "·",
@@ -398,7 +401,8 @@ module Hive
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
             state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
-            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{state.ljust(24)} #{command} #{r[:age]}"
+            puts "    #{r[:icon]} #{display_identity_with_pr(r).ljust(TEXT_IDENTITY_WIDTH)} " \
+                 "#{state.ljust(24)} #{command} #{r[:age]}"
           end
         end
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
@@ -424,7 +428,8 @@ module Hive
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
           state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
-          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{state.ljust(24)} #{command} #{row[:age]}"
+          puts "    #{row[:icon]} #{display_identity_with_pr(row).ljust(TEXT_IDENTITY_WIDTH)} " \
+               "#{state.ljust(24)} #{command} #{row[:age]}"
         end
       end
 
@@ -439,6 +444,20 @@ module Hive
       def display_identity(row)
         id = row[:id] ? "##{row[:id]}" : "—"
         "#{id} #{row[:display_name] || row[:slug]}"
+      end
+
+      def display_identity_with_pr(row)
+        id = row[:id] ? "##{row[:id]}" : "—"
+        "#{id} #{pr_cell(row)} #{row[:display_name] || row[:slug]}"
+      end
+
+      def pr_cell(row)
+        token = Hive::Pr.number(row[:pr_url]) || "—"
+        cell = token.rjust(TEXT_PR_WIDTH)
+        return cell if token == "—"
+
+        linked = Hive::Tui::Views::Hyperlink.osc8(token, row[:pr_url], enabled: $stdout.tty?)
+        cell.sub(/#{Regexp.escape(token)}\z/, linked)
       end
 
       def dependency_indicator(row)

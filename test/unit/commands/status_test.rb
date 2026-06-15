@@ -1054,6 +1054,55 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_render_project_prints_pr_number_after_id_and_dash_when_missing
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      review = File.join(hive_state, "stages", "6-review", "review-task-260615-abcd")
+      brainstorm = File.join(hive_state, "stages", "2-brainstorm", "brainstorm-task-260615-abcd")
+      FileUtils.mkdir_p(review)
+      FileUtils.mkdir_p(brainstorm)
+      Hive::TaskMeta.write(review, id: 12, slug: "review-task-260615-abcd", display_name: "Fix Login")
+      Hive::TaskMeta.write(brainstorm, id: 13, slug: "brainstorm-task-260615-abcd", display_name: "No PR Yet")
+      File.write(File.join(review, "task.md"), "<!-- REVIEW_WAITING escalations=1 pass=1 -->\n")
+      File.write(File.join(review, "pr.md"), <<~MD)
+        ---
+        pr_url: https://github.com/example/repo/pull/561
+        ---
+      MD
+      File.write(File.join(brainstorm, "brainstorm.md"), "<!-- WAITING -->\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_match(/#12\s+#561\s+Fix Login/, out)
+      assert_match(/#13\s+—\s+No PR Yet/, out)
+      refute_match(/\e\]8;;/, out, "captured non-tty status output must not emit OSC 8 bytes")
+    end
+  end
+
+  def test_archive_mode_prints_pr_number_after_id
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "9-done", "archived-task-260615-abcd")
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(folder, id: 9, slug: "archived-task-260615-abcd", display_name: "Archived Task")
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        pr_url: https://github.com/example/repo/pull/561
+        ---
+      MD
+
+      out, = capture_io do
+        Hive::Commands::Status.new(archive: true).send(:render_project, status_project(project_root, hive_state),
+                                                       project_count: 1)
+      end
+
+      assert_match(/#9\s+#561\s+Archived Task/, out)
+    end
+  end
+
   def test_render_project_hides_old_clean_archived_rows_and_prints_summary
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

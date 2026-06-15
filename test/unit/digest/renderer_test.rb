@@ -1,5 +1,7 @@
 require "test_helper"
 require "hive/digest/renderer"
+require "hive/digest/shipped_item"
+require "hive/digest/categorizer"
 
 class HiveDigestRendererTest < Minitest::Test
   def test_renders_projects_and_categories_in_fixed_order
@@ -96,6 +98,30 @@ class HiveDigestRendererTest < Minitest::Test
     assert_equal Hive::Digest::Renderer::MAX_SUMMARY_LENGTH, truncated.length,
                  "an overlong model summary must be capped so the escaped line stays under the chunk boundary"
     assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
+  end
+
+  def test_truncate_label_caps_an_overlong_label_with_an_ellipsis
+    over = "c" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 50)
+
+    truncated = Hive::Digest::Renderer.truncate_label(over)
+
+    assert_equal Hive::Digest::Renderer::MAX_LABEL_LENGTH, truncated.length,
+                 "an overlong display label must be capped so the escaped link line stays under the boundary"
+    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
+  end
+
+  def test_render_line_bounds_an_overlong_label
+    over = "d" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 500)
+    rendered = Hive::Digest::Renderer.render(
+      { "alpha" => [ categorized("feature", "Adds digest.", display_name: over) ] }
+    )
+
+    # The label inside the link must be bounded (≤ cap, plus MarkdownV2 escapes
+    # which at most double it) so the whole line can't approach 4096.
+    label_in_link = rendered[/\[([^\]]*)\]/, 1]
+    refute_nil label_in_link
+    assert_operator label_in_link.length, :<=, Hive::Digest::Renderer::MAX_LABEL_LENGTH * 2,
+                    "an overlong label must be truncated before escaping into the link"
   end
 
   private

@@ -10,13 +10,20 @@ module Hive
       # be silently dropped here for want of a render section.
       CATEGORY_ORDER = Categories::ORDERED
 
-      # Telegram hard-caps a message at 4096 chars; the chunker cuts on that
-      # boundary, and a cut landing between a MarkdownV2 `\` and the char it
-      # escapes produces an invalid escape → a 400 that fails the whole send.
-      # Model summaries are not length-bounded, so cap each one well under the
-      # limit (MarkdownV2 escaping at most doubles the length) BEFORE escaping,
-      # so a single rendered line can never approach the chunk boundary.
+      # Telegram hard-caps a message at 4096 chars; the chunker
+      # (Telegram#split_message) prefers to cut on the last newline inside that
+      # window and only hard-cuts mid-text as a fallback. A hard cut landing
+      # between a MarkdownV2 `\` and the char it escapes produces an invalid
+      # escape → a 400 that fails the whole send. Model summaries and the
+      # (attacker-influenceable) display label are not length-bounded, so cap
+      # each well under the limit (MarkdownV2 escaping at most doubles the
+      # length) BEFORE escaping, so a single rendered line can never approach
+      # the chunk boundary in the first place.
       MAX_SUMMARY_LENGTH = 600
+      # The label is a short title, so a much tighter cap is plenty; together
+      # with the summary cap it keeps the whole "• summary — [label](url)" line
+      # well under 4096 even after MarkdownV2 escaping.
+      MAX_LABEL_LENGTH = 200
 
       RESERVED_MDV2 = /([\\_*\[\]()~`>#+\-=|{}.!])/
 
@@ -65,7 +72,7 @@ module Hive
       def render_line(entry)
         item = entry.item
         summary = escape_mdv2(truncate_summary(entry.summary))
-        label = escape_mdv2(item.display_label)
+        label = escape_mdv2(truncate_label(item.display_label))
         target = item.pr_url.to_s
         link = target.empty? ? label : "[#{label}](#{escape_link_target(target)})"
         "• #{summary} — #{link}"
@@ -80,6 +87,16 @@ module Hive
         return text if text.length <= MAX_SUMMARY_LENGTH
 
         "#{text[0, MAX_SUMMARY_LENGTH - 1].rstrip}…"
+      end
+
+      # Bound the (attacker-influenceable) display label the same way as the
+      # summary, on the raw text before escaping, so an overlong label can't
+      # push the rendered link line past Telegram's chunk boundary.
+      def truncate_label(text)
+        text = text.to_s
+        return text if text.length <= MAX_LABEL_LENGTH
+
+        "#{text[0, MAX_LABEL_LENGTH - 1].rstrip}…"
       end
 
       def escape_link_target(url)

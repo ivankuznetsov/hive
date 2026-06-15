@@ -162,6 +162,7 @@ def unsafe_env?
   # The argv guards above are fully bypassable through git's environment-variable config
   # path, so the env path mirrors the same fail-closed posture. Each guarded var is a known
   # exec-capable seam (this is a denylist of the known offenders, not an exhaustive bar):
+  #   * GIT_EXEC_PATH redirects git to an arbitrary directory of git-* helper binaries.
   #   * GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND / GIT_SSH / GIT_PROXY_COMMAND each name a command
   #     git execs directly (the older GIT_SSH / GIT_PROXY_COMMAND siblings are as dangerous as
   #     the newer GIT_SSH_COMMAND). GIT_ASKPASS / SSH_ASKPASS name credential-prompt helpers
@@ -173,6 +174,7 @@ def unsafe_env?
   #     can carry the same keys.
   # GIT_PAGER / core.pager is intentionally left alone — non-TTY dry-run stdout does not
   # auto-spawn a pager, so guarding it would only over-block legitimate reads.
+  return true if env_set?("GIT_EXEC_PATH")
   return true if env_set?("GIT_EXTERNAL_DIFF")
   return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
   return true if env_set?("GIT_ASKPASS") || env_set?("SSH_ASKPASS")
@@ -295,7 +297,7 @@ end
 # write files if these env vars or config files reach real git, and argv
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
-%w[GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS].each { |key| ENV.delete(key) }
+%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL

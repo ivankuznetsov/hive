@@ -7,11 +7,11 @@ module Hive
 
       def with_env(worktree_path)
         # Resolve real git/gh *before* prepending the overlay onto PATH,
-        # otherwise `which` finds the stub symlinks and the stubs `exec`
+        # otherwise `which` finds the overlay wrappers and the stubs `exec`
         # themselves recursively until the babysitter timeout.
         real_git = which("git").to_s
         real_gh = which("gh").to_s
-        overlay = prepare_overlay(worktree_path)
+        overlay = prepare_overlay(worktree_path, real_git: real_git, real_gh: real_gh)
         old = {
           "PATH" => ENV["PATH"],
           "HIVE_BABYSITTER_DRY_RUN_LOG" => ENV["HIVE_BABYSITTER_DRY_RUN_LOG"],
@@ -27,17 +27,22 @@ module Hive
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
       end
 
-      def prepare_overlay(worktree_path)
+      def prepare_overlay(worktree_path, real_git:, real_gh:)
         overlay = File.join(worktree_path, ".hive-babysitter-dry-run-bin")
         FileUtils.mkdir_p(overlay)
         root = File.expand_path("../../..", __dir__)
         {
-          "git" => File.join(root, "bin", "hive-babysitter-stub-git"),
-          "gh" => File.join(root, "bin", "hive-babysitter-stub-gh")
-        }.each do |name, target|
+          "git" => [ File.join(root, "bin", "hive-babysitter-stub-git"), "HIVE_BABYSITTER_REAL_GIT", real_git ],
+          "gh" => [ File.join(root, "bin", "hive-babysitter-stub-gh"), "HIVE_BABYSITTER_REAL_GH", real_gh ]
+        }.each do |name, (target, env_name, real_path)|
           link = File.join(overlay, name)
           FileUtils.rm_f(link)
-          File.symlink(target, link)
+          File.write(link, <<~RUBY)
+            #!/usr/bin/env ruby
+            ENV[#{env_name.dump}] = #{real_path.to_s.dump}
+            exec(#{target.dump}, *ARGV)
+          RUBY
+          FileUtils.chmod("+x", link)
         end
         overlay
       end

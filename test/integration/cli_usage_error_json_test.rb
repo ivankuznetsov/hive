@@ -43,4 +43,20 @@ class CliUsageErrorJsonTest < Minitest::Test
       end
     end
   end
+
+  def test_patrol_missing_project_json_usage_error_uses_patrol_envelope
+    with_tmp_global_config do |home|
+      out, _err, status = run_hive(home, "patrol", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-patrol", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "error", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+    end
+  end
 end

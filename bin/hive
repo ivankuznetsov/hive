@@ -21,6 +21,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "approve" => { schema: "hive-approve", error_kind: "invalid_task_path" },
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
+  "patrol" => { schema: "hive-patrol", error_kind: "error" },
   "accept-finding" => {
     schema: "hive-findings",
     error_kind: "invalid_task_path",

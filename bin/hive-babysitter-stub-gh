@@ -198,8 +198,11 @@ if real.empty?
   exit 127
 end
 
+trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
 %w[
   GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
-  GH_CONFIG_DIR XDG_CONFIG_HOME
+  GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
 ].each { |key| ENV.delete(key) }
+ENV["GH_CONFIG_DIR"] = trusted_config_dir unless trusted_config_dir.empty?
+ENV["HOME"] = File::NULL
 exec(real, *argv)

@@ -96,6 +96,49 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_pins_gh_config_against_command_local_home
+    with_tmp_dir do |dir|
+      recording_binary(dir, "git")
+      recording_env_binary(dir, "gh", %w[
+        GH_CONFIG_DIR XDG_CONFIG_HOME HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
+      ])
+      parent_home = File.join(dir, "parent-home")
+      trusted_config = File.join(parent_home, ".config", "gh")
+      evil_trusted_config = File.join(dir, "evil-trusted-gh-config")
+
+      with_env(
+        "PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
+        "GH_CONFIG_DIR" => nil,
+        "XDG_CONFIG_HOME" => nil,
+        "HOME" => parent_home
+      ) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          _out, err, status = Open3.capture3(
+            {
+              "HOME" => File.join(dir, "evil-home"),
+              "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
+              "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
+              "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => evil_trusted_config
+            },
+            "gh",
+            "repo",
+            "view",
+            "owner/repo"
+          )
+
+          assert status.success?, err
+        end
+      end
+
+      assert_equal <<~ENV_LOG, File.read(File.join(dir, "env.log"))
+        GH_CONFIG_DIR=#{trusted_config}
+        XDG_CONFIG_HOME=<unset>
+        HOME=#{File::NULL}
+        HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR=<unset>
+      ENV_LOG
+    end
+  end
+
   def test_stubs_refuse_symlinked_skip_log
     with_tmp_dir do |dir|
       target = File.join(dir, "target.log")
@@ -438,7 +481,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     with_tmp_dir do |dir|
       env_keys = %w[
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
-        GH_CONFIG_DIR XDG_CONFIG_HOME
+        GH_CONFIG_DIR XDG_CONFIG_HOME HOME
       ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
@@ -454,13 +497,17 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "EDITOR" => "touch editor-pwned",
         "GH_FORCE_TTY" => "80",
         "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
-        "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config")
+        "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
+        "HOME" => File.join(dir, "evil-home")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
 
       assert status.success?, err
-      assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
+      assert_equal(
+        env_keys.map { |key| key == "HOME" ? "HOME=#{File::NULL}" : "#{key}=<unset>" }.join("\n") + "\n",
+        File.read(File.join(dir, "env.log"))
+      )
     end
   end
 

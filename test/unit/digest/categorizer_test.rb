@@ -201,6 +201,125 @@ class HiveDigestCategorizerTest < Minitest::Test
     end
   end
 
+  # A fake agent that stands in for Hive::Agent: instead of spawning a real
+  # process it writes the canned items.json to the `expected_output` the
+  # categorizer passed in, then reports success — exercising the full
+  # categorize orchestration (run_dir → prune → runner_task → agent_for →
+  # run! → parse_result! → map_output_file) without an AI/process call.
+  class FakeAgent
+    def initialize(expected_output:, items:)
+      @expected_output = expected_output
+      @items = items
+    end
+
+    def run!
+      File.write(@expected_output, JSON.dump({ "items" => @items }))
+      { status: :ok }
+    end
+  end
+
+  def test_categorize_runs_end_to_end_through_a_seamed_agent
+    with_tmp_dir do |run_root|
+      grouped = {
+        "alpha" => [
+          item(pr_number: 10, pr_title: "Build digest"),
+          item(pr_number: 11, pr_title: "Escape markdown")
+        ]
+      }
+      rows = [
+        { "id" => "alpha/10", "category" => "feature", "summary" => "Adds the digest." },
+        { "id" => "alpha/11", "category" => "fix", "summary" => "Escapes markdown." }
+      ]
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: nil)
+
+      fake_new = lambda do |**kw|
+        FakeAgent.new(expected_output: kw.fetch(:expected_output), items: rows)
+      end
+      result = with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        categorizer.categorize(grouped, date: "2026-06-15")
+      end
+
+      assert_equal %w[feature fix], result.fetch("alpha").map(&:category)
+      assert_equal "Adds the digest.", result.fetch("alpha").first.summary
+      assert_same grouped.fetch("alpha").first, result.fetch("alpha").first.item
+      # The orchestration created exactly one scratch run dir under the root.
+      run_dirs = Dir.children(run_root).select { |name| File.directory?(File.join(run_root, name)) }
+      assert_equal 1, run_dirs.size, "categorize must materialize one per-run scratch dir"
+      assert_match(/\A2026-06-15-[0-9a-f]{8}\z/, run_dirs.first)
+    end
+  end
+
+  def test_map_document_rejects_a_non_array_items_field
+    error = assert_raises(Hive::Digest::ModelError) do
+      Hive::Digest::Categorizer.map_document({ "items" => "not-an-array" }, grouped: {}, logger: nil)
+    end
+
+    assert_match(/must contain an items array/, error.message)
+  end
+
+  def test_default_summary_falls_back_to_display_label_when_pr_title_blank
+    with_tmp_dir do |dir|
+      path = File.join(dir, "items.json")
+      # The model omitted this item, so categorized_item takes the default
+      # path; its pr_title is blank, so default_summary must fall through to
+      # display_label rather than render an empty changelog line.
+      File.write(path, JSON.dump({ "items" => [] }))
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "  ", display_name: "Shiny task") ] }
+
+      result = Hive::Digest::Categorizer.map_output_file(path, grouped: grouped, logger: nil)
+
+      assert_equal "Shiny task", result.fetch("alpha").first.summary,
+                   "a blank pr_title must fall back to the item's display_label"
+    end
+  end
+
+  def test_prune_old_runs_drops_the_oldest_excess_scratch_dirs
+    with_tmp_dir do |run_root|
+      retention = Hive::Digest::Categorizer::RUN_DIR_RETENTION
+      # Pre-seed more than the retention cap, oldest-first by mtime, so the
+      # next run_dir call must prune the excess down to the cap (minus the
+      # one fresh dir it creates).
+      old_dirs = (1..(retention + 5)).map do |n|
+        dir = File.join(run_root, format("2026-06-%02d-%08x", n % 28 + 1, n))
+        FileUtils.mkdir_p(dir)
+        File.utime(Time.now - (retention + 5 - n) * 3600, Time.now - (retention + 5 - n) * 3600, dir)
+        dir
+      end
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: nil)
+
+      fresh = categorizer.send(:run_dir, "2026-06-15")
+
+      remaining = Dir.children(run_root).select { |name| File.directory?(File.join(run_root, name)) }
+      # prune runs BEFORE the fresh dir is created: it leaves exactly
+      # RUN_DIR_RETENTION, then run_dir adds the one fresh dir on top.
+      assert_equal retention + 1, remaining.size,
+                   "prune must leave RUN_DIR_RETENTION dirs before the fresh one is created"
+      assert_includes remaining, File.basename(fresh), "the freshly created run dir must survive the prune"
+      refute_includes remaining, File.basename(old_dirs.first), "the oldest excess dir must be pruned"
+    end
+  end
+
+  def test_prune_old_runs_tolerates_a_filesystem_error
+    with_tmp_dir do |run_root|
+      retention = Hive::Digest::Categorizer::RUN_DIR_RETENTION
+      (1..(retention + 2)).each do |n|
+        FileUtils.mkdir_p(File.join(run_root, format("2026-06-%02d-%08x", n % 28 + 1, n)))
+      end
+      logger = CapturingLogger.new
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: logger)
+
+      # An EACCES during the rm_rf (a permission flip / locked dir) must be
+      # caught and logged, not crash the whole digest run.
+      raising_rm_rf = lambda { |*_args| raise Errno::EACCES, "prune blocked" }
+      with_replaced_singleton_method(FileUtils, :rm_rf, raising_rm_rf) do
+        categorizer.send(:run_dir, "2026-06-15")
+      end
+
+      assert(logger.warnings.any? { |m| m.include?("run-dir prune failed") },
+             "a prune SystemCallError must degrade to a warning, not crash the digest")
+    end
+  end
+
   def test_agent_name_fallback_chain
     assert_equal "codex",
                  Hive::Digest::Categorizer.new(cfg: { "digest" => { "agent" => "codex" } }).send(:agent_name)
@@ -223,11 +342,11 @@ class HiveDigestCategorizerTest < Minitest::Test
 
   private
 
-  def item(pr_number:, pr_title:, pr_body: "body", project_name: "alpha")
+  def item(pr_number:, pr_title:, pr_body: "body", project_name: "alpha", display_name: nil)
     Hive::Digest::ShippedItem.new(
       project_name: project_name,
       slug: "slug-#{pr_number}",
-      display_name: "Task #{pr_number}",
+      display_name: display_name || "Task #{pr_number}",
       pr_url: "https://example.test/pulls/#{pr_number}",
       pr_number: pr_number,
       pr_title: pr_title,

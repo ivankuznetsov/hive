@@ -3,7 +3,9 @@ require "stringio"
 require "json"
 require "logger"
 require "hive/bot/logger"
+require "hive/bot/telegram"
 require "hive/digest/sender"
+require "hive/paths"
 
 class HiveDigestSenderTest < Minitest::Test
   include HiveTestHelper
@@ -101,6 +103,41 @@ class HiveDigestSenderTest < Minitest::Test
       assert_equal 1, event["accepted_chunks"]
       assert_equal 2, event["total_chunks"]
       assert_equal 2, event["failed_chunk"]
+    end
+  end
+
+  def test_default_telegram_factory_builds_a_real_telegram_client
+    # With no telegram_factory injected, the sender's default seam must build
+    # a real Hive::Bot::Telegram (construction only — no network call here).
+    sender = Hive::Digest::Sender.new(cfg: {})
+
+    client = sender.send(:build_telegram, token: "token", logger: Object.new)
+
+    assert_instance_of Hive::Bot::Telegram, client
+  end
+
+  def test_default_log_path_falls_back_to_state_home_when_unconfigured
+    sender = Hive::Digest::Sender.new(cfg: {})
+
+    assert_equal File.join(Hive::Paths.state_home, "logs", "bot.log"),
+                 sender.send(:default_log_path),
+                 "an unconfigured bot.log_file must fall back to the state-home default"
+  end
+
+  def test_default_log_path_honours_configured_bot_log_file
+    sender = Hive::Digest::Sender.new(cfg: { "bot" => { "log_file" => "/var/log/hive/bot.log" } })
+
+    assert_equal "/var/log/hive/bot.log", sender.send(:default_log_path)
+  end
+
+  def test_lazy_logger_uses_the_default_log_path_when_none_injected
+    with_tmp_dir do |dir|
+      sender = Hive::Digest::Sender.new(cfg: { "bot" => { "log_file" => File.join(dir, "bot.log") } })
+
+      logger = sender.send(:logger)
+
+      assert_instance_of Hive::Bot::Logger, logger
+      logger.close if logger.respond_to?(:close)
     end
   end
 

@@ -302,6 +302,36 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
     end
   end
 
+  def test_wrong_shape_state_emits_unreadable_event_before_degrading
+    with_tmp_dir do |dir|
+      # Valid JSON, wrong shape (a top-level array, not an object). Treating
+      # it as a silent first-run would reset the cursor forward and skip every
+      # owed day, so it must surface a distinct event before degrading to {}.
+      File.write(File.join(dir, "digest_state.json"), JSON.pretty_generate([ "2026-06-12" ]))
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+
+      assert_empty scheduler.tick(now: T0), "a wrong-shape state degrades to a seeded first-run"
+      event = logger.events.find { |name, _| name == :digest_state_unreadable }
+      refute_nil event, "a JSON array where an object is expected must surface :digest_state_unreadable"
+      assert_match(/expected a JSON object/, event.last.fetch(:error))
+    end
+  end
+
+  def test_unparseable_cursor_date_is_treated_as_first_run
+    with_tmp_dir do |dir|
+      # A non-ISO last_digested_date makes Date.iso8601 raise ArgumentError;
+      # parse_date swallows it to nil so tick re-seeds rather than crashing.
+      write_state(dir, "last_digested_date" => "not-a-date")
+      scheduler = scheduler(dir, enabled: true)
+
+      assert_empty scheduler.tick(now: T0),
+                   "an unparseable cursor must degrade to a first-run seed, not raise"
+      assert_equal "2026-06-13", state(dir).fetch("last_digested_date"),
+                   "the seed must reset the cursor to the completed day"
+    end
+  end
+
   def test_dst_boundary_uses_local_completed_day_once
     with_env("TZ" => "America/New_York") do
       with_tmp_dir do |dir|

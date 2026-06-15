@@ -26,8 +26,8 @@ module Hive
           "--format=%cI%x00%s", "-F", "--grep", slug
         )
         unless status.success?
-          raise Hive::GitError,
-                "git log #{Hive::GitOps::HIVE_BRANCH} failed for #{slug}: #{err.strip.empty? ? out : err}"
+          detail = err.strip.empty? ? out : err
+          raise Hive::GitError, "git log #{Hive::GitOps::HIVE_BRANCH} failed for #{slug}: #{detail}"
         end
 
         out.each_line.filter_map do |line|

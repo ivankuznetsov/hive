@@ -363,6 +363,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed
   end
 
+  def test_digest_scheduler_tick_raise_is_isolated_as_a_fatal_event
+    dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_digest_scheduler: true)
+    raising = Object.new
+    raising.define_singleton_method(:tick) { |now:| raise IOError, "ENOSPC on digest state" }
+    dispatcher.instance_variable_set(:@digest_scheduler, raising)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned, "a scheduler tick crash must not spawn anything"
+    event = logger.events.find { |name, _| name == :fatal }
+    refute_nil event, "an unguarded scheduler.tick crash must be isolated as a :fatal event, not crash the tick"
+    assert_match(/digest_scheduler\.tick raised/, event.last.fetch(:message))
+  end
+
+  def test_digest_scheduler_complete_raise_is_isolated_as_a_fatal_event
+    dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_digest_scheduler: true)
+    raising = Object.new
+    raising.define_singleton_method(:complete) { |date:, exit_code:, now:| raise IOError, "EROFS on cursor write" }
+    dispatcher.instance_variable_set(:@digest_scheduler, raising)
+    sup.next_exits = [
+      ChildExit.new(
+        pid: 123, exit_code: 0,
+        project: "digest", slug: "2026-06-13", stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_path: nil, started_at: T0 - 5, finished_at: T0, json_envelope: nil
+      )
+    ]
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find { |name, _| name == :fatal }
+    refute_nil event, "an unguarded scheduler.complete crash on reap must be isolated, not crash the poll loop"
+    assert_match(/digest_scheduler\.complete raised/, event.last.fetch(:message))
+  end
+
   def test_digest_config_exit_does_not_drop_phantom_digest_project
     dispatcher, _sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
       rows: [], with_digest_scheduler: true

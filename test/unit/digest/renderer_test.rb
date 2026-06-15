@@ -82,6 +82,22 @@ class HiveDigestRendererTest < Minitest::Test
                  Hive::Digest::Renderer::CATEGORY_ORDER.map(&:first)
   end
 
+  def test_truncate_summary_is_a_noop_within_the_cap
+    text = "a" * Hive::Digest::Renderer::MAX_SUMMARY_LENGTH
+
+    assert_equal text, Hive::Digest::Renderer.truncate_summary(text)
+  end
+
+  def test_truncate_summary_caps_an_overlong_summary_with_an_ellipsis
+    over = "b" * (Hive::Digest::Renderer::MAX_SUMMARY_LENGTH + 50)
+
+    truncated = Hive::Digest::Renderer.truncate_summary(over)
+
+    assert_equal Hive::Digest::Renderer::MAX_SUMMARY_LENGTH, truncated.length,
+                 "an overlong model summary must be capped so the escaped line stays under the chunk boundary"
+    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
+  end
+
   private
 
   def categorized(category, summary, display_name: "Task", pr_number: 10, pr_url: nil)

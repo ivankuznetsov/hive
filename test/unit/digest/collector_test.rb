@@ -75,6 +75,25 @@ class HiveDigestCollectorTest < Minitest::Test
     end
   end
 
+  def test_truncate_body_is_a_noop_within_the_cap
+    collector = collector([], FakeShipTimes.new({}))
+    body = "x" * Hive::Digest::Collector::MAX_PR_BODY_LENGTH
+
+    assert_equal body, collector.send(:truncate_body, body)
+  end
+
+  def test_truncate_body_caps_a_pathological_pr_body
+    collector = collector([], FakeShipTimes.new({}))
+    over = "y" * (Hive::Digest::Collector::MAX_PR_BODY_LENGTH + 100)
+
+    truncated = collector.send(:truncate_body, over)
+
+    assert truncated.length < over.length,
+           "a pathological pr.md body must be bounded so it can't blow the model context window"
+    assert_includes truncated, "[... pr.md body truncated for digest ...]"
+    assert truncated.start_with?("y" * 100), "the cap must preserve the leading body content"
+  end
+
   def test_pr_title_extracts_heading_and_skips_summary_boilerplate
     collector = collector([], FakeShipTimes.new({}))
 

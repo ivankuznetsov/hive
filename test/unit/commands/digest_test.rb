@@ -68,6 +68,29 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_match(/YYYY-MM-DD/, error.message)
   end
 
+  def test_well_formed_but_impossible_date_raises_config_error
+    # Passes the YYYY-MM-DD shape check but Window.parse_date raises a
+    # Date::Error (an ArgumentError subclass) the command must translate.
+    command = Hive::Commands::Digest.new(date: "2026-13-45", dry_run: true, runner: Runner.new([], nil))
+
+    error = assert_raises(Hive::ConfigError) { command.call }
+    assert_match(/YYYY-MM-DD/, error.message)
+  end
+
+  def test_plain_output_prints_status_and_date
+    output = StringIO.new
+    runner = Runner.new([], result(status: :sent, message: "digest body"))
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      runner: runner,
+      output: output
+    ).call
+
+    assert_equal false, runner.calls.first.fetch(:dry_run)
+    assert_equal "hive digest: sent for 2026-06-13\n", output.string
+  end
+
   private
 
   def result(status:, message:)

@@ -104,7 +104,16 @@ module Hive
       # makes the happens-before relationship explicit and survives a future
       # non-GVL runtime).
       def output_for(id)
-        @mutex.synchronize { @sessions[id]&.output&.dup }
+        raw = @mutex.synchronize { @sessions[id]&.output&.dup }
+        return nil unless raw
+
+        # The buffer is raw PTY bytes — `readpartial` returns ASCII-8BIT, and a
+        # 4096-byte read can split a UTF-8 multibyte char or carry terminal
+        # control sequences. Rendered straight into the UTF-8 `<pre>` it raised
+        # Encoding::CompatibilityError (a 500 on the login-status page).
+        # Reinterpret as UTF-8 and drop invalid byte sequences so the
+        # operator-facing CLI output always renders.
+        raw.force_encoding(Encoding::UTF_8).scrub("")
       end
 
       def url_for(id)

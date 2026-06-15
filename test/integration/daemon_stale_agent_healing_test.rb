@@ -313,6 +313,61 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     end
   end
 
+  def test_timeout_clear_redispatches_open_pr_and_artifacts
+    # U2 timeout re-entry proven end-to-end through the real status -> heal ->
+    # Policy chain (not just "the marker was removed"): a 5-open-pr / 7-artifacts
+    # task that timed out (agent finished its work but never stamped the marker)
+    # must clear AND re-dispatch, not strand red — the safety premise that lives
+    # across two unit suites, wired into one loop here.
+    {
+      "5-open-pr" => [ "pr.md", "to-openpr-260615-aaaa" ],
+      "7-artifacts" => [ "artifact.md", "to-artifacts-260615-bbbb" ]
+    }.each do |stage, (state_basename, slug)|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          folder = File.join(dir, ".hive-state", "stages", stage, slug)
+          FileUtils.mkdir_p(folder)
+          state_file = File.join(folder, state_basename)
+          File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n\n" \
+                                 "<!-- ERROR reason=timeout marker_id=to-1 timeout_sec=1800 -->\n")
+          pre_clear_mtime = Time.now - 1000
+          File.utime(pre_clear_mtime, pre_clear_mtime, state_file)
+
+          row = status_rows_via_consumer(dir).find { |candidate| candidate.slug == slug }
+          assert row, "#{stage}: status pipeline must include the timed-out task"
+          assert_equal "error", row.marker
+          assert_equal "timeout", row.marker_attrs["reason"]
+
+          @healer.heal([ row ], now: Time.now)
+
+          assert Hive::Markers.current(state_file).none?,
+                 "#{stage}: healer must clear the timeout marker"
+          baseline = @controller.last_dispatched_state_file_mtime_for(project: File.basename(dir), slug: slug)
+          assert baseline, "#{stage}: heal must seed a dispatch baseline so the post-clear row is not first-sight"
+
+          post_clear_row = status_rows_via_consumer(dir).find { |candidate| candidate.slug == slug }
+          assert post_clear_row, "#{stage}: status must include the cleared task"
+          assert_equal "none", post_clear_row.marker
+          refute_equal "error", post_clear_row.action,
+                       "#{stage}: a cleared timeout row must re-classify as dispatchable, not error"
+
+          decision = Hive::Daemon::Policy.decide(
+            action: post_clear_row.action,
+            stage: post_clear_row.stage,
+            command: post_clear_row.suggested_command,
+            state_file_mtime: post_clear_row.state_file_mtime,
+            last_dispatched_state_file_mtime: baseline,
+            now: post_clear_row.state_file_mtime + 3600,
+            edit_debounce_sec: 30
+          )
+          assert_equal :dispatch, decision,
+                       "#{stage}: must re-dispatch after the timeout heal, not strand"
+        end
+      end
+    end
+  end
+
   def test_agent_marker_grace_sec_threads_from_global_config_to_TaskAction
     # Operator overrides `daemon.agent_marker_grace_sec` in
     # ~/Dev/hive/config.yml. Both surfaces (status/TaskAction in

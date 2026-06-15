@@ -60,8 +60,10 @@ module Hive
     # on-disk artifacts. A `reason=timeout` on `5-open-pr` or `7-artifacts`
     # (TIMEOUT_RECOVERABLE_STAGES) is the narrow case where the agent finished
     # its work but returned to idle without stamping the terminal marker, so the
-    # wait timed out; it recovers EXACTLY ONCE (TIMEOUT_RECOVERY_LIMIT), relying
-    # on those two stages' idempotent "already done -> :complete" short-circuits.
+    # wait timed out; it recovers EXACTLY ONCE (TIMEOUT_RECOVERY_LIMIT) because
+    # re-running those two stages is side-effect-safe — 5-open-pr re-enters its
+    # already-open arm (returns :complete without a second PR) and 7-artifacts
+    # idempotently re-collects into artifact.md.
     # Clearing those specific markers lets the normal daemon dispatch
     # rerun the stage up to the configured limit (default 3, or 1 for timeout)
     # before leaving the marker red for manual recovery. There is no healer-side
@@ -281,15 +283,18 @@ module Hive
         return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
 
         # A `reason=timeout` on the two side-effect-safe stages recovers EXACTLY
-        # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work (5-open-pr:
-        # the PR is already open; 7-artifacts: artifact.md is on disk) but
-        # returned to idle without stamping the terminal marker, so the wait
-        # timed out. Clearing the marker re-dispatches the stage, which hits its
-        # idempotent "already done -> :complete" short-circuit (open_pr.rb's
-        # open_pr_already_open, artifacts.rb's :complete). Stage-gated because
-        # other stages' timeouts are NOT safe to blindly re-run, and bounded to
-        # one attempt because a timeout (unlike a lost session) means "I ran and
-        # didn't finish" — retry once, then leave it red for manual recovery.
+        # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work but returned
+        # to idle without stamping the terminal marker, so the wait timed out.
+        # Clearing the marker re-dispatches the stage, which is safe to re-run:
+        # 5-open-pr re-enters its already-open arm (open_pr_already_open) and
+        # returns :complete without spawning a second PR; 7-artifacts re-runs its
+        # agent, which only (idempotently) rewrites the artifact.md summary — the
+        # timeout means :complete was never stamped, so artifacts does NOT hit
+        # its own :complete short-circuit, it just re-collects. Stage-gated
+        # because other stages' timeouts are NOT safe to blindly re-run, and
+        # bounded to one attempt because a timeout (unlike a lost session) means
+        # "I ran and didn't finish" — retry once, then leave it red for manual
+        # recovery.
         return true if reason == "timeout" && TIMEOUT_RECOVERABLE_STAGES.include?(row.stage.to_s)
 
         # Agent-loss reasons heal in every stage EXCEPT 6-review: a lost

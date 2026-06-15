@@ -170,3 +170,18 @@ Each spawn produces one BEGIN / END pair carrying a shared 8-char correlation ID
 - Plan `docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md` — the migration plan whose R3 / KTD-4 / U6 specified the now-superseded foreground takeover model. The background-spawn pattern documented here replaces the takeover sections of that plan; refresh of the plan doc is out of scope for this learning but flagged for a future `/ce-compound-refresh` pass.
 - `Hive::Commands::Markers` — the agent-callable healer the auto-heal dispatches against (`hive markers clear FOLDER --name ERROR --match-attr exit_code=N` after the cross-process race fix).
 - Commits on `feat/hive-tui`: `6eae7e5` (auto-heal + background-spawn), `bd2013f` (running-flash for immediate feedback), `88012bc` (per-pattern diagnostic flashes that build on the per-section log structure), `11db9dd` (auto-heal `--match-attr` cross-process race guard), `e030b24` (per-spawn capture files).
+
+## Refinement (2026-06-15): narrow `reason=timeout` carve-out
+
+The "real failures (`exit_code=1`, `reason=timeout`, `reason=secret_in_pr_body`)
+are NOT auto-healed" rule still holds **except** for a deliberately narrow case:
+`reason=timeout` on `5-open-pr` and `7-artifacts` is now cleared-and-re-dispatched
+**exactly once** by `StaleAgentHealer` (`TIMEOUT_RECOVERY_LIMIT = 1`). The
+justification is idempotency, not interruption: in tmux mode these two stages can
+finish their externally-visible work (PR opened / artifacts collected) yet time
+out because the agent returned to idle without stamping the terminal marker. A
+single re-entry is safe — open-pr re-enters `open_pr_already_open` (no second PR)
+and artifacts idempotently re-collects `artifact.md` — and is bounded by the same
+`[project, slug, stage, reason]` budget so it can never loop. All other stages and
+all other timeout cases remain manual-only. See
+`docs/plans/2026-06-15-001-fix-tmux-marker-completion-hardening-plan.md`.

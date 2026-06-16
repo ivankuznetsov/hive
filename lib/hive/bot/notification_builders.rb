@@ -94,19 +94,7 @@ module Hive
         verb = verb_for_action(row.action)
         return nil unless verb
 
-        header = header(row)
-        text = header + "\nReady for #{verb}."
-        parse_mode = nil
-        if row.action.to_s == "ready_for_review"
-          pr_link = Hive::Bot::Format.html_pr_link(row.pr_url)
-          if pr_link
-            text = "#{Hive::Bot::Format.html_escape(header)}\n" \
-                   "Ready for #{Hive::Bot::Format.html_escape(verb)}.\n" \
-                   "PR: #{pr_link}"
-            parse_mode = :html
-          end
-        end
-
+        text, parse_mode = approval_body(row, verb)
         Notification.new(
           text: text,
           keyboard: [
@@ -115,6 +103,26 @@ module Hive
           ],
           parse_mode: parse_mode
         )
+      end
+
+      # Returns [text, parse_mode] for a stage-approval notification. A
+      # `ready_for_review` row whose PR URL builds a valid link gets an HTML
+      # body with a clickable PR link (parse_mode :html); every other row —
+      # including a review row whose PR link can't be built — gets the plain
+      # text body with no parse_mode.
+      def approval_body(row, verb)
+        header = header(row)
+        if row.action.to_s == "ready_for_review"
+          pr_link = Hive::Bot::Format.html_pr_link(row.pr_url)
+          if pr_link
+            html = "#{Hive::Bot::Format.html_escape(header)}\n" \
+                   "Ready for #{Hive::Bot::Format.html_escape(verb)}.\n" \
+                   "PR: #{pr_link}"
+            return [ html, :html ]
+          end
+        end
+
+        [ "#{header}\nReady for #{verb}.", nil ]
       end
 
       def needs_input(row)

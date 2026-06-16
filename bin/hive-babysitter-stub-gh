@@ -45,17 +45,20 @@ end
 
 # Default-deny any host override anywhere in argv, not just in the leading
 # globals. The gate classifies the *stripped* argv but `exec`s the *original*
-# argv, so a host-qualified `--repo`/`-R`/`--repo=` value or an `--hostname`/
-# `--hostname=` selector would otherwise reach the real gh against an
-# agent-chosen host even on an allowlisted read — whether it leads the call or
-# trails the subcommand. (`auth status`'s short `-h`/`-h<host>` is handled in
-# auth_status_read_only?, since `-h` means `--help` on other gh subcommands.)
+# argv, so a host-qualified `--repo`/`-R`/`--repo=` value, a glued short
+# `-R<val>`/`-R=<val>` (pflag strips the `=`), or an `--hostname`/`--hostname=`
+# selector would otherwise reach the real gh against an agent-chosen host even on
+# an allowlisted read — whether it leads the call or trails the subcommand.
+# (`auth status`'s short `-h`/`-h<host>` is handled in auth_status_read_only?,
+# since `-h` means `--help` on other gh subcommands.)
 def host_override?(argv)
   argv.each_with_index do |arg, index|
     case arg
     when "-R", "--repo"
       return true if repo_value_selects_host?(argv[index + 1])
     when /\A--repo=(.*)\z/m
+      return true if repo_value_selects_host?(Regexp.last_match(1))
+    when /\A-R=?(.+)\z/m
       return true if repo_value_selects_host?(Regexp.last_match(1))
     when "--hostname", /\A--hostname=/
       return true
@@ -71,6 +74,8 @@ def stripped_global_options(argv)
     when "-R", "--repo"
       rest.shift(2)
     when /\A--repo=/
+      rest.shift
+    when /\A-R=?/
       rest.shift
     when /\A-/
       # Unknown leading globals may take values; fail closed instead of stripping
@@ -244,9 +249,15 @@ if real.empty?
 end
 
 trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
+# The argv gate (host_override?) only inspects argv; gh also reads the target host,
+# repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
+# allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
+# GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN supply the credentials for it, so scrub
+# them too, the same host-redirect threat the argv gate defends against.
 %w[
   GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
   GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
+  GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 ].each { |key| ENV.delete(key) }
 ENV["GH_CONFIG_DIR"] = trusted_config_dir unless trusted_config_dir.empty?
 ENV["HOME"] = File::NULL

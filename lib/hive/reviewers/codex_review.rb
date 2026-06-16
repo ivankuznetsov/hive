@@ -47,6 +47,16 @@ module Hive
       # usage-limit error) is treated as a reviewer failure.
       SEVERITY_HEADER = /^##\s+(High|Medium|Nit)\b/i.freeze
 
+      # `codex review` streams its whole session to stdout: the (prompt-echoed)
+      # findings block, then a tool-call transcript of bare `exec`/`thinking`/
+      # `codex` section markers (each `exec` block can be hundreds of lines —
+      # cat'd files, diffs, even a full test run), then codex's final
+      # assistant message under the last `codex` marker. A bare line that is
+      # exactly one of these markers delimits the transcript that
+      # `normalize_output` drops; `CODEX_REPLY` is the final-message marker.
+      SESSION_MARKER = /\A(?:exec|thinking|codex)\z/.freeze
+      CODEX_REPLY = /\Acodex\z/.freeze
+
       def initialize(spec, ctx, cfg: nil)
         super(spec, ctx)
         @cfg = cfg
@@ -141,15 +151,32 @@ module Hive
         stdout.to_s.match?(SEVERITY_HEADER)
       end
 
-      # Trim leading codex banner noise so the published findings file starts
-      # at the first severity header. Everything from the first `## High|
-      # Medium|Nit` onward is the model's structured output.
+      # Trim codex's stdout to the findings triage needs to read: drop the
+      # leading banner (start at the first severity header) AND the tool-call
+      # transcript in the middle, keeping the leading findings block plus
+      # codex's final message. Handing triage the raw transcript (seen at
+      # 96 KB–565 KB) bloats its prompt and has caused triage timeouts.
       def normalize_output(stdout)
         text = stdout.to_s
         idx = text =~ SEVERITY_HEADER
         body = idx ? text[idx..] : text
-        body = body.rstrip
+        body = drop_session_transcript(body).rstrip
         body.empty? ? body : "#{body}\n"
+      end
+
+      # Discard the `exec`/`thinking`/`codex` session transcript that sits
+      # between the leading findings block and codex's final assistant message.
+      # No session marker → return the body unchanged (already-clean output, or
+      # a shape we don't recognize — never produce worse than the raw body).
+      def drop_session_transcript(body)
+        lines = body.lines
+        first = lines.index { |line| line.chomp.match?(SESSION_MARKER) }
+        return body unless first
+
+        last_reply = lines.rindex { |line| line.chomp.match?(CODEX_REPLY) }
+        head = lines[0...first].join.rstrip
+        reply = last_reply && last_reply >= first ? lines[(last_reply + 1)..].join.strip : ""
+        reply.empty? ? head : "#{head}\n\n#{reply}"
       end
 
       # Run `codex review --title <title> <prompt>` in the worktree, capturing

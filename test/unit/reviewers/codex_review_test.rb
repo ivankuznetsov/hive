@@ -134,6 +134,81 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
+  # `codex review` streams its whole session: the findings block, then a long
+  # exec/tool transcript, then its final message. The transcript must be
+  # dropped so triage isn't handed hundreds of KB (which has timed it out);
+  # the leading block and codex's final verdict are kept.
+  def test_drops_session_transcript_keeping_head_and_final_message
+    with_tmp_dir do |dir|
+      flood = (1..400).map { |i| "  cat'd SKILL.md / git diff line #{i}" }.join("\n")
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.139.0
+        ## High
+        - [ ] <finding>: <one-line justification>
+
+        ## Medium
+        No findings.
+
+        ## Nit
+        No findings.
+
+        Rules:
+        - Always print all three headers, in order.
+        exec
+        /usr/bin/bash -lc "cat SKILL.md && git diff origin/main...HEAD" in /worktree
+         succeeded in 12ms:
+        #{flood}
+        exec
+        /usr/bin/bash -lc "bundle exec ruby -Itest test/foo_test.rb" in /worktree
+         succeeded in 3458ms:
+        13 runs, 46 assertions, 0 failures, 0 errors, 0 skips
+        codex
+        The diff is clean. No correctness, security, or data-loss regressions were identified.
+      OUT
+      raw_bytes = ENV["HIVE_FAKE_CODEX_STDOUT"].bytesize
+      reviewer = build_reviewer(dir)
+
+      result = reviewer.run!
+
+      assert result.ok?, "expected :ok, got #{result.status} (#{result.error_message})"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "## High", "the severity-header block must survive (valid_findings? + format)"
+      assert_includes body, "The diff is clean. No correctness", "codex's final verdict must be surfaced"
+      refute_includes body, "succeeded in", "the exec/tool transcript must be dropped"
+      refute_includes body, "bundle exec ruby", "transcript commands must be dropped"
+      refute_includes body, "git diff line 200", "the hundreds of transcript lines must be dropped"
+      assert_operator body.bytesize, :<, raw_bytes / 4,
+                      "published findings must be a fraction of the raw transcript"
+    end
+  end
+
+  def test_drops_transcript_with_no_trailing_codex_reply_keeps_head
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] real bug: explain it
+        ## Medium
+        No findings.
+        ## Nit
+        No findings.
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        some transcript diff output here
+        more transcript lines
+      OUT
+      reviewer = build_reviewer(dir)
+
+      result = reviewer.run!
+
+      assert result.ok?, "expected :ok, got #{result.status} (#{result.error_message})"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "- [ ] real bug: explain it", "the head findings block must survive"
+      refute_includes body, "succeeded in", "transcript dropped even with no trailing codex reply"
+      refute_includes body, "some transcript diff output", "transcript dropped"
+    end
+  end
+
   # --- FIX 1: full pipe drain (no write() deadlock past the retain cap) ---
 
   def test_oversized_output_drains_without_deadlock_and_yields_valid_findings

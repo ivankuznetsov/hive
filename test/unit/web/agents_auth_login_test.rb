@@ -14,9 +14,16 @@ class AgentsAuthLoginTest < Minitest::Test
     path = File.join(bin_dir, "claude")
     File.write(path, <<~SH)
       #!/usr/bin/env bash
-      # Mimic `claude setup-token`: print an authorize URL, wait for a code,
-      # succeed only if a non-empty code is pasted.
+      # Mimic `claude setup-token` running in a REAL pty: emit the kind of
+      # raw bytes the Claude Code TUI actually writes — ANSI control
+      # sequences, a box-drawing glyph, and a trailing lone UTF-8
+      # continuation byte (a multibyte char split across a 4096-byte
+      # readpartial boundary). That stream is ASCII-8BIT and NOT valid
+      # UTF-8, so the relay's output_for must scrub it render-safe (else the
+      # Agents <pre> view 500s). A clean-ASCII fake hid exactly this bug.
+      printf '\\033[2K\\033[1m\\342\\226\\210\\033[0m\\n'
       echo "Open #{AUTH_URL} to authenticate"
+      printf '\\342'
       read -r code
       if [ -n "$code" ]; then
         echo "token stored"
@@ -111,6 +118,17 @@ class AgentsAuthLoginTest < Minitest::Test
 
       wait_until { auth.session(session.id).done }
       assert_nil auth.session(session.id).error, "a relayed valid code must finish without error"
+
+      # End-to-end guard for the Agents-page 500: the fake emits real binary
+      # PTY bytes (assert the raw buffer is genuinely invalid UTF-8), and the
+      # relay must hand the view a scrubbed, render-safe UTF-8 string.
+      raw = auth.session(session.id).output
+      refute raw.dup.force_encoding(Encoding::UTF_8).valid_encoding?,
+             "the fake CLI must emit real binary so this exercises the scrub, not a clean-ASCII shortcut"
+      relayed = auth.output_for(session.id)
+      assert_equal Encoding::UTF_8, relayed.encoding, "relayed output must reach the view as UTF-8"
+      assert relayed.valid_encoding?,
+             "binary CLI bytes must be scrubbed render-safe — else <pre><%= @session_output %></pre> 500s"
     end
   end
 

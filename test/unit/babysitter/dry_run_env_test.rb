@@ -246,6 +246,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
+      # An scp-style `git@host:owner/repo` carries a host through a single-slash
+      # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
+      # disqualify it.
+      assert_stubbed env, "gh", "-R", "git@evil.example.com:owner/repo", "pr", "view", "42"
+      # Read-only subcommands also accept the target as a positional operand — a
+      # host-qualified `HOST/OWNER/REPO` slug, a full URL, or an scp form — which the
+      # `-R`/`--repo`/`--hostname` flag gate never inspects. Each must skip.
+      assert_stubbed env, "gh", "repo", "view", "evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "repo", "view", "https://evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "repo", "view", "git@evil.example.com:owner/repo"
+      assert_stubbed env, "gh", "pr", "view", "https://evil.example.com/owner/repo/pull/42"
+      assert_stubbed env, "gh", "pr", "diff", "https://evil.example.com/owner/repo/pull/42"
+      assert_stubbed env, "gh", "pr", "checks", "https://evil.example.com/owner/repo/pull/42"
       # The bare `OWNER/REPO` slug stays on the default host, so a glued short `-R<slug>`
       # must still reach real gh — the new glued branch must not over-block the safe form.
       # Leading: stripped_global_options shifts off the glued global; trailing: host_override?
@@ -259,6 +272,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      # The safe positional forms must still reach real gh, so the new positional
+      # gate does not over-block: a bare `OWNER/REPO` slug (one slash) on `repo view`,
+      # a numeric operand on `pr view`, and a slash-bearing branch ref the pr-URL rule
+      # must not mistake for a host (only a `scheme://` URL names a host for pr reads).
+      assert_passes env, "gh", "repo", "view", "owner/repo"
+      assert_passes env, "gh", "pr", "view", "42"
+      assert_passes env, "gh", "pr", "view", "feature/topic/branch"
 
       # Glued/inline @file payload forms must be caught on explicit GET too,
       # not just the space-separated `-F q=@secret` form: each branch
@@ -465,6 +485,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
       assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
+      assert_includes skipped, "gh -R git@evil.example.com:owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh repo view evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh repo view https://evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh repo view git@evil.example.com:owner/repo skipped"
+      assert_includes skipped, "gh pr view https://evil.example.com/owner/repo/pull/42 skipped"
+      assert_includes skipped, "gh pr diff https://evil.example.com/owner/repo/pull/42 skipped"
+      assert_includes skipped, "gh pr checks https://evil.example.com/owner/repo/pull/42 skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
@@ -489,6 +516,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh auth status"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
+      assert_includes real_invocations, "real-gh repo view owner/repo"
+      assert_includes real_invocations, "real-gh pr view 42"
+      assert_includes real_invocations, "real-gh pr view feature/topic/branch"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
       assert_includes real_invocations, expected_real_invocation("git", "-C", dir, "status", "--short")

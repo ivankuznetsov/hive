@@ -35,12 +35,15 @@ end
 
 argv = ARGV.dup
 
-# `gh --repo`/`-R` accept `[HOST/]OWNER/REPO` or a full URL; only the bare
-# `OWNER/REPO` slug (exactly one slash, no scheme) keeps gh on its default host.
-# Anything else carries an agent-chosen host.
+# `gh --repo`/`-R` accept `[HOST/]OWNER/REPO`, a full URL, or an scp-style
+# `git@host:owner/repo`; only the bare `OWNER/REPO` slug (exactly one slash and
+# no host marker) keeps gh on its default host. Any colon flags both the
+# `scheme://` URL and the scp `host:owner/repo` forms — the latter has a single
+# slash, so the slash count alone would wave it through to the real gh against an
+# agent-chosen host. Anything else carries an agent-chosen host.
 def repo_value_selects_host?(value)
   value = value.to_s
-  value.include?("://") || value.count("/") != 1
+  value.include?(":") || value.count("/") != 1
 end
 
 # Default-deny any host override anywhere in argv, not just in the leading
@@ -65,6 +68,46 @@ def host_override?(argv)
     end
   end
   false
+end
+
+# `host_override?` only inspects `-R`/`--repo`/`--hostname` flags, but the same
+# read-only subcommands accept the target as a *positional* operand that carries
+# an agent-chosen host the flag gate never sees: `gh repo view [HOST/]OWNER/REPO`
+# (or a URL / scp `git@host:owner/repo`) and `gh pr {view,checks,diff} <url>`.
+# Reject those positionals too. The host-qualified slug rule (a colon or a second
+# slash) is scoped to `repo view`, because `gh api repos/owner/repo` endpoints and
+# `gh pr view feature/branch` refs legitimately carry slashes; for pr reads only a
+# full `scheme://host` URL names a host.
+def positional_host_override?(rest)
+  case rest[0, 2]
+  when %w[repo view]
+    target_operands(rest.drop(2)).any? { |arg| arg.include?(":") || arg.count("/") > 1 }
+  when %w[pr view], %w[pr checks], %w[pr diff]
+    target_operands(rest.drop(2)).any? { |arg| arg.include?("://") }
+  else
+    false
+  end
+end
+
+# Yield the bare positional operands, skipping flags and the separate value of
+# gh's value-taking read flags so a `--branch feature/x/y` or `--json a,b` value
+# is not mistaken for a host-qualified target. Glued `--flag=val` / `-fval` forms
+# start with `-` and are skipped as flags; their value never stands alone.
+def target_operands(operands)
+  positionals = []
+  index = 0
+  while index < operands.length
+    arg = operands[index]
+    if %w[-R --repo -b --branch --json -q --jq -t --template].include?(arg)
+      index += 2
+    elsif arg.start_with?("-")
+      index += 1
+    else
+      positionals << arg
+      index += 1
+    end
+  end
+  positionals
 end
 
 def stripped_global_options(argv)
@@ -236,7 +279,7 @@ end
 
 rest = stripped_global_options(argv)
 
-unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv)
+unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv) && !positional_host_override?(rest)
   log_skip(argv)
   warn "[dry-run] gh #{escaped_argv(argv)} skipped"
   exit 0

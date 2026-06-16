@@ -1,3 +1,4 @@
+require "cgi"
 require "hive/pr"
 
 module Hive
@@ -7,12 +8,19 @@ module Hive
     module Format
       module_function
 
+      # Telegram-specific text-node escaping: a deliberate 3-char subset
+      # (`& < >`) — the only entities Telegram HTML requires outside an
+      # attribute value. Keep it narrow; do NOT widen it to CGI.escapeHTML.
       def html_escape(text)
         text.to_s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;")
       end
 
+      # Attribute-value escaping (used inside `href="…"`). CGI.escapeHTML
+      # covers `& < > " '` — a superset of the old `html_escape + "`
+      # implementation — and is the same escaper used in the service
+      # installers, so the attribute path doesn't re-implement it.
       def html_attr_escape(text)
-        html_escape(text).gsub('"', "&quot;")
+        CGI.escapeHTML(text.to_s)
       end
 
       # Build a safe `<a href="…">#NNN</a>` for a PR URL, or nil unless the

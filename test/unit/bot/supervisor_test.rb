@@ -1489,6 +1489,22 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_includes text, " — Review"
   end
 
+  # /status now ships parse_mode: :html, so the legacy stage-dir lines —
+  # which are prepended to the rendered queue — must also be entity-escaped,
+  # not just the actionable rows. An HTML-special project name flows into the
+  # legacy line via NotificationBuilders.legacy_stage_dirs; without the
+  # html_escape on the legacy path, raw `<`/`&` would reach the HTML payload.
+  def test_render_queue_escapes_html_special_chars_in_legacy_stage_dir_line
+    legacy = legacy_stage_dirs(project: "a<b>&c")
+
+    text = @supervisor.send(:render_queue, [], legacy_stage_dirs: [ legacy ])
+
+    assert_includes text, "Project a&lt;b&gt;&amp;c has",
+                    "an HTML-special project name in a legacy stage-dir line must be entity-escaped"
+    refute_includes text, "<b>",
+                    "no raw angle brackets from a legacy stage-dir line may reach the HTML payload"
+  end
+
   def test_safe_send_message_forwards_parse_mode
     @supervisor.send(:safe_send_message, chat_id: 42, text: "<b>hi</b>", parse_mode: :html)
 

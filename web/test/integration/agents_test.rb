@@ -35,4 +35,55 @@ class AgentsTest < ActionDispatch::IntegrationTest
     assert_match "https://example.com/auth", response.body,
                  "the authorize URL must render so the operator can finish login"
   end
+
+  test "operator-ward agent (codex) keeps polling and shows no paste-back form" do
+    sign_in!(login: "alice")
+    seed_session("sess-codex", agent: "codex", url: "https://auth.openai.com/codex/device",
+                 output: "Enter this code: Q0F3-V1IO7", done: false)
+
+    get agent_login_status_path("codex", "sess-codex")
+
+    assert_response :success
+    assert_match "https://auth.openai.com/codex/device", response.body
+    assert_match "updates automatically", response.body
+    assert_match 'data-controller="poll"', response.body,
+                 "a poll-type agent must keep refreshing until the CLI exits"
+    assert_no_match(/Complete login/, response.body,
+                    "operator-ward agents must not show a paste-the-code form")
+  end
+
+  test "operator-ward agent shows success and stops polling once done" do
+    sign_in!(login: "alice")
+    seed_session("sess-done", agent: "codex", url: "https://auth.openai.com/codex/device",
+                 output: "done", done: true)
+
+    get agent_login_status_path("codex", "sess-done")
+
+    assert_response :success
+    assert_match "is now logged in", response.body
+    assert_no_match(/data-controller="poll"/, response.body,
+                    "polling must stop once the login is done")
+  end
+
+  test "paste-back agent (claude) keeps the code form and stops polling at the URL" do
+    sign_in!(login: "alice")
+    seed_session("sess-claude", agent: "claude", url: "https://claude.ai/device",
+                 output: "paste the code", done: false)
+
+    get agent_login_status_path("claude", "sess-claude")
+
+    assert_response :success
+    assert_match "Complete login", response.body, "paste-back agents keep the code form"
+    assert_no_match(/data-controller="poll"/, response.body,
+                    "a paste-back agent stops polling once its URL is shown")
+  end
+
+  private
+
+  def seed_session(id, agent:, url:, output:, done:, error: nil)
+    session = Hive::Web::AgentsAuth::Session.new(
+      id: id, agent: agent, url: url, output: +output, done: done, error: error
+    )
+    AgentsController.agents_auth.instance_variable_get(:@sessions)[id] = session
+  end
 end

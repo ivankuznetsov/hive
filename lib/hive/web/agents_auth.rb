@@ -46,6 +46,14 @@ module Hive
         "gh" => %w[gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key]
       }.freeze
 
+      # Agents whose login is OPERATOR-WARD: the one-time code is entered at
+      # the provider and the CLI polls in the background — nothing is pasted
+      # back into the CLI. The relay must keep refreshing the status page until
+      # the child exits (`done`) rather than show a paste-the-code form. codex
+      # `--device-auth` and gh's device flow are both poll-type; claude
+      # `setup-token` is the only paste-back flow.
+      POLL_LOGIN_AGENTS = %w[codex gh].freeze
+
       # Hard ceiling on in-flight login attempts. Each holds a PTY (2 fds + a
       # child + a reader thread); a small cap stops a stuck-CLI pile-up from
       # leaking the box's resources.
@@ -132,6 +140,13 @@ module Hive
 
       def url_for(id)
         @mutex.synchronize { @sessions[id]&.url }
+      end
+
+      # Whether this agent's login is operator-ward (poll-type) rather than
+      # paste-back — the view keeps refreshing until `done` and hides the
+      # paste-the-code form for these. See POLL_LOGIN_AGENTS.
+      def poll_login?(agent)
+        POLL_LOGIN_AGENTS.include?(agent.to_s)
       end
 
       # Block until the CLI has printed its authorize URL (or the bounded

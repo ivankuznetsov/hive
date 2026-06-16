@@ -193,6 +193,22 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                  "over-width PR must still emit the link, wrapping the truncated #1000… token"
   end
 
+  # Symmetric negative of the tty pin (and of the status-text path's
+  # refute_match(/\e\]8;;/) guard): a populated pr_url rendered through
+  # pr_cell in a NON-tty must emit zero OSC 8 bytes, so the link is gated on
+  # `$stdout.tty?` and never leaks escape sequences into piped/captured
+  # output. The default test $stdout is non-tty, so pr_cell takes the
+  # disabled branch here without any stubbing.
+  def test_pr_cell_emits_no_osc8_in_non_tty
+    url = "https://github.com/example/repo/pull/561"
+    row = Struct.new(:pr_url).new(url)
+
+    out = Hive::Tui::Views::TasksPane.pr_cell(row, 6)
+
+    refute_match(/\e\]8;;/, out, "non-tty pr_cell must not emit OSC 8 bytes")
+    assert_includes out, "#561", "the plain PR token must still render in non-tty"
+  end
+
   def test_name_column_falls_back_to_slug_when_display_name_missing
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [ make_task(slug: "abc-001", display_name: nil) ] }

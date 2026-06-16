@@ -217,10 +217,40 @@ module Hive
         push_result = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg)
         return nil if push_result.success? && pushed?(worktree_path, branch)
 
+        # A remote-side auto-rebase (the PR branch rebased onto an advanced
+        # base while this worktree stayed on the old base) leaves HEAD
+        # diverged from its upstream even though every local commit's CHANGE
+        # is already on the remote as a patch-identical rebase. The push above
+        # then fails non-fast-forward and finalize would loop on
+        # unpushed_commits forever — yet the work is safely on the PR branch.
+        # Detect that case and fast-forward the worktree to its upstream
+        # instead of erroring.
+        return nil if resync_stale_rebase!(worktree_path, branch)
+
         Hive::Markers.set(task.state_file, :error,
                           reason: "unpushed_commits",
                           detail: push_result.stderr.to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      # Fast-forward a worktree whose local commits are all already on the
+      # upstream by patch-id — the stale side of a remote auto-rebase.
+      # Returns true (and hard-resets the worktree to its upstream) only when
+      # NO local commit carries a change missing from the upstream: `git
+      # cherry` marks an already-present change `-` and a genuinely-missing
+      # one `+`, so any `+` (real unpushed work) or a git failure returns
+      # false and the caller errors rather than discarding work.
+      def resync_stale_rebase!(worktree_path, branch)
+        upstream = "#{branch}@{u}"
+        cherry, status = capture_git(worktree_path, "cherry", upstream, "HEAD")
+        return false unless status.success?
+        return false if cherry.to_s.lines.any? { |line| line.start_with?("+") }
+
+        _out, reset_status = capture_git(worktree_path, "reset", "--hard", upstream)
+        return false unless reset_status.success?
+
+        warn "[hive] finalize: fast-forwarded stale rebase-duplicate worktree to #{upstream}"
+        true
       end
 
       # Record an auto-committed-residue event under the task's log dir so

@@ -31,11 +31,18 @@ module Hive
       # (`Hive::Tui::Views::TasksPane::PR_WIDTH`) surfaces can't drift on
       # PR-column width.
       TEXT_PR_WIDTH = Hive::Pr::NUMBER_WIDTH
-      # Total visible width of the identity column (`#id  #PR display-name`).
-      # Hand-derived budget: must stay ≥ widest id (`#NNNN`) + 1 space +
-      # TEXT_PR_WIDTH + 1 space + a reasonable display-name allowance, so it
-      # has to grow if TEXT_PR_WIDTH grows.
-      TEXT_IDENTITY_WIDTH = 49
+      # Widest rendered id is `#NNNN` (5 cells); a single space separates
+      # each column in the identity string `#id #PR display-name`.
+      TEXT_ID_WIDTH = 5
+      # Display-name budget inside the identity column. Hand-tuned — bump by
+      # hand if names need more room.
+      TEXT_NAME_ALLOWANCE = 36
+      # Total visible width of the identity column (`#id #PR display-name`).
+      # Derived from TEXT_PR_WIDTH (hence Hive::Pr::NUMBER_WIDTH) so a
+      # PR-column-width bump widens this budget in lockstep with the PR cell
+      # instead of silently misaligning `hive status` text output. The id and
+      # name terms are hand-tuned and bump by hand.
+      TEXT_IDENTITY_WIDTH = TEXT_ID_WIDTH + 1 + TEXT_PR_WIDTH + 1 + TEXT_NAME_ALLOWANCE
 
       ICON = {
         none: "·",

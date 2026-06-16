@@ -15,8 +15,11 @@ module Hive
     # `Hive::Tui::Views::TasksPane::PR_WIDTH`). Sourcing both from this one
     # constant makes a one-sided width change — which would silently
     # misalign the two surfaces — structurally impossible. PR numbers
-    # ≥ 100000 (7+ chars) overflow this cell on purpose; the plan accepts
-    # that cap.
+    # ≥ 100000 (7+ chars) exceed this cell on purpose; the plan accepts that
+    # cap. The two surfaces handle the overflow differently — text mode
+    # overflows the cell (`String#rjust` keeps the full token) while the TUI
+    # truncates it (`#1000…` via `rjust_cells`) — see the sibling
+    # `Hive::Tui::Views::TasksPane::PR_WIDTH` "overflow/truncate" note.
     NUMBER_WIDTH = 6
 
     # Extract the `#NNN` PR number from a URL whose path ends in

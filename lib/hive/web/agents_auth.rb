@@ -22,11 +22,13 @@ module Hive
       # be a truncated prefix if the URL straddles a read boundary, so we keep
       # scanning until a whitespace-terminated match (or EOF) settles it.
       URL_SETTLED_RE = %r{https?://[^\s<>"']+(?=\s)}.freeze
-      # Terminal control sequences an agent may wrap a URL in (codex prints
-      # the device link as `\e[94m<url>\e[0m`). URL_RE only stops at
-      # whitespace, so without stripping these the surfaced href carries the
-      # trailing reset bytes and the link is broken.
-      URL_CONTROL_RE = %r{\e\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f]}.freeze
+      # Terminal control runs an agent may wrap a URL in — CSI/SGR color
+      # sequences (codex prints the device link as `\e[94m<url>\e[0m`) and any
+      # bare C0/DEL byte (a lone ESC left when a sequence straddles a read
+      # boundary, or an OSC/DCS introducer). URL_RE only stops at whitespace,
+      # so these ride into the captured match; sanitize_url replaces each run
+      # with a space (never deletes — see there) before re-extracting the URL.
+      TERMINAL_CONTROL_RE = %r{\e\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f]}.freeze
       AGENT_COMMANDS = {
         "claude" => %w[claude setup-token],
         # `--device-auth` is the headless device-flow: one authorize URL plus
@@ -333,11 +335,17 @@ module Hive
         end
       end
 
-      # Strip terminal control sequences from a URL captured by URL_RE, so a
-      # link an agent printed in color (`\e[94m<url>\e[0m`) is surfaced as a
-      # clean, clickable href rather than one carrying escape bytes.
+      # Turn a raw URL_RE capture into a clean, clickable href. Replace each
+      # terminal-control run with a SPACE — never delete it — then re-extract
+      # the first whitespace-terminated http(s) URL. Deleting would splice two
+      # URLs an agent printed back-to-back (separated only by an SGR reset)
+      # into one href: `…/device\e[0mhttps://evil` -> `…/devicehttps://evil`.
+      # Substituting a space instead lets URL_RE stop at the boundary, so the
+      # trailing color reset, any OSC-8 wrapper residue, and a second URL are
+      # all dropped, and the authorize URL is surfaced verbatim.
       def sanitize_url(url)
-        url.to_s.gsub(URL_CONTROL_RE, "")
+        candidate = url.to_s.gsub(TERMINAL_CONTROL_RE, " ")
+        candidate[URL_RE] || candidate.strip
       end
 
       # Read whatever bytes are available without blocking for a newline.

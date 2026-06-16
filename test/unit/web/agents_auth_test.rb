@@ -57,6 +57,33 @@ class AgentsAuthTest < Minitest::Test
                  "whose container-local server the operator's browser can't reach"
   end
 
+  def test_sanitize_url_strips_ansi_color_wrapping
+    auth = Hive::Web::AgentsAuth.new
+    assert_equal "https://auth.openai.com/codex/device",
+                 auth.send(:sanitize_url, "\e[94mhttps://auth.openai.com/codex/device\e[0m")
+  end
+
+  def test_sanitize_url_preserves_a_clean_url_with_query_and_fragment
+    auth = Hive::Web::AgentsAuth.new
+    url = "https://auth.example/cb?code=ABC%20123&state=x#frag"
+    assert_equal url, auth.send(:sanitize_url, url),
+                 "percent-encoding, query string, and fragment must survive untouched"
+  end
+
+  def test_sanitize_url_does_not_splice_two_adjacent_urls
+    auth = Hive::Web::AgentsAuth.new
+    spliced = "https://auth.openai.com/codex/device\e[0mhttps://evil.example/steal"
+    assert_equal "https://auth.openai.com/codex/device", auth.send(:sanitize_url, spliced),
+                 "a control sequence between two URLs must split them, never concatenate into one href"
+  end
+
+  def test_sanitize_url_extracts_target_from_osc8_hyperlink
+    auth = Hive::Web::AgentsAuth.new
+    osc8 = "\e]8;;https://auth.openai.com/codex/device\e\\open\e]8;;\e\\"
+    assert_equal "https://auth.openai.com/codex/device", auth.send(:sanitize_url, osc8),
+                 "an OSC-8 hyperlink must surface its target URL with no escape/residue bytes"
+  end
+
   def test_output_for_returns_a_copy_of_the_session_buffer
     auth = Hive::Web::AgentsAuth.new
     session = Hive::Web::AgentsAuth::Session.new(id: "s", agent: "claude", output: +"hello", done: false)

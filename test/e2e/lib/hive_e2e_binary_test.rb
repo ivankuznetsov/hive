@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require "fileutils"
 require "json"
 require "open3"
 require_relative "paths"
@@ -158,6 +159,30 @@ class E2EBinaryTest < Minitest::Test
     assert_equal false, payload["ok"]
     assert_equal "missing_repro", payload["error_kind"]
     assert_equal 78, payload["exit_code"]
+  end
+
+  def test_replay_non_executable_repro_emits_config_error
+    Dir.mktmpdir("e2e-replay-test") do |tmp_runs_dir|
+      scenario_dir = File.join(tmp_runs_dir, "run-1", "scenarios", "scenario-a")
+      FileUtils.mkdir_p(scenario_dir)
+      script = File.join(scenario_dir, "repro.sh")
+      File.write(script, "#!/usr/bin/env sh\necho replayed\n")
+      File.chmod(0o644, script)
+
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+        hive_e2e, "replay", "--json", "run-1", "scenario-a"
+      )
+      assert_equal 78, status.exitstatus
+      assert_empty err
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-error", payload["schema"]
+      assert_equal false, payload["ok"]
+      assert_equal "unusable_repro", payload["error_kind"]
+      assert_equal 78, payload["exit_code"]
+      assert_match(/not executable/, payload["message"])
+    end
   end
 
   def test_leading_json_replay_dispatches_to_replay

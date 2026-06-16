@@ -1347,6 +1347,23 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_pr_url_for_degrades_quietly_when_pr_md_vanishes_mid_scan
+    cmd = Hive::Commands::Status.new
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "6-review", "missing-pr-260615-abcd")
+      FileUtils.mkdir_p(folder)
+      task = Hive::Task.new(folder)
+
+      with_replaced_singleton_method(Hive::Gh, :pr_frontmatter, ->(_path) { raise Errno::ENOENT }) do
+        _out, err = capture_io do
+          assert_nil cmd.send(:pr_url_for, task),
+                     "a disappearing pr.md must degrade to no PR, not crash status"
+        end
+        assert_equal "", err
+      end
+    end
+  end
+
   def test_project_name_and_error_envelope_fallback_branches
     cmd = Hive::Commands::Status.new
 

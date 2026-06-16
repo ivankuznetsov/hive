@@ -28,6 +28,10 @@ class PrTest < Minitest::Test
     refute Hive::Pr.valid_http_url?("https:///no-host")
   end
 
+  def test_valid_http_url_rejects_invalid_uri
+    refute Hive::Pr.valid_http_url?("http://[broken")
+  end
+
   # Symmetric with `number`'s `.to_s` tolerance: a nil or non-String input
   # degrades to false rather than raising TypeError out of URI.parse.
   def test_valid_http_url_is_total_for_nil_and_non_string

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-15
+updated: 2026-06-16
 tags: [test, minitest, fixtures]
 ---
 

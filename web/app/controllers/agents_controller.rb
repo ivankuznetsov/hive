@@ -13,14 +13,17 @@ class AgentsController < ApplicationController
     redirect_to agent_login_status_path(params[:agent], login.id)
   end
 
-  # The waiting view inside a polled turbo-frame: re-renders until the
-  # authorize URL is captured, then shows it plus the code form.
+  # The waiting view inside a polled turbo-frame. For paste-back agents it
+  # re-renders until the authorize URL is captured, then shows the code form.
+  # For operator-ward (poll-type) agents it keeps polling until the CLI exits,
+  # so the page reflects completion without the operator pasting anything.
   def login_status
     @login_session = agents_auth.session(params[:session_id])
     raise Hive::InvalidTaskPath, "unknown login session" unless @login_session
 
     @session_output = agents_auth.output_for(@login_session.id)
     @session_url = agents_auth.url_for(@login_session.id)
+    @poll_login = agents_auth.poll_login?(@login_session.agent)
     @statuses = agents_auth.statuses
     render :index
   end

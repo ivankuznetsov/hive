@@ -57,6 +57,13 @@ class AgentsAuthTest < Minitest::Test
                  "whose container-local server the operator's browser can't reach"
   end
 
+  def test_poll_login_distinguishes_operator_ward_from_paste_back_agents
+    auth = Hive::Web::AgentsAuth.new
+    assert auth.poll_login?("codex"), "codex --device-auth is operator-ward (code entered at provider, CLI polls)"
+    assert auth.poll_login?("gh"), "gh device flow is operator-ward"
+    refute auth.poll_login?("claude"), "claude setup-token is paste-back (code returned to the CLI)"
+  end
+
   def test_sanitize_url_strips_ansi_color_wrapping
     auth = Hive::Web::AgentsAuth.new
     assert_equal "https://auth.openai.com/codex/device",

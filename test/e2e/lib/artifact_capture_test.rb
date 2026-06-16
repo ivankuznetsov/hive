@@ -63,6 +63,21 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
+  def test_sandbox_tree_excludes_top_level_git_metadata
+    with_dirs do |scenario_dir, sandbox, run_home|
+      assert system("git", "-C", sandbox, "init", "-b", "master", "--quiet"),
+        "expected git init fixture setup to succeed"
+      File.write(File.join(sandbox, "visible.txt"), "visible\n")
+
+      collect(scenario_dir, sandbox, run_home)
+
+      tree = File.read(File.join(scenario_dir, "sandbox-tree.txt"))
+      assert_includes tree, "visible.txt\n"
+      refute tree.lines.any? { |line| line == ".git\n" || line.start_with?(".git/") },
+        "sandbox-tree.txt must not publish git metadata paths"
+    end
+  end
+
   def test_log_tails_are_last_n_lines_per_log_file
     with_dirs do |scenario_dir, sandbox, run_home|
       logs_root = File.join(sandbox, ".hive-state", "logs", "myslug")

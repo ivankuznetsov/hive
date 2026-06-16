@@ -1601,7 +1601,8 @@ class SchemaFilesTest < Minitest::Test
         { "pr_url" => "https://example.com/pr/2", "reason" => "review_handoff_failed" }
       ],
       "skipped_findings" => [
-        { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" }
+        { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" },
+        { "finding_id" => "f3", "fingerprint" => "fp3", "reason" => "similar_to_existing" }
       ],
       "last_scanned_sha" => "abc123"
     }

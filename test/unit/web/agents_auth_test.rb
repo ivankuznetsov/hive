@@ -50,6 +50,13 @@ class AgentsAuthTest < Minitest::Test
     end
   end
 
+  def test_codex_login_uses_headless_device_auth
+    assert_equal %w[codex login --device-auth],
+                 Hive::Web::AgentsAuth::AGENT_COMMANDS.fetch("codex"),
+                 "codex must use the device-flow — plain `codex login` is a localhost-callback OAuth " \
+                 "whose container-local server the operator's browser can't reach"
+  end
+
   def test_output_for_returns_a_copy_of_the_session_buffer
     auth = Hive::Web::AgentsAuth.new
     session = Hive::Web::AgentsAuth::Session.new(id: "s", agent: "claude", output: +"hello", done: false)

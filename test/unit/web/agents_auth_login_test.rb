@@ -49,6 +49,22 @@ class AgentsAuthLoginTest < Minitest::Test
     FileUtils.chmod(0o755, path)
   end
 
+  def install_fake_codex(bin_dir)
+    path = File.join(bin_dir, "codex")
+    File.write(path, <<~SH)
+      #!/usr/bin/env bash
+      # Mimic `codex login --device-auth`: a device-flow that prints the
+      # authorize URL and one-time code wrapped in ANSI color codes
+      # (\\033[94m...\\033[0m), then blocks until the operator authorizes.
+      printf '   \\033[94mhttps://auth.openai.com/codex/device\\033[0m\\n'
+      printf '   one-time code \\033[90mQ0F3-V1IO7\\033[0m\\n'
+      read -r _
+      echo "Successfully logged in"
+      exit 0
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
   def with_fake_gh
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")
@@ -84,6 +100,35 @@ class AgentsAuthLoginTest < Minitest::Test
       with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
         yield
       end
+    end
+  end
+
+  def with_fake_codex
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      install_fake_codex(bin_dir)
+      with_env("PATH" => [ bin_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        yield
+      end
+    end
+  end
+
+  # codex prints the device-flow URL in ANSI color, so URL_RE (which stops
+  # only at whitespace) captures the trailing reset bytes. The surfaced URL
+  # must be stripped clean, or the operator gets a broken href.
+  def test_codex_device_auth_url_is_surfaced_without_terminal_controls
+    with_fake_codex do
+      auth = Hive::Web::AgentsAuth.new
+      session = auth.start("codex")
+
+      url = wait_until { auth.session(session.id).url }
+      assert_equal "https://auth.openai.com/codex/device", url,
+                   "the device URL must be ANSI-stripped, not carry \\e[..m bytes that break the link"
+
+      # Unblock the fake's `read` so the PTY closes cleanly.
+      auth.complete(session.id, "x")
+      wait_until { auth.session(session.id).done }
     end
   end
 

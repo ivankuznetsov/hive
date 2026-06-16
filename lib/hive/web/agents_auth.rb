@@ -22,9 +22,21 @@ module Hive
       # be a truncated prefix if the URL straddles a read boundary, so we keep
       # scanning until a whitespace-terminated match (or EOF) settles it.
       URL_SETTLED_RE = %r{https?://[^\s<>"']+(?=\s)}.freeze
+      # Terminal control sequences an agent may wrap a URL in (codex prints
+      # the device link as `\e[94m<url>\e[0m`). URL_RE only stops at
+      # whitespace, so without stripping these the surfaced href carries the
+      # trailing reset bytes and the link is broken.
+      URL_CONTROL_RE = %r{\e\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f]}.freeze
       AGENT_COMMANDS = {
         "claude" => %w[claude setup-token],
-        "codex" => %w[codex login],
+        # `--device-auth` is the headless device-flow: one authorize URL plus
+        # a one-time code the operator enters at the provider. Plain `codex
+        # login` is a localhost-callback OAuth — it starts a server on the
+        # CONTAINER's localhost:1455 and prints THAT as the first URL, which
+        # the relay would surface and which the operator's browser can never
+        # reach across the container boundary. codex itself recommends
+        # `--device-auth` "on a remote or headless machine".
+        "codex" => %w[codex login --device-auth],
         # gh is not a pipeline agent, but its login IS first-run setup: git's
         # https credential helper reads it for every push the daemon makes.
         # The flags pin the prompts away (host, protocol, no ssh key upload)
@@ -310,7 +322,7 @@ module Hive
             # truncated prefix that grows on the next read); lock it in only
             # once a whitespace-terminated match proves it is complete.
             match = tail[URL_RE]
-            session.url = match if match
+            session.url = sanitize_url(match) if match
             if tail[URL_SETTLED_RE]
               settled = true
               tail = nil
@@ -319,6 +331,13 @@ module Hive
             end
           end
         end
+      end
+
+      # Strip terminal control sequences from a URL captured by URL_RE, so a
+      # link an agent printed in color (`\e[94m<url>\e[0m`) is surfaced as a
+      # clean, clickable href rather than one carrying escape bytes.
+      def sanitize_url(url)
+        url.to_s.gsub(URL_CONTROL_RE, "")
       end
 
       # Read whatever bytes are available without blocking for a newline.

@@ -94,12 +94,13 @@ module Hive
         verb = verb_for_action(row.action)
         return nil unless verb
 
-        text = header(row) + "\nReady for #{verb}."
+        header = header(row)
+        text = header + "\nReady for #{verb}."
         parse_mode = nil
         if row.action.to_s == "ready_for_review"
-          pr_link = Hive::Bot::Format.html_pr_link(row.respond_to?(:pr_url) ? row.pr_url : nil)
+          pr_link = Hive::Bot::Format.html_pr_link(row.pr_url)
           if pr_link
-            text = "#{Hive::Bot::Format.html_escape(header(row))}\n" \
+            text = "#{Hive::Bot::Format.html_escape(header)}\n" \
                    "Ready for #{Hive::Bot::Format.html_escape(verb)}.\n" \
                    "PR: #{pr_link}"
             parse_mode = :html
@@ -412,14 +413,20 @@ module Hive
 
       # The only valid `parse_mode` values: nil = plain text, :html =
       # Telegram HTML (the one mode in which `<a>` markup renders as a link
-      # rather than literal text). Documented as a closed set so a future
-      # HTML message — e.g. an `:html` recovery/reminder rebuild — has a
-      # named contract to follow and can't accidentally ship raw `<a>` tags
-      # as plain text by leaving parse_mode at its nil default.
+      # rather than literal text). Enforced at construction below, so a
+      # future HTML message — e.g. an `:html` recovery/reminder rebuild —
+      # can't accidentally ship raw `<a>` tags as plain text (nil) nor reach
+      # the Telegram API with an unsupported mode like `:markdown` (a
+      # runtime 400); the failure surfaces at the call site instead.
       PARSE_MODES = [ nil, :html ].freeze
 
       Notification = Data.define(:text, :keyboard, :parse_mode) do
         def initialize(text:, keyboard:, parse_mode: nil)
+          unless PARSE_MODES.include?(parse_mode)
+            raise ArgumentError,
+                  "unsupported parse_mode #{parse_mode.inspect} (expected one of #{PARSE_MODES.inspect})"
+          end
+
           super
         end
       end

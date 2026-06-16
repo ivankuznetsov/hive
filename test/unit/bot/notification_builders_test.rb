@@ -129,6 +129,22 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     refute_includes notification.text, "PR:"
   end
 
+  def test_notification_accepts_documented_parse_modes
+    plain = Hive::Bot::NotificationBuilders::Notification.new(text: "hi", keyboard: nil)
+    html = Hive::Bot::NotificationBuilders::Notification.new(text: "hi", keyboard: nil, parse_mode: :html)
+
+    assert_nil plain.parse_mode
+    assert_equal :html, html.parse_mode
+  end
+
+  def test_notification_rejects_unsupported_parse_mode
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::NotificationBuilders::Notification.new(text: "hi", keyboard: nil, parse_mode: :markdown)
+    end
+
+    assert_match(/unsupported parse_mode :markdown/, error.message)
+  end
+
   def test_ready_to_artifacts_builds_artifacts_approval_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "ready_to_artifacts", marker: "review_complete", stage: "6-review")

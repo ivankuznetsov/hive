@@ -1416,7 +1416,7 @@ module Hive
       end
 
       def pr_link_or_dash(row)
-        Hive::Bot::Format.html_pr_link(row.respond_to?(:pr_url) ? row.pr_url : nil) || "—"
+        Hive::Bot::Format.html_pr_link(row.pr_url) || "—"
       end
 
       # Inline keyboard for the /status (and /queue) reply: one button per

@@ -41,6 +41,8 @@ tags: [gap, todo]
 
 Uncertainty: this table was refreshed manually from targeted source, dependency-manifest, executable-entrypoint, and wiki reads on 2026-06-16. It verifies domain coverage, not exact one-to-one file coverage or installed release-bundle behavior. The 2026-06-15 wrapper refresh source-inspected `bin/hive` and `test/integration/cli_version_test.rb`, but still did not find an in-tree artifact proving the packaged RubyGems/Homebrew/AUR `hive` executable exercises the same wrapper path. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 
+Latest refresh note (2026-06-16): the babysitter gh-hostname dry-run audit remains source- and unit-pinned only. This refresh found no in-tree artifact for a full live-agent `hive babysit --once PROJECT --dry-run` run after commits `a86ca033` and `ede81ac7`.
+
 ## Open questions about the codebase
 
 1. **Has `hive run` been smoke-tested against a live `claude` v2.1.118?** The plan calls for this before declaring the MVP done. No evidence in tree (no `docs/solutions/` notes, no `docs/smoke-results.md`).

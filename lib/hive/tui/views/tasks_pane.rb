@@ -163,8 +163,8 @@ module Hive
           # guard threshold and the `name:` subtraction can never drift out
           # of sync — they read the same value by construction.
           fixed_full     = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
-          fixed_no_stage = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + 5
-          fixed_minimal  = ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + 4
+          fixed_no_stage = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + (SEPARATORS - 1)
+          fixed_minimal  = ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + (SEPARATORS - 2)
           if inner_width >= fixed_full + name_min
             { name: inner_width - fixed_full, pr: PR_WIDTH, stage: STAGE_WIDTH, status: STATUS_WIDTH }
           elsif inner_width >= fixed_no_stage + name_min

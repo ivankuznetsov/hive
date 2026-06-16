@@ -88,6 +88,27 @@ class RunFinalizeTest < Minitest::Test
     [ task_dir, worktree_path, pr_md ]
   end
 
+  # Advance the bare remote's branch through a scratch clone — optionally
+  # re-applying `dup_file` as a patch-identical "rebase" commit — then fetch
+  # so the worktree's upstream points at the now-diverged remote.
+  def advance_upstream!(worktree_path, slug, dup_file: nil)
+    bare = "#{worktree_path}-remote.git"
+    scratch = Dir.mktmpdir("scratch-#{slug}-")
+    @worktree_paths << scratch
+    run!("git", "clone", "--quiet", "--branch", slug, bare, scratch)
+    run!("git", "-C", scratch, "config", "user.email", "t@t")
+    run!("git", "-C", scratch, "config", "user.name", "t")
+    run!("git", "-C", scratch, "config", "commit.gpgsign", "false")
+    run!("git", "-C", scratch, "commit", "--allow-empty", "-m", "upstream advance", "--quiet")
+    if dup_file
+      File.write(File.join(scratch, dup_file), "fix\n")
+      run!("git", "-C", scratch, "add", ".")
+      run!("git", "-C", scratch, "commit", "-m", "fix", "--quiet")
+    end
+    run!("git", "-C", scratch, "push", "--quiet", "origin", slug)
+    run!("git", "-C", worktree_path, "fetch", "--quiet", "origin")
+  end
+
   def test_finalize_writes_summary_after_agent_completion
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -122,6 +143,81 @@ class RunFinalizeTest < Minitest::Test
         # would silently leave the PR in draft state after finalize.
         assert_match(/arg=ready\n.*arg=https:\/\/example\.com\/pr\/9/m, gh_argv_log,
                      "finalize runner must invoke `gh pr ready <pr_url>`")
+      end
+    end
+  end
+
+  # A remote-side auto-rebase (e.g. base churn while several PRs merge in
+  # quick succession) advances the PR branch and rebases the fix onto it,
+  # leaving the local finalize worktree on the old base with a commit whose
+  # CHANGE is already upstream (patch-identical). Finalize must fast-forward
+  # the worktree instead of looping on unpushed_commits.
+  def test_finalize_resyncs_stale_rebase_duplicate_instead_of_unpushed_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        slug = "fix-bug-260424-aaaa"
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+
+        # Local fix commit (patch P) on the old base.
+        File.write(File.join(worktree_path, "fixfile"), "fix\n")
+        run!("git", "-C", worktree_path, "add", ".")
+        run!("git", "-C", worktree_path, "commit", "-m", "fix", "--quiet")
+
+        # Upstream advances and re-applies patch P as a patch-identical rebase.
+        advance_upstream!(worktree_path, slug, dup_file: "fixfile")
+
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://example.com/pr/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+        MD
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name,
+                     "stale rebase-duplicate must resync and finalize, not error unpushed_commits"
+        head = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+        upstream = run!("git", "-C", worktree_path, "rev-parse", "#{slug}@{u}").strip
+        assert_equal upstream, head, "finalize must fast-forward the stale worktree to its upstream"
+      end
+    end
+  end
+
+  # The guardrail: a local commit whose change is genuinely NOT upstream
+  # (diverged, push fails non-fast-forward) must still error — never be
+  # silently reset away by the rebase-duplicate fast-forward.
+  def test_finalize_errors_on_genuine_unpushed_commit_when_diverged
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        slug = "fix-bug-260424-aaaa"
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+
+        File.write(File.join(worktree_path, "uniquefile"), "unique\n")
+        run!("git", "-C", worktree_path, "add", ".")
+        run!("git", "-C", worktree_path, "commit", "-m", "unique work", "--quiet")
+        head_before = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+
+        # Upstream advances WITHOUT that change → diverged, push non-ff.
+        advance_upstream!(worktree_path, slug)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "unpushed_commits", marker.attrs["reason"],
+                     "a genuinely unpushed unique commit must still error, never be silently discarded"
+        head_after = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+        assert_equal head_before, head_after,
+                     "finalize must NOT reset a worktree that holds real unpushed work"
       end
     end
   end

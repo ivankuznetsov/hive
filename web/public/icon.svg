@@ -1,3 +1,10 @@
-<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="256" cy="256" r="256" fill="red"/>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>hivebox</title>
+  <rect width="512" height="512" rx="112" fill="#c96442"/>
+  <g fill="none" stroke="#f5e3db" stroke-width="34" stroke-linejoin="round" stroke-linecap="round">
+    <!-- honeycomb: three hive cells -->
+    <polygon points="256,96 326,136 326,216 256,256 186,216 186,136"/>
+    <polygon points="166,256 236,296 236,376 166,416 96,376 96,296"/>
+    <polygon points="346,256 416,296 416,376 346,416 276,376 276,296"/>
+  </g>
 </svg>

@@ -65,12 +65,12 @@ module Hive
         # it absorbs any extra width and is left-truncated when narrow.
         ICON_WIDTH = 2
         ID_WIDTH = 4
-        # Width of the PR column (`#NNN`). Kept in sync by convention with
-        # `Hive::Commands::Status::TEXT_PR_WIDTH` — the two surfaces have
-        # independent layout systems (deliberately not a shared constant),
-        # so a width change here must be mirrored there. PR numbers ≥ 100000
-        # overflow/truncate this cell on purpose; the plan accepts that cap.
-        PR_WIDTH = 6
+        # Width of the PR column (`#NNN`), sourced from the shared
+        # `Hive::Pr::NUMBER_WIDTH` so this pane and `hive status` text mode
+        # (`Hive::Commands::Status::TEXT_PR_WIDTH`) can't drift on PR-column
+        # width. PR numbers ≥ 100000 overflow/truncate this cell on purpose;
+        # the plan accepts that cap.
+        PR_WIDTH = Hive::Pr::NUMBER_WIDTH
         STAGE_WIDTH = 12
         STATUS_WIDTH = 36
         AGE_WIDTH = 4
@@ -204,14 +204,12 @@ module Hive
           # at width 6; the plan accepts the >99999 cap). Wrap the
           # *displayed* token — the cell's trailing non-space run — rather
           # than the pre-truncation `token`, so the OSC 8 link survives
-          # truncation instead of being silently dropped. Splice by slice
-          # (no String#sub backreference interpretation, no per-row regex
-          # compile). Leading padding is rjust spaces only; the displayed
-          # token (`#NNN`/`#NNN…`) never contains a space.
+          # truncation instead of being silently dropped. Hyperlink.splice
+          # wraps by offset (no String#sub backreference interpretation, no
+          # per-row regex compile). Leading padding is rjust spaces only; the
+          # displayed token (`#NNN`/`#NNN…`) never contains a space.
           pad_len = cell.length - cell.lstrip.length
-          displayed = cell[pad_len..]
-          linked = Hyperlink.osc8(displayed, row.pr_url, enabled: $stdout.tty?)
-          cell[0...pad_len] + linked
+          Hyperlink.splice(cell, pad_len, cell.length - pad_len, row.pr_url, enabled: $stdout.tty?)
         end
 
         def status_label(row)

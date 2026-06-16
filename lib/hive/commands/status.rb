@@ -20,13 +20,17 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
-      # Width of the text-mode PR column (`#NNN`, right-justified). Kept in
-      # sync by convention with `Hive::Tui::Views::TasksPane::PR_WIDTH` — the
-      # two surfaces have independent layout systems (deliberately not a
-      # shared constant), so a width change here must be mirrored there.
-      # PR numbers ≥ 100000 (7+ chars) overflow this cell on purpose; the
-      # plan accepts that cap.
-      TEXT_PR_WIDTH = 6
+      # First stage at which a PR exists; `pr.md` is only read from this
+      # stage onward (see `pr_url_for`). Named here, and the numeric
+      # threshold derived from `Hive::Stages`, so inserting or reordering a
+      # stage can't silently shift which stages read `pr.md`.
+      OPEN_PR_STAGE_DIR = "5-open-pr".freeze
+      OPEN_PR_STAGE_INDEX = Hive::Stages.parse(OPEN_PR_STAGE_DIR).first
+      # Width of the text-mode PR column (`#NNN`, right-justified). Sourced
+      # from the shared `Hive::Pr::NUMBER_WIDTH` so the text and TUI
+      # (`Hive::Tui::Views::TasksPane::PR_WIDTH`) surfaces can't drift on
+      # PR-column width.
+      TEXT_PR_WIDTH = Hive::Pr::NUMBER_WIDTH
       # Total visible width of the identity column (`#id  #PR display-name`).
       # Hand-derived budget: must stay ≥ widest id (`#NNNN`) + 1 space +
       # TEXT_PR_WIDTH + 1 space + a reasonable display-name allowance, so it
@@ -454,13 +458,18 @@ module Hive
       # Identity column = `#id  #PR display-name`, padded to `width` visible
       # cells. The OSC8 hyperlink for the PR token is spliced in AFTER the
       # padding (plan U3: "pad the plain token first, then wrap") because
-      # String#ljust counts the ~45 invisible escape bytes and would
+      # String#ljust counts the OSC 8 framing (~14 bytes) plus the full URL
+      # — 50+ invisible bytes, and URL-length-dependent — and would
       # otherwise add zero padding in a TTY, collapsing every column to the
-      # right of the task name. Mirrors the visible-width discipline
-      # Views::TasksPane uses via Format.rjust_cells. The PR token sits at a
-      # fixed offset (`#id ` + rjust padding), so we splice by offset rather
-      # than a global `sub` — clearer, no per-row regex compile, and no
-      # backreference footgun, and it cannot match the token inside the name.
+      # right of the task name. NOTE: this method uses plain String#ljust/
+      # rjust (char-counting), not the cell-aware Format.rjust_cells the TUI
+      # uses, so a wide/CJK display_name would misalign the text column — a
+      # known limitation, acceptable because the columns spliced here (`#id`
+      # and the `#NNN` PR cell) are ASCII. The PR token sits at a fixed
+      # offset (`#id ` + rjust padding), so Hyperlink.splice targets the PR
+      # cell by offset rather than a global `sub` — clearer, no per-row regex
+      # compile, no backreference footgun, and the offset always targets the
+      # PR cell rather than any digits inside the name.
       def display_identity_with_pr(row, width)
         id = row[:id] ? "##{row[:id]}" : "—"
         token = Hive::Pr.number(row[:pr_url]) || "—"
@@ -469,9 +478,8 @@ module Hive
         padded = "#{id} #{pr_cell} #{name}".ljust(width)
         return padded if token == "—"
 
-        linked = Hive::Tui::Views::Hyperlink.osc8(token, row[:pr_url], enabled: $stdout.tty?)
         token_start = id.length + 1 + (pr_cell.length - token.length)
-        padded[0...token_start] + linked + padded[(token_start + token.length)..]
+        Hive::Tui::Views::Hyperlink.splice(padded, token_start, token.length, row[:pr_url], enabled: $stdout.tty?)
       end
 
       def dependency_indicator(row)
@@ -665,7 +673,7 @@ module Hive
       end
 
       def pr_url_for(task)
-        return nil if task.stage_index < 5
+        return nil if task.stage_index < OPEN_PR_STAGE_INDEX
 
         value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
         value = value.to_s.strip

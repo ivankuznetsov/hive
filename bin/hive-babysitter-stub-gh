@@ -39,12 +39,14 @@ def stripped_global_options(argv)
   rest = argv.dup
   loop do
     case rest.first
-    when "-R", "--repo", "--hostname"
+    when "-R", "--repo"
       rest.shift(2)
     when /\A--repo=/
       rest.shift
     when /\A-/
-      rest.shift
+      # Unknown leading globals may take values; fail closed instead of stripping
+      # them and reclassifying the remaining argv as a safe subcommand.
+      return argv
     else
       break
     end

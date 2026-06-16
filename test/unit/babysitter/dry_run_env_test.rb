@@ -558,6 +558,29 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_skips_leading_hostname_overrides
+    with_tmp_dir do |dir|
+      real_gh = recording_binary(dir, "real-gh")
+      log_path = File.join(dir, "skipped.log")
+      @real_log = File.join(dir, "real.log")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path
+      }
+
+      assert_stubbed env, "gh", "--hostname", "example.com", "api", "rate_limit"
+      assert_stubbed env, "gh", "--hostname=example.com", "api", "rate_limit"
+      assert_stubbed env, "gh", "--hostname", "example.com", "auth", "status"
+      assert_stubbed env, "gh", "--hostname=example.com", "auth", "status"
+
+      skipped = File.read(log_path)
+      assert_includes skipped, "gh --hostname example.com api rate_limit skipped"
+      assert_includes skipped, "gh --hostname=example.com api rate_limit skipped"
+      assert_includes skipped, "gh --hostname example.com auth status skipped"
+      assert_includes skipped, "gh --hostname=example.com auth status skipped"
+    end
+  end
+
   def test_gh_api_cache_option_is_skipped_to_avoid_local_cache_writes
     with_tmp_dir do |dir|
       cache_home = File.join(dir, "cache")

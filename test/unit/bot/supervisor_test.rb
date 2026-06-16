@@ -1446,6 +1446,31 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "running"
   end
 
+  # The cap path is the fixture most likely to exceed Telegram's 4096-char
+  # body limit and to interleave HTML entities with anchors: exercise it
+  # with PR links AND HTML-special display names at once.
+  def test_render_queue_cap_path_interleaves_pr_links_with_escaped_special_names
+    rows = 12.times.map do |i|
+      row(slug: "task-#{i}-260615-abcd", id: 100 + i,
+          display_name: "Fix <Login> & Logout",
+          stage: "6-review",
+          pr_url: "https://github.com/example/repo/pull/#{500 + i}")
+    end
+
+    text = @supervisor.send(:render_queue, rows)
+
+    assert_includes text, "12 active tasks"
+    assert_includes text, "+ 2 more tasks", "the cap path must report the overflow count"
+    assert_includes text, "#100 Fix &lt;Login&gt; &amp; Logout",
+                    "an HTML-special display name must be entity-escaped on the cap path"
+    assert_includes text, '<a href="https://github.com/example/repo/pull/500">#500</a>',
+                    "each shown row keeps its clickable PR anchor alongside the escaped name"
+    refute_includes text, "<Login>",
+                    "no raw angle brackets from a display name may reach the HTML payload"
+    refute_includes text, '<a href="https://github.com/example/repo/pull/510">#510</a>',
+                    "rows past QUEUE_DISPLAY_CAP must not render"
+  end
+
   def test_render_queue_adds_clickable_pr_link_and_escapes_html
     rows = [
       row(

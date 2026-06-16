@@ -1324,6 +1324,29 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # The deliberate StandardError→SystemCallError narrowing in pr_url_for:
+  # a non-ENOENT I/O fault reading pr.md (here EACCES) must warn — so the
+  # degraded "no PR" is observable — and degrade to nil rather than crash
+  # this poll-heavy surface. Mirrors the .lock EACCES discipline above.
+  def test_pr_url_for_warns_and_degrades_on_non_enoent_system_call_error
+    cmd = Hive::Commands::Status.new
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "6-review", "eacces-task-260615-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "pr.md"), "---\npr_url: https://github.com/example/repo/pull/1\n---\n")
+      task = Hive::Task.new(folder)
+
+      with_replaced_singleton_method(Hive::Gh, :pr_frontmatter, ->(_path) { raise Errno::EACCES }) do
+        _out, err = capture_io do
+          assert_nil cmd.send(:pr_url_for, task),
+                     "a non-ENOENT I/O fault reading pr.md must degrade to nil, not crash"
+        end
+        assert_includes err, "hive: status: failed to read pr.md"
+        assert_includes err, "Errno::EACCES"
+      end
+    end
+  end
+
   def test_project_name_and_error_envelope_fallback_branches
     cmd = Hive::Commands::Status.new
 

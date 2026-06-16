@@ -160,15 +160,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   # Exercises the TTY/OSC 8 `pr_cell` path directly: the TUI render
   # pipeline routes rows through lipgloss, which rewrites ANSI under a tty,
-  # so the link contract is pinned on pr_cell itself. The rjust padding
-  # must stay OUTSIDE the hyperlink so the cell keeps its fixed visible
-  # width.
+  # so the link contract is pinned on pr_cell itself. Assert the BEHAVIOR
+  # (the two rjust spaces stay outside the link, the link wraps the #561
+  # token) by reconstructing the expected link through the same osc8
+  # builder, so a legitimate framing change (e.g. an added `id=`) doesn't
+  # break the test as long as padding stays outside and the token inside.
   def test_pr_cell_wraps_token_and_keeps_padding_outside_link_under_tty
-    row = Struct.new(:pr_url).new("https://github.com/example/repo/pull/561")
+    url = "https://github.com/example/repo/pull/561"
+    row = Struct.new(:pr_url).new(url)
 
     out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
 
-    assert_equal "  \e]8;;https://github.com/example/repo/pull/561\e\\#561\e]8;;\e\\", out,
+    link = Hive::Tui::Views::Hyperlink.osc8("#561", url, enabled: true)
+    assert_equal "  #{link}", out,
                  "two rjust spaces stay outside the OSC 8 link; the link wraps the #561 token"
   end
 
@@ -176,13 +180,16 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # truncates "#100000" to the 6-cell column and the OSC 8 link must wrap
   # the *displayed* (truncated) token instead of being silently dropped —
   # the bug the pre-fix `cell.sub(/#token\z/)` produced once truncation
-  # changed the suffix.
+  # changed the suffix. Behavior is pinned via the osc8 builder so the
+  # assertion survives an OSC 8 framing change.
   def test_pr_cell_wraps_displayed_truncated_token_for_over_width_pr_under_tty
-    row = Struct.new(:pr_url).new("https://github.com/example/repo/pull/100000")
+    url = "https://github.com/example/repo/pull/100000"
+    row = Struct.new(:pr_url).new(url)
 
     out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
 
-    assert_equal "\e]8;;https://github.com/example/repo/pull/100000\e\\#1000…\e]8;;\e\\", out,
+    link = Hive::Tui::Views::Hyperlink.osc8("#1000…", url, enabled: true)
+    assert_equal link, out,
                  "over-width PR must still emit the link, wrapping the truncated #1000… token"
   end
 
@@ -614,21 +621,28 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     # Contrast a wide double-cell emoji (🤖) against an action that
     # falls back to the narrow DEFAULT_ICON ("agent_working" is not in
     # ICONS): if either icon mis-pads to the fixed ICON_WIDTH the id
-    # column shifts, so the offsets must stay equal across both.
+    # column shifts, so the offsets must stay equal across both. Both rows
+    # carry a pr_url so the PR column is populated; the id offset is
+    # located by each row's own id token rather than "first digit", which
+    # the PR number would otherwise make ambiguous.
+    pr_url = "https://github.com/example/repo/pull/561"
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
-        make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
-        make_task(slug: "working-task", id: 8, action: "agent_working", action_label: "Agent working")
+        make_task(slug: "running-task", id: 7, action: "agent_running",
+                  action_label: "Agent running", pr_url: pr_url),
+        make_task(slug: "working-task", id: 8, action: "agent_working",
+                  action_label: "Agent working", pr_url: pr_url)
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    rows = out.lines.grep(/running-task|working-task/)
+    ids = { "running-task" => "7", "working-task" => "8" }
 
-    id_offsets = rows.map do |row|
-      prefix = row.split(/\d/, 2).first
+    id_offsets = out.lines.grep(/running-task|working-task/).map do |row|
+      slug = ids.keys.find { |candidate| row.include?(candidate) }
+      prefix = row.split(ids.fetch(slug), 2).first
       Hive::Tui::Views::Format.display_width(prefix)
     end
-    assert_equal [ 7, 7 ], id_offsets,
+    assert_equal [ 7, 7 ], id_offsets.sort,
                  "wide emoji icons must not shift fixed-width columns"
   end
 

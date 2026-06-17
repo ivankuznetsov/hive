@@ -60,9 +60,9 @@ scenario_root = File.expand_path(
 env = {
   "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
   "HIVE_EVAL_SCENARIOS_ONLY" => "1",
+  "HIVE_EVAL_NO_JUDGE" => (options[:no_judge] ? "1" : nil),
   "TEST" => nil
 }
-env["HIVE_EVAL_NO_JUDGE"] = "1" if options[:no_judge]
 
 begin
   path = scenario_path(scenario_root, options[:scenario])

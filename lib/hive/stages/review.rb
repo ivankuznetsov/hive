@@ -90,6 +90,12 @@ module Hive
       AUTO_COMMIT_OP_TIMEOUT_SEC = Hive::Stages::AutoCommit::AUTO_COMMIT_OP_TIMEOUT_SEC
       AUTO_COMMIT_SIGNING_ERROR_PATTERNS = Hive::Stages::AutoCommit::AUTO_COMMIT_SIGNING_ERROR_PATTERNS
 
+      # Cap (characters) for the single-line `message=` attribute that
+      # `mark_review_phase_failure` stamps onto a terminal review_error so the
+      # real cause is surfaced without bloating task.md with a full agent
+      # transcript. Longer messages are truncated with an ellipsis.
+      REVIEW_PHASE_ERROR_SUMMARY_MAX = 300
+
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
       # here as a class method so existing callers keep working.
@@ -378,8 +384,7 @@ module Hive
 
             if triage_enabled?(cfg)
               @current_phase = :triage
-              mark_working(task, phase: :triage, pass: pass)
-              triage_result = Hive::Stages::Review::Triage.run!(cfg: cfg, ctx: ctx_pass)
+              triage_result = run_triage_with_retries(cfg, ctx_pass, task, pass: pass)
               case triage_result.status
               when :tampered
                 Hive::Markers.set(task.state_file, :review_error,
@@ -798,9 +803,78 @@ module Hive
           true
         else
           Hive::Markers.set(task.state_file, :review_error,
-                            phase: phase, reason: terminal_reason, pass: pass)
+                            phase: phase, reason: terminal_reason, pass: pass,
+                            message: review_phase_error_summary(error_message))
           false
         end
+      end
+
+      # Condense a phase agent's `error_message` into a single-line marker
+      # attribute. Without this, a terminal review_error records only a bare
+      # `reason=triage_failed` / `reason=fix_error` and the real cause (a tmux
+      # session death, an "expected output missing" timeout, a CLI crash) is
+      # discarded — so `status.md`, `hive status --json`, and the web
+      # diagnostic card all show a contentless "the stage hit an error" with
+      # nothing to act on. Surfacing it turns an opaque failure into a
+      # diagnosable one. nil/blank collapses to no attr (Markers.set compacts
+      # nil values); multi-line / quote / comment-marker content is sanitized
+      # downstream by Hive::Markers.format_attr.
+      def review_phase_error_summary(error_message)
+        text = error_message.to_s.strip.gsub(/\s+/, " ")
+        return nil if text.empty?
+        return text if text.length <= REVIEW_PHASE_ERROR_SUMMARY_MAX
+
+        "#{text[0, REVIEW_PHASE_ERROR_SUMMARY_MAX - 1]}…"
+      end
+
+      # Run the triage phase with a bounded retry budget, mirroring the
+      # per-reviewer retry in Hive::Reviewers::Agent. Triage drives an
+      # interactive agent over tmux; on a loaded host a single transient
+      # infra blip (a momentary `tmux has-session` failure misread as
+      # "session terminated", an "expected output missing" timeout) used to
+      # fail triage outright and park the task in 6-review with a terminal
+      # `triage_failed` marker that the daemon never auto-retries. Retrying
+      # the same transient class that reviewers already retry keeps an infra
+      # flake from sticking the whole task.
+      #
+      # Non-retryable outcomes return immediately:
+      #   - :ok        — nothing to retry.
+      #   - :tampered  — the agent touched protected files; a retry repeats
+      #                  the violation rather than curing it.
+      #   - usage/credit limit — mark_review_phase_failure stamps it as
+      #                  limits_reached + retry_after for the daemon to
+      #                  self-heal once the window resets; burning inline
+      #                  attempts against an active limit only wastes budget.
+      def run_triage_with_retries(cfg, ctx_pass, task, pass:)
+        max_attempts = triage_max_attempts(cfg)
+        attempt = 0
+        loop do
+          attempt += 1
+          mark_working(task, phase: :triage, pass: pass)
+          result = Hive::Stages::Review::Triage.run!(cfg: cfg, ctx: ctx_pass)
+
+          return result if result.status == :ok
+          return result if result.status == :tampered
+          return result if Hive::AgentLimit.limit_reached?(result.error_message.to_s)
+          return result if attempt >= max_attempts
+
+          triage_retry_backoff(attempt)
+        end
+      end
+
+      # Attempt budget for the triage phase. Defaults to the shared reviewer
+      # budget; override per project via `review.triage.max_attempts` (1
+      # disables retry — single attempt).
+      def triage_max_attempts(cfg)
+        value = cfg.dig("review", "triage", "max_attempts")
+        value.nil? ? Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS : Integer(value)
+      end
+
+      # Exponential backoff (1s, 2s, 4s, …) between failed triage attempts,
+      # capped like the reviewer adapters so a high max_attempts can't
+      # introduce minute-scale waits. Extracted as a seam so tests stub it.
+      def triage_retry_backoff(failed_attempt)
+        sleep([ 2**(failed_attempt - 1), Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC ].min)
       end
 
       # Pass to start at on a fresh hive run. Falls back to 1 when no

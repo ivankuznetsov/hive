@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-06-16
+updated: 2026-06-18
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -89,7 +89,9 @@ Triage's direct `cfg` fallback values match `Config::DEFAULTS`: `budget_usd.revi
 
 Plan / worktree.yml / task.md are SHA-256 protected around the triage spawn (ADR-013); tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 
-If the triage spawn returns an error whose captured message matches `Hive::AgentLimit.limit_reached?`, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>` instead of the terminal `triage_failed` marker. The daemon healer treats that like the reviewers-phase limit marker and retries after the cooldown. Non-limit triage failures, including timeouts with no provider-limit text, still write `reason=triage_failed` and remain manual.
+The triage spawn is wrapped in the same bounded retry as a per-reviewer spawn (`run_triage_with_retries`): a transient `:error` is retried up to `review.triage.max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; `1` disables retry) with exponential backoff capped at 8s, so a single momentary infra blip (a `tmux has-session` read misread as a dead session, an "expected output missing" timeout) no longer parks the whole task on a terminal marker the daemon never auto-retries. `:tampered` and provider-limit outcomes short-circuit the retry (a retry would repeat the tamper, and a limit self-heals via `retry_after`).
+
+If the triage spawn returns an error whose captured message matches `Hive::AgentLimit.limit_reached?`, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>` instead of the terminal `triage_failed` marker. The daemon healer treats that like the reviewers-phase limit marker and retries after the cooldown. Non-limit triage failures (including timeouts with no provider-limit text) that exhaust the retry budget still write `reason=triage_failed` and remain manual — but the marker now also carries a `message="<condensed error>"` attr (capped at `REVIEW_PHASE_ERROR_SUMMARY_MAX = 300` chars). That message surfaces through `status.md`, `hive status --json`, and the web diagnostic card, so a stuck triage names its real cause instead of an opaque `reason=triage_failed`. The same `message=` attr is written for every `mark_review_phase_failure` caller (triage / fix / ci).
 
 Escalations land in `reviews/escalations-<NN>.md` — every line that triage left as `[ ]` gets copied here as a digest for the user.
 

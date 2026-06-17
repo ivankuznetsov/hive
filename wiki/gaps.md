@@ -215,3 +215,27 @@ recorder's own foreground daemon over the pidfile. Open questions:
 On a real run the display-name agent named the task "Agent Work In
 Progress" — an activity description, not a name. The prompt should pin
 "a short noun-phrase name for the TASK" with an example or two.
+
+## Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)
+
+Live task `xbookmark` #1333 (`we-need-to-add-an-260616-094b`) failed at the
+triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with
+`reason=triage_failed`. The real `error_message` was discarded by
+`mark_review_phase_failure` (now fixed — it surfaces a `message=` attr and
+triage retries; see [[stages/review]]), so the underlying trigger was never
+captured. Open questions:
+- What exactly made `wait_for_expected_output` exit before its 1800s deadline?
+  No 300s/5-min constant exists in `claude_launcher.rb`; the early-exit paths
+  are limit-reached, `tmux_session_terminated` (single-shot
+  `expected_output_session_alive?` — one `tmux has-session` `TmuxError` →
+  `false`, with no streak tolerance unlike the 3-streak pane-read path), or
+  3× consecutive unreadable-pane errors.
+- The box had ~130 agent procs and fully-exhausted swap (no OOM-kill in the
+  kernel log). Did swap thrash make a `tmux has-session` call transiently fail
+  and get misread as a dead session? If so, `expected_output_session_alive?`
+  should tolerate a transient `TmuxError` like the pane-read streak does.
+- Or did the interactive `claude` triage agent end its turn / exit before
+  writing `escalations-NN.md` (the log showed it spinning at "5m 0s" right as
+  it was about to write its output files)?
+Next live triage failure should now carry the `message=` attr — use it to pick
+between these before hardening `expected_output_session_alive?`.

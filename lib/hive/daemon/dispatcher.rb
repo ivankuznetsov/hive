@@ -736,7 +736,8 @@ module Hive
             @controller.last_dispatched_state_file_mtime_for(project: row.project, slug: row.slug),
           now: now,
           edit_debounce_sec: @edit_debounce_sec,
-          answers_pending: brainstorm_answers_pending?(row)
+          answers_pending: brainstorm_answers_pending?(row),
+          blocked: row.blocked == true
         )
 
         case decision
@@ -771,6 +772,13 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "answers_pending")
+        when :blocked_on_dependency
+          @logger.event(:blocked, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "dependency_unmet",
+                                  depends_on: row.depends_on,
+                                  blocked_by: row.blocked_by,
+                                  dependency_stage: row.dependency_stage)
         when :poll_for_merge
           enqueue_merge_watch(row)
         when :skip

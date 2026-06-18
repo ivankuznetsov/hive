@@ -107,6 +107,75 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_emits_resolved_dependency_state
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "7-artifacts", "base-task-260618-aaaa",
+                               state_file: "artifact.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+
+      tasks = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ]).fetch("projects").first.fetch("tasks")
+      row = tasks.find { |task| task.fetch("slug") == File.basename(dependent) }
+
+      assert_equal File.basename(base), row.fetch("depends_on")
+      assert_equal File.basename(base), row.fetch("blocked_by")
+      assert_equal "7-artifacts", row.fetch("dependency_stage")
+      assert_equal true, row.fetch("blocked")
+    end
+  end
+
+  def test_json_payload_unblocks_dependency_at_gate_stage
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "8-finalize", "base-task-260618-aaaa",
+                               state_file: "pr.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+
+      tasks = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ]).fetch("projects").first.fetch("tasks")
+      row = tasks.find { |task| task.fetch("slug") == File.basename(dependent) }
+
+      assert_equal File.basename(base), row.fetch("blocked_by")
+      assert_equal "8-finalize", row.fetch("dependency_stage")
+      assert_equal false, row.fetch("blocked")
+    end
+  end
+
+  def test_json_payload_and_text_render_unresolved_dependency
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: "missing-task")
+
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      tasks = Hive::Commands::Status.new.json_payload([ project ]).fetch("projects").first.fetch("tasks")
+      row = tasks.find { |task| task.fetch("slug") == File.basename(dependent) }
+
+      assert_equal "missing-task", row.fetch("depends_on")
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_equal true, row.fetch("blocked")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+      assert_includes out, "⏸ blocked by missing-task (unresolved)"
+    end
+  end
+
   # #270: unanswered_question_count must never break `hive status` — a
   # parse error on a mid-write/malformed brainstorm.md degrades to 0.
   def test_unanswered_question_count_degrades_to_zero_on_parse_error
@@ -944,6 +1013,13 @@ class CommandsStatusTest < Minitest::Test
     old = Time.now - (age_days * 86_400)
     File.utime(old, old, state_file)
     File.utime(old, old, folder)
+    folder
+  end
+
+  def write_status_task(hive_state, stage, slug, state_file:, marker:)
+    folder = File.join(hive_state, "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, state_file), "<!-- #{marker} -->\n")
     folder
   end
 

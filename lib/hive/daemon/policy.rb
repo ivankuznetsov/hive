@@ -95,15 +95,16 @@ module Hive
       #   the editor-bulk-save path still resumes once it is complete. The
       #   dispatcher computes this by parsing the brainstorm file.
       #
-      # @return [Symbol] one of :dispatch, :poll_for_merge, :wait_for_debounce,
-      #   :wait_for_answers, :record_baseline, :skip
+      # @return [Symbol] one of :dispatch, :blocked_on_dependency,
+      #   :poll_for_merge, :wait_for_debounce, :wait_for_answers,
+      #   :record_baseline, :skip
       #
       # `:record_baseline` is the first-sight `kind: edit` outcome:
       # the dispatcher does NOT spawn a child, but it MUST call
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
       def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
-                 now:, edit_debounce_sec: 30, answers_pending: false)
+                 now:, edit_debounce_sec: 30, answers_pending: false, blocked: false)
         return :skip if action.nil?
         # Three branches dispatch the row's command verbatim (advance,
         # plan_approval) or via the edit-resume path (edit_resume).
@@ -119,7 +120,7 @@ module Hive
         end
 
         if advance?(action) || plan_approval?(action, stage)
-          :dispatch
+          blocked ? :blocked_on_dependency : :dispatch
         elsif action == MERGE_WAIT_ACTION
           :poll_for_merge
         elsif edit_resume?(action)
@@ -133,7 +134,13 @@ module Hive
           # `:wait_for_debounce` outcomes pass through unchanged so the
           # mtime baseline is still seeded and the editor-bulk-save path
           # dispatches normally once every answer is in.
-          outcome == :dispatch && answers_pending ? :wait_for_answers : outcome
+          if outcome == :dispatch && blocked
+            :blocked_on_dependency
+          elsif outcome == :dispatch && answers_pending
+            :wait_for_answers
+          else
+            outcome
+          end
         else
           # `recover_execute` / `recover_review` / `agent_running` /
           # `archived` / `error` plus any unknown future TaskActionKind

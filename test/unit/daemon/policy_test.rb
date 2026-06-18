@@ -56,6 +56,57 @@ class HiveDaemonPolicyTest < Minitest::Test
                                          command: "hive archive slug-a --from 8-finalize")
   end
 
+  # ── dependency gate ───────────────────────────────────────────────────
+
+  def test_blocked_advance_action_does_not_dispatch
+    assert_equal :blocked_on_dependency,
+                 decide(action: "ready_to_develop",
+                        command: "hive develop slug-a --from 3-plan",
+                        blocked: true)
+  end
+
+  def test_unblocked_advance_action_dispatches_normally
+    assert_equal :dispatch,
+                 decide(action: "ready_to_develop",
+                        command: "hive develop slug-a --from 3-plan",
+                        blocked: false)
+  end
+
+  def test_blocked_plan_approval_does_not_dispatch
+    assert_equal :blocked_on_dependency,
+                 decide(action: "needs_input",
+                        stage: "3-plan",
+                        command: "hive develop slug-a --from 3-plan",
+                        state_file_mtime: T0 - 600,
+                        last_dispatched_state_file_mtime: nil,
+                        blocked: true)
+  end
+
+  def test_blocked_edit_resume_records_baseline_before_gate
+    assert_equal :record_baseline,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil,
+                        blocked: true)
+  end
+
+  def test_blocked_edit_resume_does_not_dispatch_after_debounce
+    assert_equal :blocked_on_dependency,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: T0 - 600,
+                        blocked: true)
+  end
+
+  def test_blocked_does_not_suppress_merge_polling
+    assert_equal :poll_for_merge,
+                 decide(action: "ready_to_archive",
+                        command: "hive archive slug-a --from 8-finalize",
+                        blocked: true)
+  end
+
   # ── edit-resume: mtime-debounced re-runs ───────────────────────────────
 
   def test_needs_input_first_sight_records_baseline
@@ -372,7 +423,7 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   def decide(action:, command:, stage: nil, state_file_mtime: nil,
              last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
-             answers_pending: false)
+             answers_pending: false, blocked: false)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
@@ -381,7 +432,8 @@ class HiveDaemonPolicyTest < Minitest::Test
       last_dispatched_state_file_mtime: last_dispatched_state_file_mtime,
       now: now,
       edit_debounce_sec: edit_debounce_sec,
-      answers_pending: answers_pending
+      answers_pending: answers_pending,
+      blocked: blocked
     )
   end
 end

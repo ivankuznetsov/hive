@@ -63,7 +63,7 @@ module Hive
         ICON_WIDTH = 2
         ID_WIDTH = 4
         STAGE_WIDTH = 12
-        STATUS_WIDTH = 18
+        STATUS_WIDTH = 36
         AGE_WIDTH = 4
         SEPARATORS = 5 # spaces between the 6 columns
 
@@ -154,7 +154,8 @@ module Hive
             { name: inner_width - fixed_full, stage: STAGE_WIDTH, status: STATUS_WIDTH }
           elsif inner_width >= ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4 + name_min
             # Drop the stage column; separators reduce from 4 to 3.
-            { name: inner_width - (ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4), stage: 0, status: STATUS_WIDTH }
+            width_without_name = ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4
+            { name: inner_width - width_without_name, stage: 0, status: STATUS_WIDTH }
           elsif inner_width >= ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3 + name_min
             # Drop both stage and status.
             { name: inner_width - (ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3), stage: 0, status: 0 }
@@ -180,10 +181,19 @@ module Hive
         end
 
         def status_label(row)
+          return dependency_status(row) if row.blocked
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"
 
           row.action_label.to_s
+        end
+
+        def dependency_status(row)
+          if row.blocked_by.to_s.empty?
+            "⏸ blocked by #{row.depends_on} (unresolved)"
+          else
+            "⏸ blocked by #{row.blocked_by} (#{row.dependency_stage})"
+          end
         end
 
         def display_name(row)

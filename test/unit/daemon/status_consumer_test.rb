@@ -107,6 +107,33 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_parses_dependency_fields_and_coerces_blocked_to_boolean
+    task_blocked = task_row(slug: "dependent").merge(
+      "depends_on" => "base",
+      "blocked_by" => "base",
+      "dependency_stage" => "7-artifacts",
+      "blocked" => true
+    )
+    task_missing = task_row(slug: "legacy-payload")
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_blocked, task_missing ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+
+      assert result.ok
+      rows = result.rows.each_with_object({}) { |row, hash| hash[row.slug] = row }
+      dependent = rows.fetch("dependent")
+      assert_equal "base", dependent.depends_on
+      assert_equal "base", dependent.blocked_by
+      assert_equal "7-artifacts", dependent.dependency_stage
+      assert_equal true, dependent.blocked
+      assert_equal false, rows.fetch("legacy-payload").blocked
+    end
+  end
+
   def test_parses_multiple_projects_and_tasks
     payload = make_envelope(projects: [
       {

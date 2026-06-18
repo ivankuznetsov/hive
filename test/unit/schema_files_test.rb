@@ -121,7 +121,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 3,
+    assert_equal 4,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
@@ -142,6 +142,10 @@ class SchemaFilesTest < Minitest::Test
       slug: "probe",
       id: 42,
       display_name: "Probe",
+      depends_on: nil,
+      blocked_by: nil,
+      dependency_stage: nil,
+      blocked: false,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       marker_name: :waiting,

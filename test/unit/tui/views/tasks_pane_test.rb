@@ -16,11 +16,17 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 id: 42, display_name: nil,
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
+                depends_on: nil, blocked_by: nil, dependency_stage: nil,
+                blocked: false,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
       "id" => id,
       "display_name" => display_name,
+      "depends_on" => depends_on,
+      "blocked_by" => blocked_by,
+      "dependency_stage" => dependency_stage,
+      "blocked" => blocked,
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
@@ -127,6 +133,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "abc-001"
+  end
+
+  def test_blocked_row_status_shows_dependency
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "dependent-task", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "7-artifacts",
+                  blocked: true)
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_includes out, "⏸ blocked by base-task (7-artifacts)"
   end
 
   def test_recover_review_status_shows_marker_reason
@@ -335,7 +354,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   def test_error_status_falls_back_to_reason_when_exit_code_missing
-    # `panic` keeps the status string under the 18-char column width so
+    # `panic` keeps the status string under the fixed status column width so
     # the assertion compares against unrenderered text. Longer reasons
     # are truncated by the layout and a fragile substring assertion
     # would couple this test to STATUS_WIDTH; the renderer guarantee
@@ -598,8 +617,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   # ---- compute_layout adaptive column dropping ----
-  # The full 6-column layout needs ~53 inner cells (icon=2, id=4,
-  # stage=12, status=18, age=4, separators=5, name_min=8). Below that, columns
+  # The full 6-column layout needs ~71 inner cells (icon=2, id=4,
+  # stage=12, status=36, age=4, separators=5, name_min=8). Below that, columns
   # drop in priority order: stage first (mostly redundant with status),
   # then status. These tests pin each branch so a future refactor of
   # the threshold values can't silently regress narrow-terminal
@@ -607,14 +626,14 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # exercise the full-5-column branch via single-pane fallback.
 
   def test_compute_layout_full_columns_at_wide_inner_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(64)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(80)
     assert_operator layout[:name], :>=, 8
     assert_equal 12, layout[:stage]
-    assert_equal 18, layout[:status]
+    assert_equal 36, layout[:status]
   end
 
   def test_compute_layout_drops_stage_at_medium_narrow_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(45)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(60)
     assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
     assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
     assert_operator layout[:name], :>=, 8

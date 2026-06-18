@@ -245,7 +245,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
-          state_file: nil, folder: nil, marker_attrs: {})
+          state_file: nil, folder: nil, marker_attrs: {},
+          depends_on: nil, blocked_by: nil, dependency_stage: nil,
+          blocked: false)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
@@ -253,7 +255,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
       suggested_command: command, claude_pid_alive: claude_pid_alive,
-      live_task_lock: live_task_lock, marker_attrs: marker_attrs
+      live_task_lock: live_task_lock, marker_attrs: marker_attrs,
+      depends_on: depends_on, blocked_by: blocked_by,
+      dependency_stage: dependency_stage, blocked: blocked
     )
   end
 
@@ -272,6 +276,30 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
+  end
+
+  def test_blocked_dependency_row_does_not_dispatch
+    rows = [
+      row(
+        action: "ready_to_plan",
+        command: "hive plan s1 --from 2-brainstorm",
+        depends_on: "base-task",
+        blocked_by: "base-task",
+        dependency_stage: "7-artifacts",
+        blocked: true
+      )
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event
+    attrs = event.last
+    assert_equal "base-task", attrs[:depends_on]
+    assert_equal "base-task", attrs[:blocked_by]
+    assert_equal "7-artifacts", attrs[:dependency_stage]
   end
 
   def test_digest_scheduler_dispatches_global_digest_without_project_gate

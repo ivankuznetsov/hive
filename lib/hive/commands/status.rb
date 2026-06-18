@@ -6,6 +6,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/stages"
 require "hive/archive_filter"
+require "hive/dependencies"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -123,6 +124,7 @@ module Hive
           # external consumers (TUI, daemon, bots) read `diagnostic` off
           # every row. Schema mandates the field.
           rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
+          rows = annotate_dependencies(rows, project)
           rows = archive_rows(rows) if @archive
           out = base.merge("tasks" => rows.map { |r| task_payload(r) })
           # Always emit `legacy_stage_dirs` (default empty array) so
@@ -181,6 +183,10 @@ module Hive
           "slug" => row[:slug],
           "id" => row[:id],
           "display_name" => row[:display_name],
+          "depends_on" => row[:depends_on],
+          "blocked_by" => row[:blocked_by],
+          "dependency_stage" => row[:dependency_stage],
+          "blocked" => row[:blocked] == true,
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
@@ -343,6 +349,7 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
+        rows = annotate_dependencies(rows, project)
         if @archive
           render_archive_project(project, rows)
           return
@@ -364,7 +371,8 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
+            state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
+            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{state.ljust(24)} #{command} #{r[:age]}"
           end
         end
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
@@ -389,7 +397,8 @@ module Hive
         puts "  Archived"
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
-          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{row[:state_label].ljust(24)} #{command} #{row[:age]}"
+          state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
+          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{state.ljust(24)} #{command} #{row[:age]}"
         end
       end
 
@@ -404,6 +413,16 @@ module Hive
       def display_identity(row)
         id = row[:id] ? "##{row[:id]}" : "—"
         "#{id} #{row[:display_name] || row[:slug]}"
+      end
+
+      def dependency_indicator(row)
+        return nil unless row[:blocked]
+
+        if row[:unresolved_dependency]
+          "⏸ blocked by #{row[:depends_on]} (unresolved)"
+        else
+          "⏸ blocked by #{row[:blocked_by]} (#{row[:dependency_stage]})"
+        end
       end
 
       def render_legacy_stage_warning(legacy)
@@ -451,6 +470,7 @@ module Hive
                 slug: slug,
                 id: task.id,
                 display_name: task.display_name,
+                depends_on: task.depends_on,
                 folder: entry,
                 state_file: task.state_file,
                 worktree_path: worktree_path,
@@ -511,6 +531,32 @@ module Hive
           end
         end
         drop_transient_stage_moves(rows)
+      end
+
+      def annotate_dependencies(rows, project)
+        threshold_stage = Hive::Config.load(project.fetch("path")).fetch("dependency_gate_stage")
+        snapshot = rows.map do |row|
+          {
+            slug: row[:slug],
+            id: row[:id],
+            stage: row[:stage],
+            stage_index: row.fetch(:task).stage_index
+          }
+        end
+
+        rows.each do |row|
+          result = Hive::Dependencies.resolve(
+            depends_on: row[:depends_on],
+            tasks: snapshot,
+            threshold_stage: threshold_stage,
+            task: row
+          )
+          row[:blocked_by] = result.blocked_by
+          row[:dependency_stage] = result.dependency_stage
+          row[:blocked] = result.blocked
+          row[:unresolved_dependency] = result.unresolved
+        end
+        rows
       end
 
       # The production glob over a stage dir's task folders, extracted into its

@@ -1,0 +1,9 @@
+## [2026-06-15T23:09:55Z] wiki - audit residual babysitter dry-run HEAD docs
+
+**Action:** Refreshed wiki planning/documentation coverage after HEAD commit `5e8723fa`, a residual wiki commit that updated [[testing]], [[gaps]], and added the `20260615T225615Z-babysitter-dry-run-residual-audit` fragment. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent compiled [[log]] entries, and the latest babysitter fragments first. `qmd search "wiki refresh committed diff documentation coverage babysitter stub gh"` surfaced existing babysitter residual-audit context, and the configured master wiki path had no separate matching cross-project pattern.
+
+**Refresh:** Inspected HEAD commit `5e8723fa`, residual commits `2d15e9ee` and `6a6cf990`, and source commit `f12c46c7` against current `bin/hive-babysitter-stub-gh`, `bin/hive-babysitter-stub-git`, `lib/hive/babysitter/dry_run_env.rb`, and `test/unit/babysitter/dry_run_env_test.rb`. Confirmed the current source/test contract still matches the babysitter dry-run docs: wrapper launchers pin parent-resolved real binaries, the `gh` launcher passes only the parent-resolved config directory through `HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR`, the `gh` stub clears command-local config/home env before restoring that trusted path with `HOME=File::NULL`, and the `git` stub fail-closes on the current exec-capable env seams. Refreshed [[commands/babysit]] so its dry-run test summary names the private trusted-config override regression, and consolidated the repeated residual-audit live-smoke uncertainty in [[gaps]]. Page coverage stayed within existing pages, so [[index]] did not need a catalog update. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[gaps]]

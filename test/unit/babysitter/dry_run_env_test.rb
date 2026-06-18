@@ -97,14 +97,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_with_env_pins_gh_config_against_command_local_home
+  def test_with_env_isolates_gh_config_against_command_local_home
     with_tmp_dir do |dir|
       recording_binary(dir, "git")
       recording_env_binary(dir, "gh", %w[
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
       ])
       parent_home = File.join(dir, "parent-home")
-      trusted_config = File.join(parent_home, ".config", "gh")
       evil_trusted_config = File.join(dir, "evil-trusted-gh-config")
 
       with_env(
@@ -131,12 +130,24 @@ class BabysitterDryRunEnvTest < Minitest::Test
         end
       end
 
-      assert_equal <<~ENV_LOG, File.read(File.join(dir, "env.log"))
-        GH_CONFIG_DIR=#{trusted_config}
-        XDG_CONFIG_HOME=<unset>
-        HOME=#{File::NULL}
-        HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR=<unset>
-      ENV_LOG
+      recorded = File.read(File.join(dir, "env.log")).lines.map(&:chomp).to_h do |line|
+        line.split("=", 2)
+      end
+      home = recorded.fetch("HOME")
+      config_dir = recorded.fetch("GH_CONFIG_DIR")
+
+      assert_equal "<unset>", recorded.fetch("XDG_CONFIG_HOME")
+      assert_equal "<unset>", recorded.fetch("HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR")
+      refute_equal File::NULL, home, "HOME must not be /dev/null -- gh cannot resolve config there"
+      refute_equal parent_home, home, "parent HOME config must not be reused during gh passthrough"
+      refute_equal File.join(dir, "evil-home"), home, "command-local HOME must not survive passthrough"
+      refute_equal File.join(dir, "evil-gh-config"), config_dir,
+                   "command-local GH_CONFIG_DIR must not survive passthrough"
+      refute_equal evil_trusted_config, config_dir, "private trusted-config override must not survive passthrough"
+      assert File.directory?(home), "HOME should point at a real directory gh can use"
+      assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
+      assert_empty Dir.children(config_dir),
+                   "gh's config dir should start empty so no caller-controlled config is honored"
     end
   end
 
@@ -599,10 +610,27 @@ class BabysitterDryRunEnvTest < Minitest::Test
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
 
       assert status.success?, err
-      assert_equal(
-        env_keys.map { |key| key == "HOME" ? "HOME=#{File::NULL}" : "#{key}=<unset>" }.join("\n") + "\n",
-        File.read(File.join(dir, "env.log"))
-      )
+      recorded = File.read(File.join(dir, "env.log")).lines.map(&:chomp).to_h do |line|
+        line.split("=", 2)
+      end
+
+      (env_keys - %w[HOME GH_CONFIG_DIR]).each do |key|
+        assert_equal "<unset>", recorded.fetch(key), "#{key} should be scrubbed before gh passthrough"
+      end
+
+      # gh has no GIT_CONFIG_GLOBAL=/dev/null-style "no config" sentinel: HOME=/dev/null leaves it
+      # resolving /dev/null/.config/gh (ENOTDIR). The stub instead points HOME and GH_CONFIG_DIR at
+      # a fresh, empty, writable directory so gh reads no attacker config yet can still write state.
+      home = recorded.fetch("HOME")
+      config_dir = recorded.fetch("GH_CONFIG_DIR")
+      refute_equal File::NULL, home, "HOME must not be /dev/null -- gh cannot resolve a config dir under it"
+      refute_equal File.join(dir, "evil-home"), home, "caller-supplied HOME must not survive passthrough"
+      refute_equal File.join(dir, "evil-gh-config"), config_dir,
+                   "caller-supplied GH_CONFIG_DIR must not survive passthrough"
+      assert File.directory?(home), "HOME should point at a real directory gh can use"
+      assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
+      assert_empty Dir.children(config_dir),
+                   "gh's config dir should start empty so no attacker-controlled config is honored"
     end
   end
 

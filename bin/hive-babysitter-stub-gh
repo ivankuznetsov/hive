@@ -262,19 +262,75 @@ def read_only?(rest)
   end
 end
 
-def external_launcher_option?(rest)
-  return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
-  return false unless [
-    %w[pr checks],
-    %w[pr diff],
-    %w[pr list],
-    %w[pr view],
-    %w[repo view],
-    %w[run view],
-    %w[workflow view]
-  ].include?(rest[0, 2])
+GH_BROWSER_COMMAND_VALUE_OPTIONS = {
+  %w[pr checks] => {
+    short: %w[i q t R],
+    long: %w[--interval --jq --json --template --repo]
+  },
+  %w[pr diff] => {
+    short: %w[e R],
+    long: %w[--color --exclude --repo]
+  },
+  %w[pr list] => {
+    short: %w[a A B H q l L S s t R],
+    long: %w[
+      --app --assignee --author --base --head --jq --json --label --limit --search --state --template --repo
+    ]
+  },
+  %w[pr view] => {
+    short: %w[q t R],
+    long: %w[--jq --json --template --repo]
+  },
+  %w[repo view] => {
+    short: %w[b q t],
+    long: %w[--branch --jq --json --template]
+  },
+  %w[run view] => {
+    short: %w[a j q t R],
+    long: %w[--attempt --job --jq --json --template --repo]
+  },
+  %w[workflow view] => {
+    short: %w[r R],
+    long: %w[--ref --repo]
+  }
+}.freeze
 
-  rest.drop(2).any? { |arg| arg.start_with?("-") && !arg.start_with?("--") && arg.include?("w") }
+def short_option_cluster_has_web?(arg, value_options)
+  chars = arg[1..].chars
+  chars.each_with_index do |char, index|
+    return [ true, false ] if char == "w"
+    return [ false, index == chars.length - 1 ] if value_options.include?(char)
+  end
+
+  [ false, false ]
+end
+
+def external_launcher_option?(rest)
+  spec = GH_BROWSER_COMMAND_VALUE_OPTIONS[rest[0, 2]]
+  return false unless spec
+
+  index = 2
+  while index < rest.length
+    arg = rest[index]
+
+    if arg == "--"
+      break
+    elsif arg == "--web" || arg.start_with?("--web=")
+      return true
+    elsif arg.start_with?("--")
+      name = arg.split("=", 2).first
+      index += spec.fetch(:long).include?(name) && !arg.include?("=") ? 2 : 1
+    elsif arg.start_with?("-") && arg != "-"
+      has_web, consumes_next = short_option_cluster_has_web?(arg, spec.fetch(:short))
+      return true if has_web
+
+      index += consumes_next ? 2 : 1
+    else
+      index += 1
+    end
+  end
+
+  false
 end
 
 rest = stripped_global_options(argv)

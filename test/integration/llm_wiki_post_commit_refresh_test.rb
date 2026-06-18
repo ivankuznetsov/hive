@@ -17,8 +17,9 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     @dir = Dir.mktmpdir("llmwiki-hook-")
     @main = File.join(@dir, "main")
     @wt = File.join(@dir, "wt")
-    @stub = File.join(@dir, "stub-refresh.sh")
+    @stub = File.join(@dir, "stub bin", "stub-refresh.sh")
 
+    FileUtils.mkdir_p(File.dirname(@stub))
     File.write(@stub, <<~STUB)
       #!/usr/bin/env bash
       wiki_root="$1"

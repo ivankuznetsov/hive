@@ -115,7 +115,7 @@ run_refresh() {
   # (wiki_root, prompt) instead of the real agent. Lets tests exercise the
   # worktree-redirect/lock/commit plumbing without a live model run.
   if [ -n "${LLM_WIKI_REFRESH_CMD:-}" ]; then
-    run_without_git_env ${LLM_WIKI_REFRESH_CMD} "$wiki_root" "$full_prompt" >>"$log_file" 2>&1 || true
+    run_without_git_env "$LLM_WIKI_REFRESH_CMD" "$wiki_root" "$full_prompt" >>"$log_file" 2>&1 || true
     return 0
   fi
 

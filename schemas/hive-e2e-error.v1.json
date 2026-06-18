@@ -11,7 +11,7 @@
     "ok": { "const": false },
     "error_kind": {
       "type": "string",
-      "enum": ["usage", "no_scenarios", "preflight", "run_failed", "missing_repro", "error"]
+      "enum": ["usage", "no_scenarios", "preflight", "run_failed", "missing_repro", "unusable_repro", "error"]
     },
     "message": { "type": "string" },
     "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },

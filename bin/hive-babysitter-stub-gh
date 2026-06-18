@@ -35,16 +35,95 @@ end
 
 argv = ARGV.dup
 
+# `gh --repo`/`-R` accept `[HOST/]OWNER/REPO`, a full URL, or an scp-style
+# `git@host:owner/repo`; only the bare `OWNER/REPO` slug (exactly one slash and
+# no host marker) keeps gh on its default host. Any colon flags both the
+# `scheme://` URL and the scp `host:owner/repo` forms — the latter has a single
+# slash, so the slash count alone would wave it through to the real gh against an
+# agent-chosen host. Anything else carries an agent-chosen host.
+def repo_value_selects_host?(value)
+  value = value.to_s
+  value.include?(":") || value.count("/") != 1
+end
+
+# Default-deny any host override anywhere in argv, not just in the leading
+# globals. The gate classifies the *stripped* argv but `exec`s the *original*
+# argv, so a host-qualified `--repo`/`-R`/`--repo=` value, a glued short
+# `-R<val>`/`-R=<val>` (pflag strips the `=`), or an `--hostname`/`--hostname=`
+# selector would otherwise reach the real gh against an agent-chosen host even on
+# an allowlisted read — whether it leads the call or trails the subcommand.
+# (`auth status`'s short `-h`/`-h<host>` is handled in auth_status_read_only?,
+# since `-h` means `--help` on other gh subcommands.)
+def host_override?(argv)
+  argv.each_with_index do |arg, index|
+    case arg
+    when "-R", "--repo"
+      return true if repo_value_selects_host?(argv[index + 1])
+    when /\A--repo=(.*)\z/m
+      return true if repo_value_selects_host?(Regexp.last_match(1))
+    when /\A-R=?(.+)\z/m
+      return true if repo_value_selects_host?(Regexp.last_match(1))
+    when "--hostname", /\A--hostname=/
+      return true
+    end
+  end
+  false
+end
+
+# `host_override?` only inspects `-R`/`--repo`/`--hostname` flags, but the same
+# read-only subcommands accept the target as a *positional* operand that carries
+# an agent-chosen host the flag gate never sees: `gh repo view [HOST/]OWNER/REPO`
+# (or a URL / scp `git@host:owner/repo`) and `gh pr {view,checks,diff} <url>`.
+# Reject those positionals too. The host-qualified slug rule (a colon or a second
+# slash) is scoped to `repo view`, because `gh api repos/owner/repo` endpoints and
+# `gh pr view feature/branch` refs legitimately carry slashes; for pr reads only a
+# full `scheme://host` URL names a host.
+def positional_host_override?(rest)
+  case rest[0, 2]
+  when %w[repo view]
+    target_operands(rest.drop(2)).any? { |arg| arg.include?(":") || arg.count("/") > 1 }
+  when %w[pr view], %w[pr checks], %w[pr diff]
+    target_operands(rest.drop(2)).any? { |arg| arg.include?("://") }
+  else
+    false
+  end
+end
+
+# Yield the bare positional operands, skipping flags and the separate value of
+# gh's value-taking read flags so a `--branch feature/x/y` or `--json a,b` value
+# is not mistaken for a host-qualified target. Glued `--flag=val` / `-fval` forms
+# start with `-` and are skipped as flags; their value never stands alone.
+def target_operands(operands)
+  positionals = []
+  index = 0
+  while index < operands.length
+    arg = operands[index]
+    if %w[-R --repo -b --branch --json -q --jq -t --template].include?(arg)
+      index += 2
+    elsif arg.start_with?("-")
+      index += 1
+    else
+      positionals << arg
+      index += 1
+    end
+  end
+  positionals
+end
+
 def stripped_global_options(argv)
   rest = argv.dup
   loop do
     case rest.first
-    when "-R", "--repo", "--hostname"
+    when "-R", "--repo"
       rest.shift(2)
     when /\A--repo=/
       rest.shift
-    when /\A-/
+    when /\A-R=?/
       rest.shift
+    when /\A-/
+      # Unknown leading globals may take values; fail closed instead of stripping
+      # them and reclassifying the remaining argv as a safe subcommand.
+      return argv
     else
       break
     end
@@ -144,10 +223,24 @@ def auth_status_shows_token?(arg)
   false
 end
 
+# `gh auth status` also takes `-h`/`--hostname <host>` to target a specific host.
+# In dry-run the agent must not be able to redirect the authenticated status probe
+# to an arbitrary host, so any hostname selector disqualifies the read: the long
+# `--hostname`/`--hostname=` forms, the glued `-h<host>`, and an `h` reached inside
+# a boolean shorthand cluster (e.g. `-ah`), where pflag consumes the rest as the
+# hostname value.
+def auth_status_selects_host?(arg)
+  return true if arg == "--hostname" || arg.start_with?("--hostname=")
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  arg[1..].each_char { |char| return true if char == "h" }
+  false
+end
+
 def auth_status_read_only?(rest)
   return false unless rest[1] == "status"
 
-  rest.drop(2).none? { |arg| auth_status_shows_token?(arg) }
+  rest.drop(2).none? { |arg| auth_status_shows_token?(arg) || auth_status_selects_host?(arg) }
 end
 
 def read_only?(rest)
@@ -186,7 +279,7 @@ end
 
 rest = stripped_global_options(argv)
 
-unless read_only?(rest) && !external_launcher_option?(rest)
+unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv) && !positional_host_override?(rest)
   log_skip(argv)
   warn "[dry-run] gh #{escaped_argv(argv)} skipped"
   exit 0
@@ -199,9 +292,15 @@ if real.empty?
 end
 
 trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
+# The argv gate (host_override?) only inspects argv; gh also reads the target host,
+# repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
+# allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
+# GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN supply the credentials for it, so scrub
+# them too, the same host-redirect threat the argv gate defends against.
 %w[
   GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
   GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
+  GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 ].each { |key| ENV.delete(key) }
 ENV["GH_CONFIG_DIR"] = trusted_config_dir unless trusted_config_dir.empty?
 ENV["HOME"] = File::NULL

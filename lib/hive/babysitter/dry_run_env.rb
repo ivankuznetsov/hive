@@ -21,7 +21,7 @@ module Hive
         # themselves recursively until the babysitter timeout.
         real_git = which("git").to_s
         real_gh = which("gh").to_s
-        overlay = prepare_overlay(worktree_path, real_git: real_git, real_gh: real_gh)
+        overlay = prepare_overlay(worktree_path, real_git: real_git, real_gh: real_gh, gh_config_dir: gh_config_dir)
         old = {
           "PATH" => ENV["PATH"],
           "HIVE_BABYSITTER_DRY_RUN_LOG" => ENV["HIVE_BABYSITTER_DRY_RUN_LOG"],
@@ -38,24 +38,49 @@ module Hive
         FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
       end
 
-      def prepare_overlay(worktree_path, real_git:, real_gh:)
+      def prepare_overlay(worktree_path, real_git:, real_gh:, gh_config_dir: nil)
         overlay = File.join(worktree_path, OVERLAY_DIRNAME)
         FileUtils.mkdir_p(overlay)
         root = File.expand_path("../../..", __dir__)
         {
-          "git" => [ File.join(root, "bin", "hive-babysitter-stub-git"), "HIVE_BABYSITTER_REAL_GIT", real_git ],
-          "gh" => [ File.join(root, "bin", "hive-babysitter-stub-gh"), "HIVE_BABYSITTER_REAL_GH", real_gh ]
-        }.each do |name, (target, env_name, real_path)|
+          "git" => [
+            File.join(root, "bin", "hive-babysitter-stub-git"),
+            { "HIVE_BABYSITTER_REAL_GIT" => real_git }
+          ],
+          "gh" => [
+            File.join(root, "bin", "hive-babysitter-stub-gh"),
+            {
+              "HIVE_BABYSITTER_REAL_GH" => real_gh,
+              "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => gh_config_dir
+            }
+          ]
+        }.each do |name, (target, env)|
           link = File.join(overlay, name)
           FileUtils.rm_f(link)
+          env_setup = env.map do |env_name, value|
+            value.nil? ? "ENV.delete(#{env_name.dump})" : "ENV[#{env_name.dump}] = #{value.to_s.dump}"
+          end.join("\n")
           File.write(link, <<~RUBY)
             #!/usr/bin/env ruby
-            ENV[#{env_name.dump}] = #{real_path.to_s.dump}
+            #{env_setup}
             exec(#{target.dump}, *ARGV)
           RUBY
           FileUtils.chmod("+x", link)
         end
         overlay
+      end
+
+      def gh_config_dir
+        gh_config = ENV["GH_CONFIG_DIR"].to_s
+        return gh_config unless gh_config.empty?
+
+        xdg_config = ENV["XDG_CONFIG_HOME"].to_s
+        return File.join(xdg_config, "gh") unless xdg_config.empty?
+
+        home = ENV["HOME"].to_s
+        return if home.empty?
+
+        File.join(home, ".config", "gh")
       end
 
       def which(name)

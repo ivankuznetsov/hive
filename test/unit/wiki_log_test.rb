@@ -84,6 +84,20 @@ class WikiLogTest < Minitest::Test
     end
   end
 
+  def test_compile_bang_raises_hive_error_when_log_unreadable_after_success
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "wiki"))
+      FileUtils.mkdir_p(File.join(dir, ".llm-wiki"))
+      # A compiler that exits 0 but writes no log.md must surface a Hive::Error,
+      # not a raw Errno::ENOENT, so the contract stays consistent.
+      File.write(File.join(dir, ".llm-wiki", "compile-log.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod("+x", File.join(dir, ".llm-wiki", "compile-log.sh"))
+
+      error = assert_raises(Hive::Error) { Hive::WikiLog.compile!(dir) }
+      assert_match(/log\.md is unreadable/, error.message)
+    end
+  end
+
   def test_compile_drops_template_prose_without_legacy_entries
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "wiki", "log.d"))

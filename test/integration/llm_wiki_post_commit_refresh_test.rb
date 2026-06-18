@@ -93,6 +93,53 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     FileUtils.rm_rf(lock) if lock
   end
 
+  def test_main_checkout_commit_commits_wiki_scoped_on_main
+    # The non-linked path: a commit on the main checkout itself still self-commits
+    # the wiki, scoped to wiki/, leaving nothing else dirty.
+    File.write(File.join(@main, "bin", "tool.sh"), "echo hi\necho main-change\n")
+    git(@main, "add -A")
+    git(@main, "commit -qm 'feat: change on main'")
+
+    run_refresh_from(@main)
+
+    assert_match(/docs\(wiki\): post-commit refresh for main@/, git(@main, "log -1 --pretty=%s"),
+                 "a main-checkout commit must still produce the scoped wiki refresh commit")
+    assert_includes git(@main, "show --stat --pretty=format: HEAD"), "wiki/log.d/stub-entry.md"
+    # Nothing outside wiki/ should be left dirty (the refresh log is gitignored/untracked noise only).
+    dirty = git(@main, "status --porcelain").lines.reject { |l| l.include?(".llm-wiki/post-commit-refresh.log") }
+    assert_empty dirty.reject { |l| l.strip.empty? },
+                 "the refresh must not leave tracked dirt outside wiki/ on the main checkout"
+  end
+
+  def test_recursion_guards_present_in_script
+    # The wiki commit must not re-trigger the post-commit hook. Both guards must
+    # stay on the commit invocation; assert their presence so a refactor that
+    # drops either is caught without risking a runtime commit loop in the test.
+    script = File.read(SCRIPT)
+    assert_match(/core\.hooksPath=\/dev\/null/, script,
+                 "the wiki commit must disable hooks so it can't re-trigger the refresh")
+    assert_match(/HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \\\n\s*git -C "\$wiki_root"/, script,
+                 "the wiki commit must also set HIVE_SKIP_LLM_WIKI_POST_COMMIT")
+    refute_match(/git .*push/, script, "the refresh must never push")
+  end
+
+  def test_generated_scripts_match_committed_and_template_copies
+    # The committed .llm-wiki/*.sh are generated artifacts; the Ruby Scripts
+    # generator and the templates/ source must all agree, or `hive init`/reinstall
+    # would silently revert the worktree-safe behavior.
+    require "hive/llm_wiki_bootstrap/scripts"
+    root = File.expand_path("../..", __dir__)
+    {
+      "post-commit-refresh.sh" => Hive::LlmWikiBootstrap::Scripts.post_commit_refresh,
+      "compile-log.sh" => Hive::LlmWikiBootstrap::Scripts.compile_log
+    }.each do |name, generated|
+      committed = File.read(File.join(root, ".llm-wiki", name))
+      template = File.read(File.join(root, "templates", "llm-wiki", name))
+      assert_equal template, generated, "Scripts must emit templates/llm-wiki/#{name} verbatim"
+      assert_equal template, committed, "committed .llm-wiki/#{name} must match templates/llm-wiki/#{name}"
+    end
+  end
+
   private
 
   def run_refresh_from(tree)

@@ -97,11 +97,14 @@ module Hive
       llm_wiki_dir = File.join(project_root, ".llm-wiki")
       refresh_path = File.join(llm_wiki_dir, "refresh-wiki.sh")
       post_commit_path = File.join(llm_wiki_dir, "post-commit-refresh.sh")
+      compile_log_path = File.join(llm_wiki_dir, "compile-log.sh")
 
       write_file(refresh_path, Scripts.refresh_wiki)
-      write_file(post_commit_path, Scripts.post_commit_refresh(File.basename(project_root)))
+      write_file(post_commit_path, Scripts.post_commit_refresh)
+      write_file(compile_log_path, Scripts.compile_log)
       File.chmod(0o755, refresh_path)
       File.chmod(0o755, post_commit_path)
+      File.chmod(0o755, compile_log_path)
     end
 
     def ensure_post_commit_hook(project_root)

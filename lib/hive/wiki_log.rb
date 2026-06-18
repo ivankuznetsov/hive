@@ -1,31 +1,33 @@
 require "fileutils"
+require "open3"
 
 module Hive
+  # Thin Ruby wrapper over the single shared changelog compiler,
+  # `.llm-wiki/compile-log.sh`. The shell script is the one source of truth for
+  # the log.md format (shared verbatim with the llm-wiki plugin and the
+  # post-commit hook); this module just exposes it to Ruby callers (`hive wiki`).
   module WikiLog
     HEADER = "# Wiki Changelog\n\nAppend-only log of all wiki operations.\n".freeze
     BEGIN_MARKER = "<!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->".freeze
     END_MARKER = "<!-- END GENERATED WIKI LOG FRAGMENTS -->".freeze
+    SCRIPT_RELATIVE = File.join(".llm-wiki", "compile-log.sh").freeze
 
     module_function
 
     def compile(project_root)
       project_root = File.expand_path(project_root)
-      log_path = File.join(project_root, "wiki", "log.md")
-      fragments = read_fragments(project_root)
-      legacy = legacy_body(File.exist?(log_path) ? File.read(log_path) : "")
+      out, err, status = Open3.capture3("bash", compiler_path(project_root), project_root, "--print")
+      raise Hive::Error, "wiki log compile failed (#{status.exitstatus}): #{err.strip}" unless status.success?
 
-      sections = [ HEADER.rstrip, generated_block(fragments) ]
-      sections << legacy unless legacy.empty?
-      "#{sections.join("\n\n")}\n"
+      out
     end
 
     def compile!(project_root)
       project_root = File.expand_path(project_root)
-      log_path = File.join(project_root, "wiki", "log.md")
-      FileUtils.mkdir_p(File.dirname(log_path))
-      content = compile(project_root)
-      File.write(log_path, content)
-      content
+      _out, err, status = Open3.capture3("bash", compiler_path(project_root), project_root)
+      raise Hive::Error, "wiki log compile! failed (#{status.exitstatus}): #{err.strip}" unless status.success?
+
+      File.read(File.join(project_root, "wiki", "log.md"))
     end
 
     def stale?(project_root)
@@ -39,32 +41,15 @@ module Hive
       Dir[File.join(project_root, "wiki", "log.d", "*.md")].sort.reverse
     end
 
-    def read_fragments(project_root)
-      fragment_paths(project_root).filter_map do |path|
-        body = File.read(path).strip
-        body.empty? ? nil : body
-      end
-    end
+    # Resolve the shared compiler: prefer the project's own bootstrapped copy,
+    # otherwise fall back to hive's bundled copy so the compiler works against any
+    # project root (including throwaway dirs that were never bootstrapped). A
+    # genuinely missing script surfaces as a non-zero exit from `compile`.
+    def compiler_path(project_root)
+      project_copy = File.join(project_root, SCRIPT_RELATIVE)
+      return project_copy if File.exist?(project_copy)
 
-    def generated_block(fragments)
-      body = fragments.join("\n\n")
-      if body.empty?
-        "#{BEGIN_MARKER}\n#{END_MARKER}"
-      else
-        "#{BEGIN_MARKER}\n#{body}\n#{END_MARKER}"
-      end
-    end
-
-    def legacy_body(existing)
-      body = existing.to_s.dup
-      body.sub!(/#{Regexp.escape(BEGIN_MARKER)}.*?#{Regexp.escape(END_MARKER)}\n*/m, "")
-      body.sub!(/\A# Wiki Changelog\s*\n+/m, "")
-      body = body.lstrip
-      unless body.start_with?("## ")
-        first_entry = body.index(/^## /)
-        body = first_entry ? body[first_entry..] : ""
-      end
-      body.strip
+      File.expand_path("../../#{SCRIPT_RELATIVE}", __dir__)
     end
   end
 end

@@ -190,6 +190,14 @@ PROMPT
 fi
 
 if [ "$ran_refresh" -eq 1 ]; then
+  # Recompile wiki/log.md from the wiki/log.d/*.md fragments the refresh agent
+  # wrote (single shared compiler). Fragments are append-only and conflict-free
+  # across worktrees; the compiled log.md is a derived artifact regenerated here
+  # on the main checkout so it never has to be hand-edited or merged.
+  if [ -x "$wiki_root/.llm-wiki/compile-log.sh" ]; then
+    bash "$wiki_root/.llm-wiki/compile-log.sh" "$wiki_root" >>"$log_file" 2>&1 || true
+  fi
+
   if command -v qmd >/dev/null 2>&1; then
     ( cd "$wiki_root" && run_qmd update ) >>"$log_file" 2>&1 || true
     ( cd "$wiki_root" && run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 ) >>"$log_file" 2>&1 || true

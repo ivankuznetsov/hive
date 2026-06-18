@@ -516,25 +516,35 @@ class HiveTuiClipboardTest < Minitest::Test
   end
 
   def test_default_shim_capture3_success_and_timeout_paths
-    out, err, status = Hive::Tui::Clipboard::DefaultShim.capture3(
-      [ RbConfig.ruby, "-e", "STDOUT.write('abc'); STDERR.write('err')" ],
-      timeout: 2,
-      max_bytes: nil
-    )
+    with_tmp_dir do |dir|
+      emitter = File.join(dir, "emit")
+      File.write(emitter, "#!/bin/sh\nprintf abc\nprintf err >&2\n")
+      File.chmod(0o755, emitter)
 
-    assert_equal "abc", out
-    assert_equal "err", err
-    assert status.success?
+      out, err, status = Hive::Tui::Clipboard::DefaultShim.capture3(
+        [ emitter ],
+        timeout: 2,
+        max_bytes: nil
+      )
 
-    out, err, status = Hive::Tui::Clipboard::DefaultShim.capture3(
-      [ RbConfig.ruby, "-e", "sleep 1" ],
-      timeout: 0.05,
-      max_bytes: 8
-    )
+      assert_equal "abc", out
+      assert_equal "err", err
+      assert status.success?
 
-    assert_equal "", out
-    assert_equal "", err
-    assert_same Hive::Tui::Clipboard::TIMEOUT_STATUS, status
+      sleeper = File.join(dir, "sleep")
+      File.write(sleeper, "#!/bin/sh\nsleep 1\n")
+      File.chmod(0o755, sleeper)
+
+      out, err, status = Hive::Tui::Clipboard::DefaultShim.capture3(
+        [ sleeper ],
+        timeout: 0.05,
+        max_bytes: 8
+      )
+
+      assert_equal "", out
+      assert_equal "", err
+      assert_same Hive::Tui::Clipboard::TIMEOUT_STATUS, status
+    end
   end
 
   def test_default_shim_read_capped_includes_one_overflow_byte_and_drains

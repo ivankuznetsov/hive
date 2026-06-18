@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-15
+updated: 2026-06-16
 tags: [commands, api]
 ---
 
@@ -154,6 +154,11 @@ last recognized JSON boolean flag, matching the main CLI wrapper. Successful
 `--json` surfaces are single-document stdout
 contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 `hive-e2e-clean`.
+
+The replay subcommand stays a config-gated harness action: a missing stored
+`repro.sh` and an existing but non-regular or non-executable `repro.sh` both
+exit `78`; JSON mode distinguishes them as `missing_repro` and
+`unusable_repro`, respectively.
 
 ## Backlinks
 

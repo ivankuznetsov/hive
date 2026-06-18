@@ -680,6 +680,26 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_allows_w_inside_value_taking_read_options
+    with_tmp_dir do |dir|
+      real_gh = recording_binary(dir, "real-gh")
+      @real_log = File.join(dir, "real.log")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      assert_passes env, "gh", "pr", "diff", "42", "-eworkflow.yml"
+      assert_passes env, "gh", "pr", "diff", "42", "-e", "workflow.yml"
+      assert_passes env, "gh", "pr", "list", "-lwip"
+      assert_passes env, "gh", "pr", "list", "-l", "wip"
+      assert_passes env, "gh", "pr", "view", "42", "-qweb"
+      assert_passes env, "gh", "pr", "view", "42", "-q", "web"
+      assert_passes env, "gh", "pr", "list", "--search", "-wip"
+      assert_passes env, "gh", "pr", "list", "--search=-wip"
+    end
+  end
+
   def test_gh_api_cache_option_is_skipped_to_avoid_local_cache_writes
     with_tmp_dir do |dir|
       cache_home = File.join(dir, "cache")

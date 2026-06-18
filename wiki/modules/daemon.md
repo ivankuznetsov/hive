@@ -620,7 +620,10 @@ Behavior by skew (both `StatusConsumer` and `Hive::Bot::StatusWatcher`):
   (see [[commands/status]] and ADR-028 carve-out in [[decisions]]), so a
   newer payload is still readable. The consumer returns `ok: true` and
   carries a non-fatal `Result#warning`; the dispatcher logs it once per
-  tick as `:status_schema_skew` and keeps dispatching. If best-effort
+  tick as `:status_warning` (a neutral name — the same channel also
+  carries status-command stderr breadcrumbs like a fail-open dependency
+  gate or dropped `depends_on`, so it is intentionally not skew-specific)
+  and keeps dispatching. If best-effort
   extraction (`extract_rows`/`extract_projects`) genuinely throws, it
   degrades to the actionable failure `hive status: envelope schema vN is
   newer than this process (vM); restart the hive daemon to pick up the new

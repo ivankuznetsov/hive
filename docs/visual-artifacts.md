@@ -66,8 +66,12 @@ in hivebox.
 Recommended tools where artifacts agents run:
 
 - UI/browser: agent-browser or Playwright with a browser installed.
-- TUI/CLI: asciinema or vhs plus ffmpeg for GIF output.
+- TUI/CLI: `vhs` (records straight to GIF), or `asciinema` to record a `.cast`
+  plus `agg` to render that `.cast` to a GIF. `ffmpeg` cannot read an asciinema
+  `.cast`, so it is not a GIF encoder for terminal recordings on its own.
 
-The hivebox Docker image includes `asciinema` and `ffmpeg`. Browser capture
-tools can still vary by project and agent environment; absence records a
-failed capture rather than failing the pipeline.
+The hivebox Docker image includes `asciinema` and `ffmpeg` but no terminal-GIF
+encoder (`agg`/`vhs`), so an in-box TUI/CLI demo records a `.cast` and then
+writes a `failed` capture unless the agent installs `agg` or `vhs`. Browser
+capture tools also vary by project and agent environment; a missing tool
+records a failed capture rather than failing the pipeline.

@@ -246,8 +246,10 @@ seconds, drives Chromium through Playwright, and writes
 `packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
 the gem builds/installs from `/app`; the Rails app bundles and precompiles
 assets (propshaft — no node build) at `/app/web` with a dummy build-time
-secret. The image includes `asciinema` and `ffmpeg` for artifacts-stage
-terminal capture/GIF conversion; browser capture still depends on the
+secret. The image includes `asciinema` (records a terminal `.cast`) and
+`ffmpeg`, but NOT a terminal-GIF encoder (`agg`/`vhs`) — `ffmpeg` cannot read a
+`.cast`, so an in-box TUI/CLI demo records a `.cast` and then writes a `failed`
+capture unless the agent installs `agg`/`vhs`. Browser capture depends on the
 project/agent environment having agent-browser or Playwright available, and
 missing tools record a failed media manifest instead of failing the pipeline.
 The image sets git's system credential helper for `https://github.com`

@@ -122,8 +122,9 @@ These are not gems but the CLI tools the runtime invokes:
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
 | `npm` | any recent npm with Node.js | installer for the QMD npm package; Hive reports missing npm but does not install Node.js/npm itself |
-| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed, and the artifacts prompt can use it for terminal GIF demos |
-| `ffmpeg` | any recent | optional media conversion support for artifacts-stage GIF demos and manual `web/script/record_box_demo.rb` output |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
+| `ffmpeg` | any recent | media conversion for manual `web/script/record_box_demo.rb` output (webm/mp4). NOT a terminal-GIF encoder: it cannot read an asciinema `.cast`, so it does not turn TUI recordings into GIFs on its own |
+| `agg` / `vhs` | not shipped in the hivebox image | the terminal-GIF encoders for artifacts-stage TUI/CLI demos (`agg` renders an asciinema `.cast`; `vhs` records straight to GIF). Absent in-box, so a TUI/CLI demo degrades to a `failed` capture unless the agent installs one |
 | agent-browser or Playwright | project/environment specific | optional UI visual capture support for the artifacts prompt; absence records a failed media manifest rather than failing the stage |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.

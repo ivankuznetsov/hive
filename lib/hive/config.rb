@@ -360,8 +360,9 @@ module Hive
         "session_secret_file" => nil
       },
       # Optional hosted screenshot publishing for 7-artifacts visual
-      # manifests. Tokens are operator-global and may be supplied only via
-      # HIVE_SCREENOTE_API_TOKEN; the agent never receives them.
+      # manifests. Tokens are operator-global and may be supplied via the
+      # global config (screenote.api_token) or HIVE_SCREENOTE_API_TOKEN; the
+      # agent never receives them.
       "screenote" => {
         "base_url" => nil,
         "api_token" => nil

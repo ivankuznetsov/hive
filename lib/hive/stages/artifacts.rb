@@ -10,6 +10,14 @@ module Hive
     module Artifacts
       module_function
 
+      # Aggregate wall-clock budget for the synchronous screenote upload loop.
+      # Each request is bounded (open 10s / read 60s) but the loop runs inside
+      # the daemon dispatch cycle, so several stills against a slow endpoint
+      # could otherwise serialize to N x 60s of blocking. Stop starting new
+      # uploads once this is exceeded; unfinished stills are retried on a later
+      # run (their screenote_url stays blank).
+      SCREENOTE_UPLOAD_BUDGET_SEC = 120
+
       def run!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         marker = Hive::Markers.current(task.state_file)
@@ -81,7 +89,13 @@ module Hive
 
         changed = false
         items = manifest["items"].is_a?(Array) ? manifest["items"] : []
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SCREENOTE_UPLOAD_BUDGET_SEC
         items.each do |item|
+          if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+            warn "[hive] screenote upload budget (#{SCREENOTE_UPLOAD_BUDGET_SEC}s) exceeded; " \
+                 "leaving remaining stills for a later run"
+            break
+          end
           next unless upload_item_to_screenote?(item)
 
           file_path = media_item_path(task, item["file"])
@@ -98,6 +112,12 @@ module Hive
         File.write(manifest_path, "#{JSON.pretty_generate(manifest)}\n") if changed
       rescue JSON::ParserError => e
         warn "[hive] media manifest is not valid JSON: #{e.message}"
+      rescue Hive::ConfigError => e
+        # A misconfigured screenote endpoint (e.g. a fat-fingered
+        # HIVE_SCREENOTE_BASE_URL) must not raise into the pipeline, but it is
+        # an operator error distinct from a transient upload blip — warn loudly
+        # and specifically so it isn't flattened into the generic message.
+        warn "[hive] screenote is misconfigured; skipping uploads: #{e.message}"
       rescue StandardError => e
         warn "[hive] screenote manifest processing failed: #{e.class}: #{e.message}"
       end
@@ -127,10 +147,22 @@ module Hive
         return nil if name.empty? || File.basename(name) != name
 
         media_dir = File.expand_path(File.join(task.folder, "media"))
-        path = File.expand_path(File.join(media_dir, name))
-        return nil unless path.start_with?("#{media_dir}#{File::SEPARATOR}")
+        return nil unless File.directory?(media_dir)
 
-        path
+        # Resolve symlinks on both sides and require the real target to stay
+        # under the real media dir, so an agent-produced `media/01-home.png`
+        # symlink can't exfiltrate an arbitrary readable host file to
+        # screenote. Mirrors the web controller's resolved_media_path.
+        media_root = File.realpath(media_dir)
+        candidate = File.join(media_root, name)
+        return nil unless File.file?(candidate)
+
+        real = File.realpath(candidate)
+        return nil unless real.start_with?("#{media_root}#{File::SEPARATOR}")
+
+        real
+      rescue SystemCallError
+        nil
       end
     end
   end

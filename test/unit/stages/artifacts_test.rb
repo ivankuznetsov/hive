@@ -1,6 +1,8 @@
 require "test_helper"
 require "json"
+require "hive/config"
 require "hive/markers"
+require "hive/screenote_uploader"
 require "hive/stages/artifacts"
 require "hive/task"
 
@@ -156,13 +158,21 @@ class StagesArtifactsTest < Minitest::Test
         ]
       })
 
-      original_spawn = Hive::Stages::Artifacts.method(:spawn_artifacts_agent)
-      original_uploader = Hive::Stages::Artifacts.method(:screenote_uploader)
       uploader = StubUploader.new
+      original_spawn = Hive::Stages::Artifacts.method(:spawn_artifacts_agent)
+      original_load = Hive::Config.method(:load_global_screenote)
+      original_new = Hive::ScreenoteUploader.method(:new)
       Hive::Stages::Artifacts.define_singleton_method(:spawn_artifacts_agent) do |spawn_task, _cfg, _prompt, _profile|
         Hive::Markers.set(spawn_task.state_file, :complete)
       end
-      Hive::Stages::Artifacts.define_singleton_method(:screenote_uploader) { |_config| uploader }
+      # Drive the real screenote_uploader factory through the documented config
+      # seam (load_global_screenote -> ScreenoteUploader.new) instead of
+      # overriding the private factory: a valid global config plus a stubbed
+      # uploader exercises the production path without coupling to internals.
+      Hive::Config.define_singleton_method(:load_global_screenote) do
+        { "base_url" => "https://screenote.test", "api_token" => "secret" }
+      end
+      Hive::ScreenoteUploader.define_singleton_method(:new) { |base_url:, api_token:| uploader }
 
       result = Hive::Stages::Artifacts.run!(task, {})
 
@@ -170,7 +180,47 @@ class StagesArtifactsTest < Minitest::Test
       assert_equal [ "01-home.png" ], uploader.files
     ensure
       Hive::Stages::Artifacts.define_singleton_method(:spawn_artifacts_agent, original_spawn)
-      Hive::Stages::Artifacts.define_singleton_method(:screenote_uploader, original_uploader)
+      Hive::Config.define_singleton_method(:load_global_screenote, original_load)
+      Hive::ScreenoteUploader.define_singleton_method(:new, original_new)
+    end
+  end
+
+  def test_media_item_path_rejects_traversal_and_nested_names
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      FileUtils.mkdir_p(File.join(task.folder, "media"))
+
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "../evil.png"),
+                 "a ../-shaped filename must not resolve to an upload path"
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "sub/evil.png"),
+                 "a nested filename must not resolve to an upload path"
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "")
+    end
+  end
+
+  def test_media_item_path_refuses_symlink_escapes
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      secret = File.join(dir, "secret.png")
+      File.binwrite(secret, "secret")
+      File.symlink(secret, File.join(media_dir, "01-home.png"))
+
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "01-home.png"),
+                 "a media symlink escaping the media dir must not resolve to an upload path"
+    end
+  end
+
+  def test_media_item_path_resolves_a_real_still
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+
+      assert_equal File.realpath(File.join(media_dir, "01-home.png")),
+                   Hive::Stages::Artifacts.media_item_path(task, "01-home.png")
     end
   end
 

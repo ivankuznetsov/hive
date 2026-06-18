@@ -9,7 +9,7 @@ module Hive
     DEFAULT_READ_TIMEOUT = 60
     SUCCESS_CODE = "201".freeze
 
-    attr_reader :base_url, :api_token
+    attr_reader :base_url
 
     def initialize(base_url:, api_token:, http: nil, open_timeout: DEFAULT_OPEN_TIMEOUT, read_timeout: DEFAULT_READ_TIMEOUT)
       @base_url = base_url.to_s.strip
@@ -20,7 +20,7 @@ module Hive
     end
 
     def configured?
-      !base_url.empty? && !api_token.empty?
+      !base_url.empty? && !@api_token.empty?
     end
 
     def upload(path:, title:)
@@ -29,7 +29,7 @@ module Hive
 
       uri = URI("#{base_url.delete_suffix("/")}/api/v1/screenshots")
       request = Net::HTTP::Post.new(uri)
-      request["Authorization"] = "Bearer #{api_token}"
+      request["Authorization"] = "Bearer #{@api_token}"
       request["Content-Type"] = "multipart/form-data; boundary=#{boundary}"
       request.body = multipart_body(path, title.to_s)
 
@@ -76,7 +76,11 @@ module Hive
     end
 
     def quote(value)
-      value.to_s.gsub("\\", "\\\\").gsub('"', '\"')
+      # Backslash-escape both the escape character and the quote so an exotic
+      # on-disk filename can't break out of the Content-Disposition value.
+      # Block form avoids the gsub replacement-string backslash collapse that
+      # made the old string-replacement a no-op.
+      value.to_s.gsub(/[\\"]/) { |char| "\\#{char}" }
     end
 
     def content_type(path)
@@ -88,8 +92,17 @@ module Hive
 
     def parse_success(response)
       payload = JSON.parse(response.body.to_s)
+      unless payload.is_a?(Hash)
+        warn "[hive] screenote upload returned a non-object response body"
+        return nil
+      end
+
       url = payload["annotate_url"].to_s
       return nil if url.empty?
+      unless url.match?(%r{\Ahttps?://})
+        warn "[hive] screenote upload returned a non-http annotate_url: #{url.inspect}"
+        return nil
+      end
 
       {
         "annotate_url" => url,

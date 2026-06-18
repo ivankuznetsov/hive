@@ -75,6 +75,42 @@ class ScreenoteUploaderTest < Minitest::Test
     end
   end
 
+  def test_non_object_success_body_returns_nil_with_diagnostic
+    with_tmp_dir do |dir|
+      image = File.join(dir, "shot.png")
+      File.binwrite(image, "png")
+      uploader = Hive::ScreenoteUploader.new(
+        base_url: "https://screenote.test",
+        api_token: "secret",
+        http: ->(*) { Response.new(code: "201", body: JSON.generate([ 1, 2, 3 ])) }
+      )
+
+      _out, err = capture_io do
+        assert_nil uploader.upload(path: image, title: "Home")
+      end
+      assert_includes err, "non-object response body",
+                      "a valid-but-non-object 201 body must surface an accurate diagnostic"
+    end
+  end
+
+  def test_relative_annotate_url_is_rejected
+    with_tmp_dir do |dir|
+      image = File.join(dir, "shot.png")
+      File.binwrite(image, "png")
+      uploader = Hive::ScreenoteUploader.new(
+        base_url: "https://screenote.test",
+        api_token: "secret",
+        http: ->(*) { Response.new(code: "201", body: JSON.generate("annotate_url" => "/s/123")) }
+      )
+
+      _out, err = capture_io do
+        assert_nil uploader.upload(path: image, title: "Home")
+      end
+      assert_includes err, "non-http annotate_url",
+                      "a scheme-less annotate_url must be rejected at the uploader source"
+    end
+  end
+
   def test_missing_credentials_skip_without_transport
     called = false
     uploader = Hive::ScreenoteUploader.new(

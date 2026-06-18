@@ -370,7 +370,7 @@ module Hive
       end
 
       def backoff_seconds_for(failed_attempt)
-        [ 2**(failed_attempt - 1), Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC ].min
+        Hive::Reviewers.backoff_seconds_for(failed_attempt)
       end
 
       def backoff(seconds)

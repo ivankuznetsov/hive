@@ -32,6 +32,15 @@ module Hive
     DEFAULT_REVIEWER_MAX_ATTEMPTS = 2
     REVIEWER_BACKOFF_CAP_SEC = 8
 
+    # Capped exponential backoff (1s, 2s, 4s, 8s, 8s, …) for the Nth failed
+    # attempt. Single source of truth shared by the reviewer adapters
+    # (Hive::Reviewers::Agent, CodexReview) and the 6-review triage retry
+    # (Hive::Stages::Review#triage_retry_backoff); each caller keeps its own
+    # thin wrapper as a test-stub seam but delegates the formula here.
+    def self.backoff_seconds_for(failed_attempt)
+      [ 2**(failed_attempt - 1), REVIEWER_BACKOFF_CAP_SEC ].min
+    end
+
     class UnknownKindError < Hive::Error
       def exit_code
         Hive::ExitCodes::CONFIG

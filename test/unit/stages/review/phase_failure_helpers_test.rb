@@ -63,6 +63,28 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
     assert_match(/invalid review.triage.max_attempts/, out.join)
   end
 
+  def test_run_triage_with_retries_bails_when_wall_clock_exceeded_between_attempts
+    # A transient :error with attempts left, but the review wall-clock budget is
+    # spent → don't start another ~1800s triage spawn; signal the caller to
+    # finalize REVIEW_STALE reason=wall_clock.
+    error = Hive::Stages::Review::Triage::Result.new(
+      status: :error, escalations_path: nil, error_message: "transient boom", tampered_files: []
+    )
+    with_replaced_singleton_method(Hive::Stages::Review, :mark_working, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(*) { }) do
+        with_replaced_singleton_method(Hive::Stages::Review, :wall_clock_exceeded?, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, ->(cfg:, ctx:) { error }) do
+            result = Hive::Stages::Review.send(
+              :run_triage_with_retries, {}, nil, :task,
+              pass: 1, started_at: Time.now, max_wall_clock_sec: 100
+            )
+            assert_equal :wall_clock_exceeded, result
+          end
+        end
+      end
+    end
+  end
+
   def test_triage_retry_backoff_uses_capped_exponential_delay
     delays = []
 

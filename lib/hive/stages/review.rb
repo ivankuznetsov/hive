@@ -384,7 +384,14 @@ module Hive
 
             if triage_enabled?(cfg)
               @current_phase = :triage
-              triage_result = run_triage_with_retries(cfg, ctx_pass, task, pass: pass)
+              triage_result = run_triage_with_retries(
+                cfg, ctx_pass, task, pass: pass,
+                started_at: started_at, max_wall_clock_sec: max_wall_clock
+              )
+              if triage_result == :wall_clock_exceeded
+                return finalize_wall_clock_stale(task, started_at, pass: pass)
+              end
+
               case triage_result.status
               when :tampered
                 Hive::Markers.set(task.state_file, :review_error,
@@ -668,11 +675,11 @@ module Hive
       # the TUI; an unbounded multi-kilobyte tail in a single attr would
       # break the line-oriented marker format. 500 bytes is the same cap
       # `prepare_claude_session!` uses for its own tail capture.
-      def truncate_marker_message(message)
+      def truncate_marker_message(message, max: 500, ellipsis: "...")
         return "" if message.nil?
 
         s = message.to_s
-        s.length <= 500 ? s : "#{s[0, 497]}..."
+        s.length <= max ? s : "#{s[0, max - ellipsis.length]}#{ellipsis}"
       end
 
       # --- helpers ---------------------------------------------------------
@@ -822,9 +829,12 @@ module Hive
       def review_phase_error_summary(error_message)
         text = error_message.to_s.strip.gsub(/\s+/, " ")
         return nil if text.empty?
-        return text if text.length <= REVIEW_PHASE_ERROR_SUMMARY_MAX
 
-        "#{text[0, REVIEW_PHASE_ERROR_SUMMARY_MAX - 1]}…"
+        # Reuse the shared marker-message truncator (one implementation), but
+        # with this surface's own cap and single-char ellipsis. Distinct from
+        # the default-cap callers: this collapses to a single line and returns
+        # nil (not "") on blank so the message= attr is omitted entirely.
+        truncate_marker_message(text, max: REVIEW_PHASE_ERROR_SUMMARY_MAX, ellipsis: "…")
       end
 
       # Run the triage phase with a bounded retry budget, mirroring the
@@ -845,7 +855,7 @@ module Hive
       #                  limits_reached + retry_after for the daemon to
       #                  self-heal once the window resets; burning inline
       #                  attempts against an active limit only wastes budget.
-      def run_triage_with_retries(cfg, ctx_pass, task, pass:)
+      def run_triage_with_retries(cfg, ctx_pass, task, pass:, started_at:, max_wall_clock_sec:)
         max_attempts = triage_max_attempts(cfg)
         attempt = 0
         loop do
@@ -857,6 +867,12 @@ module Hive
           return result if result.status == :tampered
           return result if Hive::AgentLimit.limit_reached?(result.error_message.to_s)
           return result if attempt >= max_attempts
+
+          # Don't start another full triage spawn (timeout_sec default 1800s) if
+          # the review wall-clock budget is already spent — mirrors run_reviewers
+          # so a high max_attempts can't overrun review.max_wall_clock_sec. The
+          # caller turns this into REVIEW_STALE reason=wall_clock.
+          return :wall_clock_exceeded if wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
           triage_retry_backoff(attempt)
         end
@@ -881,10 +897,10 @@ module Hive
       end
 
       # Exponential backoff (1s, 2s, 4s, …) between failed triage attempts,
-      # capped like the reviewer adapters so a high max_attempts can't
-      # introduce minute-scale waits. Extracted as a seam so tests stub it.
+      # capped like the reviewer adapters via the shared
+      # Hive::Reviewers.backoff_seconds_for. Kept as a thin seam so tests stub it.
       def triage_retry_backoff(failed_attempt)
-        sleep([ 2**(failed_attempt - 1), Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC ].min)
+        sleep(Hive::Reviewers.backoff_seconds_for(failed_attempt))
       end
 
       # Pass to start at on a fresh hive run. Falls back to 1 when no

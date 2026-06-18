@@ -124,6 +124,36 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_clears_inherited_no_judge_env_when_judge_enabled
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      scenario_root = File.join(dir, "scenarios")
+      FileUtils.mkdir_p(scenario_root)
+      scenario_name = "assert_judge_env"
+      File.write(File.join(scenario_root, "#{scenario_name}_test.rb"), <<~RUBY)
+        require "eval/eval_helper"
+
+        class HiveEvalInheritedNoJudgeFixture < Minitest::Test
+          include Hive::Eval::ScenarioSupport
+
+          def test_inherited_no_judge_env_is_cleared
+            assert_nil ENV["HIVE_EVAL_NO_JUDGE"]
+          end
+        end
+      RUBY
+      report = File.join(dir, "judge-enabled.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1", "HIVE_EVAL_SCENARIO_ROOT" => scenario_root },
+        "bin/hive-eval", "--scenario", scenario_name, "--report", report
+      )
+
+      assert status.success?, err
+      doc = JSON.parse(File.read(report))
+      refute_empty doc.fetch("scenarios")
+      assert_equal "pass", doc.fetch("scenarios").fetch(0).fetch("status")
+    end
+  end
+
   def test_cli_rejects_scenario_paths_outside_scenario_dir
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "outside.json")

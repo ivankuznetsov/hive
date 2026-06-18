@@ -220,11 +220,17 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
-        # Forward schema-version skew (tolerated, parsed best-effort): an
-        # updated `hive` binary emitted a newer hive-status envelope than
-        # this long-running daemon was built for. Log once; the tick
-        # proceeds on the additive payload. Restart picks up the schema.
-        @logger.event(:status_schema_skew, message: result.warning) if result.warning
+        # Non-fatal status advisory (logged once per tick). `result.warning`
+        # combines TWO sources: a tolerated forward schema-version skew (an
+        # updated `hive` binary emitted a newer hive-status envelope than this
+        # long-running daemon was built for, parsed best-effort) AND any
+        # status-command stderr breadcrumbs surfaced on an
+        # otherwise-successful fetch (fail-open dependency gate, dropped
+        # depends_on). The event name is deliberately NEUTRAL — not
+        # schema-skew-only — so an operator grepping daemon.log for
+        # dependency-gate degradation finds it here instead of being misled by
+        # a schema-version event name. Tick proceeds on the additive payload.
+        @logger.event(:status_warning, message: result.warning) if result.warning
         # Rebuild the per-tick set of half-migrated projects from the
         # status snapshot. Stays empty when the daemon talks to an old
         # status binary that didn't ship the field (Result#projects

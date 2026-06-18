@@ -400,8 +400,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
 
   # A successful (exit-0) fetch whose stderr is non-empty carries the status
   # command's own degradation breadcrumbs (fail-open dependency gate, dropped
-  # depends_on, collapsed stack). Surface them via the warning channel so the
-  # dispatcher logs them once per tick instead of discarding them.
+  # depends_on). Surface them via the warning channel so the dispatcher logs
+  # them once per tick instead of discarding them.
   def test_successful_fetch_surfaces_nonempty_stderr_as_warning
     payload = make_envelope(projects: [ {
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",

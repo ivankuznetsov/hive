@@ -334,6 +334,35 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "a blocked row with no identified prerequisite must be flagged unresolved"
   end
 
+  # Single-source-of-truth invariant (plan decision #2): the daemon trusts the
+  # status JSON's `blocked` flag VERBATIM and never re-derives the gate
+  # threshold itself. This synthetic row sets blocked:true while carrying a
+  # dependency_stage PAST the gate (8-finalize) — a state a naive
+  # re-derivation ("prereq is past the gate ⇒ unblocked") would dispatch. The
+  # dispatcher must still hold, proving no second threshold comparison crept
+  # in. Holds only by construction today; this guard pins it.
+  def test_dispatcher_reads_blocked_verbatim_and_never_rederives_threshold
+    rows = [
+      row(
+        action: "ready_to_develop",
+        command: "hive develop s1 --from 3-plan",
+        depends_on: "base-task",
+        blocked_by: "base-task",
+        dependency_stage: "8-finalize",
+        blocked: true
+      )
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned,
+                 "blocked:true must hold dispatch even when dependency_stage is past the gate"
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event,
+               "the dispatcher must emit :blocked reason=dependency_unmet straight from the blocked flag"
+  end
+
   def test_digest_scheduler_dispatches_global_digest_without_project_gate
     dispatcher, sup, _ctrl, logger, _mw, _patrol, digest = make_dispatcher(
       rows: [],
@@ -1284,8 +1313,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   # A forward schema-version skew (newer binary, daemon not restarted) is
   # tolerated: the consumer returns ok=true with a non-fatal `warning`,
-  # the tick proceeds and dispatches, and the dispatcher logs the skew
-  # once instead of crashing the tick.
+  # the tick proceeds and dispatches, and the dispatcher logs the warning
+  # once (under the neutral :status_warning event — the channel also carries
+  # status-stderr breadcrumbs, so the name is deliberately not skew-specific)
+  # instead of crashing the tick.
   def test_forward_schema_skew_warning_is_logged_and_tick_proceeds
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
@@ -1298,7 +1329,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       )
     dispatcher.tick(now: T0)
     assert_equal 1, sup.spawned.size, "forward-skew tick must still dispatch"
-    assert events_include?(logger, :status_schema_skew)
+    assert events_include?(logger, :status_warning)
   end
 
   # ── dry run ───────────────────────────────────────────────────────────

@@ -38,7 +38,9 @@ module Hive
       # otherwise-successful (exit-0) `hive status --json` fetch. In JSON mode
       # stdout carries the payload and stderr is empty on a healthy run, so
       # non-empty stderr is the status command's own degradation breadcrumbs
-      # (fail-open dependency gate, dropped depends_on, collapsed stack).
+      # (fail-open dependency gate, dropped depends_on). (The collapsed-stack
+      # warn fires only from the execute/open_pr child processes, never the
+      # status command, so it never reaches this channel.)
       # Surfacing it here makes those breadcrumbs observable in daemon.log
       # instead of being silently discarded. nil on a clean fetch.
       Result = Struct.new(:ok, :rows, :projects, :error, :warning, keyword_init: true)

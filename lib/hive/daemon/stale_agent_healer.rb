@@ -97,6 +97,19 @@ module Hive
       TIMEOUT_RECOVERY_LIMIT = 1
       TIMEOUT_RECOVERABLE_STAGES = %w[5-open-pr 7-artifacts].freeze
 
+      # Review fix-phase auto-commit failures that a bounded rerun can clear:
+      # the fix agent left residue the scope check rejected, or a transient
+      # signing/sign-policy hiccup blocked the commit. A rerun re-attempts the
+      # SAME scope-checked auto-commit (it never bypasses the check), so a
+      # genuinely out-of-scope change just re-fails and parks after the budget.
+      # `fix_status_check_failed` / `fix_tampered` are excluded on purpose —
+      # those are git-level / integrity signals that warrant a human.
+      FIX_AUTO_COMMIT_RETRYABLE_REASONS = %w[
+        fix_auto_commit_scope_failed
+        fix_auto_commit_sign_policy_failed
+        fix_auto_commit_signing_failed
+      ].freeze
+
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
                      error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT,
@@ -297,6 +310,15 @@ module Hive
         # recovery.
         return true if reason == "timeout" && TIMEOUT_RECOVERABLE_STAGES.include?(row.stage.to_s)
 
+        # CleanExit stage-exit residue (`ensure_clean_on_exit_failed`) heals in
+        # any worktree-owning stage. The rerun re-runs CleanExit, which re-adds
+        # and re-scope-checks the residue: residue that is now in scope (e.g. a
+        # gitignored transient that no longer stages, or a path the allowlist
+        # now covers) auto-commits and advances; genuinely out-of-scope residue
+        # simply re-fails and parks after the budget (default 3). The scope
+        # check is never bypassed — this only stops the immediate manual park.
+        return true if reason == "ensure_clean_on_exit_failed"
+
         # Agent-loss reasons heal in every stage EXCEPT 6-review: a lost
         # tmux session or orphaned agent is environmental wherever it
         # happens (the sweep-kills-the-server bug took out parallel
@@ -314,6 +336,7 @@ module Hive
         return "finalize_unpushed_commits" if row.stage.to_s == "8-finalize" && reason == "unpushed_commits"
         return "limits_reached" if reason == "limits_reached"
         return "stage_timeout" if reason == "timeout"
+        return "clean_exit_residue" if reason == "ensure_clean_on_exit_failed"
 
         "terminal_agent_loss"
       end
@@ -341,6 +364,12 @@ module Hive
           return "the #{row.stage} agent finished but did not stamp its completion marker before the " \
                  "stage timeout; it was retried once and timed out again — rerun #{row.stage} " \
                  "(`#{command}`) or run `hive markers clear`"
+        end
+
+        if reason == "ensure_clean_on_exit_failed"
+          return "#{row.stage} left worktree residue the auto-commit scope check rejected and #{@error_auto_recovery_limit} " \
+                 "reruns did not clear it — inspect the worktree, move the out-of-scope changes into an allowed path or " \
+                 "commit/discard them by hand, then rerun #{row.stage} (`#{command}`)"
         end
 
         "rerun #{row.stage} (`#{command}`) " \
@@ -493,6 +522,8 @@ module Hive
         case reason
         when "review_agent_died" then "review_agent_died"
         when "limits_reached" then "reviewer_limits_reached"
+        when "all_failed" then "reviewer_all_failed"
+        when *FIX_AUTO_COMMIT_RETRYABLE_REASONS then "fix_auto_commit_retry"
         else "reviewer_tmux_session_terminated"
         end
       end
@@ -555,8 +586,25 @@ module Hive
         # All reviewers hit a usage/credit limit: self-heal once the stamped
         # cooldown has elapsed (a missing/unparseable retry_after stays
         # manual). Gated before the caller's budget increment so cooldown-wait
-        # ticks do not burn the retry budget.
+        # ticks do not burn the retry budget. This is the token/budget
+        # carve-out — every branch below it is a non-limit failure that retries
+        # immediately (bounded), since a credit limit set reason=limits_reached
+        # (the `all_failed_limit` arm in Stages::Review), never the reasons here.
         return cooldown_elapsed?(row, now: now) if attrs["reason"].to_s == "limits_reached"
+
+        # All reviewers crashed for a non-limit reason (e.g. a native reviewer
+        # exited non-zero, a tool/infra fault): bounded rerun. A persistent
+        # crash just re-fails and parks after the budget; a transient one
+        # clears. The pass stays put across a failed reviewers phase, so the
+        # recovery key (which includes pass) bounds this to the budget.
+        return true if attrs["phase"].to_s == "reviewers" && attrs["reason"].to_s == "all_failed"
+
+        # The fix phase's scope-checked auto-commit failed (out-of-scope
+        # residue, or a signing/sign-policy hiccup): bounded rerun. The rerun
+        # re-runs the fix agent and re-applies the SAME scope check, so this
+        # never lands an out-of-scope change — it only stops the immediate park.
+        return true if attrs["phase"].to_s == "fix" &&
+                       FIX_AUTO_COMMIT_RETRYABLE_REASONS.include?(attrs["reason"].to_s)
 
         return false unless attrs["phase"].to_s == "reviewers"
         return false unless attrs["reason"].to_s == "reviewer_partial_failure"

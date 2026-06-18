@@ -1405,15 +1405,21 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_does_not_auto_recover_manual_clean_exit_failure
+  # `dirty_worktree` (legacy operator-residue reason) stays manual: auto-
+  # committing residue a human left without review is not safe to retry
+  # blindly, so the healer must leave it red as a clean no-op. (Its sibling
+  # `ensure_clean_on_exit_failed` IS auto-retried now — see
+  # test_auto_recovers_error_ensure_clean_on_exit_failed — because a rerun
+  # re-applies the scope check rather than bypassing it.)
+  def test_does_not_auto_recover_dirty_worktree
     with_marker_file do |state_file|
-      File.write(state_file, "# task\n\n<!-- ERROR reason=ensure_clean_on_exit_failed -->\n")
+      File.write(state_file, "# task\n\n<!-- ERROR reason=dirty_worktree -->\n")
       row = make_row(
         state_file,
         pid_alive: nil,
         stage: "8-finalize",
         marker: "error",
-        marker_attrs: { "reason" => "ensure_clean_on_exit_failed" },
+        marker_attrs: { "reason" => "dirty_worktree" },
         action: "error",
         live_task_lock: false
       )
@@ -1423,7 +1429,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       refute @logger.events.any? { |name, _| name == :marker_healed }
       refute @logger.events.any? { |name, _| name == :marker_heal_failed },
              "a wrong-reason (non-recoverable) skip must be a clean no-op, not a logged failure"
-      assert_match(/ERROR reason=ensure_clean_on_exit_failed/, File.read(state_file))
+      assert_match(/ERROR reason=dirty_worktree/, File.read(state_file))
     end
   end
 
@@ -2145,6 +2151,130 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_match(/ERROR reason=timeout marker_id=t-b/, File.read(state_file),
                    "a fresh timeout marker_id must not earn a fresh budget")
       assert_equal 1, @logger.events.count { |name, _| name == :marker_healed }
+      assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
+    end
+  end
+
+  # --- all_failed reviewers auto-retry (non-limit total reviewer crash) ---
+
+  def make_review_error_row(state_file, reason:, phase:, pass: "1")
+    make_row(
+      state_file,
+      pid_alive: nil,
+      stage: "6-review",
+      marker: "review_error",
+      marker_attrs: { "phase" => phase, "reason" => reason, "pass" => pass },
+      action: "recover_review",
+      live_task_lock: false
+    )
+  end
+
+  def test_auto_recovers_review_error_all_failed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=all_failed pass=1 -->\n")
+      row = make_review_error_row(state_file, reason: "all_failed", phase: "reviewers")
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected all_failed auto-recovery event, got: #{@logger.events.inspect}"
+      assert_equal "reviewer_all_failed", heal_event[1][:reason]
+      refute_match(/REVIEW_ERROR/, File.read(state_file),
+                   "a non-limit all_failed must clear so the daemon re-dispatches review")
+    end
+  end
+
+  def test_review_all_failed_auto_recovery_is_bounded
+    with_marker_file do |state_file|
+      3.times do
+        File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=all_failed pass=1 -->\n")
+        heal([ make_review_error_row(state_file, reason: "all_failed", phase: "reviewers") ])
+        assert Hive::Markers.current(state_file).none?, "each attempt within budget clears the marker"
+      end
+      assert_equal 3, @logger.events.count { |name, _| name == :marker_healed }
+
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=all_failed pass=1 -->\n")
+      heal([ make_review_error_row(state_file, reason: "all_failed", phase: "reviewers") ])
+
+      assert_match(/REVIEW_ERROR/, File.read(state_file),
+                   "the 4th all_failed must stay red — bounded retry, then park")
+      assert_equal 3, @logger.events.count { |name, _| name == :marker_healed }
+      assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
+    end
+  end
+
+  # --- fix-phase auto-commit scope/sign failures auto-retry ---
+
+  def test_auto_recovers_review_error_fix_auto_commit_scope_failed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_auto_commit_scope_failed pass=2 -->\n")
+      row = make_review_error_row(state_file, reason: "fix_auto_commit_scope_failed", phase: "fix", pass: "2")
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected fix scope auto-recovery, got: #{@logger.events.inspect}"
+      assert_equal "fix_auto_commit_retry", heal_event[1][:reason]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_review_fix_status_check_failed
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_status_check_failed pass=2 -->\n")
+      row = make_review_error_row(state_file, reason: "fix_status_check_failed", phase: "fix", pass: "2")
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "git-level/integrity fix reasons must stay manual"
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  # --- ensure_clean_on_exit_failed terminal ERROR auto-retry ---
+
+  def test_auto_recovers_error_ensure_clean_on_exit_failed
+    %w[4-execute 6-review 8-finalize].each do |stage|
+      with_marker_file do |state_file|
+        File.write(state_file, "# task\n\n<!-- ERROR reason=ensure_clean_on_exit_failed -->\n")
+        row = make_row(
+          state_file, pid_alive: nil, stage: stage,
+          marker: "error", marker_attrs: { "reason" => "ensure_clean_on_exit_failed" },
+          action: "error", live_task_lock: false
+        )
+
+        heal([ row ])
+
+        heal_event = @logger.events.find { |name, _| name == :marker_healed }
+        assert heal_event, "#{stage} ensure_clean_on_exit_failed should auto-recover, got: #{@logger.events.inspect}"
+        assert_equal "clean_exit_residue", heal_event[1][:reason]
+        assert Hive::Markers.current(state_file).none?,
+               "#{stage} clean-exit residue must clear so the stage re-runs CleanExit"
+      end
+      @logger = FakeLogger.new
+      @healer = Hive::Daemon::StaleAgentHealer.new(
+        controller: @controller, logger: @logger, grace_sec: 300, request_queue: @request_queue
+      )
+    end
+  end
+
+  def test_ensure_clean_on_exit_failed_auto_recovery_is_bounded
+    with_marker_file do |state_file|
+      attrs = { "reason" => "ensure_clean_on_exit_failed" }
+      3.times do
+        File.write(state_file, "# task\n\n<!-- ERROR reason=ensure_clean_on_exit_failed -->\n")
+        heal([ make_row(state_file, pid_alive: nil, stage: "6-review", marker: "error",
+                        marker_attrs: attrs, action: "error", live_task_lock: false) ])
+        assert Hive::Markers.current(state_file).none?
+      end
+
+      File.write(state_file, "# task\n\n<!-- ERROR reason=ensure_clean_on_exit_failed -->\n")
+      heal([ make_row(state_file, pid_alive: nil, stage: "6-review", marker: "error",
+                      marker_attrs: attrs, action: "error", live_task_lock: false) ])
+
+      assert_match(/ERROR reason=ensure_clean_on_exit_failed/, File.read(state_file),
+                   "the 4th attempt must stay red — bounded, then park for a human")
       assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
     end
   end

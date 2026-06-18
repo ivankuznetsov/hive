@@ -102,9 +102,15 @@ module Hive
       Integer(raw)
     rescue ArgumentError, TypeError
       # A corrupt prerequisite id (non-numeric string in meta.yml) makes a
-      # numeric `depends_on` silently mis-resolve. Leave a breadcrumb so the
-      # "typo in depends_on" case is distinguishable from "prereq id is
-      # garbage" when debugging an unexpected unresolved gate.
+      # numeric `depends_on` FAIL to resolve (treated as a missing
+      # prerequisite): `find_task`'s numeric arm compares `nil == <int>` →
+      # false, so the prereq is not found — it does NOT mis-resolve to the
+      # wrong task. Note this rescue is effectively dead on the production
+      # status path: `TaskMeta.normalize_id` already coerces a corrupt id to
+      # nil before the resolver ever sees it, so the breadcrumb fires only for
+      # callers that pass a raw, unnormalized id. Kept so the "typo in
+      # depends_on" case stays distinguishable from "prereq id is garbage"
+      # when debugging an unexpected unresolved gate.
       warn "[hive] dependencies: prerequisite id #{raw.inspect} is not an integer; " \
            "ignoring it for numeric depends_on matching"
       nil

@@ -26,7 +26,7 @@ Behavior:
   before this prompt runs.
 - Create the pull request as a draft:
 
-  gh pr create --draft --title "<title>" --body-file <path-to-body-file> --head <%= branch %><%= base_branch ? " --base #{base_branch}" : "" %>
+  gh pr create --draft --title "<title>" --body-file <path-to-body-file> --head <%= branch %><%= defined?(base_branch) && base_branch ? " --base #{base_branch}" : "" %>
 
 - After `gh pr create --draft` succeeds, write `pr.md` in the task folder with
   frontmatter `pr_url: <url>` and `pr_number: <number when known>`.

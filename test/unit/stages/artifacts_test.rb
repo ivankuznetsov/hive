@@ -399,6 +399,99 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_push_manifest_media_persists_item_one_when_the_budget_trips_before_item_two
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      File.binwrite(File.join(media_dir, "02-state.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil },
+          { "file" => "02-state.png", "type" => "still", "caption" => "State", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      # Backdate the folder so the post-rewrite touch is observable without sleeping.
+      past = Time.now - 3600
+      File.utime(past, past, task.folder)
+      uploader = StubUploader.new
+
+      # Clock reads: 1 seeds the deadline; 2 is item 1's top-of-loop check
+      # (under budget → it uploads + its URL is written); 3 is item 2's check
+      # (over budget → break before uploading). This exercises the realistic
+      # partial path the production comment documents — manifest rewritten with
+      # item 1's URL, folder touched, item 2 left blank.
+      calls = 0
+      original_clock = Process.singleton_class.instance_method(:clock_gettime)
+      Process.define_singleton_method(:clock_gettime) do |*|
+        calls += 1
+        calls <= 2 ? 0.0 : Hive::Stages::Artifacts::SCREENOTE_UPLOAD_BUDGET_SEC + 1000.0
+      end
+
+      begin
+        _out, err = capture_io do
+          Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+        end
+      ensure
+        Process.singleton_class.define_method(:clock_gettime, original_clock)
+      end
+
+      assert_equal [ "01-home.png" ], uploader.files,
+                   "item 1 uploads before the budget trips; item 2 must not be attempted"
+      assert_includes err, "screenote upload budget"
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_equal "https://screenote.test/01-home.png", manifest.dig("items", 0, "screenote_url"),
+                   "item 1's hosted URL must be persisted in the partially-rewritten manifest"
+      assert_nil manifest.dig("items", 1, "screenote_url"),
+                 "the budget-skipped item 2 keeps a blank screenote_url"
+      assert_operator File.mtime(task.folder), :>, past + 1,
+                      "a real upload (changed=true) must still touch the folder so the feed refreshes"
+    end
+  end
+
+  def test_push_manifest_media_swallows_a_screenote_config_error
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+
+      # No uploader/config passed → the real load_global_screenote seam runs.
+      # A misconfigured endpoint raises Hive::ConfigError; the dedicated rescue
+      # must swallow it (run! calls this on the :complete path, which must not
+      # crash) while warning distinctly from a transient upload blip.
+      original_load = Hive::Config.method(:load_global_screenote)
+      Hive::Config.define_singleton_method(:load_global_screenote) do
+        raise Hive::ConfigError, "screenote.base_url must be blank or an http(s) URL"
+      end
+
+      begin
+        _out, err = capture_io do
+          Hive::Stages::Artifacts.push_manifest_media_to_screenote(task)
+        end
+      ensure
+        Hive::Config.define_singleton_method(:load_global_screenote, original_load)
+      end
+
+      assert_includes err, "screenote is misconfigured"
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_nil manifest.dig("items", 0, "screenote_url"),
+                 "a config error must skip uploads, not enrich the manifest"
+    end
+  end
+
   private
 
   StubUploader = Struct.new(:nil_result_for, keyword_init: true) do

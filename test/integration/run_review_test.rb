@@ -1641,6 +1641,37 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_wall_clock_returned_from_triage_retry_yields_review_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **_kwargs|
+          reviews = File.join(ctx.task_folder, "reviews")
+          FileUtils.mkdir_p(reviews)
+          File.write(
+            File.join(reviews, "stub-reviewer-01.md"),
+            "## High\n- [ ] needs human\n"
+          )
+          :ok
+        }) do
+          with_replaced_singleton_method(
+            Hive::Stages::Review,
+            :run_triage_with_retries,
+            ->(_cfg, _ctx, _task, **_kwargs) { :wall_clock_exceeded }
+          ) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        assert_equal "wall_clock", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
   def test_triage_tampered_and_error_statuses_yield_review_error
     cases = [
       [ :tampered, "triage_tampered", [ "reviews/stub-reviewer-01.md" ] ],

@@ -113,7 +113,7 @@ evidence closing the following June 16 gaps.
 
 47. **Babysitter GH browser-flag parsing is unit-pinned but not live-agent-smoked.** Commit `1dab816a` changes `bin/hive-babysitter-stub-gh` so short `-w` is treated as a browser-launch flag only when the command-specific short-option scanner parses it as an option flag. Value-taking read options now consume attached or following values, allowing examples such as `gh pr diff 42 -eworkflow.yml`, `gh pr list -lwip`, `gh pr view 42 -qweb`, and `gh pr list --search -wip` to pass through. `test/unit/babysitter/dry_run_env_test.rb` pins those cases with a recording fake `gh`, but this refresh did not find an in-tree artifact proving a full live-agent `hive babysit --once PROJECT --dry-run` run after the GH stub parser change.
 
-48. **Fix-prompt whole-defect-class behavior is prose/test-render pinned but not live-smoked.** Commit `ba495dc0` changes `templates/fix_prompt.md.erb` so a 6-review Phase 4 fix agent should grep for and fix every site with the same defect class named by an accepted finding, rather than patching only the cited line. The committed evidence is prompt prose plus the existing `test/integration/prompt_injection_test.rb` render coverage (nonce wrapping, trailers, answered-escalation context); no in-tree artifact yet proves a live review fix agent followed the new instruction by repairing multiple same-defect sites in one pass, named the extra sites, and avoided unrelated refactors.
+48. **Fix-prompt whole-defect-class behavior is prose/test-render pinned but not live-smoked.** Commit `ce3f7978` changes `templates/fix_prompt.md.erb` so a 6-review Phase 4 fix agent should grep for and fix every site with the same defect class named by an accepted finding, rather than patching only the cited line. The committed evidence is prompt prose plus the existing `test/integration/prompt_injection_test.rb` render coverage (nonce wrapping, trailers, answered-escalation context); no in-tree artifact yet proves a live review fix agent followed the new instruction by repairing multiple same-defect sites in one pass, named the extra sites, and avoided unrelated refactors.
 
 ## Release install follow-ups
 
@@ -240,7 +240,9 @@ captured. Open questions:
   writing `escalations-NN.md` (the log showed it spinning at "5m 0s" right as
   it was about to write its output files)?
 Commit `e5c26edc` adds direct helper coverage for bounded `message=`
-truncation and capped retry backoff, but it still does not provide a live
+truncation and capped retry backoff. Commit `c4045dfe` then clamps the retry
+loop against `review.max_wall_clock_sec` before another triage spawn and dedups
+the retry/backoff/truncation helpers, but it still does not provide a live
 post-fix failure sample. Next live triage failure should now carry the
 `message=` attr — use it to pick between these before hardening
 `expected_output_session_alive?`.

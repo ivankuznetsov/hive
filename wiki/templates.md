@@ -47,7 +47,7 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 
 `fix_prompt.md.erb` is still the Phase 4 review-fix prompt: it receives accepted `[x]` findings and answered escalation context through the nonce-wrapped `accepted_findings` block, tells the agent to edit only the worktree, forbids orchestrator-owned files (`task.md`, `plan.md`, `worktree.yml`, `reviews/*`), and requires rollback-rate trailers on every fix commit.
 
-As of commit `ba495dc0`, the prompt's scoped-edit rule has one deliberate exception. If the cited finding's root cause is a recurring pattern, the agent must grep for the other sites with the same defect and apply the identical remedy to all of them in the same pass, then name the extra sites in its final message. This is meant to reduce repeated review/fix passes for one defect class; it is explicitly not permission for unrelated refactors, renames, or broad cleanup. Operational context is in [[stages/review]].
+As of commit `ce3f7978`, the prompt's scoped-edit rule has one deliberate exception. If the cited finding's root cause is a recurring pattern, the agent must grep for the other sites with the same defect and apply the identical remedy to all of them in the same pass, then name the extra sites in its final message. This is meant to reduce repeated review/fix passes for one defect class; it is explicitly not permission for unrelated refactors, renames, or broad cleanup. Operational context is in [[stages/review]].
 
 ## Terminal-marker completion prompts
 

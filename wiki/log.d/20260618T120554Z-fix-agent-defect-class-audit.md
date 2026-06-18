@@ -4,7 +4,7 @@ slug: fix-agent-defect-class-audit
 pages: [templates, gaps]
 ---
 
-Audited post-commit wiki coverage after `ba495dc0` changed
+Audited post-commit wiki coverage after branch commit `ce3f7978` changed
 `templates/fix_prompt.md.erb` and already added
 `wiki/log.d/20260618T120406Z-fix-agent-generalize-defect-class.md` plus a
 [[stages/review]] Phase 4 update. Read `AGENTS.md`, `.llm-wiki/config.json`,

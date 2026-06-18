@@ -3,7 +3,7 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,codex_review,synthetic_task,plan_context}.rb
 created: 2026-04-26
-updated: 2026-06-16
+updated: 2026-06-18
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
@@ -13,12 +13,15 @@ tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 
 ```ruby
 Hive::Reviewers.dispatch(spec, ctx)            # → Reviewers::Agent.new(...)
+Hive::Reviewers.backoff_seconds_for(n)         # → capped retry delay in seconds
 Hive::Reviewers::Context.new(worktree_path:, task_folder:, default_branch:, pass:)
 Hive::Reviewers::Result.new(name:, output_path:, status:, error_message:)
 Hive::Reviewers.synthetic_task_for(ctx)        # → SyntheticTask facade
 ```
 
 `dispatch`'s `kind` discriminator defaults to `"agent"`; `"codex_review"` selects `Reviewers::CodexReview`. An explicit `kind: "linter"` raises `UnknownKindError` (exit code `CONFIG = 78`) with a message pointing the user at `review.ci.command` rather than silently ignoring the request. Any other value also raises `UnknownKindError`.
+
+`backoff_seconds_for(failed_attempt)` is the shared capped exponential retry formula: 1s, 2s, 4s, 8s, then 8s for later failed attempts. `Reviewers::Agent#backoff_seconds_for`, `Reviewers::CodexReview#backoff_seconds_for`, and `Stages::Review#triage_retry_backoff` delegate to this helper while keeping their thin wrappers as test seams. This keeps Phase 2 reviewer retries and Phase 3 transient-triage retries on the same delay contract.
 
 ## `Reviewers::Base`
 
@@ -51,7 +54,7 @@ Native-`codex review` adapter (added 2026-06-10). The **patrol-default** reviewe
 1. Resolves the codex profile via `AgentProfiles.lookup(spec["agent"])` and calls `check_version!` (preflight; missing binary → `:error "preflight failed: …"`).
 2. Renders `templates/reviewer_codex_native_review.md.erb` (no `skill_invocation` binding — codex review takes no CE skill).
 3. Spawns `codex review --title <title> <prompt>` with `cwd = worktree_path`, capturing combined stdout+stderr under a wall-clock timeout (`spec["timeout_sec"]`, default 7200; process-group TERM on timeout).
-4. Validates: stdout must contain at least one `## High|Medium|Nit` header AND must NOT be the prompt template echoed back. codex occasionally returns the prompt's own example block (the literal `- [ ] <finding>: <one-line justification>` placeholder under each header) instead of reviewing; that passes the header check but is hollow, so `TEMPLATE_ECHO` rejects it as a failure (it retries rather than recording a fake clean pass — a real `No findings.` review still passes). Valid → trims the codex banner to the first severity header, drops the middle `exec` / `thinking` / `codex` tool-call transcript that `codex review` streams after the findings block, keeps codex's final assistant message when present, and writes the normalized body to `output_path`. Invalid / template-echo / non-zero exit / timeout → deletes any partial file and returns `:error` (so triage never sees a malformed findings file). On failure the captured combined stdout+stderr **tail** (last `FAILURE_TAIL_BYTES = 2000`) is appended to the `:error` message, so it lands in `reviews/errors-NN.md` and a `reviewer all_failed` becomes diagnosable instead of an opaque `exited status=1`; surfacing it also lets `Hive::AgentLimit.limit_reached?` (which only sees the error message) catch a codex usage-limit and route the phase to the cooldown `limits_reached` path instead of `all_failed`. Shares Agent's `max_attempts` retry + monotonic `deadline:` handling.
+4. Validates: stdout must contain at least one `## High|Medium|Nit` header AND must NOT be the prompt template echoed back. codex occasionally returns the prompt's own example block (the literal `- [ ] <finding>: <one-line justification>` placeholder under each header) instead of reviewing; that passes the header check but is hollow, so `TEMPLATE_ECHO` rejects it as a failure (it retries rather than recording a fake clean pass — a real `No findings.` review still passes). Valid → trims the codex banner to the first severity header, drops the middle `exec` / `thinking` / `codex` tool-call transcript that `codex review` streams after the findings block, keeps codex's final assistant message when present, and writes the normalized body to `output_path`. Invalid / template-echo / non-zero exit / timeout → deletes any partial file and returns `:error` (so triage never sees a malformed findings file). On failure the captured combined stdout+stderr **tail** (last `FAILURE_TAIL_BYTES = 2000`) is appended to the `:error` message, so it lands in `reviews/errors-NN.md` and a `reviewer all_failed` becomes diagnosable instead of an opaque `exited status=1`; surfacing it also lets `Hive::AgentLimit.limit_reached?` (which only sees the error message) catch a codex usage-limit and route the phase to the cooldown `limits_reached` path instead of `all_failed`. Shares Agent's `max_attempts` retry, `Hive::Reviewers.backoff_seconds_for` delay formula, and monotonic `deadline:` handling.
 
 **Why no `--base`**: the codex CLI's parser makes `--base <BRANCH>` mutually exclusive with a custom `[PROMPT]` (`"the argument '--base <BRANCH>' cannot be used with '[PROMPT]'"`), and the native `--base` review emits codex's own free-form summary, not Hive's GFM-checkbox format. So the adapter uses custom-PROMPT mode and the prompt itself scopes the review to `git diff <default_branch>...HEAD` and coerces the output format. argv never includes `--base`.
 
@@ -96,8 +99,8 @@ The DEFAULTS `patrol.review.reviewers` is the single `codex-native-review` entry
 ## Tests
 
 - `test/unit/reviewers_test.rb` — dispatch (agent / linter / unknown), Context / Result shape.
-- `test/unit/reviewers/agent_test.rb` — adapter render + spawn integration.
-- `test/unit/reviewers/codex_review_test.rb` — `codex review` argv (no `--base`), cwd, stdout→findings, banner trim, session-transcript drop with and without a trailing codex reply, malformed/empty/non-zero → error + no file, timeout kill, version gate, retry/deadline, dispatch, prompt render. Fakes the codex subprocess via `test/fixtures/fake-codex` + `HIVE_CODEX_BIN`.
+- `test/unit/reviewers/agent_test.rb` — adapter render + spawn integration and retry-loop behavior through the adapter seam.
+- `test/unit/reviewers/codex_review_test.rb` — `codex review` argv (no `--base`), cwd, stdout→findings, banner trim, template-echo rejection, session-transcript drop with and without a trailing codex reply, malformed/empty/non-zero → error + no file, timeout kill, version gate, retry/deadline, dispatch, prompt render. Fakes the codex subprocess via `test/fixtures/fake-codex` + `HIVE_CODEX_BIN`.
 - `test/unit/reviewers/synthetic_task_test.rb` — facade shape.
 
 ## Backlinks

@@ -11,6 +11,7 @@ module Hive
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
       "default_branch" => nil,
+      "dependency_gate_stage" => "8-finalize",
       "project_name" => nil,
       "claude" => {
         "mode" => "tmux",
@@ -531,6 +532,7 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
+    DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
 
@@ -1252,6 +1254,7 @@ module Hive
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
+      validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
@@ -1638,6 +1641,15 @@ module Hive
       raise ConfigError,
             "claude.permission_mode in #{describe_source(source_path)} must be one of " \
             "#{CLAUDE_PERMISSION_MODES.inspect}; got #{permission_mode.inspect} (#{permission_mode.class})"
+    end
+
+    def validate_dependency_gate_stage!(cfg, source_path)
+      stage = cfg["dependency_gate_stage"]
+      return if DEPENDENCY_GATE_STAGES.include?(stage)
+
+      raise ConfigError,
+            "dependency_gate_stage in #{describe_source(source_path)} must be one of " \
+            "#{DEPENDENCY_GATE_STAGES.inspect}; got #{stage.inspect} (#{stage.class})"
     end
 
     def validate_brainstorm_runtime!(cfg, source_path)

@@ -300,6 +300,38 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "base-task", attrs[:depends_on]
     assert_equal "base-task", attrs[:blocked_by]
     assert_equal "7-artifacts", attrs[:dependency_stage]
+    assert_equal false, attrs[:unresolved],
+                 "a resolved prerequisite (blocked_by present) is a real below-gate wait, not unresolved"
+  end
+
+  # An unresolved block (mistyped/unknown depends_on → blocked_by nil) must
+  # still gate dispatch AND carry unresolved:true, so an operator can tell a
+  # config error apart from a genuine waiting-on-prerequisite block. The
+  # dispatcher derives `unresolved` from blocked_by presence — pin it here so
+  # a regression hardcoding/dropping the field is caught.
+  def test_unresolved_dependency_row_logs_unresolved_true_and_does_not_dispatch
+    rows = [
+      row(
+        action: "ready_to_plan",
+        command: "hive plan s1 --from 2-brainstorm",
+        depends_on: "typo-task",
+        blocked_by: nil,
+        dependency_stage: nil,
+        blocked: true
+      )
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event
+    attrs = event.last
+    assert_equal "typo-task", attrs[:depends_on]
+    assert_nil attrs[:blocked_by]
+    assert_equal true, attrs[:unresolved],
+                 "a blocked row with no identified prerequisite must be flagged unresolved"
   end
 
   def test_digest_scheduler_dispatches_global_digest_without_project_gate

@@ -293,6 +293,62 @@ class SchemaFilesTest < Minitest::Test
                  "(errors: #{errors.inspect})"
   end
 
+  # Round-trip: a SuccessPayload carrying a POPULATED v4 Task (real
+  # depends_on / blocked_by / dependency_stage / blocked values) must
+  # validate against the published schema. The legacy_stage_dirs test above
+  # only validates the envelope with `tasks: []`, and the required-keys test
+  # only compares key sets — so a too-narrow field type (e.g.
+  # dependency_stage not allowing null, or blocked not boolean) would slip
+  # past those and be rejected at runtime by external consumers.
+  def test_hive_status_populated_task_validates_against_published_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+    row = {
+      stage: "1-inbox",
+      slug: "probe",
+      id: 42,
+      display_name: "Probe",
+      depends_on: "base-task",
+      blocked_by: "base-task",
+      dependency_stage: "7-artifacts",
+      blocked: true,
+      folder: "/tmp/probe",
+      state_file: "/tmp/probe/idea.md",
+      marker_name: :waiting,
+      marker_attrs: {},
+      mtime: Time.now,
+      folder_mtime: Time.now,
+      claude_pid: nil,
+      claude_pid_alive: nil,
+      action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
+      action_label: "Ready to brainstorm",
+      suggested_command: "hive brainstorm probe --from 1-inbox",
+      diagnostic: nil,
+      worktree_path: nil,
+      live_task_lock: false,
+      unanswered_questions: 0,
+      next_action: nil
+    }
+    task = Hive::Commands::Status.new.task_payload(row)
+    payload = JSON.parse(JSON.generate(
+                           "schema" => "hive-status",
+                           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+                           "ok" => true,
+                           "generated_at" => "2026-06-18T00:00:00Z",
+                           "projects" => [
+                             {
+                               "name" => "alpha",
+                               "path" => "/tmp/alpha",
+                               "hive_state_path" => "/tmp/alpha/.hive-state",
+                               "tasks" => [ task ]
+                             }
+                           ]
+                         ))
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "a populated v4 Task carrying real depends_on/blocked_by/dependency_stage/blocked " \
+                 "must validate against the published schema (errors: #{errors.inspect})"
+  end
+
   # `legacy_migrate_command` accepts either "hive migrate" (when
   # legacy_stage_dirs is non-empty) or `null` (when clean); any other
   # JSON type (e.g. a boolean or a number) must be rejected. Issue #94.

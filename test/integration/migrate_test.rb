@@ -359,6 +359,35 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  # The id-backfill path re-writes meta.yml; dropping the depends_on arg
+  # there would silently strip a task's dependency during migrate. Seed a
+  # populated depends_on and assert it survives a full migrate run.
+  def test_migrate_fills_null_id_and_preserves_depends_on
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        folder = write_task_folder(stages, "4-execute", "dependent-task-260603-aaaa")
+        Hive::TaskMeta.write(
+          folder,
+          id: nil,
+          slug: "dependent-task-260603-aaaa",
+          display_name: "Dependent Task",
+          depends_on: "base-task-260603-bbbb"
+        )
+
+        capture_io { migrate_command(dir).call }
+
+        assert_equal(
+          { id: 1, slug: "dependent-task-260603-aaaa",
+            display_name: "Dependent Task", depends_on: "base-task-260603-bbbb" },
+          Hive::TaskMeta.read(folder),
+          "migrate's id-backfill must preserve depends_on, not strip it"
+        )
+      end
+    end
+  end
+
   def test_migrate_backfills_missing_display_names_without_renaming_existing_names
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

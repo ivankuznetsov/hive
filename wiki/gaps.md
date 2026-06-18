@@ -237,5 +237,8 @@ captured. Open questions:
 - Or did the interactive `claude` triage agent end its turn / exit before
   writing `escalations-NN.md` (the log showed it spinning at "5m 0s" right as
   it was about to write its output files)?
-Next live triage failure should now carry the `message=` attr — use it to pick
-between these before hardening `expected_output_session_alive?`.
+Commit `e5c26edc` adds direct helper coverage for bounded `message=`
+truncation and capped retry backoff, but it still does not provide a live
+post-fix failure sample. Next live triage failure should now carry the
+`message=` attr — use it to pick between these before hardening
+`expected_output_session_alive?`.

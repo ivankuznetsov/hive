@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-06-11
+updated: 2026-06-18
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -51,7 +51,7 @@ patrol:
 1. Reconcile dismissal memory for existing patrol branches and PRs.
 2. Map tracked repository files into durable feature records under `.hive-state/patrol/features/`.
 3. Ask the configured agent to emit schema-shaped findings for each feature.
-4. Skip dismissed, already-PR'd, low-confidence, and low-severity findings.
+4. Skip dismissed, already-PR'd, similar-known, low-confidence, and low-severity findings.
 5. For each remaining finding (in order), create a dedicated `hive-patrol/...` worktree branch and run the fix agent. `max_prs_per_cycle` caps the number of PRs **opened** per scan, not the number of fix candidates: the loop keeps attempting candidates until that many PRs have actually opened, so a failed validation does not waste the budget on an otherwise-fixable later finding.
 6. Run configured validation commands in the fix worktree.
 7. Open a PR only when validation passed and the diff is not blocked by the secret scanner.
@@ -85,9 +85,9 @@ With `--json`, the command emits a single `hive-patrol.v1` envelope:
 }
 ```
 
-If patrol opens a PR but cannot create its synthetic `6-review` task, the PR URL appears in `review_handoff_errors` and the finding fingerprint is recorded as `review_handoff_failed` so a later patrol cycle can retry the handoff instead of permanently skipping the finding as already active.
+If patrol opens a PR but cannot create its synthetic `6-review` task, the PR URL appears in `review_handoff_errors` and the finding fingerprint is recorded as `review_handoff_failed` so a later patrol cycle can retry the handoff instead of permanently skipping the finding as already active. `skipped_findings[].reason` reports why reviewed findings did not become fix candidates; currently source can emit exact dismissal, exact active fingerprint, similar-known finding, low-confidence, or low-severity reasons.
 
-Config errors emit `ok: false`, `error_kind: "config"`, and exit 78.
+Config errors emit `ok: false`, `error_kind: "config"`, and exit 78. A missing `PROJECT` is rejected by Thor before `Hive::Commands::Patrol` runs; when `--json` is present, `bin/hive` maps that pre-dispatch usage error to a `hive-patrol` error payload with `error_kind: "error"` and exit 64 so patrol callers still receive one schema-shaped JSON document.
 
 ## Daemon
 

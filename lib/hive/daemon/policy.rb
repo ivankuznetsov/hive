@@ -101,6 +101,10 @@ module Hive
       #   and the `:skip`/`:wait_for_debounce` outcomes are unaffected, so
       #   the editor-bulk-save path still resumes once it is complete. The
       #   dispatcher computes this by parsing the brainstorm file.
+      # @param blocked [Boolean] the status JSON's verbatim dependency-gate
+      #   flag. When true, a would-be `:dispatch` is gated to
+      #   `:blocked_on_dependency`, taking precedence over `answers_pending`
+      #   (applied to both advance/plan-approval and edit-resume rows).
       #
       # @return [Symbol] one of :dispatch, :blocked_on_dependency,
       #   :poll_for_merge, :wait_for_debounce, :wait_for_answers,

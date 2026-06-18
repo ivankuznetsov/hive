@@ -29,7 +29,9 @@ module Hive
       # so a resolved prerequisite without one is a corrupt input, not a
       # missing dependency — raise rather than emit a tuple that would
       # render as "(unresolved)". Callers on the never-fail status surface
-      # already isolate this per project (see annotate_dependencies).
+      # isolate this per row, not per project: apply_dependency_result
+      # rescues each row independently, so one corrupt prerequisite blanks
+      # only its own dependent's gate, not the whole project's.
       slug = task_slug(prerequisite)
       raise ArgumentError, "resolved prerequisite #{dependency.inspect} has no slug" unless slug
 
@@ -136,11 +138,15 @@ module Hive
     end
 
     # Read `key` (a symbol) from `task`, which is either a Hash (symbol- or
-    # string-keyed) or an object exposing `key` as a reader. Production
-    # callers pass a symbol-keyed Hash (DependencySnapshot / status rows) or
-    # a `Hive::Task`; the string-key arm covers config-sourced hashes (and
-    # the hash-tasks test). Returns nil only when the key is genuinely absent
-    # from a recognized shape; warns (and returns nil) when `task` is neither
+    # string-keyed) or an object exposing `key` as a reader. EVERY production
+    # caller passes a SYMBOL-keyed Hash: Status#apply_dependency_result and
+    # DependencySnapshot#stacked_base both project their rows/tasks into
+    # symbol-keyed Hashes before calling in (the snapshot deliberately does
+    # not duck-type other inputs). The string-key arm and the reader arm are
+    # test-ergonomics / forward-compat only — no production path passes a
+    # string-keyed Hash or a reader-exposing object (e.g. a `Hive::Task`)
+    # today. Returns nil only when the key is genuinely absent from a
+    # recognized shape; warns (and returns nil) when `task` is neither
     # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves
     # a breadcrumb instead of silently resolving every field to "missing".
     def field(task, key)

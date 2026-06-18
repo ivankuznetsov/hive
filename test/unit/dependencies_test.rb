@@ -160,6 +160,65 @@ class DependenciesTest < Minitest::Test
     assert_equal "8-finalize", result.dependency_stage
   end
 
+  # `blocked_label` is the single source of truth for the "⏸ blocked by …"
+  # indicator both renderers share. Pin both branches directly so a
+  # regression localises to the helper instead of surfacing only through
+  # the two end-to-end renderer tests.
+  def test_blocked_label_renders_resolved_and_unresolved_branches
+    resolved = Hive::Dependencies.blocked_label(
+      depends_on: "base-task", blocked_by: "base-task", dependency_stage: "7-artifacts"
+    )
+    unresolved = Hive::Dependencies.blocked_label(
+      depends_on: "typo-task", blocked_by: nil, dependency_stage: nil
+    )
+
+    assert_equal "⏸ blocked by base-task (7-artifacts)", resolved
+    assert_equal "⏸ blocked by typo-task (unresolved)", unresolved
+  end
+
+  # A numeric self-reference where the current task and its snapshot entry
+  # share an id but NOT a slug (absent on the task-under-eval) must be
+  # recognised via same_task?'s id-equality arm — the slug arm short-
+  # circuits to false when either slug is missing, so only the id branch
+  # can catch this self-reference.
+  def test_self_reference_by_numeric_id_only_stays_blocked_unresolved
+    current = task(nil, id: 42, stage_index: 4)
+    snapshot_entry = task("base-task", id: 42, stage_index: 4)
+    result = Hive::Dependencies.resolve(
+      depends_on: "42",
+      tasks: [ snapshot_entry ],
+      threshold_stage: "8-finalize",
+      task: current
+    )
+
+    assert_equal true, result.blocked
+    assert_equal true, result.unresolved?
+    assert_nil result.blocked_by
+  end
+
+  # A numeric depends_on whose only candidate carries a garbage (non-integer)
+  # id must leave a breadcrumb on stderr AND degrade to unresolved rather
+  # than mis-resolve — the corrupt id can't satisfy the numeric match.
+  def test_corrupt_numeric_prerequisite_id_warns_and_degrades_to_unresolved
+    result = nil
+    _out, err = capture_io do
+      result = Hive::Dependencies.resolve(
+        depends_on: "42",
+        tasks: [ task("base-task", id: "not-a-number", stage_index: 8) ],
+        threshold_stage: "8-finalize"
+      )
+    end
+
+    assert_match(/prerequisite id "not-a-number" is not an integer/, err,
+                 "a corrupt prereq id must leave a breadcrumb on stderr")
+    assert_equal true, result.blocked,
+                 "an unresolvable numeric depends_on must stay blocked"
+    assert_equal true, result.unresolved?,
+                 "a numeric depends_on whose only candidate has a garbage id must " \
+                 "degrade to unresolved, not mis-resolve"
+    assert_nil result.blocked_by
+  end
+
   private
 
   def task(slug, id: nil, stage_index: nil, stage: nil)

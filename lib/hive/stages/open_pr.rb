@@ -1,5 +1,8 @@
 require "open3"
+require "hive/dependencies"
+require "hive/dependency_snapshot"
 require "hive/gh"
+require "hive/git_ops"
 require "hive/markers"
 require "hive/protected_files"
 require "hive/secret_patterns"
@@ -96,7 +99,8 @@ module Hive
 
         Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
 
-        prompt = render_prompt(task, worktree_path, branch)
+        prompt = render_prompt(task, worktree_path, branch,
+                               base_branch: dependency_pr_base_branch(task, cfg))
         profile = Hive::Stages::Base.stage_profile(cfg, "open_pr")
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
         spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path)
@@ -166,7 +170,7 @@ module Hive
         pointer
       end
 
-      def render_prompt(task, worktree_path, branch)
+      def render_prompt(task, worktree_path, branch, base_branch: nil)
         Hive::Stages::Base.render(
           "open_pr_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -175,11 +179,28 @@ module Hive
             worktree_path: worktree_path,
             slug: task.slug,
             branch: branch,
+            base_branch: base_branch,
             plan_text: read_optional(task, "plan.md"),
             execute_output_text: read_optional(task, "task.md"),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
+      end
+
+      def dependency_pr_base_branch(task, cfg)
+        depends_on = Hive::DependencySnapshot.depends_on(task)
+        return nil if depends_on.to_s.strip.empty?
+
+        default_branch = cfg["default_branch"] || Hive::GitOps.new(task.project_root).default_branch
+        base_branch = Hive::Dependencies.base_branch_for(
+          depends_on: depends_on,
+          tasks: Hive::DependencySnapshot.tasks(task.project_root),
+          default_branch: default_branch,
+          task: Hive::DependencySnapshot.current_task(task)
+        )
+        return nil if base_branch == default_branch
+
+        Hive::Worktree.origin_branch_exists?(task.project_root, base_branch) ? base_branch : nil
       end
 
       # Validate the agent-written COMPLETE marker against GitHub. An

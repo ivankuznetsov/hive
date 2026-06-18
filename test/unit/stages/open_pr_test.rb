@@ -4,23 +4,29 @@ require "hive/stages/open_pr"
 class HiveStagesOpenPrTest < Minitest::Test
   include HiveTestHelper
 
-  Task = Struct.new(:folder, :state_file, :project_root, :slug, keyword_init: true)
+  Task = Struct.new(:folder, :state_file, :project_root, :slug, :depends_on, :id, keyword_init: true)
   Scan = Struct.new(:fetch_failed, :fetch_error, :hits, keyword_init: true)
 
 
-  def make_task(root)
+  def make_task(root, depends_on: nil)
     folder = File.join(root, ".hive-state", "stages", "5-open-pr", "open-pr-task")
     FileUtils.mkdir_p(folder)
     Task.new(
       folder: folder,
       state_file: File.join(folder, "pr.md"),
       project_root: root,
-      slug: "open-pr-task"
+      slug: "open-pr-task",
+      depends_on: depends_on,
+      id: 2
     )
   end
 
   def write_pointer(task, worktree_path, branch: task.slug)
     File.write(File.join(task.folder, "worktree.yml"), { "path" => worktree_path, "branch" => branch }.to_yaml)
+  end
+
+  def write_dependency_meta(task)
+    Hive::TaskMeta.write(task.folder, id: task.id, slug: task.slug, display_name: nil, depends_on: task.depends_on)
   end
 
   def cfg
@@ -434,6 +440,57 @@ class HiveStagesOpenPrTest < Minitest::Test
             end
           end
         end
+      end
+    end
+  end
+
+  def test_render_prompt_includes_base_branch_when_supplied
+    with_tmp_dir do |root|
+      task = make_task(root)
+
+      prompt = Hive::Stages::OpenPr.render_prompt(task, "/tmp/worktree", task.slug, base_branch: "base-task")
+
+      assert_includes prompt, "gh pr create --draft"
+      assert_includes prompt, "--head open-pr-task --base base-task"
+    end
+  end
+
+  def test_render_prompt_omits_base_branch_when_absent
+    with_tmp_dir do |root|
+      task = make_task(root)
+
+      prompt = Hive::Stages::OpenPr.render_prompt(task, "/tmp/worktree", task.slug)
+
+      assert_includes prompt, "--head open-pr-task"
+      refute_includes prompt, "--base"
+    end
+  end
+
+  def test_dependency_pr_base_branch_returns_dependency_when_origin_branch_exists
+    with_tmp_dir do |root|
+      task = make_task(root, depends_on: "base-task")
+      write_dependency_meta(task)
+      base_folder = File.join(root, ".hive-state", "stages", "8-finalize", "base-task")
+      FileUtils.mkdir_p(base_folder)
+      Hive::TaskMeta.write(base_folder, id: 1, slug: "base-task", display_name: nil)
+
+      with_replaced_singleton_method(Hive::Worktree, :origin_branch_exists?, ->(_project_root, branch) { branch == "base-task" }) do
+        assert_equal "base-task",
+                     Hive::Stages::OpenPr.dependency_pr_base_branch(task, { "default_branch" => "master" })
+      end
+    end
+  end
+
+  def test_dependency_pr_base_branch_returns_nil_when_dependency_branch_missing
+    with_tmp_dir do |root|
+      task = make_task(root, depends_on: "base-task")
+      write_dependency_meta(task)
+      base_folder = File.join(root, ".hive-state", "stages", "8-finalize", "base-task")
+      FileUtils.mkdir_p(base_folder)
+      Hive::TaskMeta.write(base_folder, id: 1, slug: "base-task", display_name: nil)
+
+      with_replaced_singleton_method(Hive::Worktree, :origin_branch_exists?, ->(_project_root, _branch) { false }) do
+        assert_nil Hive::Stages::OpenPr.dependency_pr_base_branch(task, { "default_branch" => "master" })
       end
     end
   end

@@ -141,6 +141,61 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_branches_from_dependency_override_when_origin_branch_exists
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      scratch = nil
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+
+        scratch = Dir.mktmpdir("origin-base")
+        run!("git", "clone", origin_dir, scratch)
+        run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+        run!("git", "-C", scratch, "config", "user.name", "Test")
+        run!("git", "-C", scratch, "checkout", "-b", "base-task")
+        File.write(File.join(scratch, "base.txt"), "base\n")
+        run!("git", "-C", scratch, "add", ".")
+        run!("git", "-C", scratch, "commit", "-m", "base task", "--quiet")
+        run!("git", "-C", scratch, "push", "origin", "base-task:base-task")
+        base_sha = run!("git", "-C", origin_dir, "rev-parse", "base-task").strip
+
+        wt = Hive::Worktree.new(dir, "dependent-task", worktree_root: root)
+        wt.create!("dependent-task", default_branch: "master", base_override: "base-task")
+
+        worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+        assert_equal base_sha, worktree_sha,
+                     "dependent worktree must branch from origin/<depends_on>, not default"
+      ensure
+        FileUtils.rm_rf(scratch) if scratch
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
+  def test_create_falls_back_to_default_when_dependency_override_missing_on_origin
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        default_sha = run!("git", "-C", origin_dir, "rev-parse", "master").strip
+
+        wt = Hive::Worktree.new(dir, "dependent-fallback", worktree_root: root)
+        _, err = capture_io do
+          wt.create!("dependent-fallback", default_branch: "master", base_override: "missing-base")
+        end
+
+        worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+        assert_equal default_sha, worktree_sha,
+                     "missing dependency branch must fall back to origin/default"
+        assert_match(/worktree base: fetch origin missing-base failed/, err)
+      ensure
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
   def test_create_falls_back_to_local_default_when_no_origin_remote
     # No `origin` configured — the existing behavior (branch from
     # local default) is the correct fallback. Must not raise.

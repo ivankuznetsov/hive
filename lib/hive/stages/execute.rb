@@ -3,6 +3,8 @@ require "fileutils"
 require "date"
 require "yaml"
 require "hive/claude_launcher"
+require "hive/dependencies"
+require "hive/dependency_snapshot"
 require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
@@ -86,13 +88,27 @@ module Hive
         ops = Hive::GitOps.new(task.project_root)
         worktree_root = canonical_worktree_root(task, cfg)
         wt = Hive::Worktree.new(task.project_root, task.slug, worktree_root: worktree_root)
-        wt.create!(task.slug, default_branch: ops.default_branch)
+        wt.create!(task.slug, default_branch: ops.default_branch,
+                              base_override: dependency_base_override(task, ops.default_branch))
 
         Hive::Worktree.validate_pointer_path(wt.path, worktree_root)
         wt.write_pointer!(task.folder, task.slug, execute_base_head: Hive::GitOps.new(wt.path).head_sha)
 
         write_initial_task_md(task)
         run_pass(task, cfg, wt.path)
+      end
+
+      def dependency_base_override(task, default_branch)
+        depends_on = Hive::DependencySnapshot.depends_on(task)
+        return nil if depends_on.to_s.strip.empty?
+
+        base_branch = Hive::Dependencies.base_branch_for(
+          depends_on: depends_on,
+          tasks: Hive::DependencySnapshot.tasks(task.project_root),
+          default_branch: default_branch,
+          task: Hive::DependencySnapshot.current_task(task)
+        )
+        base_branch == default_branch ? nil : base_branch
       end
 
       # User re-ran `hive run` on a 4-execute task whose worktree

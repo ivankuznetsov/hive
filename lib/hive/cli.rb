@@ -288,12 +288,13 @@ module Hive
     end
 
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
+    option :depends_on, type: :string, desc: "block daemon auto-advance until this task id or slug reaches PR-open"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
       raise Hive::Error, "missing task text" if text.strip.empty?
 
-      Hive::Commands::New.new(project, text).call
+      Hive::Commands::New.new(project, text, depends_on: options[:depends_on]).call
     end
     map "new" => :new_task
 

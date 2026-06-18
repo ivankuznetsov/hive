@@ -19,23 +19,26 @@ module Hive
       {
         id: normalize_id(raw["id"] || raw[:id]),
         slug: normalize_string(raw["slug"] || raw[:slug]),
-        display_name: normalize_string(raw["display_name"] || raw[:display_name])
+        display_name: normalize_string(raw["display_name"] || raw[:display_name]),
+        depends_on: normalize_string(raw["depends_on"] || raw[:depends_on])
       }
     rescue StandardError
       empty
     end
 
-    def write(task_folder, id:, slug:, display_name:)
+    def write(task_folder, id:, slug:, display_name:, depends_on: nil)
       FileUtils.mkdir_p(task_folder)
+      normalized_depends_on = normalize_string(depends_on)
       data = {
         "id" => normalize_id(id),
         "slug" => normalize_string(slug),
         "display_name" => normalize_string(display_name)
       }
+      data["depends_on"] = normalized_depends_on if normalized_depends_on
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
-      data.transform_keys(&:to_sym)
+      data.transform_keys(&:to_sym).merge(depends_on: normalized_depends_on)
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
@@ -47,12 +50,13 @@ module Hive
         task_folder,
         id: current[:id],
         slug: slug,
-        display_name: name
+        display_name: name,
+        depends_on: current[:depends_on]
       )
     end
 
     def empty
-      { id: nil, slug: nil, display_name: nil }
+      { id: nil, slug: nil, display_name: nil, depends_on: nil }
     end
 
     def normalize_id(value)

@@ -37,6 +37,7 @@ module Hive
 
       class ProjectNotFound < TypedValueError; end
       class InvalidSlugError < TypedValueError; end
+      class InvalidDependencyError < TypedValueError; end
       class SlugCollisionError < TypedValueError; end
       # Raised when an attachment's filename fails the basename/empty guard
       # in `copy_attachments!`. Distinct from `InvalidSlugError` so TUI
@@ -44,12 +45,13 @@ module Hive
       # "attachment routing bug" feedback in their rescue lists.
       class InvalidAttachmentError < TypedValueError; end
 
-      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [])
+      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
         @body_override = body_override
         @attachments = attachments
+        @depends_on = depends_on
       end
 
       class << self
@@ -73,7 +75,7 @@ module Hive
       # screen.
       def call
         call!
-      rescue ProjectNotFound, InvalidSlugError, InvalidAttachmentError,
+      rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidAttachmentError,
              SlugCollisionError, SystemCallError, IOError => e
         warn "hive: #{e.message}"
         exit 1
@@ -90,6 +92,8 @@ module Hive
 
         slug = @slug_override || derive_slug(@text)
         validate_slug!(slug)
+        depends_on = normalize_dependency(@depends_on)
+        validate_dependency!(depends_on) if depends_on
 
         hive_state = project["hive_state_path"]
         task_dir = File.join(hive_state, "stages", "1-inbox", slug)
@@ -107,7 +111,7 @@ module Hive
           File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
           copy_attachments!(task_dir)
           id = allocate_task_id
-          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil)
+          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as
@@ -158,6 +162,20 @@ module Hive
         return unless RESERVED_SLUGS.include?(slug.downcase) || slug.include?("..") || slug.include?("/") || slug.include?("@")
 
         raise InvalidSlugError.new("reserved or unsafe slug '#{slug}'", value: slug)
+      end
+
+      def normalize_dependency(value)
+        string = value.to_s.strip
+        string.empty? ? nil : string
+      end
+
+      def validate_dependency!(value)
+        return if value.match?(/\A\d+\z/) || SLUG_RE.match?(value)
+
+        raise InvalidDependencyError.new(
+          "invalid dependency '#{value}' (must be a task id or slug matching #{SLUG_RE.source})",
+          value: value
+        )
       end
 
       def render_idea(slug, text, body_override: nil)

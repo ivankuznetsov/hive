@@ -191,7 +191,8 @@ module Hive
             folder,
             id: Hive::TaskCounter.next!,
             slug: File.basename(folder),
-            display_name: meta[:display_name]
+            display_name: meta[:display_name],
+            depends_on: meta[:depends_on]
           )
         end
         targets.size

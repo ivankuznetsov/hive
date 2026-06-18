@@ -1,5 +1,6 @@
 require "test_helper"
 require "open3"
+require "timeout"
 require "hive/babysitter/dry_run_env"
 
 class BabysitterDryRunEnvTest < Minitest::Test
@@ -155,6 +156,24 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_equal "existing\n", File.read(target)
       assert_includes git_err, "[dry-run] failed to write skip log #{link}:"
       assert_includes gh_err, "[dry-run] failed to write skip log #{link}:"
+    end
+  end
+
+  def test_stubs_refuse_fifo_skip_log_without_hanging
+    with_tmp_dir do |dir|
+      fifo = File.join(dir, "skipped.log")
+      File.mkfifo(fifo)
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => fifo }
+
+      _out, git_err, git_status = capture_stub_with_timeout(env, "git", "commit", "-m", "through-fifo")
+      _out, gh_err, gh_status = capture_stub_with_timeout(env, "gh", "pr", "comment", "42", "--body", "hi")
+
+      assert git_status.success?, git_err
+      assert gh_status.success?, gh_err
+      assert_includes git_err, "[dry-run] failed to write skip log #{fifo}:"
+      assert_includes gh_err, "[dry-run] failed to write skip log #{fifo}:"
+      assert_includes git_err, "[dry-run] git commit -m through-fifo skipped"
+      assert_includes gh_err, "[dry-run] gh pr comment 42 --body hi skipped"
     end
   end
 
@@ -892,6 +911,24 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   private
+
+  STUB_HANG_TIMEOUT_SEC = 10
+
+  def capture_stub_with_timeout(env, binary, *args)
+    Open3.popen3(env, stub_path(binary), *args) do |stdin, stdout, stderr, wait_thread|
+      stdin.close
+      out_reader = Thread.new { stdout.read }
+      err_reader = Thread.new { stderr.read }
+      status = Timeout.timeout(STUB_HANG_TIMEOUT_SEC) { wait_thread.value }
+      [ out_reader.value, err_reader.value, status ]
+    rescue Timeout::Error
+      Process.kill("TERM", wait_thread.pid)
+      Process.wait(wait_thread.pid)
+      raise
+    rescue Errno::ESRCH, Errno::ECHILD
+      raise Timeout::Error, "#{binary} stub did not exit"
+    end
+  end
 
   def assert_stubbed(env, binary, *args)
     _out, err, status = Open3.capture3(env, stub_path(binary), *args)

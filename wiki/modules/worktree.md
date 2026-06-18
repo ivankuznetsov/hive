@@ -3,8 +3,8 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-05-13
-tags: [worktree, git, pointer]
+updated: 2026-06-18
+tags: [worktree, git, pointer, dependencies]
 ---
 
 **TLDR**: Wrapper around `git worktree add/remove/list` with a YAML pointer file (`worktree.yml`) inside the task folder, plus path-prefix validation that rejects pointers outside the configured `worktree_root`.
@@ -15,7 +15,7 @@ tags: [worktree, git, pointer]
 Hive::Worktree.new(project_root, slug, worktree_root: nil)
 #path   → "<worktree_root>/<slug>"
 #exists? → bool (sees both filesystem dir and `git worktree list`)
-#create!(branch_name, default_branch:) → :created
+#create!(branch_name, default_branch:, base_override: nil) → :created
 #remove! → :removed
 #write_pointer!(task_folder, branch_name, execute_base_head: nil) → writes worktree.yml
 ```
@@ -40,12 +40,12 @@ If passed explicitly, that's used. Otherwise:
 
 `Hive::Worktree.worktree_base` returns `ENV["HIVE_WORKTREE_BASE"] || File.expand_path("~/Dev")`, and every fallback site (`worktree.rb`, `task.rb`, `diagnosis_agent.rb`, `stages/execute.rb`, `stages/review.rb`, `commands/init.rb`) routes the default through `default_worktree_root`. The env override exists so the test suite can point the default base at a tmp sandbox (`test_helper.rb` sets `HIVE_WORKTREE_BASE ||= Dir.mktmpdir("hive-test-wtbase")`); previously the hardcoded `~/Dev/<project>.worktrees` fallback seeded the developer's real `~/Dev` with thousands of `hive-test<...>.worktrees` dirs. When unset, behavior is identical to the old hardcoded `~/Dev` default.
 
-## `create!(branch_name, default_branch:)`
+## `create!(branch_name, default_branch:, base_override: nil)`
 
 1. `mkdir -p` the parent of `path`.
 2. Probe `git show-ref --verify refs/heads/<branch_name>`:
    - If it exists, run `git worktree add <path> <branch_name>` (attach to existing branch).
-   - If not, **resolve the freshest base** via `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
+   - If not, resolve the base via `base_override` when present, otherwise `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
 3. On non-zero exit, raise `Hive::WorktreeError` with the captured stderr.
 
 This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history.
@@ -61,6 +61,14 @@ The helper:
 4. On fetch success, return `"origin/#{default_branch}"`.
 
 Local `<default>` is never modified — any unpushed commits there are preserved. Only the new feature branch's starting point is affected.
+
+### Dependency base override
+
+`base_override` is used by [[modules/task_dependencies]] when a dependent task
+enters `4-execute`. Hive tries to fetch and branch from
+`origin/<base_override>` so stacked tasks start from their prerequisite branch.
+If there is no origin, the fetch fails, or the remote branch is unavailable,
+`create!` warns and falls back through `freshest_base(default_branch)`.
 
 ## `remove!`
 

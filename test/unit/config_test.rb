@@ -2681,7 +2681,6 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("digest", "enabled")
       assert_nil cfg.dig("digest", "agent")
       assert_equal 7, cfg.dig("digest", "max_catchup_days")
-      assert_nil cfg.dig("bot", "digest_chat_id")
     end
   end
 
@@ -2700,6 +2699,72 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg["enabled"]
       assert_equal "codex", cfg["agent"]
       assert_equal 3, cfg["max_catchup_days"]
+    end
+  end
+
+  def test_load_global_digest_block_defaults_enabled_on_when_bot_configured
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: true
+          chat_id_allowlist:
+            - 60499527
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal true, cfg["enabled"],
+                   "digest should auto-enable when the Telegram bot is configured with a chat"
+    end
+  end
+
+  def test_load_global_digest_block_honors_explicit_disable_even_with_bot
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          enabled: false
+        bot:
+          enabled: true
+          chat_id_allowlist:
+            - 60499527
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal false, cfg["enabled"],
+                   "an explicit digest.enabled: false must always be honored as an opt-out"
+    end
+  end
+
+  def test_load_global_digest_block_stays_off_without_a_deliverable_bot
+    with_tmp_global_config do |home|
+      # Bot enabled but no chat to deliver to: auto-enabling would only
+      # dispatch a paid categorizer that then fails at send time.
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: true
+          chat_id_allowlist: []
+      YAML
+
+      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
+                   "no allowlisted chat means no deliverable digest, so stay off"
+    end
+
+    with_tmp_global_config do |home|
+      # Chat present but bot disabled: the user has not turned Telegram on.
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: false
+          chat_id_allowlist:
+            - 60499527
+      YAML
+
+      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
+                   "a disabled bot means Telegram is not set up, so stay off"
     end
   end
 
@@ -2758,7 +2823,8 @@ class ConfigTest < Minitest::Test
         timeout_sec:
           digest: 34
         bot:
-          digest_chat_id: 12345
+          chat_id_allowlist:
+            - 12345
       YAML
 
       cfg = Hive::Config.load_global_digest_config
@@ -2766,7 +2832,7 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg.dig("digest", "enabled")
       assert_equal 12, cfg.dig("budget_usd", "digest")
       assert_equal 34, cfg.dig("timeout_sec", "digest")
-      assert_equal 12_345, cfg.dig("bot", "digest_chat_id")
+      assert_equal [ 12_345 ], cfg.dig("bot", "chat_id_allowlist")
       assert_equal File.join(home, "logs", "bot.log"), cfg.dig("bot", "log_file")
     end
   end
@@ -2928,19 +2994,6 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
       assert_match(/bot.chat_id_allowlist\[0\].*Integer/, err.message)
-    end
-  end
-
-  def test_load_global_bot_rejects_string_digest_chat_id
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          digest_chat_id: "12345"
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
-      assert_match(/bot\.digest_chat_id.*Integer/, err.message)
     end
   end
 

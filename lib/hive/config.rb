@@ -418,7 +418,6 @@ module Hive
       # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
       "bot" => {
         "enabled" => false,
-        "digest_chat_id" => nil,
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
@@ -929,8 +928,25 @@ module Hive
       end
 
       merged = deep_merge(deep_dup(DEFAULTS["digest"]), override)
+      # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
+      # either way, default it ON for anyone who already has the Telegram bot
+      # configured with a deliverable chat. An explicit digest.enabled (true
+      # OR false) is always honored — only the unset case is derived.
+      merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
       validate_digest!({ "digest" => merged }, path)
       merged
+    end
+
+    # True when the global Telegram bot is enabled and has at least one
+    # allowlisted chat to deliver to — the signal that "the user has Telegram
+    # set up", used to default the daily digest on. Reads the raw config so
+    # it never depends on bot-block defaults; the bot block's own shape is
+    # validated on its own load path.
+    def telegram_digest_default?(data)
+      bot = data["bot"]
+      return false unless bot.is_a?(Hash) && bot["enabled"] == true
+
+      Array(bot["chat_id_allowlist"]).any? { |id| id.is_a?(Integer) }
     end
 
     def load_global_digest_config
@@ -2069,7 +2085,6 @@ module Hive
       end
 
       validate_bot_allowlist!(bot, source_path)
-      validate_bot_digest_chat_id!(bot, source_path)
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
@@ -2101,16 +2116,6 @@ module Hive
               "bot.chat_id_allowlist[#{idx}] in #{describe_source(source_path)} must be an Integer; " \
               "got #{entry.inspect} (#{entry.class})"
       end
-    end
-
-    def validate_bot_digest_chat_id!(bot, source_path)
-      chat_id = bot["digest_chat_id"]
-      return if chat_id.nil?
-      return if chat_id.is_a?(Integer)
-
-      raise ConfigError,
-            "bot.digest_chat_id in #{describe_source(source_path)} must be an Integer; " \
-            "got #{chat_id.inspect} (#{chat_id.class})"
     end
 
     def validate_bot_numbers!(bot, source_path)

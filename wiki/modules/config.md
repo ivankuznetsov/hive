@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-06-18
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, and web settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.digest_chat_id`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, and web settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -104,7 +104,6 @@ tags: [config, yaml, validation]
   },
   "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
   "bot" => {
-    "digest_chat_id" => nil,
     "idea_attachment_max_bytes" => 20 * 1024 * 1024,
     "idea_attachment_max_count" => 10,
     "idea_draft_ttl_sec" => 900,
@@ -139,13 +138,20 @@ keys are:
   agent.
 - `budget_usd.digest` and `timeout_sec.digest` for categorizer limits,
   defaulting inside `Hive::Digest::Categorizer` to `50` and `1800`.
-- `bot.digest_chat_id`, then `bot.chat_id_allowlist[0]`, for Telegram delivery.
+- `bot.chat_id_allowlist[0]` for Telegram delivery.
 - `bot.log_file` for the sender's bot logger path.
 
 `load_global_digest_block` returns only the validated `digest` block for
-`Hive::Commands::Daemon`, which wires `DigestScheduler`. `bot.digest_chat_id`
-is optional and must be an Integer when set; delivery falls back to the first
-`bot.chat_id_allowlist` entry.
+`Hive::Commands::Daemon`, which wires `DigestScheduler`. Delivery resolves to
+`bot.chat_id_allowlist[0]`. The digest is **opt-out**: when the operator has not
+set `digest.enabled`, `load_global_digest_block` derives it from the bot config —
+`true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one
+integer chat id, else `false` (the predicate is the private
+`Config.telegram_digest_default?(data)` helper). An explicit `digest.enabled`
+(true or false) is always honored; only the unset case is derived. Both
+scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
+SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
+value applies in both.
 
 ## Module functions
 
@@ -258,7 +264,7 @@ cfg.dig("patrol", "review", "reviewers")
 cfg.dig("digest", "agent")
 cfg.dig("budget_usd", "digest")
 cfg.dig("timeout_sec", "digest")
-cfg.dig("bot", "digest_chat_id")
+cfg.dig("bot", "chat_id_allowlist")
 cfg["worktree_root"]
 ```
 

@@ -136,8 +136,7 @@ class HiveDigestE2ETest < Minitest::Test
         "max_catchup_days" => 7
       },
       "bot" => {
-        "digest_chat_id" => Integer(ENV.fetch("HIVE_DIGEST_TEST_CHAT_ID")),
-        "chat_id_allowlist" => []
+        "chat_id_allowlist" => [ Integer(ENV.fetch("HIVE_DIGEST_TEST_CHAT_ID")) ]
       }
     }.to_yaml)
   end

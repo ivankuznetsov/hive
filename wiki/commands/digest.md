@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-06-18
 tags: [command, digest, telegram, json]
 ---
 
@@ -14,8 +14,8 @@ calendar date, asks an agent to classify and summarize them when there is
 work to report, renders Telegram MarkdownV2, and sends through the bot
 Telegram client. Runtime config is loaded through
 `Hive::Config.load_global_digest_config`, so real sends can use
-`digest.agent`, `budget_usd.digest`, `timeout_sec.digest`,
-`bot.digest_chat_id`, and `bot.chat_id_allowlist`. See [[modules/digest]].
+`digest.agent`, `budget_usd.digest`, `timeout_sec.digest`, and
+`bot.chat_id_allowlist`. See [[modules/digest]].
 
 ## Synopsis
 
@@ -116,8 +116,7 @@ the direct API can still override that with `cfg:`. Supported keys:
 - `patrol.agent` — fallback summarizer agent.
 - `budget_usd.digest` — categorizer budget override; default is `50`.
 - `timeout_sec.digest` — categorizer timeout override; default is `1800`.
-- `bot.digest_chat_id` — preferred Telegram chat id for delivery.
-- `bot.chat_id_allowlist[0]` — delivery fallback when no digest chat is set.
+- `bot.chat_id_allowlist[0]` — Telegram chat id the digest is delivered to.
 - `bot.log_file` — Telegram client log path fallback.
 
 `Digest::Sender` always gets the bot token from
@@ -125,8 +124,15 @@ the direct API can still override that with `cfg:`. Supported keys:
 `HIVE_TELEGRAM_BOT_TOKEN`.
 
 The daemon schedules the command through `Hive::Daemon::DigestScheduler` when
-`digest.enabled: true`, dispatching `hive digest --date <day> --json` once per
-owed local day.
+`digest.enabled` is on, dispatching `hive digest --date <day> --json` once per
+owed local day. The digest is **opt-out**: when the operator has not set
+`digest.enabled` either way, `Hive::Config.load_global_digest_block` derives it
+from the bot config — it auto-enables (`true`) when the Telegram bot is
+configured with an allowlisted chat (`bot.enabled == true` and
+`bot.chat_id_allowlist` has at least one integer chat id), and is `false`
+otherwise. An explicit `digest.enabled: false` is the opt-out (and an explicit
+`digest.enabled: true` is always honored). See [[modules/config]] and
+[[commands/daemon]].
 
 ## Tests
 

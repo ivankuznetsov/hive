@@ -23,6 +23,43 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  # The shims are pure tooling that nobody reads after the block, so `with_env`
+  # removes the overlay dir on exit. The skip log is left in place on purpose —
+  # the test above reads it after the block returns.
+  def test_with_env_removes_overlay_bin_on_exit
+    with_tmp_dir do |dir|
+      overlay = File.join(dir, ".hive-babysitter-dry-run-bin")
+
+      Hive::Babysitter::DryRunEnv.with_env(dir) do
+        assert File.directory?(overlay), "overlay shims must exist inside the block"
+        assert File.executable?(File.join(overlay, "git"))
+        assert File.executable?(File.join(overlay, "gh"))
+        # Exercise a mutating command so the skip log is actually written.
+        _out, _err, status = Open3.capture3("git", "push", "origin", "HEAD:feature")
+        assert status.success?
+      end
+
+      refute File.exist?(overlay), "overlay-bin dir must be cleaned up on exit"
+      assert File.exist?(File.join(dir, ".babysitter-dry-run-skipped.log")),
+             "skip log must survive exit — it is the dry-run diagnostic record"
+    end
+  end
+
+  # The dry-run artifacts must be gitignored in the real repo so a stage-exit
+  # CleanExit treats them as clean rather than out-of-scope residue. Removing
+  # any of these `.gitignore` entries turns this red.
+  def test_dry_run_artifacts_are_gitignored_in_repo
+    repo_root = File.expand_path("../../..", __dir__)
+    %w[
+      .babysitter-dry-run-skipped.log
+      .babysitter-dry-run-plan.md
+      .hive-babysitter-dry-run-bin/git
+    ].each do |path|
+      _out, _err, status = Open3.capture3("git", "-C", repo_root, "check-ignore", "-q", path)
+      assert status.success?, "#{path} must be gitignored (git check-ignore failed)"
+    end
+  end
+
   def test_with_env_pins_real_binaries_against_command_local_overrides
     with_tmp_dir do |dir|
       recording_binary(dir, "git")

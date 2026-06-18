@@ -16,9 +16,10 @@ These are the auto-fix lines collected from `<%= task_folder %>/reviews/*-<%= "%
 ## What to do
 
 1. For each AUTO-FIX finding or answered escalation, read the cited file/line in the worktree, understand the requested change, and apply it when the answer asks for a code or documentation change.
-2. Make focused, scoped edits. Stay within what each finding asks for; do NOT refactor adjacent code unless that's literally what the finding asked for.
-3. Run any relevant test or assertion locally to confirm your fix doesn't regress neighboring behavior.
-4. Commit your changes with one or more conventional messages (`fix(scope): …` or `refactor(scope): …`). Multiple findings can land in one commit if they share a scope; otherwise prefer separate commits.
+2. Make focused, scoped edits. Stay within what each finding asks for; do NOT refactor adjacent code or make unrelated improvements.
+3. **Fix the whole class, not just the cited line.** When a finding's root cause is an instance of a recurring pattern — e.g. "this path silently swallows a session expiry/error and seals a partial result as complete," or "this call doesn't verify the returned id matches the requested one" — grep the worktree for the *other* sites that exhibit the **same** defect and apply the identical remedy to all of them in this pass. Name the extra sites you fixed in your final message. This is the one deliberate exception to the scoped-edits rule above, and it exists for a concrete reason: otherwise the next reviewer pass just re-finds the identical bug at the next site, burning a full extra pass per site. It is NOT license to rename, restructure, or "improve" unrelated code — only to eliminate every instance of the specific defect a finding identifies.
+4. Run any relevant test or assertion locally to confirm your fix doesn't regress neighboring behavior.
+5. Commit your changes with one or more conventional messages (`fix(scope): …` or `refactor(scope): …`). Multiple findings can land in one commit if they share a scope; otherwise prefer separate commits.
 
 ## Required commit trailers
 

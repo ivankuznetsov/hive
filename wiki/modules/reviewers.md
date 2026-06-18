@@ -3,7 +3,7 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,codex_review,synthetic_task,plan_context}.rb
 created: 2026-04-26
-updated: 2026-06-10
+updated: 2026-06-16
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
@@ -51,7 +51,7 @@ Native-`codex review` adapter (added 2026-06-10). The **patrol-default** reviewe
 1. Resolves the codex profile via `AgentProfiles.lookup(spec["agent"])` and calls `check_version!` (preflight; missing binary → `:error "preflight failed: …"`).
 2. Renders `templates/reviewer_codex_native_review.md.erb` (no `skill_invocation` binding — codex review takes no CE skill).
 3. Spawns `codex review --title <title> <prompt>` with `cwd = worktree_path`, capturing combined stdout+stderr under a wall-clock timeout (`spec["timeout_sec"]`, default 7200; process-group TERM on timeout).
-4. Validates: stdout must contain at least one `## High|Medium|Nit` header. Valid → trims the codex banner to the first severity header and writes the rest to `output_path`. Invalid / non-zero exit / timeout → deletes any partial file and returns `:error` (so triage never sees a malformed findings file). Shares Agent's `max_attempts` retry + monotonic `deadline:` handling.
+4. Validates: stdout must contain at least one `## High|Medium|Nit` header. Valid → trims the codex banner to the first severity header, drops the middle `exec` / `thinking` / `codex` tool-call transcript that `codex review` streams after the findings block, keeps codex's final assistant message when present, and writes the normalized body to `output_path`. Invalid / non-zero exit / timeout → deletes any partial file and returns `:error` (so triage never sees a malformed findings file). Shares Agent's `max_attempts` retry + monotonic `deadline:` handling.
 
 **Why no `--base`**: the codex CLI's parser makes `--base <BRANCH>` mutually exclusive with a custom `[PROMPT]` (`"the argument '--base <BRANCH>' cannot be used with '[PROMPT]'"`), and the native `--base` review emits codex's own free-form summary, not Hive's GFM-checkbox format. So the adapter uses custom-PROMPT mode and the prompt itself scopes the review to `git diff <default_branch>...HEAD` and coerces the output format. argv never includes `--base`.
 
@@ -97,7 +97,7 @@ The DEFAULTS `patrol.review.reviewers` is the single `codex-native-review` entry
 
 - `test/unit/reviewers_test.rb` — dispatch (agent / linter / unknown), Context / Result shape.
 - `test/unit/reviewers/agent_test.rb` — adapter render + spawn integration.
-- `test/unit/reviewers/codex_review_test.rb` — `codex review` argv (no `--base`), cwd, stdout→findings, banner trim, malformed/empty/non-zero → error + no file, timeout kill, version gate, retry/deadline, dispatch, prompt render. Fakes the codex subprocess via `test/fixtures/fake-codex` + `HIVE_CODEX_BIN`.
+- `test/unit/reviewers/codex_review_test.rb` — `codex review` argv (no `--base`), cwd, stdout→findings, banner trim, session-transcript drop with and without a trailing codex reply, malformed/empty/non-zero → error + no file, timeout kill, version gate, retry/deadline, dispatch, prompt render. Fakes the codex subprocess via `test/fixtures/fake-codex` + `HIVE_CODEX_BIN`.
 - `test/unit/reviewers/synthetic_task_test.rb` — facade shape.
 
 ## Backlinks

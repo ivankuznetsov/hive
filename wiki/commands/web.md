@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-14
+updated: 2026-06-16
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -142,6 +142,17 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   meta-refresh; pi token form. `gh` joins the relay (login supplies git push
   credentials via the image's credential helper); its `--web` flow blocks on
   a bare Enter rather than a paste-back code, which the relay auto-answers.
+  Codex uses `codex login --device-auth` rather than the localhost-callback
+  `codex login`, because the callback server would bind inside the container
+  and surface an unreachable localhost URL to the host browser. Codex and `gh`
+  are operator-ward poll flows: the one-time code is entered at the provider,
+  the CLI keeps polling, and the status turbo-frame keeps refreshing until the
+  PTY child exits while hiding the paste-back form. Claude remains the
+  paste-back `claude setup-token` flow. Raw PTY bytes are scrubbed to
+  render-safe UTF-8 before the `<pre>` output is interpolated, and captured
+  URLs are sanitized by replacing ANSI/terminal-control runs with spaces
+  before re-extracting the first URL so adjacent URLs are split rather than
+  spliced into one href.
 - **Telegram** — first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
@@ -190,8 +201,9 @@ config — `test_helper.rb` sets the sandbox before the app loads). It pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape and strict chat-ID validation, repo
-clone target refusal for non-directories, plain-vs-deep health semantics, and
-the oversized diff cap/truncation notice.
+clone target refusal for non-directories, agent-login status rendering for
+binary PTY output and operator-ward poll flows, root favicon/icon assets,
+plain-vs-deep health semantics, and the oversized diff cap/truncation notice.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
@@ -257,6 +269,11 @@ claimable `/login`, owner-gated `/`). The Windows workflow cannot run Linux
 containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
 `packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the
 installer's diagnostics and pull/run argv shape.
+
+Root web assets are served from `web/public/`: `/favicon.ico` (multi-size
+legacy icon), `/icon.svg`, and `/icon.png` (apple-touch). The layout links all
+three so browsers no longer emit a root favicon 404, and the icon mark is the
+terracotta honeycomb hive glyph rather than the old placeholder.
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

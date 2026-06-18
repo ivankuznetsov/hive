@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-06-12
+updated: 2026-06-16
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's paste-the-code agent OAuth relay, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
 
 ## ADR-037: Hivebox web tier is a vanilla Rails 8 + Turbo app, replacing the Sinatra tier
 
@@ -78,7 +78,7 @@ github.com/login/device) — symmetrical with the agent relay. Operators
 overriding `client_id` must check "Enable Device Flow" on their app. Route
 behavior and tests: [[commands/web]].
 
-## ADR-035: Hivebox agent OAuth uses PTY paste-the-code relay, not provider-page proxying
+## ADR-035: Hivebox agent OAuth uses a PTY login relay, not provider-page proxying
 
 **Status:** Active (shipped with hivebox web UI work on 2026-06-04).
 
@@ -88,13 +88,18 @@ through the hivebox origin would put third-party login HTML under a different
 origin, run against normal phishing defenses, and depend on redirect URI
 assumptions the CLIs do not promise to expose.
 
-**Decision:** For Claude and Codex, hivebox spawns the real CLI login command in
-a PTY (`claude setup-token`, `codex login`), captures output, extracts the first
-`http(s)://` URL, asks the operator to open that provider URL directly, and
-writes the pasted code or callback URL back to the waiting PTY. The same relay
-now covers `gh auth login` with `--hostname github.com --git-protocol https --web --skip-ssh-key`;
-`gh`'s device-flow prompt asks for a bare Enter before polling, so the relay
-auto-answers that prompt rather than asking for a paste-back code.
+**Decision:** Hivebox spawns the real CLI login command in a PTY, captures
+output, extracts the first clean `http(s)://` URL, and asks the operator to
+open that provider URL directly. Claude remains a paste-back flow
+(`claude setup-token`): hivebox writes the pasted code or callback URL back to
+the waiting PTY. Codex is intentionally started as `codex login --device-auth`
+because plain `codex login` starts a container-local callback server whose
+localhost URL is unreachable from the host browser. Codex and `gh auth login
+--hostname github.com --git-protocol https --web --skip-ssh-key` are
+operator-ward device flows: the one-time code is entered at the provider, the
+CLI polls in the background, and the status frame keeps polling until the child
+exits instead of showing a paste-back form. `gh`'s device-flow prompt asks for
+a bare Enter before polling, so the relay auto-answers that prompt.
 For Pi, hivebox validates that the submitted token JSON is a non-empty object
 and writes it to `~/.pi/agent/auth.json` with mode `0600`. The container sets
 `HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, and `~/.config/gh`
@@ -102,12 +107,13 @@ survive image upgrades via the `/data` bind mount.
 
 **Consequences:** Hivebox avoids becoming a login-page reverse proxy and keeps
 the credential persistence model aligned with the CLI tools themselves. The UX
-cost is that the operator must copy/paste the returned code or callback URL for
-Claude/Codex; `gh` needs only the displayed GitHub device code because the relay
-answers its Enter prompt. The Docker image's git credential helper can then use
-that `gh` auth for daemon-owned https pushes, removing the previous docker-exec
-setup step. Callback proxying to a localhost listener remains intentionally
-unimplemented until an agent CLI documents a supported callback-host override.
+cost is that Claude still requires a copy/paste round trip, while Codex and
+`gh` require the operator to enter the displayed one-time code at the provider
+and wait for the frame to update. The Docker image's git credential helper can
+then use that `gh` auth for daemon-owned https pushes, removing the previous
+docker-exec setup step. Callback proxying to a localhost listener remains
+intentionally unimplemented until an agent CLI documents a supported
+callback-host override.
 The local design note is `docs/notes/hivebox-agent-oauth-relay.md`; route-level
 behavior is covered in [[commands/web]].
 

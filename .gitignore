@@ -56,3 +56,14 @@ test/e2e/tg/*.session
 test/e2e/tg/*.session-journal
 test/e2e/tg/.code_hash
 **/__pycache__/
+
+# Babysitter dry-run artifacts. The PR-repair daemon's preview mode
+# (lib/hive/babysitter/dry_run_env.rb) writes a skip log + overlay-bin shims
+# into the worktree; the stubs also fall back to a worktree-relative skip log
+# when HIVE_BABYSITTER_DRY_RUN_LOG is unset. These are transient and must never
+# be committed — otherwise a stage-exit CleanExit `git add -A` stages them and
+# the auto-commit scope check rejects them as out-of-scope residue
+# (:error reason=ensure_clean_on_exit_failed).
+.babysitter-dry-run-skipped.log
+.babysitter-dry-run-plan.md
+.hive-babysitter-dry-run-bin/

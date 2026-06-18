@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-06-12
+updated: 2026-06-15
 tags: [agent, claude, subprocess]
 ---
 
@@ -34,9 +34,9 @@ Hive::Agent.new(
 
 ## Provider-limit classification
 
-`Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`. `AgentLimit` also owns the limit-retry cooldown: `RETRY_COOLDOWN_SEC` (default 3600s = 1h, overridable per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`, validated to a positive integer) and `retry_after(now:)`, which returns `(now.utc + cooldown).iso8601`. Every `limits_reached` marker writer stamps that `retry_after` so the daemon healer can self-heal the parked task once the usage window has plausibly reset — see [[daemon]] and [[state-model]].
+`Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. The broad "limit reached/exceeded/reset" family is intentionally usage-qualified (`usage`, `rate`, `token`, `credit`, `quota`, account/subscription/time-window terms, etc.) so healthy agent output about UI limits such as scroll, window, viewport, page, buffer, or line limits does not trip a false `limits_reached` wall. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`. `AgentLimit` also owns the limit-retry cooldown: `RETRY_COOLDOWN_SEC` (default 3600s = 1h, overridable per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`, validated to a positive integer) and `retry_after(now:)`, which returns `(now.utc + cooldown).iso8601`. Every `limits_reached` marker writer stamps that `retry_after` so the daemon healer can self-heal the parked task once the usage window has plausibly reset — see [[daemon]] and [[state-model]].
 
-Headless `Hive::Agent#handle_exit` only runs this classifier when the child failed or timed out; a clean `exit_code == 0` result is not reclassified. For `:state_file_marker` spawns it stamps `ERROR reason=limits_reached`; for `:exit_code_only` and `:output_file_exists` spawns it returns the limit message without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
+Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. The classifier still only controls failure/timeout handling: a clean `exit_code == 0` result is not reclassified. For `:state_file_marker` spawns it stamps `ERROR reason=limits_reached`; for `:exit_code_only` and `:output_file_exists` spawns it returns the limit message without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
 
 ## `run!` (the main entry)
 
@@ -113,7 +113,7 @@ tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
 4. Capture `pgid` (with `Errno::ESRCH` fallback to pid).
 5. `Hive::Lock.update_task_lock(task.folder, "claude_pid" => pid)` — `hive status` uses this to detect stale agents.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
-7. Reader thread: `r.each_line` writes timestamped lines to the log and captures the last structured agent final message it recognizes. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source.
+7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source.
 8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
@@ -130,7 +130,7 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 
 | Condition | Marker set |
 |-----------|------------|
-| provider-limit text in a failed/timeout result's `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
+| provider-limit text in a failed/timeout result's raw stream `limit_text` or `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
 | `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code marker_id=<hex16> -->` (corrupted state, not silent OK) |

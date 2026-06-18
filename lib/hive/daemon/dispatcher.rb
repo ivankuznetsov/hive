@@ -773,9 +773,16 @@ module Hive
                                   stage: row.stage, action: row.action,
                                   reason: "answers_pending")
         when :blocked_on_dependency
+          # `unresolved` distinguishes a real waiting-on-prereq block
+          # (blocked_by names the prerequisite) from a mistyped/unknown
+          # depends_on (blocked_by nil — a config error, not a wait). The
+          # hive-status JSON carries no `unresolved` field, so derive it
+          # from blocked_by presence — the same discriminator the status
+          # and TUI renderers use (see Dependencies.blocked_label).
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "dependency_unmet",
+                                  unresolved: row.blocked_by.nil?,
                                   depends_on: row.depends_on,
                                   blocked_by: row.blocked_by,
                                   dependency_stage: row.dependency_stage)

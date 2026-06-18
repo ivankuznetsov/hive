@@ -22,7 +22,19 @@ module Hive
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
         depends_on: normalize_string(raw["depends_on"] || raw[:depends_on])
       }
-    rescue StandardError
+    rescue Errno::ENOENT
+      # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
+      # absence, not corruption. Return empty silently.
+      empty
+    rescue Psych::Exception, SystemCallError, IOError => e
+      # A YAML/permission/encoding error here silently drops `depends_on`,
+      # which the resolver then reads as "no dependency" (blocked:false) —
+      # the daemon could dispatch a dependent ahead of its prerequisite.
+      # Narrow the rescue (matching Worktree.read_pointer) and log so the
+      # dropped field is observable instead of failing the gate open in
+      # silence.
+      warn "hive: task_meta: failed to read #{path(task_folder)} " \
+           "(#{e.class}: #{e.message}); treating meta as empty (depends_on dropped)"
       empty
     end
 

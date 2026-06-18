@@ -532,6 +532,11 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
+    # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
+    # Kept as an explicit policy literal rather than derived via
+    # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
+    # deliberate review point here, not a silent propagation — if DIRS
+    # changes, update this list to match.
     DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime

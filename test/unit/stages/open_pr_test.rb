@@ -495,6 +495,21 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_dependency_pr_base_branch_returns_nil_for_self_reference
+    with_tmp_dir do |root|
+      # A task whose depends_on points at its own slug resolves to no
+      # stacked base (same_task? guard) and must fall back to the default —
+      # never attempt to stack a PR onto its own branch.
+      task = make_task(root, depends_on: "open-pr-task")
+      write_dependency_meta(task)
+
+      _out, err = capture_io do
+        assert_nil Hive::Stages::OpenPr.dependency_pr_base_branch(task, { "default_branch" => "master" })
+      end
+      assert_match(/did not resolve to a stacked base/, err)
+    end
+  end
+
   def test_run_lands_error_when_open_pr_recovery_secret_scan_fetch_fails
     with_tmp_dir do |root|
       task = make_task(root)

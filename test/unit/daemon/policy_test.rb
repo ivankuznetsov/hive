@@ -392,6 +392,20 @@ class HiveDaemonPolicyTest < Minitest::Test
                         answers_pending: false)
   end
 
+  def test_blocked_takes_precedence_over_answers_pending_on_debounced_resume
+    # A debounced edit-resume row that is BOTH dependency-blocked and has
+    # unanswered Q&A must resolve to the dependency gate, not the Q&A hold —
+    # the `blocked` branch is checked before `answers_pending`. A future
+    # reordering of those two branches would otherwise pass CI.
+    assert_equal :blocked_on_dependency,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: T0 - 600,
+                        answers_pending: true,
+                        blocked: true)
+  end
+
   def test_answers_pending_does_not_override_record_baseline
     # First-sight must still seed the baseline even while answers pend,
     # otherwise the editor-bulk-save path would never get a baseline to

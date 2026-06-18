@@ -172,8 +172,14 @@ module Hive
       def validate_dependency!(value)
         return if value.match?(/\A\d+\z/) || SLUG_RE.match?(value)
 
+        # Describe the accepted shape in plain English for humans and
+        # agents; the raw offending value stays in the structured `value:`
+        # field for machine consumers (the regex source is an
+        # implementation detail, not an operator-facing format).
         raise InvalidDependencyError.new(
-          "invalid dependency '#{value}' (must be a task id or slug matching #{SLUG_RE.source})",
+          "invalid dependency '#{value}' — expected a prerequisite task id " \
+          "(a positive integer) or a slug (lowercase, starting with a letter, " \
+          "e.g. add-export-endpoint-260618-ab12)",
           value: value
         )
       end

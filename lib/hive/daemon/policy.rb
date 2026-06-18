@@ -2,15 +2,22 @@ module Hive
   module Daemon
     # Pure decision module: maps a `hive status --json` task row's
     # `action` field (a `Hive::Schemas::TaskActionKind` value) plus
-    # state-file mtime context to one of four outcomes:
+    # state-file mtime and dependency context to one of these outcomes
+    # (authoritative list: the `@return` tag on `decide` below):
     #
-    #   :dispatch          — run `row.suggested_command` as a child
-    #   :poll_for_merge    — hand off to PrMergeWatcher (finalize → done)
-    #   :wait_for_debounce — user is mid-edit; let mtime settle
-    #   :wait_for_answers  — brainstorm Q&A still has unanswered questions;
-    #                        hold the resume until every question is
-    #                        answered (Telegram answers land one at a time)
-    #   :skip              — do nothing this tick
+    #   :dispatch              — run `row.suggested_command` as a child
+    #   :blocked_on_dependency — hold: an unmet/unresolved task dependency
+    #                            (the `blocked` gate; takes precedence over
+    #                            the Q&A hold)
+    #   :poll_for_merge        — hand off to PrMergeWatcher (finalize → done)
+    #   :wait_for_debounce     — user is mid-edit; let mtime settle
+    #   :wait_for_answers      — brainstorm Q&A still has unanswered
+    #                            questions; hold the resume until every
+    #                            question is answered (Telegram answers land
+    #                            one at a time)
+    #   :record_baseline       — first-sight edit-resume row; seed the mtime
+    #                            baseline without dispatching
+    #   :skip                  — do nothing this tick
     #
     # The daemon adds NO new approval logic. Forward-advance safety is
     # delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
@@ -128,12 +135,15 @@ module Hive
                                 last_dispatched: last_dispatched_state_file_mtime,
                                 now: now,
                                 debounce_sec: edit_debounce_sec)
-          # Hold the resume while a brainstorm Q&A still has unanswered
-          # questions. Only the terminal `:dispatch` is gated — the
-          # first-sight `:record_baseline` and the `:skip`/
-          # `:wait_for_debounce` outcomes pass through unchanged so the
+          # Gate a would-be edit-resume `:dispatch` on two holds, in
+          # precedence order: an unmet task dependency wins
+          # (→ :blocked_on_dependency), then unanswered brainstorm Q&A
+          # (→ :wait_for_answers). Both gate ONLY the terminal `:dispatch`
+          # — the first-sight `:record_baseline` and the `:skip`/
+          # `:wait_for_debounce` outcomes pass through unchanged, so the
           # mtime baseline is still seeded and the editor-bulk-save path
-          # dispatches normally once every answer is in.
+          # dispatches normally once every answer is in and the block
+          # clears.
           if outcome == :dispatch && blocked
             :blocked_on_dependency
           elsif outcome == :dispatch && answers_pending

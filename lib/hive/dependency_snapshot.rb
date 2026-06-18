@@ -1,7 +1,14 @@
 require "hive/stages"
 require "hive/task_meta"
+require "hive/dependencies"
 
 module Hive
+  # Disk→resolver glue for task dependencies. `tasks` reads every stage
+  # folder's meta.yml into the shape `Hive::Dependencies` consumes;
+  # `current_task`/`depends_on` project the task-under-evaluation into the
+  # same shape. Every production caller passes a `Hive::Task`, which exposes
+  # #slug, #id, #depends_on, #folder, and #project_root directly — the
+  # snapshot does not duck-type other inputs.
   module DependencySnapshot
     module_function
 
@@ -26,16 +33,42 @@ module Hive
     end
 
     def current_task(task)
-      {
-        slug: task.slug,
-        id: task.respond_to?(:id) ? task.id : nil
-      }
+      { slug: task.slug, id: task.id }
     end
 
     def depends_on(task)
-      return task.depends_on if task.respond_to?(:depends_on)
+      task.depends_on
+    end
 
-      Hive::TaskMeta.read(task.folder)[:depends_on] if task.respond_to?(:folder)
+    # Resolve the branch a dependent task's worktree / PR should stack
+    # onto. Shared by 4-execute (worktree base) and 5-open-pr (PR base) so
+    # the read-depends_on → load-snapshot → resolve → null-out-when-default
+    # scaffolding lives in one place. Returns nil when the task has no
+    # dependency, or when a set dependency does not resolve to a stacked
+    # base (typo / prereq transiently absent from the snapshot /
+    # self-reference) — and warns in that latter case so a silently
+    # collapsed stack is observable at execute/open-pr time rather than
+    # only via the fail-closed daemon gate. Lives here (the disk-reading
+    # layer) rather than in the pure `Hive::Dependencies` resolver so the
+    # resolver stays free of disk I/O.
+    def stacked_base(task, default_branch)
+      dependency = depends_on(task)
+      return nil if dependency.to_s.strip.empty?
+
+      base = Hive::Dependencies.base_branch_for(
+        depends_on: dependency,
+        tasks: tasks(task.project_root),
+        default_branch: default_branch,
+        task: current_task(task)
+      )
+      if base == default_branch
+        warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
+             "but it did not resolve to a stacked base (prerequisite missing " \
+             "from the snapshot or self-reference); branching from #{default_branch}"
+        return nil
+      end
+
+      base
     end
   end
 end

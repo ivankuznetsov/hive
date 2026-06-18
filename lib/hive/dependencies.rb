@@ -2,22 +2,54 @@ require "hive/stages"
 
 module Hive
   module Dependencies
-    Result = Data.define(:blocked_by, :dependency_stage, :blocked, :unresolved)
+    # `unresolved` is NOT a stored field: it is derived so the three-field
+    # tuple can never contradict itself. A blocked row with no identified
+    # prerequisite (missing dependency or self-reference) is unresolved; a
+    # blocked row that names a prerequisite slug is a real below-gate wait.
+    # `resolve` guarantees the correlation `unresolved? ⟺ (blocked &&
+    # blocked_by.nil?)` by construction (see the resolved⟹slug guard below).
+    Result = Data.define(:blocked_by, :dependency_stage, :blocked) do
+      def unresolved?
+        blocked && blocked_by.nil?
+      end
+    end
 
     module_function
 
     def resolve(depends_on:, tasks:, threshold_stage:, task: nil)
       dependency = normalize_depends_on(depends_on)
-      return Result.new(blocked_by: nil, dependency_stage: nil, blocked: false, unresolved: false) unless dependency
+      return Result.new(blocked_by: nil, dependency_stage: nil, blocked: false) unless dependency
 
       prerequisite = find_task(dependency, tasks)
       if prerequisite.nil? || same_task?(prerequisite, task)
-        return Result.new(blocked_by: nil, dependency_stage: nil, blocked: true, unresolved: true)
+        return Result.new(blocked_by: nil, dependency_stage: nil, blocked: true)
       end
+
+      # Resolved ⟹ slug present. Every snapshot builder guarantees a slug,
+      # so a resolved prerequisite without one is a corrupt input, not a
+      # missing dependency — raise rather than emit a tuple that would
+      # render as "(unresolved)". Callers on the never-fail status surface
+      # already isolate this per project (see annotate_dependencies).
+      slug = task_slug(prerequisite)
+      raise ArgumentError, "resolved prerequisite #{dependency.inspect} has no slug" unless slug
 
       stage = stage_name_for(prerequisite)
       blocked = stage_index_for(prerequisite) < threshold_index(threshold_stage)
-      Result.new(blocked_by: task_slug(prerequisite), dependency_stage: stage, blocked: blocked, unresolved: false)
+      Result.new(blocked_by: slug, dependency_stage: stage, blocked: blocked)
+    end
+
+    # Single source of truth for the "⏸ blocked by …" indicator rendered by
+    # both Commands::Status (text mode) and Tui::Views::TasksPane. The
+    # unresolved-vs-resolved discriminator is `blocked_by` presence —
+    # `resolve`'s resolved⟹slug guard makes a resolved prerequisite always
+    # carry its slug and an unresolved one (missing / self-reference) always
+    # nil — so the two renderers can never diverge on the predicate.
+    def blocked_label(depends_on:, blocked_by:, dependency_stage:)
+      if blocked_by.to_s.strip.empty?
+        "⏸ blocked by #{depends_on} (unresolved)"
+      else
+        "⏸ blocked by #{blocked_by} (#{dependency_stage})"
+      end
     end
 
     def base_branch_for(depends_on:, tasks:, default_branch:, task: nil)
@@ -57,26 +89,31 @@ module Hive
     end
 
     def task_slug(task)
-      field(task, :slug) || field(task, "slug")
+      field(task, :slug)
     end
 
     def task_id(task)
-      raw = field(task, :id) || field(task, "id")
+      raw = field(task, :id)
       return raw if raw.is_a?(Integer)
       return nil if raw.nil? || raw.to_s.strip.empty?
 
       Integer(raw)
     rescue ArgumentError, TypeError
+      # A corrupt prerequisite id (non-numeric string in meta.yml) makes a
+      # numeric `depends_on` silently mis-resolve. Leave a breadcrumb so the
+      # "typo in depends_on" case is distinguishable from "prereq id is
+      # garbage" when debugging an unexpected unresolved gate.
+      warn "[hive] dependencies: prerequisite id #{raw.inspect} is not an integer; " \
+           "ignoring it for numeric depends_on matching"
       nil
     end
 
     def stage_index_for(task)
-      raw = field(task, :stage_index) || field(task, "stage_index")
+      raw = field(task, :stage_index)
       return raw if raw.is_a?(Integer)
       return Integer(raw) if raw
 
-      stage = field(task, :stage) || field(task, "stage") ||
-              field(task, :dependency_stage) || field(task, "dependency_stage")
+      stage = field(task, :stage)
       resolved = Hive::Stages.resolve(stage.to_s)
       return Hive::Stages::DIRS.index(resolved) + 1 if resolved
 
@@ -84,7 +121,7 @@ module Hive
     end
 
     def stage_name_for(task)
-      stage = field(task, :stage) || field(task, "stage")
+      stage = field(task, :stage)
       resolved = Hive::Stages.resolve(stage.to_s)
       return resolved if resolved
 
@@ -98,11 +135,26 @@ module Hive
       Hive::Stages::DIRS.index(resolved) + 1
     end
 
+    # Read `key` (a symbol) from `task`, which is either a Hash (symbol- or
+    # string-keyed) or an object exposing `key` as a reader. Production
+    # callers pass a symbol-keyed Hash (DependencySnapshot / status rows) or
+    # a `Hive::Task`; the string-key arm covers config-sourced hashes (and
+    # the hash-tasks test). Returns nil only when the key is genuinely absent
+    # from a recognized shape; warns (and returns nil) when `task` is neither
+    # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves
+    # a breadcrumb instead of silently resolving every field to "missing".
     def field(task, key)
-      if task.respond_to?(:key?) && task.key?(key)
-        task[key]
+      if task.respond_to?(:key?)
+        return task[key] if task.key?(key)
+        return task[key.to_s] if task.key?(key.to_s)
+
+        nil
       elsif task.respond_to?(key)
         task.public_send(key)
+      else
+        warn "[hive] dependencies: unrecognized task shape #{task.class} " \
+             "(expected Hash or object responding to #{key}); treating #{key} as missing"
+        nil
       end
     end
   end

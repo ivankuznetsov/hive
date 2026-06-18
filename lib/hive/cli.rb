@@ -288,7 +288,24 @@ module Hive
     end
 
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
-    option :depends_on, type: :string, desc: "block daemon auto-advance until this task id or slug reaches PR-open"
+    long_desc <<~DESC
+      Create a new task in 1-inbox of PROJECT from the free-text TEXT.
+
+      --depends-on stacks this task on a prerequisite: the daemon holds
+      auto-advance until the prerequisite reaches the project's dependency
+      gate stage (8-finalize by default, configurable via
+      `dependency_gate_stage`). The value is a prerequisite task id (a
+      positive integer) or slug (lowercase, starts with a letter).
+
+      Examples:
+
+        hive new myproj "add export button" --depends-on 42
+        hive new myproj "wire up export API" --depends-on add-export-endpoint-260618-ab12
+    DESC
+    option :depends_on, type: :string,
+                        desc: "stack on a prerequisite task id or slug; hold daemon " \
+                              "auto-advance until it reaches the dependency gate stage " \
+                              "(8-finalize by default)"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")

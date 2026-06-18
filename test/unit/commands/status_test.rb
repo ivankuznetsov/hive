@@ -176,6 +176,157 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # The resolved branch of the text-mode indicator was only exercised via
+  # the TUI's separate renderer, so swapping the two branches in
+  # Commands::Status would have passed every test. Pin a below-gate
+  # resolvable prereq through render_project.
+  def test_render_project_renders_resolved_dependency_indicator
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "7-artifacts", "base-task-260618-aaaa",
+                               state_file: "artifact.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+
+      assert_includes out, "⏸ blocked by #{File.basename(base)} (7-artifacts)"
+      refute_includes out, "(unresolved)", "a resolved prereq must NOT render the unresolved variant"
+    end
+  end
+
+  # End-to-end config→annotate_dependencies threshold wiring: a project that
+  # raises the gate to 9-done blocks a prereq sitting at 8-finalize (which
+  # would unblock under the default gate).
+  def test_json_payload_honors_dependency_gate_stage_override
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "dependency_gate_stage: 9-done\n")
+      base = write_status_task(hive_state, "8-finalize", "base-task-260618-aaaa",
+                               state_file: "pr.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+
+      tasks = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ]).fetch("projects").first.fetch("tasks")
+      row = tasks.find { |task| task.fetch("slug") == File.basename(dependent) }
+
+      assert_equal "8-finalize", row.fetch("dependency_stage")
+      assert_equal true, row.fetch("blocked"),
+                   "raising the gate to 9-done must keep an 8-finalize prereq blocking"
+    end
+  end
+
+  # The `same_task?` self-reference branch runs in production via `task: row`
+  # but was asserted only at the resolver level. A task depending on its own
+  # slug must surface as blocked with no blocked_by through the JSON path.
+  def test_json_payload_self_reference_dependency_is_blocked_unresolved
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      task = write_status_task(hive_state, "4-execute", "loop-task-260618-cccc",
+                               state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(task, id: 1, slug: File.basename(task),
+                                 display_name: nil, depends_on: File.basename(task))
+
+      tasks = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ]).fetch("projects").first.fetch("tasks")
+      row = tasks.find { |t| t.fetch("slug") == File.basename(task) }
+
+      assert_equal true, row.fetch("blocked")
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+    end
+  end
+
+  # Regression guard for the High finding: one project with an invalid
+  # dependency_gate_stage (which Config.load rejects with ConfigError) must
+  # NOT abort the whole `hive status --json` — that would feed the daemon
+  # ok:false and freeze auto-advance fleet-wide. The dependency threshold
+  # degrades to the global default (with a stderr breadcrumb) so the bad
+  # project still reports its tasks and the healthy project is untouched.
+  def test_json_payload_isolates_a_project_with_invalid_config
+    with_tmp_dir do |bad_root|
+      with_tmp_dir do |good_root|
+        bad_state = File.join(bad_root, ".hive-state")
+        good_state = File.join(good_root, ".hive-state")
+        FileUtils.mkdir_p(bad_state)
+        # 5-open-pr is below the allowed gate stages, so Config.load raises.
+        File.write(File.join(bad_state, "config.yml"), "dependency_gate_stage: 5-open-pr\n")
+        write_status_task(bad_state, "4-execute", "bad-proj-task-260618-aaaa",
+                          state_file: "task.md", marker: "EXECUTE_COMPLETE")
+        write_status_task(good_state, "4-execute", "good-proj-task-260618-bbbb",
+                          state_file: "task.md", marker: "EXECUTE_COMPLETE")
+
+        payload = nil
+        _out, err = capture_io do
+          payload = Hive::Commands::Status.new.json_payload([
+            { "name" => "bad", "path" => bad_root, "hive_state_path" => bad_state },
+            { "name" => "good", "path" => good_root, "hive_state_path" => good_state }
+          ])
+        end
+
+        assert_equal true, payload.fetch("ok"),
+                     "one bad project must not flip the whole status envelope to not-ok"
+        bad = payload.fetch("projects").find { |p| p["name"] == "bad" }
+        good = payload.fetch("projects").find { |p| p["name"] == "good" }
+        bad_slugs = bad.fetch("tasks").map { |t| t["slug"] }
+        good_slugs = good.fetch("tasks").map { |t| t["slug"] }
+        assert_includes bad_slugs, "bad-proj-task-260618-aaaa",
+                        "the bad-config project still reports tasks (gate falls back to default)"
+        assert_includes good_slugs, "good-proj-task-260618-bbbb",
+                        "a healthy project must still report its tasks"
+        assert_match(/unusable dependency_gate_stage/, err,
+                     "the degraded gate must leave a stderr breadcrumb")
+      end
+    end
+  end
+
+  # Belt-and-suspenders for the same freeze: any unexpected per-project
+  # raise inside project_payload must degrade that one project to an empty
+  # task list rather than abort the whole envelope.
+  def test_json_payload_degrades_a_project_that_raises_unexpectedly
+    raising = Class.new(Hive::Commands::Status) do
+      def project_payload(project, **)
+        raise "boom in #{project['name']}" if project["name"] == "explodes"
+
+        super
+      end
+    end
+
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(hive_state, "4-execute", "healthy-task-260618-eeee",
+                        state_file: "task.md", marker: "EXECUTE_COMPLETE")
+
+      payload = nil
+      _out, err = capture_io do
+        payload = raising.new.json_payload([
+          { "name" => "explodes", "path" => project_root, "hive_state_path" => hive_state },
+          { "name" => "healthy", "path" => project_root, "hive_state_path" => hive_state }
+        ])
+      end
+
+      assert_equal true, payload.fetch("ok")
+      exploded = payload.fetch("projects").find { |p| p["name"] == "explodes" }
+      healthy = payload.fetch("projects").find { |p| p["name"] == "healthy" }
+      assert_equal [], exploded.fetch("tasks"), "the exploding project degrades to no tasks"
+      refute_empty healthy.fetch("tasks"), "the healthy project is unaffected"
+      assert_match(/payload failed/, err)
+    end
+  end
+
   # #270: unanswered_question_count must never break `hive status` — a
   # parse error on a mid-write/malformed brainstorm.md degrades to 0.
   def test_unanswered_question_count_degrades_to_zero_on_parse_error

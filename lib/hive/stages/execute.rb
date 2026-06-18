@@ -88,27 +88,21 @@ module Hive
         ops = Hive::GitOps.new(task.project_root)
         worktree_root = canonical_worktree_root(task, cfg)
         wt = Hive::Worktree.new(task.project_root, task.slug, worktree_root: worktree_root)
-        wt.create!(task.slug, default_branch: ops.default_branch,
-                              base_override: dependency_base_override(task, ops.default_branch))
+        # Consult config's `default_branch` first, falling back to the
+        # detected branch — same precedence as 5-open-pr's
+        # `dependency_pr_base_branch`, so both stacking call sites agree on
+        # the base ref. The shared `DependencySnapshot.stacked_base`
+        # resolves the prerequisite branch (or nil + a warn when a set
+        # dependency doesn't resolve).
+        default_branch = cfg["default_branch"] || ops.default_branch
+        wt.create!(task.slug, default_branch: default_branch,
+                              base_override: Hive::DependencySnapshot.stacked_base(task, default_branch))
 
         Hive::Worktree.validate_pointer_path(wt.path, worktree_root)
         wt.write_pointer!(task.folder, task.slug, execute_base_head: Hive::GitOps.new(wt.path).head_sha)
 
         write_initial_task_md(task)
         run_pass(task, cfg, wt.path)
-      end
-
-      def dependency_base_override(task, default_branch)
-        depends_on = Hive::DependencySnapshot.depends_on(task)
-        return nil if depends_on.to_s.strip.empty?
-
-        base_branch = Hive::Dependencies.base_branch_for(
-          depends_on: depends_on,
-          tasks: Hive::DependencySnapshot.tasks(task.project_root),
-          default_branch: default_branch,
-          task: Hive::DependencySnapshot.current_task(task)
-        )
-        base_branch == default_branch ? nil : base_branch
       end
 
       # User re-ran `hive run` on a 4-execute task whose worktree

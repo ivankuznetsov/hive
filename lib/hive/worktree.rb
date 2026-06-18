@@ -7,7 +7,15 @@ module Hive
   class Worktree
     NONINTERACTIVE_FETCH_ENV = {
       "GIT_TERMINAL_PROMPT" => "0",
-      "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10"
+      "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10",
+      # Bound HTTPS fetches too. The SSH options only cap the SSH connect;
+      # on an HTTPS origin a stalled remote (dead TCP, hung proxy) makes
+      # `git fetch` hang indefinitely, wedging the now-non-daemonized
+      # 4-execute (freshest_override_base) and 5-open-pr
+      # (origin_branch_exists?) stage paths this branch introduced. Abort
+      # the transfer if it stays under ~1 KB/s for 30 contiguous seconds.
+      "GIT_HTTP_LOW_SPEED_LIMIT" => "1000",
+      "GIT_HTTP_LOW_SPEED_TIME" => "30"
     }.freeze
 
     attr_reader :project_root, :slug
@@ -43,6 +51,13 @@ module Hive
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
       if exists.success?
+        # A local branch named `branch_name` already exists — only reachable
+        # on a re-run with a stale branch (a normal first creation has no
+        # such branch). Attach the worktree to it as-is; `base_override`
+        # (dependency stacking) is intentionally NOT honored on this path
+        # because the branch already carries history and re-basing it could
+        # discard committed work. `base_override` is honored on the normal
+        # first-creation else-branch below.
         args = [ "worktree", "add", path, branch_name ]
       else
         # Branch new worktrees from `origin/<default>` (after a quick
@@ -57,9 +72,9 @@ module Hive
         # commits the user has there.
         base = if base_override.to_s.strip.empty?
                  freshest_base(default_branch)
-               else
+        else
                  freshest_override_base(base_override, default_branch)
-               end
+        end
         args = [ "worktree", "add", path, "-b", branch_name, base ]
       end
       out, err, status = Open3.capture3("git", "-C", @project_root, *args)
@@ -113,17 +128,31 @@ module Hive
     def freshest_override_base(base_override, default_branch)
       branch = base_override.to_s.strip
       return freshest_base(default_branch) if branch.empty?
-      return freshest_base(default_branch) unless self.class.origin_configured?(@project_root)
 
+      unless self.class.origin_configured?(@project_root)
+        # No origin remote, so the requested stacked base can't be fetched.
+        # Warn like the sibling branches below so a dropped stack request is
+        # observable instead of silently collapsing onto the default.
+        warn "[hive] worktree base: no origin remote; cannot stack on #{branch}, " \
+             "falling back to the default branch base (origin/#{default_branch} when reachable)"
+        return freshest_base(default_branch)
+      end
+
+      # The fallbacks below call freshest_base, which returns
+      # `origin/<default>` on a successful fetch (only local `<default>` if
+      # that fetch also fails) — so the message names the default branch
+      # base rather than a specific ref.
       _, err, status = self.class.fetch_origin_branch(@project_root, branch)
       unless status.success?
         warn "[hive] worktree base: fetch origin #{branch} failed " \
-             "(#{err.strip[0, 200]}); branching from #{default_branch}"
+             "(#{err.strip[0, 200]}); falling back to the default branch base " \
+             "(origin/#{default_branch} when reachable)"
         return freshest_base(default_branch)
       end
 
       unless self.class.origin_branch_ref_exists?(@project_root, branch)
-        warn "[hive] worktree base: origin/#{branch} not found after fetch; branching from #{default_branch}"
+        warn "[hive] worktree base: origin/#{branch} not found after fetch; " \
+             "falling back to the default branch base (origin/#{default_branch} when reachable)"
         return freshest_base(default_branch)
       end
 

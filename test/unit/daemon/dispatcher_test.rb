@@ -967,6 +967,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil skipped, "must log :skipped reason: baseline_recorded"
   end
 
+  def test_blocked_first_sight_edit_resume_still_records_baseline
+    # A first-sight edit-resume row that is ALSO dependency-blocked must
+    # still seed its mtime baseline (the `:record_baseline` arm passes
+    # through the dependency gate, which only intercepts the terminal
+    # `:dispatch`). Otherwise the row would never get a baseline and could
+    # never resume once the block clears.
+    rows = [ row(action: "needs_input", marker: "waiting",
+                 command: "hive brainstorm s1 --from 2-brainstorm",
+                 mtime: T0 - 600,
+                 depends_on: "base-task", blocked_by: "base-task",
+                 dependency_stage: "7-artifacts", blocked: true) ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size, "a blocked first-sight row must not dispatch"
+    refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
+               "the blocked first-sight row must still seed its mtime baseline"
+    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
+    refute_nil skipped, "must log :skipped reason: baseline_recorded even when blocked"
+  end
+
   def test_plan_needs_input_first_sight_dispatches_without_baseline
     # End-to-end fix for PR #83's P0: the production command for a
     # `plan_waiting` row is `hive plan ...` (per TaskAction; see the

@@ -188,18 +188,13 @@ module Hive
       end
 
       def dependency_pr_base_branch(task, cfg)
-        depends_on = Hive::DependencySnapshot.depends_on(task)
-        return nil if depends_on.to_s.strip.empty?
-
         default_branch = cfg["default_branch"] || Hive::GitOps.new(task.project_root).default_branch
-        base_branch = Hive::Dependencies.base_branch_for(
-          depends_on: depends_on,
-          tasks: Hive::DependencySnapshot.tasks(task.project_root),
-          default_branch: default_branch,
-          task: Hive::DependencySnapshot.current_task(task)
-        )
-        return nil if base_branch == default_branch
+        base_branch = Hive::DependencySnapshot.stacked_base(task, default_branch)
+        return nil unless base_branch
 
+        # PR-specific extra guard (not shared with 4-execute): the PR base
+        # must already exist on origin, else `gh pr create` would 422. A
+        # resolved-but-unpushed prereq branch falls back to the default.
         Hive::Worktree.origin_branch_exists?(task.project_root, base_branch) ? base_branch : nil
       end
 

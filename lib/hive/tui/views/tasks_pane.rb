@@ -1,5 +1,6 @@
 require "lipgloss"
 require "hive/commands/status"
+require "hive/dependencies"
 require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/views/format"
@@ -189,11 +190,13 @@ module Hive
         end
 
         def dependency_status(row)
-          if row.blocked_by.to_s.empty?
-            "⏸ blocked by #{row.depends_on} (unresolved)"
-          else
-            "⏸ blocked by #{row.blocked_by} (#{row.dependency_stage})"
-          end
+          # Shared with Commands::Status#dependency_indicator so text mode
+          # and the TUI can never diverge on the unresolved discriminator.
+          Hive::Dependencies.blocked_label(
+            depends_on: row.depends_on,
+            blocked_by: row.blocked_by,
+            dependency_stage: row.dependency_stage
+          )
         end
 
         def display_name(row)

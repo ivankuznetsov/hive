@@ -132,6 +132,25 @@ class SchemaFilesTest < Minitest::Test
     assert_includes doc.dig("$defs", "Task", "properties", "action", "enum"), "ready_for_pr"
   end
 
+  # v3 (the pre-dependency schema) is preserved for external validators
+  # pinned to the release before the task-dependency fields landed in v4.
+  # The daemon fails closed on a v3 payload via schema-skew, so correctness
+  # holds — but unlike hive-approve there was no test guarding v3 against
+  # accidental mutation. v3's Task must NOT carry the v4 dependency fields.
+  def test_hive_status_v3_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 3)))
+    assert_equal 3, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+
+    v3_required = doc.dig("$defs", "Task", "required")
+    v3_props = doc.dig("$defs", "Task", "properties").keys
+    %w[depends_on blocked_by dependency_stage blocked].each do |field|
+      refute_includes v3_required, field,
+                      "v3 Task must not require the v4 dependency field #{field.inspect}"
+      refute_includes v3_props, field,
+                      "v3 Task must not declare the v4 dependency property #{field.inspect}"
+    end
+  end
+
   def test_hive_status_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort

@@ -12,7 +12,7 @@ class DependenciesTest < Minitest::Test
     )
 
     assert_equal true, result.blocked
-    assert_equal false, result.unresolved
+    assert_equal false, result.unresolved?
     assert_equal "base-task", result.blocked_by
     assert_equal "7-artifacts", result.dependency_stage
   end
@@ -43,7 +43,7 @@ class DependenciesTest < Minitest::Test
     )
 
     assert_equal true, result.blocked
-    assert_equal true, result.unresolved
+    assert_equal true, result.unresolved?
     assert_nil result.blocked_by
     assert_nil result.dependency_stage
   end
@@ -69,7 +69,7 @@ class DependenciesTest < Minitest::Test
     )
 
     assert_equal true, result.blocked
-    assert_equal true, result.unresolved
+    assert_equal true, result.unresolved?
     assert_nil result.blocked_by
     assert_nil result.dependency_stage
   end
@@ -82,7 +82,7 @@ class DependenciesTest < Minitest::Test
     )
 
     assert_equal false, result.blocked
-    assert_equal false, result.unresolved
+    assert_equal false, result.unresolved?
     assert_nil result.blocked_by
     assert_nil result.dependency_stage
   end
@@ -95,6 +95,29 @@ class DependenciesTest < Minitest::Test
     )
 
     assert_equal "base-task", branch
+  end
+
+  # Stacking is threshold-blind by design: base_branch_for returns the
+  # prerequisite slug regardless of how far the prereq has progressed, so a
+  # dependent worktree branches off the prereq even while the gate still
+  # blocks dispatch. Pin both a below-threshold and an at/after-threshold
+  # prereq to lock that contract independent of `resolve`'s gate.
+  def test_base_branch_for_is_threshold_blind
+    below_gate = Hive::Dependencies.base_branch_for(
+      depends_on: "base-task",
+      tasks: [ task("base-task", stage_index: 4) ],
+      default_branch: "main"
+    )
+    after_gate = Hive::Dependencies.base_branch_for(
+      depends_on: "base-task",
+      tasks: [ task("base-task", stage_index: 9) ],
+      default_branch: "main"
+    )
+
+    assert_equal "base-task", below_gate,
+                 "stacking must return the prereq slug even below the gate"
+    assert_equal "base-task", after_gate,
+                 "stacking must return the prereq slug at/after the gate"
   end
 
   def test_base_branch_for_nil_missing_or_self_dependency_returns_default_branch

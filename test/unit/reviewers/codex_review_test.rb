@@ -144,16 +144,13 @@ class ReviewersCodexReviewTest < Minitest::Test
       ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
         OpenAI Codex v0.139.0
         ## High
-        - [ ] <finding>: <one-line justification>
+        - [ ] uses subtraction instead of addition: breaks add()
 
         ## Medium
         No findings.
 
         ## Nit
         No findings.
-
-        Rules:
-        - Always print all three headers, in order.
         exec
         /usr/bin/bash -lc "cat SKILL.md && git diff origin/main...HEAD" in /worktree
          succeeded in 12ms:
@@ -276,6 +273,84 @@ class ReviewersCodexReviewTest < Minitest::Test
       assert result.error?
       assert_match(/exited with status=1/, result.error_message)
       refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # Observability: a failed codex run must carry its captured stdout/stderr tail
+  # into the error message (→ reviews/errors-NN.md) so an `all_failed` is
+  # diagnosable instead of an opaque "exited status=1".
+  def test_failure_message_captures_codex_output_tail
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_EXIT"] = "1"
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "panic: codex internal assertion failed at frobnicate.rs:42\n"
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert_match(/exited with status=1/, result.error_message)
+      assert_includes result.error_message, "codex output (last",
+                      "the captured codex transcript tail must be surfaced"
+      assert_includes result.error_message, "frobnicate.rs:42",
+                      "the actual codex error text must reach errors-NN.md"
+    end
+  end
+
+  # Because the failed output now reaches the error message, a codex usage-limit
+  # that exits non-zero becomes detectable by AgentLimit — which lets the review
+  # phase route it to the cooldown (limits_reached) path instead of all_failed.
+  def test_usage_limit_in_failed_output_is_detectable
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_EXIT"] = "1"
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "stream error: You've hit your usage limit. Try again later.\n"
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert Hive::AgentLimit.limit_reached?(result.error_message),
+             "a codex usage-limit failure must be limit-detectable via the captured tail"
+    end
+  end
+
+  # codex sometimes echoes the prompt's own example block (with the literal
+  # `<finding>: <one-line justification>` placeholders) instead of reviewing.
+  # It has the severity headers but is hollow — reject it as a failure so it
+  # retries, rather than recording a fake clean pass.
+  def test_template_echo_is_rejected_as_failure
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~ECHO
+        ## High
+        - [ ] <finding>: <one-line justification>
+
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+      ECHO
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?, "an echoed prompt template must not count as a clean review"
+      assert_match(/echoed the prompt template/, result.error_message)
+      refute File.exist?(reviewer.output_path),
+             "a hollow template echo must not be left as a findings file"
+    end
+  end
+
+  # The flip side: a genuine clean review (`No findings.` under each header)
+  # must still pass — the echo guard must not over-reject real output.
+  def test_legitimate_no_findings_review_is_accepted
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "## High\nNo findings.\n## Medium\nNo findings.\n## Nit\nNo findings.\n"
+      reviewer = build_reviewer(dir)
+
+      result = reviewer.run!
+
+      assert result.ok?, "a real 'No findings.' review must be accepted, got: #{result.error_message}"
+      assert File.exist?(reviewer.output_path)
     end
   end
 

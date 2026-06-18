@@ -64,6 +64,7 @@ package() {
 #!/usr/bin/env bash
 export GEM_HOME="/usr/share/hive/gems"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "/usr/share/hive/gems/bin/hive" "\$@"
 WRAPPER
   chmod 755 "${pkgdir}/usr/bin/hive"

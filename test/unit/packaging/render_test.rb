@@ -37,6 +37,19 @@ class PackagingRenderTest < Minitest::Test
     assert_includes out, "sha256sums=('#{SAMPLE_SHA}')"
   end
 
+  def test_pkgbuild_wrapper_preserves_user_facing_binary_for_daemon_units
+    template = File.read(PKGBUILD_TEMPLATE)
+    out = Hive::PackagingRender.render(
+      template, { "version" => "0.1.1", "sha256_gem" => SAMPLE_SHA }, PKGBUILD_TEMPLATE
+    )
+    export_line = 'export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"'
+    exec_line = 'exec "/usr/share/hive/gems/bin/hive" "\$@"'
+
+    assert_includes out, export_line
+    assert_includes out, exec_line
+    assert_operator out.index(export_line), :<, out.index(exec_line)
+  end
+
   def test_render_raises_on_undefined_variable
     err = assert_raises(Hive::PackagingRender::Error) do
       Hive::PackagingRender.render(

@@ -49,14 +49,11 @@ module Hive
 
       def self.resolve_chat_id(cfg)
         bot = cfg.fetch("bot", {})
-        digest_chat_id = bot["digest_chat_id"]
-        return digest_chat_id unless blank?(digest_chat_id)
-
         chat_id = Array(bot["chat_id_allowlist"]).first
         return chat_id unless blank?(chat_id)
 
         raise Hive::ConfigError,
-              "bot.digest_chat_id or bot.chat_id_allowlist[0] must be configured before sending digest"
+              "bot.chat_id_allowlist[0] must be configured before sending digest"
       end
 
       # Internal helper for resolve_chat_id only; not part of the public

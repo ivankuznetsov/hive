@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-12
+updated: 2026-06-18
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -168,7 +168,6 @@ The bot is global, not per-project:
 bot:
   enabled: false
   chat_id_allowlist: [123456789]
-  digest_chat_id: 123456789
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
@@ -209,11 +208,10 @@ token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
 (exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
 silently.
 
-The shipped-digest sender reuses the same Telegram token and bot client. Its
-direct API prefers `bot.digest_chat_id` for the daily digest destination and
-falls back to the first `bot.chat_id_allowlist` entry; see [[commands/digest]]
-and [[modules/digest]]. `bot.digest_chat_id` is optional and does not authorize
-normal bot chats; the allowlist remains the bot's chat-auth boundary.
+The shipped-digest sender reuses the same Telegram token and bot client. The
+daily digest delivers to `bot.chat_id_allowlist[0]`; there is no separate digest
+chat setting. See [[commands/digest]] and [[modules/digest]]. The allowlist
+remains the bot's chat-auth boundary.
 
 Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
 audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.

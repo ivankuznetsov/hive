@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-06-18
 tags: [digest, shipped, telegram, module]
 ---
 
@@ -98,9 +98,10 @@ falls back to the PR title or display label for summary when needed.
 
 ## Delivery Contract
 
-`Digest::Sender.resolve_chat_id(cfg)` prefers `bot.digest_chat_id`, then the
-first `bot.chat_id_allowlist` entry. Missing both raises `Hive::ConfigError`.
-Dry-run bypasses token and chat lookup entirely.
+`Digest::Sender.resolve_chat_id(cfg)` resolves to `bot.chat_id_allowlist[0]`
+only and raises `Hive::ConfigError`
+(`"bot.chat_id_allowlist[0] must be configured before sending digest"`) when no
+allowlisted chat is set. Dry-run bypasses token and chat lookup entirely.
 
 Real delivery builds `Hive::Bot::Telegram` with
 `Hive::Config.telegram_bot_token!` and calls:
@@ -143,6 +144,12 @@ cursor; a non-zero exit clears the pending marker, leaves the cursor for retry,
 and records an escalating failure backoff (`60`/`300`/`900`s) so the same date
 is **not** re-dispatched every tick. `digest.enabled` / `max_catchup_days` are
 re-read on SIGHUP (the scheduler is reconfigured in place within one tick).
+
+`digest.enabled` is **opt-out**: when the operator has not set it, both
+scheduler-config callers load it through `Config.load_global_digest_block`,
+which derives the flag ON from the bot config (the bot is enabled with an
+allowlisted chat) and OFF otherwise — see [[commands/daemon]] and
+[[modules/config]]. An explicit value (true or false) is always honored.
 
 ## Tests
 

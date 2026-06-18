@@ -10,13 +10,7 @@ require "hive/paths"
 class HiveDigestSenderTest < Minitest::Test
   include HiveTestHelper
 
-  def test_resolve_chat_id_prefers_digest_chat_id
-    cfg = { "bot" => { "digest_chat_id" => 123, "chat_id_allowlist" => [ 456 ] } }
-
-    assert_equal 123, Hive::Digest::Sender.resolve_chat_id(cfg)
-  end
-
-  def test_resolve_chat_id_falls_back_to_first_allowlist_entry
+  def test_resolve_chat_id_uses_first_allowlist_entry
     cfg = { "bot" => { "chat_id_allowlist" => [ 456, 789 ] } }
 
     assert_equal 456, Hive::Digest::Sender.resolve_chat_id(cfg)
@@ -27,7 +21,7 @@ class HiveDigestSenderTest < Minitest::Test
       Hive::Digest::Sender.resolve_chat_id({ "bot" => { "chat_id_allowlist" => [] } })
     end
 
-    assert_match(/digest_chat_id/, error.message)
+    assert_match(/chat_id_allowlist/, error.message)
   end
 
   def test_dry_run_returns_text_without_token_or_chat
@@ -59,7 +53,7 @@ class HiveDigestSenderTest < Minitest::Test
   end
 
   def test_preflight_raises_when_token_missing
-    sender = Hive::Digest::Sender.new(cfg: { "bot" => { "digest_chat_id" => 123 } })
+    sender = Hive::Digest::Sender.new(cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } })
 
     with_env("HIVE_TELEGRAM_BOT_TOKEN" => nil) do
       assert_raises(Hive::ConfigError) { sender.preflight! }
@@ -68,7 +62,7 @@ class HiveDigestSenderTest < Minitest::Test
 
   def test_preflight_passes_when_recipient_and_token_present
     with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
-      sender = Hive::Digest::Sender.new(cfg: { "bot" => { "digest_chat_id" => 123 } })
+      sender = Hive::Digest::Sender.new(cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } })
 
       assert_nil sender.preflight!
     end
@@ -92,7 +86,7 @@ class HiveDigestSenderTest < Minitest::Test
 
       with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
         sender = Hive::Digest::Sender.new(
-          cfg: { "bot" => { "digest_chat_id" => 123 } },
+          cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
           telegram_factory: ->(token:, logger:) { client },
           logger: logger
         )
@@ -167,7 +161,7 @@ class HiveDigestSenderTest < Minitest::Test
 
     with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
       sender = Hive::Digest::Sender.new(
-        cfg: { "bot" => { "digest_chat_id" => 123 } },
+        cfg: { "bot" => { "chat_id_allowlist" => [ 123 ] } },
         telegram_factory: factory,
         logger: Object.new
       )

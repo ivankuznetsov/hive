@@ -510,6 +510,16 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 **Consequences:** Daemon, bot, TUI, status JSON, and humans see `ready_to_artifacts` after `REVIEW_COMPLETE`, then `ready_to_finalize` only after `artifact.md` carries `COMPLETE`. `hive migrate` maps both the pre-open-pr layout and the previous canonical `7-finalize` / `8-done` directories to the current names. Artifact packaging and handoff work has a dedicated agent-backed stage without overloading finalize.
 
+## ADR-030: Daily digest defaults ON when the Telegram bot is configured; drop the separate `bot.digest_chat_id`
+
+**Status:** Active
+
+**Context:** The shipped digest shipped opt-in (`digest.enabled` defaulted to `false`), so an operator who had already set up the Telegram bot with an allowlisted chat still received nothing at midnight until they discovered and set `digest.enabled: true` — the most common "why didn't I get a digest" case. The separate `bot.digest_chat_id` override added a second delivery-target knob that nobody needed: `Digest::Sender.resolve_chat_id` already fell back to `bot.chat_id_allowlist[0]`, which is where operators wanted the digest anyway.
+
+**Decision:** Make the digest opt-out instead of opt-in. `Config.load_global_digest_block` now derives `digest.enabled` from the bot config when the operator has not pinned it either way: it is `true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one integer chat, else `false`. An explicit `digest.enabled` (true **or** false) is always honored — only the unset case is derived (`override.key?("enabled")` gate). Both scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher's SIGHUP reconfigure) go through `load_global_digest_block`, so the derived value flows everywhere with no second code path. Remove `bot.digest_chat_id` entirely — from `DEFAULTS`, its validator (`validate_bot_digest_chat_id!`), the config template, and the JSON schema description. `Digest::Sender.resolve_chat_id` now resolves to `bot.chat_id_allowlist[0]` only and raises `"bot.chat_id_allowlist[0] must be configured before sending digest"` when absent.
+
+**Consequences:** Anyone running the Telegram bot with an allowlisted chat starts getting the midnight digest after the next local midnight (first enabled tick only initializes the `digest_state.json` cursor; it does not back-fill history — run `hive digest` manually for the current day). The auto-enable requires a *deliverable* chat so the daemon never dispatches a paid categorizer that would fail at send time. Operators who deliberately want no digest set `digest.enabled: false`. Existing configs that still carry `bot.digest_chat_id` are silently ignored (no validation error) and route to the allowlist instead. See [[modules/digest]], [[commands/digest]], [[modules/config]].
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.

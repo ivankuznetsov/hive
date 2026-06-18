@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-14
+updated: 2026-06-18
 tags: [command, daemon, automation, json]
 ---
 
@@ -57,8 +57,6 @@ digest:
   enabled: false
   agent: null
   max_catchup_days: 7
-bot:
-  digest_chat_id: null
 ```
 
 `hive daemon start` loads this block via `Hive::Config.load_global_digest_block` and

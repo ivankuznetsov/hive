@@ -40,6 +40,9 @@ Tests (`test/integration/run_review_test.rb`): updated
 `triage_retry_backoff` (keeps them sleepless) and assert the new `message`
 attr; added `test_triage_transient_error_is_retried_then_recovers` (error
 once → `:ok`, asserts two triage calls and recovery to `review_waiting`).
+Added `test/unit/stages/review/phase_failure_helpers_test.rb` so the 100%
+coverage gate also covers long-message truncation and the real capped backoff
+helper without sleeping.
 Full `run_review_test.rb` (50) + markers/task_action/status/web-dispatcher/
 notification-builders/run_reviewers unit suites green; rubocop clean.
 

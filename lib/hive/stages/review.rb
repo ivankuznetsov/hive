@@ -811,7 +811,7 @@ module Hive
 
       # Condense a phase agent's `error_message` into a single-line marker
       # attribute. Without this, a terminal review_error records only a bare
-      # `reason=triage_failed` / `reason=fix_error` and the real cause (a tmux
+      # `reason=triage_failed` / `reason=fix_failed` and the real cause (a tmux
       # session death, an "expected output missing" timeout, a CLI crash) is
       # discarded — so `status.md`, `hive status --json`, and the web
       # diagnostic card all show a contentless "the stage hit an error" with
@@ -867,7 +867,17 @@ module Hive
       # disables retry — single attempt).
       def triage_max_attempts(cfg)
         value = cfg.dig("review", "triage", "max_attempts")
-        value.nil? ? Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS : Integer(value)
+        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
+
+        [ Integer(value), 1 ].max
+      rescue ArgumentError, TypeError
+        # Config::POSITIVE_INTEGER_KEYS rejects a bad value at load time, but
+        # programmatic/test configs bypass that gate. Mirror the reviewer
+        # adapters (Hive::Reviewers::Agent#max_attempts_from_spec): warn and fall
+        # back rather than aborting the whole 6-review run with a runner_exception.
+        warn "hive: invalid review.triage.max_attempts=#{value.inspect}; " \
+             "using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
+        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
       end
 
       # Exponential backoff (1s, 2s, 4s, …) between failed triage attempts,

@@ -47,6 +47,24 @@ module Hive
       # usage-limit error) is treated as a reviewer failure.
       SEVERITY_HEADER = /^##\s+(High|Medium|Nit)\b/i.freeze
 
+      # The prompt's example block (templates/reviewer_codex_native_review.md.erb)
+      # spells findings as `- [ ] <finding>: <one-line justification>`. When
+      # codex echoes the prompt template instead of reviewing, the output
+      # carries the `## High/Medium/Nit` headers (so it passes SEVERITY_HEADER)
+      # but still has these literal angle-bracket placeholders — a real review
+      # never emits them. Treat that as a reviewer failure so it retries rather
+      # than recording a hollow clean pass.
+      TEMPLATE_ECHO = /-\s*\[\s*\]\s*<finding>:\s*<one-line justification>/.freeze
+
+      # Bytes of the captured codex transcript retained in the failure message
+      # (and thus in reviews/errors-NN.md) so an `all_failed` is diagnosable
+      # instead of an opaque "exited status=1". codex prints its error near the
+      # end before exiting, so the tail is where the cause lives. Surfacing it
+      # also lets Hive::AgentLimit.limit_reached? — which only sees the error
+      # message — catch a codex usage-limit and route the phase to the cooldown
+      # path (limits_reached) instead of a generic all_failed.
+      FAILURE_TAIL_BYTES = 2000
+
       # `codex review` streams its whole session to stdout: the (prompt-echoed)
       # findings block, then a tool-call transcript of bare `exec`/`thinking`/
       # `codex` section markers (each `exec` block can be hundreds of lines —
@@ -90,7 +108,7 @@ module Hive
           end
 
           run = run_codex_review(profile.bin, prompt, spawn_timeout || configured_timeout)
-          break if run.success? && valid_findings?(run.stdout)
+          break if usable_review?(run)
           break if attempts >= max_attempts
 
           sleep_seconds = backoff_seconds_for(attempts)
@@ -116,7 +134,7 @@ module Hive
       end
 
       def finalize(run, attempts, max_attempts)
-        if run && run.success? && valid_findings?(run.stdout)
+        if usable_review?(run)
           File.write(output_path, normalize_output(run.stdout))
           return Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
         end
@@ -124,31 +142,67 @@ module Hive
         # Failure: leave no malformed findings file behind — triage would
         # otherwise treat it as real reviewer output.
         delete_output!
-        error_result(failure_message(run), attempts, max_attempts)
+        error_result(base_reason(run), attempts, max_attempts, detail: captured_tail(run))
       end
 
-      def failure_message(run)
+      # A run is usable only when it exited 0, carries the severity headers, and
+      # is NOT the prompt template echoed back (which would otherwise pass the
+      # header check as a hollow clean pass).
+      def usable_review?(run)
+        return false unless run&.success?
+
+        valid_findings?(run.stdout) && !template_echo?(run.stdout)
+      end
+
+      # Terse, single-line failure reason (no captured output — `captured_tail`
+      # carries that). Order matters: a non-zero exit is reported as such even
+      # when stdout happens to echo the template.
+      def base_reason(run)
         return "codex review produced no output" if run.nil?
         return run.error if run.error
-        unless run.exit_code&.zero?
-          return "codex review exited with status=#{run.exit_code.inspect}"
-        end
+        return "codex review exited with status=#{run.exit_code.inspect}" unless run.exit_code&.zero?
+        return "codex review echoed the prompt template instead of producing findings" if template_echo?(run.stdout)
 
         "codex review output missing High/Medium/Nit findings headers"
       end
 
-      def error_result(base_msg, attempts = nil, max_attempts = nil)
+      # The last FAILURE_TAIL_BYTES of codex's combined stdout+stderr, indented
+      # under a labeled fence, appended to the failure message so it lands in
+      # reviews/errors-NN.md. Returns "" when nothing was captured (launch
+      # failure / timeout). codex's actual error sits at the end of the
+      # transcript, so a tail captures it without bloating the errors file with
+      # a multi-MB transcript.
+      def captured_tail(run)
+        text = run&.stdout.to_s
+        return "" if text.empty?
+
+        shown = [ FAILURE_TAIL_BYTES, text.bytesize ].min
+        tail = text.byteslice(text.bytesize - shown, shown).to_s
+        tail = tail.dup.force_encoding(Encoding::UTF_8)
+        tail.scrub!("?")
+        tail = tail.strip
+        return "" if tail.empty?
+
+        "\n  ── codex output (last #{shown} bytes) ──\n#{tail.gsub(/^/, '    ')}"
+      end
+
+      def error_result(base_msg, attempts = nil, max_attempts = nil, detail: nil)
         msg =
           if attempts && max_attempts && max_attempts > 1
             "#{base_msg} after #{attempts} attempt(s)"
           else
             base_msg
           end
+        msg = "#{msg}#{detail}" if detail && !detail.empty?
         Result.new(name: name, output_path: output_path, status: :error, error_message: msg)
       end
 
       def valid_findings?(stdout)
         stdout.to_s.match?(SEVERITY_HEADER)
+      end
+
+      def template_echo?(stdout)
+        stdout.to_s.match?(TEMPLATE_ECHO)
       end
 
       # Trim codex's stdout to the findings triage needs to read: drop the

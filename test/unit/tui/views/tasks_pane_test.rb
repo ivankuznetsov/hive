@@ -145,7 +145,58 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
 
-    assert_includes out, "⏸ blocked by base-task (7-artifacts)"
+    # The dependency block is APPENDED to the action-state label, not a
+    # replacement — so both appear. The fixed-width status column truncates
+    # the tail, so assert the leading, truncation-stable portion here; the
+    # exact composition is pinned by the direct status_label tests below.
+    assert_includes out, "Ready to plan",
+                    "a blocked row must keep its action-state label, not drop it for the block"
+    assert_includes out, "blocked by",
+                    "a blocked row must still surface the dependency block"
+  end
+
+  def test_status_label_appends_dependency_to_action_state
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "dependent-task", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "7-artifacts",
+                  blocked: true)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "a blocked row must append the dependency block to its action-state label"
+  end
+
+  # A task can be blocked AND in an error/recover_review state (e.g. a human
+  # manually `hive run`s a frozen dependent). Text mode appends the
+  # dependency block to the error label via compact.join; the TUI must do the
+  # same instead of dropping the error context for only the block.
+  def test_status_label_blocked_error_row_keeps_both_error_and_dependency
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "blocked-and-errored",
+          stage: "4-execute",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: { "reason" => "exit_code", "exit_code" => "1" },
+          depends_on: "base-task",
+          blocked_by: "base-task",
+          dependency_stage: "7-artifacts",
+          blocked: true,
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "ERROR exit_code=1 ⏸ blocked by base-task (7-artifacts)",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "a blocked error row must surface BOTH its error state and the dependency block"
   end
 
   def test_recover_review_status_shows_marker_reason

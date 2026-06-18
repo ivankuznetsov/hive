@@ -182,7 +182,22 @@ module Hive
         end
 
         def status_label(row)
-          return dependency_status(row) if row.blocked
+          base = action_state_label(row)
+          return base unless row.blocked
+
+          # Append the dependency block rather than replace the action-state
+          # label, mirroring Commands::Status (text mode), which composes
+          # `state_label` with `dependency_indicator` via compact.join. A row
+          # that is blocked AND in an error/recover_review state then surfaces
+          # BOTH labels in either renderer instead of the TUI dropping the
+          # error/recover context.
+          [ base, dependency_status(row) ].reject { |part| part.to_s.empty? }.join(" ")
+        end
+
+        # The action-state portion of the status column, independent of any
+        # dependency block. Shared by status_label so the blocked and
+        # unblocked paths compute the same base label.
+        def action_state_label(row)
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"
 

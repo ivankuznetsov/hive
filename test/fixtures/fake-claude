@@ -20,6 +20,8 @@ ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"
   echo "cwd=$(pwd)"
   printf 'env_ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY-__unset__}"
   printf 'env_CLAUDE_API_KEY=%s\n' "${CLAUDE_API_KEY-__unset__}"
+  printf 'env_HIVE_SCREENOTE_API_TOKEN=%s\n' "${HIVE_SCREENOTE_API_TOKEN-__unset__}"
+  printf 'env_HIVE_SCREENOTE_BASE_URL=%s\n' "${HIVE_SCREENOTE_BASE_URL-__unset__}"
   for a in "$@"; do
     printf 'arg=%s\n' "$a"
   done

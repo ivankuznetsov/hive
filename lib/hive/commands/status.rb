@@ -588,9 +588,19 @@ module Hive
       def dependency_gate_stage_for(project)
         Hive::Config.load(project.fetch("path")).fetch("dependency_gate_stage")
       rescue StandardError => e
+        # The degrade direction is security-relevant: the default
+        # (8-finalize) is MORE permissive than a deliberately-raised gate
+        # (e.g. 9-done), so this fallback can LOOSEN the gate and let a
+        # dependent dispatch one stage early. Erring toward dispatchable is
+        # the documented safe default (a transient/unrelated config error
+        # must not freeze fleet-wide auto-advance), but the warn names the
+        # direction so an operator can tell a genuine loosening apart from a
+        # no-op fallback.
         default = Hive::Config::DEFAULTS["dependency_gate_stage"]
         warn "hive: status: unusable dependency_gate_stage for project " \
-             "#{project['name'].inspect} (#{e.class}: #{e.message}); using default #{default}"
+             "#{project['name'].inspect} (#{e.class}: #{e.message}); gate LOOSENED to " \
+             "default #{default} — a stricter configured gate is ignored, so a dependent " \
+             "may dispatch one stage early until the config loads cleanly"
         default
       end
 

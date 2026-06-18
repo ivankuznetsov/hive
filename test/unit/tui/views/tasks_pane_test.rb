@@ -170,6 +170,42 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                  "a blocked row must append the dependency block to its action-state label"
   end
 
+  # CLAUDE.md test-rule 10: an at-gate dependent (blocked:false, prereq past
+  # the gate) still carries depends_on/blocked_by but must NOT render the
+  # "⏸ blocked by" indicator — status_label keys off `blocked`, not field
+  # presence. Only an absence check catches a regression that keyed the badge
+  # off depends_on/blocked_by presence and labelled a dispatchable task held.
+  def test_status_label_omits_dependency_block_for_unblocked_dependent
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "unblocked-dependent", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "8-finalize",
+                  blocked: false)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "Ready to plan",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "an unblocked dependent must show only its action-state label"
+    refute_includes Hive::Tui::Views::TasksPane.status_label(row), "blocked by",
+                    "an unblocked dependent must NOT render the dependency block"
+  end
+
+  def test_render_omits_dependency_block_for_unblocked_dependent
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "unblocked-dependent", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "8-finalize",
+                  blocked: false)
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    refute_includes out, "blocked by",
+                    "a dispatchable (unblocked) dependent must not render the held indicator"
+  end
+
   # A task can be blocked AND in an error/recover_review state (e.g. a human
   # manually `hive run`s a frozen dependent). Text mode appends the
   # dependency block to the error label via compact.join; the TUI must do the

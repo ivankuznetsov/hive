@@ -201,6 +201,84 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # CLAUDE.md test-rule 10: a dispatchable dependent (blocked:false, prereq
+  # past the gate) still carries depends_on/blocked_by, but must NOT render
+  # the "⏸ blocked by" indicator. dependency_indicator keys off `blocked`,
+  # not field presence — only an absence check catches a regression that
+  # keyed the badge off depends_on/blocked_by presence.
+  def test_render_project_omits_indicator_for_unblocked_dependent
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "8-finalize", "base-task-260618-aaaa",
+                               state_file: "pr.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+
+      refute_includes out, "⏸ blocked by",
+                      "a dispatchable (unblocked) dependent must not render the held indicator"
+    end
+  end
+
+  # The per-row fail-open rescue in apply_dependency_result is a finer-grained
+  # net than the project-level degrade: one row whose resolve raises must
+  # serialize blocked:false with a breadcrumb while sibling rows keep their
+  # resolved dependency state. Without this test, removing the per-row rescue
+  # (collapsing back to whole-project degradation) passes every other test.
+  def test_one_raising_dependency_row_fails_open_without_blanking_siblings
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "7-artifacts", "base-task-260618-aaaa",
+                               state_file: "artifact.md", marker: "COMPLETE")
+      good = write_status_task(hive_state, "4-execute", "good-dependent-260618-bbbb",
+                               state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      bad = write_status_task(hive_state, "4-execute", "bad-dependent-260618-cccc",
+                              state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(good, id: 2, slug: File.basename(good),
+                                 display_name: nil, depends_on: File.basename(base))
+      Hive::TaskMeta.write(bad, id: 3, slug: File.basename(bad),
+                                display_name: nil, depends_on: File.basename(base))
+
+      original = Hive::Dependencies.method(:resolve)
+      raising = lambda do |depends_on:, tasks:, threshold_stage:, task: nil|
+        raise "boom" if task && task[:slug] == File.basename(bad)
+
+        original.call(depends_on: depends_on, tasks: tasks,
+                      threshold_stage: threshold_stage, task: task)
+      end
+
+      payload = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::Dependencies, :resolve, raising) do
+          payload = Hive::Commands::Status.new.json_payload([
+            { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+          ])
+        end
+      end
+
+      tasks = payload.fetch("projects").first.fetch("tasks")
+      bad_row = tasks.find { |t| t.fetch("slug") == File.basename(bad) }
+      good_row = tasks.find { |t| t.fetch("slug") == File.basename(good) }
+
+      assert_equal false, bad_row.fetch("blocked"),
+                   "a row whose resolve raises must fail open to blocked:false"
+      assert_nil bad_row.fetch("blocked_by")
+      assert_equal true, good_row.fetch("blocked"),
+                   "a sibling row must keep its resolved dependency state, not be blanked by the raising row"
+      assert_equal File.basename(base), good_row.fetch("blocked_by")
+      assert_match(/dependency resolve failed for/, err,
+                   "the per-row fail-open must leave a stderr breadcrumb")
+    end
+  end
+
   # End-to-end config→annotate_dependencies threshold wiring: a project that
   # raises the gate to 9-done blocks a prereq sitting at 8-finalize (which
   # would unblock under the default gate).

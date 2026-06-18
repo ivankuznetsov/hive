@@ -194,6 +194,11 @@ class TasksController < ApplicationController
     return nil unless File.file?(path)
 
     manifest = JSON.parse(File.read(path))
+    # A syntactically-valid manifest whose top level is a JSON array, number,
+    # or null is a half-written agent file — it must not 500 the page (read it
+    # resiliently, like open_questions). Bail before indexing into a non-Hash.
+    return nil unless manifest.is_a?(Hash)
+
     status = manifest["status"].to_s
     return nil unless %w[captured skipped failed].include?(status)
 

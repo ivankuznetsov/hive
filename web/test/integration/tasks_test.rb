@@ -212,6 +212,38 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_match "idea.md", response.body
   end
 
+  test "a valid-JSON manifest with a non-object top level does not 500 the page" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+
+    [ "[]", "42", "null" ].each do |body|
+      media_dir.join("manifest.json").write(body)
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success, "a #{body.inspect} manifest must render the page, not raise"
+      assert_select "section.demo", count: 0
+    end
+  end
+
+  test "a captured manifest with only malformed items renders no empty demo section" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "captured",
+      "surface" => "ui",
+      "items" => [
+        "not-a-hash",
+        { "file" => "../../etc/passwd.png", "type" => "still", "caption" => "traversal" },
+        { "file" => "missing.png", "type" => "still", "caption" => "no file on disk" }
+      ]
+    })
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0,
+                  message: "all items filtered out → no bare Demo heading"
+  end
+
   test "a red task offers Retry which queues the clear-then-rerun pair" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))

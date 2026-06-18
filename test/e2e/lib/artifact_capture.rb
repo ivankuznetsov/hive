@@ -191,7 +191,10 @@ module Hive
 
         Dir.chdir(@sandbox_dir) do
           Dir.glob("**/*", File::FNM_DOTMATCH)
-            .reject { |path| path == "." || path == ".." || path.include?("/.git/") }
+            .reject do |path|
+              path == "." || path == ".." || path == ".git" ||
+                path.start_with?(".git/") || path.include?("/.git/")
+            end
             .sort
             .join("\n") + "\n"
         end

@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/markers"
 require "hive/stages/artifacts"
 require "hive/task"
@@ -34,7 +35,174 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_push_manifest_media_uploads_only_png_and_jpeg_stills
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      File.binwrite(File.join(media_dir, "02-state.jpg"), "jpg")
+      File.binwrite(File.join(media_dir, "demo.gif"), "gif")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil },
+          { "file" => "02-state.jpg", "type" => "still", "caption" => "State", "push_to_screenote" => true, "screenote_url" => nil },
+          { "file" => "demo.gif", "type" => "gif", "caption" => "Motion", "push_to_screenote" => false, "screenote_url" => nil }
+        ]
+      })
+      uploader = StubUploader.new
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+
+      assert_equal [ "01-home.png", "02-state.jpg" ], uploader.files
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_equal "https://screenote.test/01-home.png", manifest.dig("items", 0, "screenote_url")
+      assert_equal "https://screenote.test/02-state.jpg", manifest.dig("items", 1, "screenote_url")
+      assert_nil manifest.dig("items", 2, "screenote_url")
+    end
+  end
+
+  def test_push_manifest_media_skips_existing_urls_and_nil_upload_results
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      File.binwrite(File.join(media_dir, "02-state.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => "https://already.test/s/1" },
+          { "file" => "02-state.png", "type" => "still", "caption" => "State", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      uploader = StubUploader.new(nil_result_for: "02-state.png")
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+
+      assert_equal [ "02-state.png" ], uploader.files
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_equal "https://already.test/s/1", manifest.dig("items", 0, "screenote_url")
+      assert_nil manifest.dig("items", 1, "screenote_url")
+    end
+  end
+
+  def test_push_manifest_media_ignores_skipped_and_failed_manifests
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      uploader = StubUploader.new
+
+      %w[skipped failed].each do |status|
+        write_manifest(task, { "schema" => 1, "status" => status, "surface" => "none", "items" => [] })
+        Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+      end
+
+      assert_empty uploader.files
+    end
+  end
+
+  def test_push_manifest_media_without_screenote_config_is_noop
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "items" => [
+          { "file" => "01-home.png", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, screenote_config: { "base_url" => "", "api_token" => "" })
+
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_nil manifest.dig("items", 0, "screenote_url")
+    end
+  end
+
+  def test_push_manifest_media_swallows_corrupt_manifest
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.write(File.join(media_dir, "manifest.json"), "{")
+
+      _out, err = capture_io do
+        Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: StubUploader.new)
+      end
+
+      assert_includes err, "media manifest is not valid JSON"
+    end
+  end
+
+  def test_complete_agent_run_pushes_manifest_after_marker
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "items" => [
+          { "file" => "01-home.png", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+
+      original_spawn = Hive::Stages::Artifacts.method(:spawn_artifacts_agent)
+      original_uploader = Hive::Stages::Artifacts.method(:screenote_uploader)
+      uploader = StubUploader.new
+      Hive::Stages::Artifacts.define_singleton_method(:spawn_artifacts_agent) do |spawn_task, _cfg, _prompt, _profile|
+        Hive::Markers.set(spawn_task.state_file, :complete)
+      end
+      Hive::Stages::Artifacts.define_singleton_method(:screenote_uploader) { |_config| uploader }
+
+      result = Hive::Stages::Artifacts.run!(task, {})
+
+      assert_equal({ commit: "artifacts_collected", status: :complete }, result)
+      assert_equal [ "01-home.png" ], uploader.files
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:spawn_artifacts_agent, original_spawn)
+      Hive::Stages::Artifacts.define_singleton_method(:screenote_uploader, original_uploader)
+    end
+  end
+
   private
+
+  StubUploader = Struct.new(:nil_result_for, keyword_init: true) do
+    def initialize(nil_result_for: nil)
+      super
+      @files = []
+    end
+
+    attr_reader :files
+
+    def upload(path:, title:)
+      files << File.basename(path)
+      return nil if File.basename(path) == nil_result_for
+
+      { "annotate_url" => "https://screenote.test/#{File.basename(path)}", "screenshot_id" => title }
+    end
+  end
+
+  def make_artifacts_task(dir)
+    folder = File.join(dir, ".hive-state", "stages", "7-artifacts", "demo-260522-aaaa")
+    FileUtils.mkdir_p(folder)
+    Hive::Task.new(folder)
+  end
+
+  def write_manifest(task, manifest)
+    media_dir = File.join(task.folder, "media")
+    FileUtils.mkdir_p(media_dir)
+    File.write(File.join(media_dir, "manifest.json"), "#{JSON.pretty_generate(manifest)}\n")
+  end
 
   def with_stubbed_artifacts_spawn
     original = Hive::Stages::Artifacts.method(:spawn_artifacts_agent)

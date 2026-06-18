@@ -1,6 +1,8 @@
 require "fileutils"
+require "json"
 require "hive/claude_launcher"
 require "hive/markers"
+require "hive/screenote_uploader"
 require "hive/stages/base"
 
 module Hive
@@ -17,6 +19,7 @@ module Hive
         prompt = render_prompt(task)
         spawn_artifacts_agent(task, cfg, prompt, profile)
         marker = Hive::Markers.current(task.state_file)
+        push_manifest_media_to_screenote(task) if marker.name == :complete
         { commit: action_for(marker.name), status: marker.name }
       end
 
@@ -64,6 +67,70 @@ module Hive
         when :error then "error"
         else marker_name.to_s
         end
+      end
+
+      def push_manifest_media_to_screenote(task, uploader: nil, screenote_config: nil)
+        manifest_path = media_manifest_path(task)
+        return unless File.file?(manifest_path)
+
+        manifest = JSON.parse(File.read(manifest_path))
+        return unless manifest["status"] == "captured"
+
+        uploader ||= screenote_uploader(screenote_config || Hive::Config.load_global_screenote)
+        return unless uploader
+
+        changed = false
+        items = manifest["items"].is_a?(Array) ? manifest["items"] : []
+        items.each do |item|
+          next unless upload_item_to_screenote?(item)
+
+          file_path = media_item_path(task, item["file"])
+          next unless file_path && File.file?(file_path)
+
+          result = uploader.upload(path: file_path, title: item["caption"].to_s.empty? ? item["file"].to_s : item["caption"].to_s)
+          url = result ? result["annotate_url"].to_s : ""
+          next if url.empty?
+
+          item["screenote_url"] = url
+          changed = true
+        end
+
+        File.write(manifest_path, "#{JSON.pretty_generate(manifest)}\n") if changed
+      rescue JSON::ParserError => e
+        warn "[hive] media manifest is not valid JSON: #{e.message}"
+      rescue StandardError => e
+        warn "[hive] screenote manifest processing failed: #{e.class}: #{e.message}"
+      end
+
+      def screenote_uploader(screenote_config)
+        base_url = screenote_config["base_url"].to_s.strip
+        api_token = screenote_config["api_token"].to_s.strip
+        return nil if base_url.empty? || api_token.empty?
+
+        Hive::ScreenoteUploader.new(base_url: base_url, api_token: api_token)
+      end
+
+      def media_manifest_path(task)
+        File.join(task.folder, "media", "manifest.json")
+      end
+
+      def upload_item_to_screenote?(item)
+        return false unless item.is_a?(Hash)
+        return false unless item["push_to_screenote"] == true
+        return false unless item["screenote_url"].to_s.strip.empty?
+
+        %w[.png .jpg .jpeg].include?(File.extname(item["file"].to_s).downcase)
+      end
+
+      def media_item_path(task, filename)
+        name = filename.to_s
+        return nil if name.empty? || File.basename(name) != name
+
+        media_dir = File.expand_path(File.join(task.folder, "media"))
+        path = File.expand_path(File.join(media_dir, name))
+        return nil unless path.start_with?("#{media_dir}#{File::SEPARATOR}")
+
+        path
       end
     end
   end

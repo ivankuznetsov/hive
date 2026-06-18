@@ -65,6 +65,28 @@ class HiveCommandsDaemonTest < Minitest::Test
     }
   end
 
+  def default_update_config
+    { "check" => true, "auto" => true }
+  end
+
+  def default_digest_config
+    {
+      "enabled" => false,
+      "agent" => nil,
+      "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+    }
+  end
+
+  def with_global_start_config(config, update_config: default_update_config, digest_config: default_digest_config)
+    with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+      with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
+        with_replaced_singleton_method(Hive::Config, :load_global_digest_block, -> { digest_config }) do
+          yield
+        end
+      end
+    end
+  end
+
 
   def test_start_daemon_writes_pid_loads_global_config_runs_dispatcher_and_cleans_pid
     command = daemon("start", dry_run: true)
@@ -72,16 +94,15 @@ class HiveCommandsDaemonTest < Minitest::Test
     config = daemon_config
     captured = nil
 
-    update_config = { "check" => true, "auto" => true }
+    update_config = default_update_config
+    digest_config = default_digest_config
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
-      with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
-        with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
-          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
-            captured = kwargs
-            dispatcher
-          }) do
-            command.call
-          end
+      with_global_start_config(config, update_config: update_config, digest_config: digest_config) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
         end
       end
     end
@@ -91,11 +112,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       {
         "daemon" => config,
         "update" => update_config,
-        "digest" => {
-          "enabled" => false,
-          "agent" => nil,
-          "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
-        }
+        "digest" => digest_config
       },
       captured.fetch(:config)
     )
@@ -112,7 +129,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     command.define_singleton_method(:reexec_with_fresh_code!) { reexec_invoked = true }
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
-      with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+      with_global_start_config(config) do
         with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, ->(**_) { dispatcher }) do
           command.call
         end
@@ -180,7 +197,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       daemon_calls << [ nochdir, noclose ]
     }) do
       with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
-        with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+        with_global_start_config(config) do
           with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, ->(**_kwargs) { dispatcher }) do
             command.call
           end
@@ -199,7 +216,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     command.define_singleton_method(:read_pid_file_payload) { raise RuntimeError, "bad pid file" }
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
-      with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+      with_global_start_config(config) do
         with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, ->(**_kwargs) { dispatcher }) do
           command.call
         end

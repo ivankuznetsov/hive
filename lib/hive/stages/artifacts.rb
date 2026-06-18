@@ -23,8 +23,10 @@ module Hive
 
       # Mirror the web display contract (`[\w.-]+` plus a known image extension)
       # so a still hivebox would refuse to render — a name with spaces or
-      # newlines — is never pushed to screenote. Screenote only hosts PNG/JPEG
-      # stills, never GIFs.
+      # newlines — is never pushed to screenote. GIFs are excluded by Hive
+      # policy: only PNG/JPEG stills are pushed to screenote (the artifacts
+      # prompt and the push_to_screenote gating decide what goes), so the
+      # extension allow-list deliberately omits gif.
       SCREENOTE_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g)\z/i
 
       def run!(task, cfg)
@@ -161,13 +163,18 @@ module Hive
         # Full filename-shape check, not just the extension: an item hivebox
         # can't display (spaces/newlines fail the web route's `[\w.-]+` shape)
         # must not be uploaded only to be hidden from the Demo gallery. GIFs are
-        # excluded — screenote hosts PNG/JPEG stills only.
+        # excluded by Hive policy — only PNG/JPEG stills are pushed to screenote
+        # (SCREENOTE_FILENAME_RE omits gif).
         item["file"].to_s.match?(SCREENOTE_FILENAME_RE)
       end
 
       def media_item_path(task, filename)
         name = filename.to_s
-        return nil if name.empty? || File.basename(name) != name
+        # Handle the null-byte case explicitly and up front: File.basename /
+        # File.realpath raise ArgumentError on a NUL, so reject it here rather
+        # than catching ArgumentError broadly below — a broad catch would mask
+        # any OTHER (genuinely unexpected) ArgumentError as a benign skip.
+        return nil if name.empty? || name.include?("\0") || File.basename(name) != name
 
         # Anchor the media root to the REAL task folder: resolve the folder's
         # symlinks, then require `media/` to resolve to exactly <folder>/media.
@@ -186,10 +193,11 @@ module Hive
         return nil unless real.start_with?("#{media_root}#{File::SEPARATOR}")
 
         real
-      rescue SystemCallError, ArgumentError
-        # SystemCallError: a missing media dir / broken symlink. ArgumentError:
-        # an agent-written name with a null byte poisons File.basename/realpath;
-        # skip just that one item rather than aborting all remaining uploads.
+      rescue SystemCallError
+        # A missing media dir / broken symlink: skip just that one item rather
+        # than aborting all remaining uploads. The null-byte ArgumentError case
+        # is guarded explicitly above, so it isn't swallowed here — leaving any
+        # other ArgumentError free to surface as the real bug it would be.
         nil
       end
     end

@@ -7,6 +7,10 @@ module Hive
   class ScreenoteUploader
     DEFAULT_OPEN_TIMEOUT = 10
     DEFAULT_READ_TIMEOUT = 60
+    # Screenote signals a created screenshot with 201 specifically; a bare
+    # 200 OK would be treated as a failure here. This pins the external API's
+    # success contract — widen only if screenote starts returning other 2xx
+    # codes on a successful create.
     SUCCESS_CODE = "201".freeze
 
     attr_reader :base_url
@@ -78,7 +82,12 @@ module Hive
     def append_file(body, name, path)
       filename = File.basename(path)
       body << "--#{boundary}\r\n"
-      body << %(Content-Disposition: form-data; name="#{quote(name)}"; filename="#{quote(filename)}"\r\n)
+      # `.b` mirrors the title fix in append_field: a non-ASCII on-disk filename
+      # interpolated into the BINARY buffer would flip its encoding to UTF-8 and
+      # then raise Encoding::CompatibilityError when the image bytes append.
+      # (Unreachable in production — SCREENOTE_FILENAME_RE gates `[\w.-]` — but
+      # the standalone class must stay robust on its own.)
+      body << %(Content-Disposition: form-data; name="#{quote(name)}"; filename="#{quote(filename)}"\r\n).b
       body << "Content-Type: #{content_type(path)}\r\n"
       body << "\r\n"
       body << File.binread(path)
@@ -87,10 +96,10 @@ module Hive
 
     def quote(value)
       # Backslash-escape both the escape character and the quote so an exotic
-      # on-disk filename can't break out of the Content-Disposition value.
-      # Block form avoids the gsub replacement-string backslash collapse: the
-      # old string-replacement form escaped the quote correctly but silently
-      # dropped the backslash escape, so only that branch had regressed.
+      # on-disk filename can't break out of the Content-Disposition value. Use
+      # the block form, not a replacement string: gsub's replacement string
+      # gives "\\" a special meaning and would collapse the backslash escape,
+      # leaving the quote escaped but the backslash silently dropped.
       value.to_s.gsub(/[\\"]/) { |char| "\\#{char}" }
     end
 
@@ -109,7 +118,14 @@ module Hive
       end
 
       url = payload["annotate_url"].to_s
-      return nil if url.empty?
+      if url.empty?
+        # A 201 Created carrying no annotate_url is a screenote contract break,
+        # not "screenote disabled" — and it looks identical to the disabled
+        # case from the caller. Warn so it's distinguishable; every other
+        # anomaly branch in this method already does.
+        warn "[hive] screenote upload returned a 201 with a blank annotate_url"
+        return nil
+      end
       unless url.match?(%r{\Ahttps?://})
         warn "[hive] screenote upload returned a non-http annotate_url: #{url.inspect}"
         return nil

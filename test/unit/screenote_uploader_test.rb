@@ -262,7 +262,7 @@ class ScreenoteUploaderTest < Minitest::Test
     end
   end
 
-  def test_empty_annotate_url_returns_nil_without_warning
+  def test_empty_annotate_url_returns_nil_with_diagnostic
     with_tmp_dir do |dir|
       image = File.join(dir, "shot.png")
       File.binwrite(image, "png")
@@ -272,11 +272,12 @@ class ScreenoteUploaderTest < Minitest::Test
         http: ->(*) { Response.new(code: "201", body: JSON.generate("annotate_url" => "")) }
       )
 
-      out, err = capture_io do
+      _out, err = capture_io do
         assert_nil uploader.upload(path: image, title: "Home")
       end
-      assert_empty err, "an empty annotate_url is a clean miss, not a diagnostic-worthy error"
-      assert_empty out
+      assert_includes err, "blank annotate_url",
+                      "a 201 with no annotate_url is a screenote contract break, not a silent miss " \
+                      "indistinguishable from screenote being disabled"
     end
   end
 

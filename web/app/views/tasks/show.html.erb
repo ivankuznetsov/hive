@@ -17,6 +17,8 @@
 <%= turbo_stream_from StatusBroadcaster::CHANNEL %>
 <%= render "tasks/state" %>
 
+<%= render "tasks/media", media: @media, project: @project, row: @row %>
+
 <% if @files.any? %>
   <h2>Artifacts</h2>
   <%# The controller re-applies the operator's open/closed choices after each

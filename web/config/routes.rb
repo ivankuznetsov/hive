@@ -24,6 +24,8 @@ Rails.application.routes.draw do
     get  "" => "tasks#show", as: :task
     get  "diff" => "tasks#diff", as: :task_diff
     get  "log" => "tasks#log", as: :task_log
+    get  "media/:filename" => "tasks#media", as: :task_media,
+         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif)/i }
     post "approve" => "tasks#approve", as: :task_approve
     post "reject" => "tasks#reject", as: :task_reject
     post "drop" => "tasks#drop", as: :task_drop

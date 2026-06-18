@@ -7,6 +7,7 @@ class TasksController < ApplicationController
   def show
     @row = task_row!
     @files = artifact_files(@row)
+    @media = media_manifest(@row)
     @log = latest_log
     @questions = open_questions(@row)
     @worktree_exists = worktree_exists?(@row)
@@ -47,6 +48,17 @@ class TasksController < ApplicationController
     raise Hive::InvalidTaskPath, "no worktree for #{params[:slug]}" if worktree.empty? || !File.directory?(worktree)
 
     @diff, @diff_truncated = bounded_diff(worktree)
+  end
+
+  def media
+    row = task_row!
+    path = resolved_media_path(row, params[:filename])
+    return head :not_found unless path
+
+    expires_in 60.seconds, public: false
+    send_file path,
+              type: Rack::Mime.mime_type(File.extname(path), "application/octet-stream"),
+              disposition: "inline"
   end
 
   def approve
@@ -170,6 +182,71 @@ class TasksController < ApplicationController
     return ARTIFACT_ORDER unless %w[8-finalize 9-done].include?(row["stage"].to_s)
 
     [ "artifact.md" ] + (ARTIFACT_ORDER - [ "artifact.md" ])
+  end
+
+  MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i
+
+  def media_manifest(row)
+    folder = row["folder"]
+    return nil unless folder
+
+    path = File.join(folder, "media", "manifest.json")
+    return nil unless File.file?(path)
+
+    manifest = JSON.parse(File.read(path))
+    status = manifest["status"].to_s
+    return nil unless %w[captured skipped failed].include?(status)
+
+    {
+      "status" => status,
+      "reason" => manifest["reason"].to_s,
+      "surface" => manifest["surface"].to_s,
+      "items" => normalized_media_items(row, manifest["items"])
+    }
+  rescue JSON::ParserError, SystemCallError => e
+    Rails.logger.warn("media manifest unreadable for #{params[:slug]}: #{e.class}: #{e.message}")
+    nil
+  end
+
+  def normalized_media_items(row, items)
+    Array(items).filter_map do |item|
+      next unless item.is_a?(Hash)
+
+      file = item["file"].to_s
+      next unless file.match?(MEDIA_FILENAME_RE)
+      next unless File.basename(file) == file
+      next unless resolved_media_path(row, file)
+
+      url = item["screenote_url"].to_s
+      {
+        "file" => file,
+        "type" => item["type"].to_s,
+        "caption" => item["caption"].to_s,
+        "screenote_url" => url.match?(%r{\Ahttps?://}) ? url : nil
+      }
+    end
+  end
+
+  def resolved_media_path(row, filename)
+    folder = row["folder"].to_s
+    return nil if folder.empty?
+
+    filename = File.basename(filename.to_s)
+    return nil unless filename.match?(MEDIA_FILENAME_RE)
+
+    media_dir = File.expand_path(File.join(folder, "media"))
+    return nil unless File.directory?(media_dir)
+
+    media_root = File.realpath(media_dir)
+    candidate = File.join(media_root, filename)
+    return nil unless File.file?(candidate)
+
+    real = File.realpath(candidate)
+    return nil unless real.start_with?("#{media_root}#{File::SEPARATOR}")
+
+    real
+  rescue SystemCallError
+    nil
   end
 
   def open_questions(row)

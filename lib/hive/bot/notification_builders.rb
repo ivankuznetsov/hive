@@ -228,6 +228,12 @@ module Hive
       # `ensure_clean_on_exit_failed` is the new
       # `stages.ensure_clean_on_exit` plan reason: residue out of scope,
       # or the auto-commit itself failed (sign-policy / git error).
+      #
+      # NOTE: this is the OPERATOR-FACING (bot/TUI) classification, kept as
+      # the post-exhaustion backstop. The daemon's StaleAgentHealer retries
+      # `ensure_clean_on_exit_failed` automatically first (bounded, then
+      # parks); only once those retries are spent does an operator see this
+      # "inspect manually" routing — at which point human eyes are warranted.
       ERROR_MANUAL_ONLY_REASONS = %w[dirty_worktree ensure_clean_on_exit_failed].freeze
 
       # Single source of truth for "this state has no auto-recovery".

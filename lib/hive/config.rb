@@ -164,6 +164,27 @@ module Hive
                 "docs/**/*",
                 "wiki/**",
                 "wiki/**/*",
+                # Nested project roots (monorepo layout): a Rails/JS app under
+                # `web/` keeps its source in `web/app`, `web/lib`, `web/test`,
+                # etc. Mirror the top-level source/test/docs categories under
+                # `web/` so the fix-phase auto-commit can land legitimate web
+                # changes. Sensitive nested dirs (`web/config`, `web/bin`,
+                # `web/db`) are intentionally NOT listed, so they stay outside
+                # the allowlist exactly like their top-level counterparts.
+                "web/app/**",
+                "web/app/**/*",
+                "web/lib/**",
+                "web/lib/**/*",
+                "web/src/**",
+                "web/src/**/*",
+                "web/test/**",
+                "web/test/**/*",
+                "web/tests/**",
+                "web/tests/**/*",
+                "web/spec/**",
+                "web/spec/**/*",
+                "web/docs/**",
+                "web/docs/**/*",
                 "README",
                 "README.*",
                 "CHANGELOG",

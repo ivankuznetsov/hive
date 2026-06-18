@@ -234,8 +234,22 @@ module Hive
     end
 
     def self.fetch_origin_branch(project_root, branch_name)
+      # Fetch into an EXPLICIT colon-refspec so the local tracking ref
+      # `refs/remotes/origin/<branch>` is written deterministically,
+      # independent of the clone's configured fetch refspec. A plain
+      # `git fetch origin <branch>` only updates FETCH_HEAD and relies on
+      # git's opportunistic tracking-ref update, which fires SOLELY when a
+      # configured wildcard refspec (+refs/heads/*:refs/remotes/origin/*)
+      # matches. On a `--single-branch` / shallow / narrow-refspec clone
+      # that wildcard is absent, so the tracking ref is never created and
+      # `origin_branch_ref_exists?` wrongly reports a genuinely-present
+      # branch as missing — silently collapsing dependency stacking onto
+      # the default base (4-execute branches off origin/<default>,
+      # 5-open-pr drops `--base <prereq>`). The leading `+` force-updates
+      # the tracking ref exactly as the wildcard refspec would.
       Open3.capture3(NONINTERACTIVE_FETCH_ENV, "git", "-C", project_root,
-                     "fetch", "origin", branch_name)
+                     "fetch", "origin",
+                     "+#{branch_name}:refs/remotes/origin/#{branch_name}")
     end
 
     def self.origin_branch_ref_exists?(project_root, branch_name)

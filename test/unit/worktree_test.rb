@@ -125,6 +125,31 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Push a fresh branch into `origin_dir` via a throwaway scratch clone, so a
+  # branch genuinely exists on origin without the dev repo tracking it.
+  def push_branch_to_origin(origin_dir, branch)
+    scratch = Dir.mktmpdir("origin-pusher")
+    run!("git", "clone", origin_dir, scratch)
+    run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+    run!("git", "-C", scratch, "config", "user.name", "Test")
+    run!("git", "-C", scratch, "checkout", "-b", branch)
+    File.write(File.join(scratch, "#{branch}.txt"), "#{branch}\n")
+    run!("git", "-C", scratch, "add", ".")
+    run!("git", "-C", scratch, "commit", "-m", "#{branch} work", "--quiet")
+    run!("git", "-C", scratch, "push", "origin", "#{branch}:#{branch}")
+  ensure
+    FileUtils.rm_rf(scratch) if scratch
+  end
+
+  # Narrow the dev repo's origin fetch refspec to ONLY the default branch, so
+  # the wildcard +refs/heads/*:refs/remotes/origin/* opportunistic tracking
+  # update no longer fires for other branches — reproducing a single-branch /
+  # narrow-refspec clone.
+  def narrow_refspec_to_default!(dir)
+    run!("git", "-C", dir, "config", "remote.origin.fetch",
+         "+refs/heads/master:refs/remotes/origin/master")
+  end
+
   def test_create_branches_from_origin_default_when_origin_ahead_of_local
     # Regression for the agent-plugins-was-7-commits-behind incident:
     # creating a worktree must branch from origin/<default>'s current
@@ -196,6 +221,82 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Real-git coverage for the open_pr/stacking guard `origin_branch_exists?`.
+  # Every other test stubs it (open_pr_test.rb), so its real `fetch` +
+  # `rev-parse` composition had zero coverage — an inverted boolean or wrong
+  # refspec would ship green.
+  def test_origin_branch_exists_true_for_pushed_branch_false_for_missing
+    with_initialized_project do |dir, _root|
+      origin_dir = "#{dir}.origin.git"
+      scratch = nil
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        push_branch_to_origin(origin_dir, "pushed-branch")
+
+        assert Hive::Worktree.origin_branch_exists?(dir, "pushed-branch"),
+               "a branch pushed to origin must be detected as existing"
+        refute Hive::Worktree.origin_branch_exists?(dir, "never-pushed"),
+               "a branch absent from origin must be detected as missing"
+      ensure
+        FileUtils.rm_rf(scratch) if scratch
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
+  # Regression for the recorded FETCH_HEAD stack-collapse: on a narrow
+  # (single-branch) fetch refspec, a plain `git fetch origin <branch>`
+  # updates only FETCH_HEAD and never writes refs/remotes/origin/<branch>,
+  # so the branch was falsely treated as missing and stacking collapsed onto
+  # the default base. The colon-refspec fetch must write the tracking ref
+  # deterministically. Every other override test uses the wildcard refspec
+  # `git remote add origin` installs, so the suite could not catch this.
+  def test_origin_branch_exists_true_under_narrow_refspec_clone
+    with_initialized_project do |dir, _root|
+      origin_dir = "#{dir}.origin.git"
+      scratch = nil
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        narrow_refspec_to_default!(dir)
+        push_branch_to_origin(origin_dir, "prereq-branch")
+
+        assert Hive::Worktree.origin_branch_exists?(dir, "prereq-branch"),
+               "an existing prereq branch must be detected even under a narrow fetch refspec"
+      ensure
+        FileUtils.rm_rf(scratch) if scratch
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
+  # Narrow-refspec sibling of
+  # test_create_branches_from_dependency_override_when_origin_branch_exists:
+  # the dependent worktree must still branch from origin/<prereq> even when
+  # the clone's fetch refspec covers only the default branch.
+  def test_create_branches_from_dependency_override_under_narrow_refspec
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        narrow_refspec_to_default!(dir)
+        push_branch_to_origin(origin_dir, "base-task")
+        base_sha = run!("git", "-C", origin_dir, "rev-parse", "base-task").strip
+
+        wt = Hive::Worktree.new(dir, "dependent-narrow", worktree_root: root)
+        wt.create!("dependent-narrow", default_branch: "master", base_override: "base-task")
+
+        worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+        assert_equal base_sha, worktree_sha,
+                     "dependent must branch from origin/<prereq> even under a narrow fetch refspec"
+      ensure
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
   def test_create_falls_back_to_local_default_when_no_origin_remote
     # No `origin` configured — the existing behavior (branch from
     # local default) is the correct fallback. Must not raise.
@@ -206,6 +307,27 @@ class WorktreeTest < Minitest::Test
       worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
       assert_equal local_sha, worktree_sha,
                    "no-origin fallback: worktree HEAD matches local master"
+    end
+  end
+
+  def test_create_falls_back_to_local_default_when_no_origin_with_base_override
+    # `freshest_override_base`'s no-origin warn arm: a base_override
+    # (dependency stacking) is requested but there is no origin remote, so
+    # the stacked base can't be fetched — warn that it cannot stack and fall
+    # back to the local default branch base. The sibling no-origin test
+    # above passes no base_override, so it exercises `freshest_base`, not
+    # this arm.
+    with_initialized_project do |dir, root|
+      local_sha = `git -C #{dir} rev-parse master`.strip
+      wt = Hive::Worktree.new(dir, "dependent-no-origin", worktree_root: root)
+      _, err = capture_io do
+        wt.create!("dependent-no-origin", default_branch: "master", base_override: "base-task")
+      end
+      worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+      assert_equal local_sha, worktree_sha,
+                   "no-origin override fallback: worktree HEAD matches local master"
+      assert_match(/cannot stack on base-task/, err,
+                   "a dropped stack request with no origin must surface a 'cannot stack' warning")
     end
   end
 

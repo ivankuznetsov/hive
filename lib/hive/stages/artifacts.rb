@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "hive/claude_launcher"
 require "hive/markers"
+require "hive/media_manifest"
 require "hive/screenote_uploader"
 require "hive/stages/base"
 
@@ -19,11 +20,6 @@ module Hive
       # the :complete marker, so they are NOT retried automatically — clearing
       # the marker and re-running the stage is an explicit operator action.
       SCREENOTE_UPLOAD_BUDGET_SEC = 120
-
-      # The only media-manifest schema this stage understands. A future manifest
-      # with a higher schema may reshape items[]; gate on the known version so a
-      # v2 file is skipped rather than misread as v1.
-      MEDIA_MANIFEST_SCHEMA = 1
 
       # Mirror the web display contract (`[\w.-]+` plus a known image extension)
       # so a still hivebox would refuse to render — a name with spaces or
@@ -96,7 +92,7 @@ module Hive
 
         manifest = JSON.parse(File.read(manifest_path))
         return unless manifest.is_a?(Hash)
-        return unless manifest["schema"] == MEDIA_MANIFEST_SCHEMA
+        return unless manifest["schema"] == Hive::MediaManifest::SCHEMA
         return unless manifest["status"] == "captured"
 
         uploader ||= screenote_uploader(screenote_config || Hive::Config.load_global_screenote)

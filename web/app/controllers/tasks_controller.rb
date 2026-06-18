@@ -193,10 +193,6 @@ class TasksController < ApplicationController
 
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i
 
-  # The only media-manifest schema this reader understands; matches the stage's
-  # Hive::Stages::Artifacts::MEDIA_MANIFEST_SCHEMA and the artifacts prompt.
-  MEDIA_MANIFEST_SCHEMA = 1
-
   def media_manifest(row)
     folder = row["folder"]
     return nil unless folder
@@ -210,8 +206,10 @@ class TasksController < ApplicationController
     # resiliently, like open_questions). Bail before indexing into a non-Hash.
     return nil unless manifest.is_a?(Hash)
     # Gate on the known schema version: a future schema reshapes items[], so a
-    # v2 manifest must be ignored, not rendered as garbage v1 items.
-    return nil unless manifest["schema"] == MEDIA_MANIFEST_SCHEMA
+    # v2 manifest must be ignored, not rendered as garbage v1 items. The schema
+    # int is hoisted into the gem (Hive::MediaManifest::SCHEMA) so the stage and
+    # this reader can't drift apart on a bump.
+    return nil unless manifest["schema"] == Hive::MediaManifest::SCHEMA
 
     status = manifest["status"].to_s
     return nil unless %w[captured skipped failed].include?(status)
@@ -219,7 +217,6 @@ class TasksController < ApplicationController
     {
       "status" => status,
       "reason" => manifest["reason"].to_s,
-      "surface" => manifest["surface"].to_s,
       "items" => normalized_media_items(row, manifest["items"])
     }
   rescue JSON::ParserError, SystemCallError => e
@@ -234,7 +231,15 @@ class TasksController < ApplicationController
       file = item["file"].to_s
       next unless file.match?(MEDIA_FILENAME_RE)
       next unless File.basename(file) == file
-      next unless resolved_media_path(row, file)
+      unless resolved_media_path(row, file)
+        # A captured manifest naming a still the media dir no longer holds (a
+        # cleaned/renamed demo dir, a missing file) otherwise vanishes from the
+        # Demo gallery with no trace. Log it — mirroring the media action's
+        # breadcrumb — so an empty Demo section is diagnosable without
+        # hand-reading the manifest.
+        Rails.logger.warn("media item unresolved for #{params[:slug]}: #{file.inspect}")
+        next
+      end
 
       url = item["screenote_url"].to_s
       {

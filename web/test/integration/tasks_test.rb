@@ -199,6 +199,14 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
+  test "media route 404s a valid-shape slug that names no task" do
+    # A slug that satisfies the route constraint but matches no task row hits
+    # the shared task_row! -> InvalidTaskPath -> 404 path, the same handling
+    # every other action gets for an unknown task (plan U3/U5).
+    get "/tasks/#{@project}/ghost-task-260101-zzzz/media/01-home.png"
+    assert_response :not_found
+  end
+
   test "task page renders captured media gallery and screenote links" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     media_fixture!(folder)
@@ -282,6 +290,21 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "section.demo", count: 0,
                   message: "all items filtered out → no bare Demo heading"
+  end
+
+  test "a captured manifest with a literal empty items list renders no demo section" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "captured",
+      "surface" => "ui",
+      "items" => []
+    })
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0,
+                  message: "a captured manifest with no items must not render a bare Demo heading"
   end
 
   test "a red task offers Retry which queues the clear-then-rerun pair" do

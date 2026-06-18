@@ -11,6 +11,11 @@ module Hive
 
     attr_reader :base_url
 
+    # `http:` injects the transport seam (defaults to Net::HTTP). It is called
+    # as `http.call(uri, request, open_timeout:, read_timeout:)` and must return
+    # a response that duck-types Net::HTTPResponse: `#code` -> String (e.g.
+    # "201") and `#body` -> String (the JSON payload). The test suite passes a
+    # lambda returning a Struct with those two readers.
     def initialize(base_url:, api_token:, http: nil, open_timeout: DEFAULT_OPEN_TIMEOUT, read_timeout: DEFAULT_READ_TIMEOUT)
       @base_url = base_url.to_s.strip
       @api_token = api_token.to_s.strip
@@ -61,7 +66,12 @@ module Hive
       body << "--#{boundary}\r\n"
       body << %(Content-Disposition: form-data; name="#{quote(name)}"\r\n)
       body << "\r\n"
-      body << value.to_s
+      # `body` is BINARY-encoded; a UTF-8 title (em-dash, curly quotes,
+      # accented or Cyrillic captions, emoji) would flip its encoding to UTF-8
+      # and then make the later `body << File.binread(path)` raise
+      # Encoding::CompatibilityError. Force the title bytes to binary so any
+      # caption appends cleanly.
+      body << value.to_s.b
       body << "\r\n"
     end
 
@@ -78,8 +88,9 @@ module Hive
     def quote(value)
       # Backslash-escape both the escape character and the quote so an exotic
       # on-disk filename can't break out of the Content-Disposition value.
-      # Block form avoids the gsub replacement-string backslash collapse that
-      # made the old string-replacement a no-op.
+      # Block form avoids the gsub replacement-string backslash collapse: the
+      # old string-replacement form escaped the quote correctly but silently
+      # dropped the backslash escape, so only that branch had regressed.
       value.to_s.gsub(/[\\"]/) { |char| "\\#{char}" }
     end
 

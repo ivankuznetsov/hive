@@ -172,7 +172,9 @@ class StagesArtifactsTest < Minitest::Test
       Hive::Config.define_singleton_method(:load_global_screenote) do
         { "base_url" => "https://screenote.test", "api_token" => "secret" }
       end
-      Hive::ScreenoteUploader.define_singleton_method(:new) { |base_url:, api_token:| uploader }
+      # Accept any constructor signature: a new kwarg on ScreenoteUploader.new
+      # must not break this stage test with an unrelated ArgumentError.
+      Hive::ScreenoteUploader.define_singleton_method(:new) { |*, **| uploader }
 
       result = Hive::Stages::Artifacts.run!(task, {})
 
@@ -221,6 +223,179 @@ class StagesArtifactsTest < Minitest::Test
 
       assert_equal File.realpath(File.join(media_dir, "01-home.png")),
                    Hive::Stages::Artifacts.media_item_path(task, "01-home.png")
+    end
+  end
+
+  def test_media_item_path_refuses_a_media_dir_symlinked_outside_the_task_folder
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p(outside)
+      File.binwrite(File.join(outside, "01-home.png"), "png")
+      # media/ itself is a symlink pointing out of the task folder.
+      File.symlink(outside, File.join(task.folder, "media"))
+
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "01-home.png"),
+                 "a media dir symlinked outside the task folder must not become a trusted root"
+    end
+  end
+
+  def test_media_item_path_skips_a_null_byte_filename_without_raising
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      FileUtils.mkdir_p(File.join(task.folder, "media"))
+
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "a\x00.png"),
+                 "a null byte in the agent-written name must skip the one item, not raise"
+    end
+  end
+
+  def test_upload_eligibility_mirrors_the_web_filename_shape
+    base = { "push_to_screenote" => true, "screenote_url" => nil, "type" => "still" }
+
+    assert Hive::Stages::Artifacts.upload_item_to_screenote?(base.merge("file" => "01-home.png"))
+    assert Hive::Stages::Artifacts.upload_item_to_screenote?(base.merge("file" => "02-state.jpeg"))
+    refute Hive::Stages::Artifacts.upload_item_to_screenote?(base.merge("file" => "my shot.png")),
+           "a name with a space can't be displayed by hivebox, so it must not be uploaded"
+    refute Hive::Stages::Artifacts.upload_item_to_screenote?(base.merge("file" => "shot\n.png")),
+           "a name with a newline must not be uploaded"
+    refute Hive::Stages::Artifacts.upload_item_to_screenote?(base.merge("file" => "demo.gif")),
+           "screenote hosts PNG/JPEG stills only, never GIFs — even when push_to_screenote is true"
+  end
+
+  def test_push_manifest_media_rejects_a_push_flagged_gif
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "demo.gif"), "gif")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "demo.gif", "type" => "gif", "caption" => "Motion", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      uploader = StubUploader.new
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+
+      assert_empty uploader.files,
+                   "a push-flagged GIF must be rejected by the filename gate, not uploaded"
+    end
+  end
+
+  def test_push_manifest_media_skips_items_missing_on_disk
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      FileUtils.mkdir_p(File.join(task.folder, "media"))
+      # No 01-home.png written to disk.
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      uploader = StubUploader.new
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+
+      assert_empty uploader.files,
+                   "a manifest item naming a png missing on disk must be skipped, not uploaded or crash"
+    end
+  end
+
+  def test_push_manifest_media_ignores_an_unknown_schema_version
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 2,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      uploader = StubUploader.new
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+
+      assert_empty uploader.files,
+                   "a future schema version must be skipped, not misread as v1"
+    end
+  end
+
+  def test_push_manifest_media_stops_uploading_once_the_budget_is_exhausted
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      uploader = StubUploader.new
+
+      # First clock read seeds the deadline; every later read is past it, so the
+      # loop must break before starting any upload. Minitest::Mock.stub isn't
+      # bundled, so patch the singleton method and restore via ensure.
+      calls = 0
+      original_clock = Process.singleton_class.instance_method(:clock_gettime)
+      Process.define_singleton_method(:clock_gettime) do |*|
+        calls += 1
+        calls == 1 ? 0.0 : Hive::Stages::Artifacts::SCREENOTE_UPLOAD_BUDGET_SEC + 1000.0
+      end
+
+      begin
+        _out, err = capture_io do
+          Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+        end
+      ensure
+        Process.singleton_class.define_method(:clock_gettime, original_clock)
+      end
+
+      assert_empty uploader.files, "no still may be uploaded once the wall-clock budget is exhausted"
+      assert_includes err, "screenote upload budget"
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_nil manifest.dig("items", 0, "screenote_url"),
+                 "the budget-skipped still keeps a blank screenote_url"
+    end
+  end
+
+  def test_push_manifest_media_touches_the_task_folder_after_rewrite
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      # Backdate the folder so a real touch is observable without sleeping.
+      past = Time.now - 3600
+      File.utime(past, past, task.folder)
+      uploader = StubUploader.new
+
+      Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+
+      assert_operator File.mtime(task.folder), :>, past + 1,
+                      "the task folder mtime must be bumped so the status feed broadcasts the hosted links"
     end
   end
 

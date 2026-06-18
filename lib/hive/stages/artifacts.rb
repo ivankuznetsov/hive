@@ -12,11 +12,24 @@ module Hive
 
       # Aggregate wall-clock budget for the synchronous screenote upload loop.
       # Each request is bounded (open 10s / read 60s) but the loop runs inside
-      # the daemon dispatch cycle, so several stills against a slow endpoint
-      # could otherwise serialize to N x 60s of blocking. Stop starting new
-      # uploads once this is exceeded; unfinished stills are retried on a later
-      # run (their screenote_url stays blank).
+      # the spawned `hive run artifacts` child process, so several stills
+      # against a slow endpoint could otherwise serialize to N x 60s of blocking
+      # in that child. Stop starting new uploads once this is exceeded; the
+      # budget-skipped stills keep a blank screenote_url. run! early-returns on
+      # the :complete marker, so they are NOT retried automatically — clearing
+      # the marker and re-running the stage is an explicit operator action.
       SCREENOTE_UPLOAD_BUDGET_SEC = 120
+
+      # The only media-manifest schema this stage understands. A future manifest
+      # with a higher schema may reshape items[]; gate on the known version so a
+      # v2 file is skipped rather than misread as v1.
+      MEDIA_MANIFEST_SCHEMA = 1
+
+      # Mirror the web display contract (`[\w.-]+` plus a known image extension)
+      # so a still hivebox would refuse to render — a name with spaces or
+      # newlines — is never pushed to screenote. Screenote only hosts PNG/JPEG
+      # stills, never GIFs.
+      SCREENOTE_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g)\z/i
 
       def run!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
@@ -82,6 +95,8 @@ module Hive
         return unless File.file?(manifest_path)
 
         manifest = JSON.parse(File.read(manifest_path))
+        return unless manifest.is_a?(Hash)
+        return unless manifest["schema"] == MEDIA_MANIFEST_SCHEMA
         return unless manifest["status"] == "captured"
 
         uploader ||= screenote_uploader(screenote_config || Hive::Config.load_global_screenote)
@@ -109,7 +124,15 @@ module Hive
           changed = true
         end
 
-        File.write(manifest_path, "#{JSON.pretty_generate(manifest)}\n") if changed
+        if changed
+          File.write(manifest_path, "#{JSON.pretty_generate(manifest)}\n")
+          # The status feed's live-refresh dedup keys on the task folder mtime
+          # (status.rb folder_mtime = File.mtime(task folder)); a write inside
+          # media/ only bumps the media dir, so open task pages would miss the
+          # new hosted links until reload. Touch the folder so the poller sees
+          # the change and broadcasts a refresh.
+          FileUtils.touch(task.folder)
+        end
       rescue JSON::ParserError => e
         warn "[hive] media manifest is not valid JSON: #{e.message}"
       rescue Hive::ConfigError => e
@@ -139,21 +162,27 @@ module Hive
         return false unless item["push_to_screenote"] == true
         return false unless item["screenote_url"].to_s.strip.empty?
 
-        %w[.png .jpg .jpeg].include?(File.extname(item["file"].to_s).downcase)
+        # Full filename-shape check, not just the extension: an item hivebox
+        # can't display (spaces/newlines fail the web route's `[\w.-]+` shape)
+        # must not be uploaded only to be hidden from the Demo gallery. GIFs are
+        # excluded — screenote hosts PNG/JPEG stills only.
+        item["file"].to_s.match?(SCREENOTE_FILENAME_RE)
       end
 
       def media_item_path(task, filename)
         name = filename.to_s
         return nil if name.empty? || File.basename(name) != name
 
-        media_dir = File.expand_path(File.join(task.folder, "media"))
-        return nil unless File.directory?(media_dir)
+        # Anchor the media root to the REAL task folder: resolve the folder's
+        # symlinks, then require `media/` to resolve to exactly <folder>/media.
+        # A `media` directory that is itself a symlink out of the task folder
+        # must not become a trusted root, or an agent could exfiltrate arbitrary
+        # readable host files to screenote. Mirrors the web controller's
+        # resolved_media_path.
+        folder_root = File.realpath(task.folder)
+        media_root = File.realpath(File.join(folder_root, "media"))
+        return nil unless media_root == File.join(folder_root, "media")
 
-        # Resolve symlinks on both sides and require the real target to stay
-        # under the real media dir, so an agent-produced `media/01-home.png`
-        # symlink can't exfiltrate an arbitrary readable host file to
-        # screenote. Mirrors the web controller's resolved_media_path.
-        media_root = File.realpath(media_dir)
         candidate = File.join(media_root, name)
         return nil unless File.file?(candidate)
 
@@ -161,7 +190,10 @@ module Hive
         return nil unless real.start_with?("#{media_root}#{File::SEPARATOR}")
 
         real
-      rescue SystemCallError
+      rescue SystemCallError, ArgumentError
+        # SystemCallError: a missing media dir / broken symlink. ArgumentError:
+        # an agent-written name with a null byte poisons File.basename/realpath;
+        # skip just that one item rather than aborting all remaining uploads.
         nil
       end
     end

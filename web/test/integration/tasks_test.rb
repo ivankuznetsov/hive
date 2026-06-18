@@ -144,6 +144,46 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal gif_bytes, response.body.b
   end
 
+  test "media route streams committed jpeg stills inline" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+    File.binwrite(media_dir.join("02-state.jpg"), jpg_bytes)
+
+    get "/tasks/#{@project}/#{@slug}/media/02-state.jpg"
+    assert_response :success
+    assert_equal "image/jpeg", response.media_type
+    assert_equal jpg_bytes, response.body.b
+  end
+
+  test "media responses are privately cached, never shared-proxy cacheable" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+
+    get "/tasks/#{@project}/#{@slug}/media/01-home.png"
+    assert_response :success
+    cache_control = response.headers["Cache-Control"].to_s
+    assert_includes cache_control, "max-age=60", "the media response must carry the 60s freshness window"
+    assert_includes cache_control, "private",
+                    "a user's task screenshots must not be cacheable by a shared proxy"
+    refute_includes cache_control, "public",
+                    "a regression to public:true would leak authenticated screenshots into shared caches"
+  end
+
+  test "a manifest with an unknown schema version hides the demo section" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+    # Bump the on-disk manifest to a future schema the reader must not render.
+    manifest = JSON.parse(folder.join("media", "manifest.json").read)
+    manifest["schema"] = 2
+    folder.join("media", "manifest.json").write("#{JSON.pretty_generate(manifest)}\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0,
+                  message: "a future-schema manifest must be ignored, not rendered as garbage v1 items"
+  end
+
   test "media route refuses traversal disallowed extensions and missing files" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     media_fixture!(folder)
@@ -530,6 +570,10 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   def png_bytes
     [ 137, 80, 78, 71, 13, 10, 26, 10 ].pack("C*") + "fake-png-body"
+  end
+
+  def jpg_bytes
+    [ 0xFF, 0xD8, 0xFF, 0xE0 ].pack("C*") + "fake-jpg-body"
   end
 
   def gif_bytes

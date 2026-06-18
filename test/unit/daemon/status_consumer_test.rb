@@ -398,6 +398,41 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  # A successful (exit-0) fetch whose stderr is non-empty carries the status
+  # command's own degradation breadcrumbs (fail-open dependency gate, dropped
+  # depends_on, collapsed stack). Surface them via the warning channel so the
+  # dispatcher logs them once per tick instead of discarding them.
+  def test_successful_fetch_surfaces_nonempty_stderr_as_warning
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_row(slug: "s1") ]
+    } ])
+    breadcrumb = "hive: status: dependency resolve failed for \"dep\"; treating as unblocked\n"
+    with_fake_status(JSON.generate(payload), stderr_text: breadcrumb) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+      assert result.ok, "non-empty stderr on an exit-0 fetch must not fail the result: #{result.error.inspect}"
+      assert_equal [ "s1" ], result.rows.map(&:slug)
+      refute_nil result.warning, "non-empty stderr on a healthy fetch must surface as a warning"
+      assert_match(/treating as unblocked/, result.warning)
+    end
+  end
+
+  # Forward skew AND non-empty stderr coexist: the single warning channel
+  # must carry both advisories, not drop one for the other.
+  def test_successful_fetch_combines_skew_and_stderr_warnings
+    expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_row(slug: "s1") ]
+    } ]).merge("schema_version" => expected + 1)
+    with_fake_status(JSON.generate(payload), stderr_text: "depends_on dropped\n") do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+      assert result.ok, result.error
+      assert_match(/newer than this process/, result.warning)
+      assert_match(/depends_on dropped/, result.warning)
+    end
+  end
+
   def test_envelope_with_ok_false_returns_not_ok
     payload = {
       "schema" => "hive-status",

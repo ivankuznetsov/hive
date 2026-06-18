@@ -101,10 +101,14 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   `GET /tasks/:project/:slug/media/:filename` and shown as an inline gallery
   with captions plus screenote links when the manifest carries
   `screenote_url`; failed captures render a warning banner with the recorded
-  reason; skipped or absent manifests render nothing. The media route accepts
-  only a single filename component ending in png/jpg/jpeg/gif, resolves the real
-  path under `<task>/media/`, refuses symlink/path traversal escapes, and
-  streams with inline content type. Artifact summaries are UI chrome:
+  reason; skipped or absent manifests render nothing. The media route applies a
+  first-pass filename constraint (a single component ending in png/jpg/jpeg/gif,
+  with `format: false` so a trailing `.rb` cannot masquerade as an implicit
+  format); the strict guarantee lives in the controller's `resolved_media_path`,
+  which re-checks the filename against an anchored regex, requires `File.basename`
+  equality, and resolves `File.realpath` to confirm containment under
+  `<task>/media/` — refusing symlink and path-traversal escapes — before
+  streaming with inline content type. Artifact summaries are UI chrome:
   filename-style tabs in muted monospace, while rendered markdown bodies sit
   in a bordered document panel so the file label and document headings do not
   visually compete. Open/closed choices survive pushed morphs (a Stimulus

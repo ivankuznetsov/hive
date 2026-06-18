@@ -35,7 +35,8 @@ observable surface.
   project `/run` skill or dev script when present, then documented dev commands),
   drive the changed surface with agent-browser or Playwright, and write a handful
   of labelled PNG stills plus one short animated GIF of the key interaction.
-- TUI/CLI surface: record a short terminal demo of the changed command with
+- TUI/CLI surface (record this under `surface: "tui"` — there is no separate
+  `cli` enum value): record a short terminal demo of the changed command with
   asciinema or vhs and convert it to a GIF. Also capture at least one final PNG
   still so the stage can push a screenote link for the PR.
 - Failure: if the project cannot be booted or driven, or capture tooling is

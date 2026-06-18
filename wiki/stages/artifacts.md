@@ -25,7 +25,7 @@ tags: [stage, artifacts, release]
 7. On `COMPLETE`, read `media/manifest.json`. If it is `status: "captured"`, upload PNG/JPEG items whose `push_to_screenote` is true and whose `screenote_url` is blank through `Hive::ScreenoteUploader`; write any returned `annotate_url` values back into the manifest.
 8. Return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise.
 
-Screenote processing is deliberately fail-soft: missing credentials, skipped/failed manifests, corrupt JSON, upload errors, missing files, non-still GIF entries, and traversal-shaped item filenames are ignored with warnings rather than turning a completed artifacts stage red.
+Screenote processing is deliberately fail-soft and never turns a completed artifacts stage red. Only invalid manifest JSON, a misconfigured screenote endpoint (`Hive::ConfigError`), individual upload failures, and the outer `StandardError` rescue actually warn. The per-item skips — missing credentials (the whole batch short-circuits), skipped/failed manifests, missing files, non-still GIF entries, and traversal-/symlink-shaped item filenames — are silently skipped.
 
 ## Media manifest
 

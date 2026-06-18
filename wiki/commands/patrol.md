@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-06-11
+updated: 2026-06-15
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -85,9 +85,9 @@ With `--json`, the command emits a single `hive-patrol.v1` envelope:
 }
 ```
 
-If patrol opens a PR but cannot create its synthetic `6-review` task, the PR URL appears in `review_handoff_errors` and the finding fingerprint is recorded as `review_handoff_failed` so a later patrol cycle can retry the handoff instead of permanently skipping the finding as already active.
+If patrol opens a PR but cannot create its synthetic `6-review` task, the PR URL appears in `review_handoff_errors` and the finding fingerprint is recorded as `review_handoff_failed` so a later patrol cycle can retry the handoff instead of permanently skipping the finding as already active. `skipped_findings[].reason` reports why reviewed findings did not become fix candidates; currently source can emit dismissal, active/similar existing finding, low confidence, or low severity reasons.
 
-Config errors emit `ok: false`, `error_kind: "config"`, and exit 78.
+Config errors emit `ok: false`, `error_kind: "config"`, and exit 78. A missing `PROJECT` is rejected by Thor before `Hive::Commands::Patrol` runs; when `--json` is present, `bin/hive` maps that pre-dispatch usage error to a `hive-patrol` error payload with `error_kind: "error"` and exit 64 so patrol callers still receive one schema-shaped JSON document.
 
 ## Daemon
 

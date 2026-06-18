@@ -3,7 +3,7 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-06-16
 tags: [roadmap, status]
 ---
 
@@ -13,10 +13,22 @@ tags: [roadmap, status]
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` replaces the dead `which` delegators. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 
-Recent release/dependency/history inspected on 2026-06-14:
+Recent release/dependency/history inspected on 2026-06-16:
 
 | Commit | Area | Notes |
 |--------|------|-------|
+| `0d0cac16` | Native Codex reviewer | Drops the verbose `codex review` exec/thinking/codex session transcript from published findings while keeping the High/Medium/Nit block and final Codex reply, reducing triage prompt bloat. |
+| `70e6ff14` | Hivebox agent login | Completes operator-ward device-flow UI behavior for Codex and `gh`: poll until the CLI exits, hide the paste-back form, and render done/error state. Claude remains paste-back. |
+| `b370e7c3` | Hivebox assets | Replaces the placeholder icon with terracotta honeycomb SVG/PNG assets and adds `/favicon.ico` so root favicon requests stop 404ing. |
+| `c75f4039` | Hivebox agent login | Sanitizes captured agent-login URLs by replacing terminal-control runs with spaces before re-extracting the first URL, preventing adjacent URLs from being spliced into one href. |
+| `c5cd70a9` / `b08703a3` / `5c645734` | Hivebox agent login | Moves Codex to `login --device-auth`, strips ANSI from surfaced URLs, and exercises binary PTY output through the controller/view path so login-status pages do not 500 on raw CLI bytes. |
+| `7b17bfd6` | Finalize | Fast-forwards stale rebase-duplicate worktrees so finalize does not loop on `unpushed_commits`. |
+| `f25896a2` | Tmux prompt submit | Replaces fixed paste-to-Enter sleep with pane-tail settle polling so large Claude/tmux prompts submit after the paste fully renders. |
+| `7f088c48` | Review triage defaults | Aligns `Review::Triage`'s partial-config fallback budget/timeout with `Config::DEFAULTS` (`review_triage` = 75 / 1800), closing a test/internal-caller footgun. Loaded project config already received these values through the deep merge. |
+| `118ed2fd` | Provider limits / finalize | Narrows AgentLimit's broad limit match to usage-qualified walls so UI feature prose like scroll/window limits does not trip `limits_reached`, and lets finalize short-circuit already-merged PRs to `COMPLETE merged=true` before stale local-branch checks. |
+| `fce1a3a3` | Daily digest | Adds `Hive::Digest`, `hive digest`, daemon scheduling, Telegram delivery, schema/test coverage, and follow-up hardening for digest concurrency, timeout, prompt fencing, JSON error output, and config validation. |
+| `7b0a02fd` | Babysitter dry-run | Blocks `GIT_EXEC_PATH` in the git dry-run stub so repo-configured remote helpers cannot execute through an allowlisted read command. |
+| `2b5b51b9` | Babysitter dry-run | Pins wrapper-launcher handoff so command-local `HIVE_BABYSITTER_REAL_GIT` / `HIVE_BABYSITTER_REAL_GH` overrides cannot replace the parent-resolved real binaries. |
 | `aa160a2c` | Install smoke CI | Hardens the `verify-release.sh (end-to-end behavior)` job so `jq` provisioning first uses runner-provided `jq`, then falls back to apt, and retries after disabling transiently broken `packages.microsoft.com` apt sources. |
 | `b6bba5d6` | Review limit healing | Routes triage/fix phase provider-limit failures through `REVIEW_ERROR reason=limits_reached retry_after=...`, matching the existing reviewers-phase cooldown path instead of terminal `triage_failed` / `fix_failed`. |
 | `64b11b41` | Release | Prepares v0.3.0: sets `Hive::VERSION` and the lockfile path gem to `0.3.0`, points public Linux installer snippets at `v0.3.0`, and adds release notes for hivebox alpha, the first GHCR hivebox image release, session-limit healing, dispatch-request/drop schema v2, golden-path E2E, and Windows installer harness coverage. |

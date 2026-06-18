@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-06-13
+updated: 2026-06-16
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -54,7 +54,7 @@ Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is l
 
 ## Phase 2 — reviewers (`Hive::Reviewers`)
 
-For each selected reviewer spec, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run the selected adapter, and write `reviews/<output_basename>-<NN>.md`. `kind: "agent"` uses `Hive::Reviewers::Agent` and `Hive::Agent.run!` with the spec's profile; `kind: "codex_review"` uses `Hive::Reviewers::CodexReview`, which runs native `codex review --title <title> <prompt>` and captures valid High/Medium/Nit output into the findings file. Normal tasks select specs from `cfg.review.reviewers`; synthetic patrol handoff tasks whose `task.md` frontmatter carries `source: patrol` select specs from `cfg.patrol.review.reviewers` instead, so patrol PRs can use the cheap `codex-native-review` default without changing the normal feature-review policy. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists (probed via the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy the check), falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings. When `cfg.default_branch` is unset AND `Hive::GitOps#origin_default_branch` returns nil (no origin/HEAD symref and neither `origin/main` nor `origin/master` exist), review preflight refuses to fall back to the worktree's current branch (which in a `git worktree add` is the task branch — diffing the task against itself produces zero or phantom findings) and exits 1 with the two remediation paths named: set `default_branch` in `.hive-state/config.yml`, or run `git remote set-head origin --auto` so origin/HEAD points at the project default.
+For each selected reviewer spec, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run the selected adapter, and write `reviews/<output_basename>-<NN>.md`. `kind: "agent"` uses `Hive::Reviewers::Agent` and `Hive::Agent.run!` with the spec's profile; `kind: "codex_review"` uses `Hive::Reviewers::CodexReview`, which runs native `codex review --title <title> <prompt>` and captures valid High/Medium/Nit output into the findings file. The native Codex adapter normalizes stdout before publishing it: after the first severity header, it drops the verbose middle `exec` / `thinking` / `codex` session transcript and keeps codex's final assistant message, so triage reads findings rather than hundreds of KB of tool logs. Normal tasks select specs from `cfg.review.reviewers`; synthetic patrol handoff tasks whose `task.md` frontmatter carries `source: patrol` select specs from `cfg.patrol.review.reviewers` instead, so patrol PRs can use the cheap `codex-native-review` default without changing the normal feature-review policy. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists (probed via the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy the check), falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings. When `cfg.default_branch` is unset AND `Hive::GitOps#origin_default_branch` returns nil (no origin/HEAD symref and neither `origin/main` nor `origin/master` exist), review preflight refuses to fall back to the worktree's current branch (which in a `git worktree add` is the task branch — diffing the task against itself produces zero or phantom findings) and exits 1 with the two remediation paths named: set `default_branch` in `.hive-state/config.yml`, or run `git remote set-head origin --auto` so origin/HEAD points at the project default.
 
 The patrol selector is deliberately frontmatter-based and fail-soft:
 `reviewer_specs_for` reads YAML only when `task.md` starts with a
@@ -84,6 +84,8 @@ Spawns a triage agent with all per-reviewer files for the current pass concatena
 - **`safetyist`** (opt-in, `templates/triage_safetyist.md.erb`) — escalate when in doubt; only tick obvious mechanical fixes.
 
 `review.triage.custom_prompt` overrides both presets with a path under `templates/`. Path-escape-guarded — `..` and absolute paths are rejected before render.
+
+Triage's direct `cfg` fallback values match `Config::DEFAULTS`: `budget_usd.review_triage` falls back to `75` and `timeout_sec.review_triage` falls back to `1800`. Normal `Config.load` callers already receive those values through the deep merge; the explicit fallback only protects tests or internal callers that build a partial config hash by hand.
 
 Plan / worktree.yml / task.md are SHA-256 protected around the triage spawn (ADR-013); tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 
@@ -174,7 +176,7 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 - `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap, reviewers all-limit markers, and triage limit vs non-limit failure classification.
 - `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` — phase-level unit coverage.
 - `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, and patrol-task selection of `patrol.review.reviewers`.
-- `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior.
+- `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior including transcript trimming before triage.
 - `test/unit/metrics_test.rb`, `test/integration/metrics_command_test.rb` — `hive metrics rollback-rate` against trailered fixture commits.
 
 ## Backlinks

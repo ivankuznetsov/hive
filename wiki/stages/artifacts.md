@@ -3,11 +3,11 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-06-15
+updated: 2026-06-18
 tags: [stage, artifacts, release]
 ---
 
-**TLDR**: Artifact collection is the agent-backed handoff between autonomous review and PR finalization. It asks the configured `artifacts.agent` to write `artifact.md`, ending with `<!-- COMPLETE -->`, and gives release/handoff material a stable stage slot without letting finalize skip the terminal-marker gate. When `artifacts.agent` resolves to Claude, the launch path honors project-global `claude.mode`.
+**TLDR**: Artifact collection is the agent-backed handoff between autonomous review and PR finalization. It asks the configured `artifacts.agent` to write `artifact.md`, ending with `<!-- COMPLETE -->`, and now asks the agent to produce best-effort visual proof under `media/` when the task has an observable UI/TUI/CLI surface. Still PNG/JPEG captures are pushed to screenote after the agent finishes, using Ruby-side credentials that are never shown to the agent. Capture skips/failures are recorded in `media/manifest.json` and do not fail the stage. When `artifacts.agent` resolves to Claude, the launch path honors project-global `claude.mode`.
 
 ## Preconditions
 
@@ -21,7 +21,35 @@ tags: [stage, artifacts, release]
 3. Render `templates/artifacts_prompt.md.erb` with the task folder, worktree path, and target artifact file.
 4. Resolve `artifacts.agent` through `Hive::Stages::Base.stage_profile`.
 5. If the profile is Claude, call `Hive::Stages::Base.spawn_claude!` with session name `hive-7-artifacts-<slug>`; otherwise call the normal `spawn_agent` path.
-6. Re-read the terminal marker from `artifact.md` and return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise.
+6. Re-read the terminal marker from `artifact.md`.
+7. On `COMPLETE`, read `media/manifest.json`. If it is `status: "captured"`, upload PNG/JPEG items whose `push_to_screenote` is true and whose `screenote_url` is blank through `Hive::ScreenoteUploader`; write any returned `annotate_url` values back into the manifest.
+8. Return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise.
+
+Screenote processing is deliberately fail-soft: missing credentials, skipped/failed manifests, corrupt JSON, upload errors, missing files, non-still GIF entries, and traversal-shaped item filenames are ignored with warnings rather than turning a completed artifacts stage red.
+
+## Media manifest
+
+The agent writes `<task>/media/manifest.json`:
+
+```json
+{
+  "schema": 1,
+  "status": "captured | skipped | failed",
+  "reason": "required when skipped or failed",
+  "surface": "ui | tui | none",
+  "items": [
+    {
+      "file": "01-home.png",
+      "type": "still",
+      "caption": "Home page after load",
+      "push_to_screenote": true,
+      "screenote_url": null
+    }
+  ]
+}
+```
+
+`status: "skipped"` means the task has no observable surface. `status: "failed"` means boot, driving, or capture tooling failed; hivebox renders the reason as a Demo warning banner. `status: "captured"` renders committed PNG/JPEG/GIF files inline in hivebox through the task media route. See [[commands/web]].
 
 ## Marker -> next action
 

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-06-18
 tags: [dependencies, gems, runtime]
 ---
 
@@ -99,6 +99,7 @@ The codebase leans heavily on stdlib (no extra gems for these):
 | `File.open(... LOCK_EX \| EXCL)` | Per-task lock acquisition | `lock.rb` |
 | `YAML.safe_load` | All config / lock / pointer files | `config.rb`, `lock.rb`, `task.rb`, `worktree.rb` |
 | `ERB` (`trim_mode: "-"`) | Prompt and config templates | `commands/init.rb`, `commands/new.rb`, `stages/base.rb` |
+| `Net::HTTP` | Multipart screenote screenshot uploads without adding a gem dependency | `screenote_uploader.rb` |
 | `SecureRandom.hex` | 4-char slug suffix and unique global-config tempfile names | `commands/new.rb`, `config.rb` |
 | `Digest::SHA256` | Reviewer-tamper detection on `plan.md` / `worktree.yml` | `stages/execute.rb` |
 | `Time.now.utc.iso8601` | Lock timestamps, marker `started=`, `worktree.yml#created_at` | `lock.rb`, `agent.rb`, `worktree.rb` |
@@ -121,7 +122,9 @@ These are not gems but the CLI tools the runtime invokes:
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
 | `npm` | any recent npm with Node.js | installer for the QMD npm package; Hive reports missing npm but does not install Node.js/npm itself |
-| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | test-time optional; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed, and the artifacts prompt can use it for terminal GIF demos |
+| `ffmpeg` | any recent | optional media conversion support for artifacts-stage GIF demos and manual `web/script/record_box_demo.rb` output |
+| agent-browser or Playwright | project/environment specific | optional UI visual capture support for the artifacts prompt; absence records a failed media manifest rather than failing the stage |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 

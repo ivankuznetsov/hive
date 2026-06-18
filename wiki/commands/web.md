@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-16
+updated: 2026-06-18
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -95,7 +95,16 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and
-  fenced examples of markers remain visible as escaped text). Artifact summaries are UI chrome:
+  fenced examples of markers remain visible as escaped text). Visual media from
+  `7-artifacts` renders in a dedicated Demo section before the text artifacts:
+  captured PNG/JPEG/GIF files are served from
+  `GET /tasks/:project/:slug/media/:filename` and shown as an inline gallery
+  with captions plus screenote links when the manifest carries
+  `screenote_url`; failed captures render a warning banner with the recorded
+  reason; skipped or absent manifests render nothing. The media route accepts
+  only a single filename component ending in png/jpg/jpeg/gif, resolves the real
+  path under `<task>/media/`, refuses symlink/path traversal escapes, and
+  streams with inline content type. Artifact summaries are UI chrome:
   filename-style tabs in muted monospace, while rendered markdown bodies sit
   in a bordered document panel so the file label and document headings do not
   visually compete. Open/closed choices survive pushed morphs (a Stimulus
@@ -203,7 +212,9 @@ route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape and strict chat-ID validation, repo
 clone target refusal for non-directories, agent-login status rendering for
 binary PTY output and operator-ward poll flows, root favicon/icon assets,
-plain-vs-deep health semantics, and the oversized diff cap/truncation notice.
+plain-vs-deep health semantics, the oversized diff cap/truncation notice,
+media route streaming/refusal cases, and captured/skipped/failed Demo
+rendering.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
@@ -214,7 +225,8 @@ scroll plus composer draft preservation across a live broadcast, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, and artifact
-open-state preservation across pushed morphs with live content refresh. CI runs
+open-state preservation across pushed morphs with live content refresh, plus
+browser-visible Demo gallery images and failed-capture banner states. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden
 path's daemon/Turbo row-replacement retry contract is covered in [[testing]].
@@ -230,7 +242,11 @@ seconds, drives Chromium through Playwright, and writes
 `packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
 the gem builds/installs from `/app`; the Rails app bundles and precompiles
 assets (propshaft — no node build) at `/app/web` with a dummy build-time
-secret. The image sets git's system credential helper for `https://github.com`
+secret. The image includes `asciinema` and `ffmpeg` for artifacts-stage
+terminal capture/GIF conversion; browser capture still depends on the
+project/agent environment having agent-browser or Playwright available, and
+missing tools record a failed media manifest instead of failing the pipeline.
+The image sets git's system credential helper for `https://github.com`
 to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
 credentials for repos under `/data/repos`. The supervisor still spawns
 `hive web --bind 0.0.0.0` — unchanged

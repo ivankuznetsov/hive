@@ -114,7 +114,7 @@ task default: :test
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
 | `run_open_pr_test.rb` | `hive run` of `5-open-pr/` — push, draft PR creation, idempotent existing-PR path. |
-| `run_review_test.rb` | `hive run` of `6-review/` — pre-flight states, reviewer/triage/fix/browser branching, manual wait and stale/error recovery, auto-commit/guardrail boundaries, provider-limit marker behavior for reviewers, triage limit vs non-limit failures, transient triage retry recovery, and terminal triage `message=` surfacing. |
+| `run_review_test.rb` | `hive run` of `6-review/` — pre-flight states, reviewer/triage/fix/browser branching, manual wait and stale/error recovery, auto-commit/guardrail boundaries, provider-limit marker behavior for reviewers, triage limit vs non-limit failures, bounded transient triage retry recovery, and `message=` surfacing on terminal phase-agent (triage/fix/ci) errors. |
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, already-merged PR short-circuit (`merged=true`, no `gh pr ready`, no `summary.md`), PR-ready wrap-up, and summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |

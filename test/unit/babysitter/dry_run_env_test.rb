@@ -159,21 +159,22 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_stubs_refuse_fifo_skip_log_without_hanging
+  def test_stubs_refuse_fifo_skip_log_without_blocking
     with_tmp_dir do |dir|
-      fifo = File.join(dir, "skipped.log")
-      File.mkfifo(fifo)
+      fifo = File.join(dir, "skipped.fifo")
+      File.mkfifo(fifo, 0o600)
       env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => fifo }
 
-      _out, git_err, git_status = capture_stub_with_timeout(env, "git", "commit", "-m", "through-fifo")
-      _out, gh_err, gh_status = capture_stub_with_timeout(env, "gh", "pr", "comment", "42", "--body", "hi")
+      [
+        [ "git", [ "commit", "-m", "through-fifo" ] ],
+        [ "gh", [ "pr", "comment", "42", "--body", "hi" ] ]
+      ].each do |binary, args|
+        _out, err, status = capture_stub_with_timeout(env, binary, *args)
 
-      assert git_status.success?, git_err
-      assert gh_status.success?, gh_err
-      assert_includes git_err, "[dry-run] failed to write skip log #{fifo}:"
-      assert_includes gh_err, "[dry-run] failed to write skip log #{fifo}:"
-      assert_includes git_err, "[dry-run] git commit -m through-fifo skipped"
-      assert_includes gh_err, "[dry-run] gh pr comment 42 --body hi skipped"
+        assert status.success?, err
+        assert_includes err, "[dry-run] failed to write skip log #{fifo}: dry-run skip log is not a regular file"
+        assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+      end
     end
   end
 

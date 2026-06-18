@@ -18,6 +18,7 @@ def append_skip_log(path)
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
   rescue Errno::ENOENT
+    # Missing logs are created below; the fstat check still verifies the opened target.
   end
 
   File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW | File::NONBLOCK, 0o600) do |file|

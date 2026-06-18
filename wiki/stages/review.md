@@ -177,7 +177,7 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 
 ## Tests
 
-- `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap, reviewers all-limit markers, triage limit vs non-limit failure classification, transient triage retry, and `message=` surfacing on terminal phase-agent errors.
+- `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap including triage-retry handoff to `REVIEW_STALE`, reviewers all-limit markers, triage limit vs non-limit failure classification, transient triage retry, and `message=` surfacing on terminal phase-agent errors.
 - `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` — phase-level unit coverage.
 - `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, and patrol-task selection of `patrol.review.reviewers`.
 - `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior including transcript trimming before triage.

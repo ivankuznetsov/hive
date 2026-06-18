@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-15
+updated: 2026-06-18
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -81,7 +81,10 @@ tick from double-spawning.
 Digest dispatches happen before status fetch because they are global, not
 project-row driven. The dispatcher tracks them with synthetic project/stage
 `digest/digest`; when the child is reaped, the scheduler advances its cursor
-only on exit 0.
+only on exit 0. The dry-run pseudo-child reap path mirrors the same completion
+hook so dry-run daemons do not wedge after one digest dispatch; if the scheduler
+cursor write fails there, the dispatcher logs `:fatal` and keeps the tick alive
+instead of crashing.
 
 `Hive::Daemon::Policy` and `Hive::Daemon::ConcurrencyController` have no
 I/O at all — fully unit-testable without forking. The other modules

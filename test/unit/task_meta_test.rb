@@ -50,6 +50,35 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  # The narrowed rescue in `read` deliberately splits two arms: a YAML/
+  # permission/encoding error WARNS (a dropped `depends_on` reads as "no
+  # dependency" → blocked:false, so the daemon could dispatch a dependent
+  # ahead of its prerequisite — the warn is the only signal), while a missing
+  # file (ENOENT) stays SILENT (a normal, expected absence). Pin both arms so
+  # a regression re-broadening to a silent `rescue StandardError; empty`
+  # — which passes test_missing_or_malformed_file_returns_nil_fields (return
+  # value only) — is caught.
+  def test_malformed_yaml_warns_that_depends_on_was_dropped
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "meta.yml"), "depends_on: [unterminated\n")
+      result = nil
+      _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
+      assert_equal Hive::TaskMeta.empty, result
+      assert_match(/depends_on dropped/, err,
+                   "a YAML parse failure must warn that depends_on was dropped")
+    end
+  end
+
+  def test_missing_meta_file_arm_stays_silent
+    with_tmp_dir do |dir|
+      result = nil
+      _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
+      assert_equal Hive::TaskMeta.empty, result
+      assert_equal "", err,
+                   "a missing meta.yml is a normal absence (ENOENT arm) and must NOT warn"
+    end
+  end
+
   def test_update_display_name_preserves_id_slug_and_dependency
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 7, slug: "keep-slug", display_name: nil, depends_on: "base-task")

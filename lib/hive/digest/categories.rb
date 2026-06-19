@@ -7,9 +7,9 @@ module Hive
     module Categories
       # [category_key, section_label], in render order.
       ORDERED = [
-        [ "feature", "New features" ],
+        [ "feature", "Features" ],
         [ "fix", "Fixes" ],
-        [ "patrol", "Patrol tasks" ]
+        [ "patrol", "Patrol" ]
       ].freeze
 
       # Accepted category keys, in the same order.

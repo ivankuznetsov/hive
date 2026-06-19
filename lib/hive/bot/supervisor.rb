@@ -20,6 +20,7 @@ require "hive/bot/idea_attachment_policy"
 require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
+require "hive/bot/format"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/paths"
@@ -396,8 +397,8 @@ module Hive
         @dispatch_result_state_home || Hive::Paths.state_home
       end
 
-      def safe_send_message(chat_id:, text:, reply_markup: nil)
-        @telegram.send_message(chat_id: chat_id, text: text, reply_markup: reply_markup)
+      def safe_send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
+        @telegram.send_message(chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode)
       rescue StandardError => e
         @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
         nil
@@ -973,6 +974,7 @@ module Hive
           else
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
+                              parse_mode: :html,
                               reply_markup: status_keyboard(rows))
           end
           return nil
@@ -1397,19 +1399,24 @@ module Hive
       def render_queue(rows, legacy_stage_dirs: [])
         actionable = actionable_queue_rows(rows)
         legacy_lines = legacy_stage_dirs.map do |row|
-          Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text
+          Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text)
         end
         return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{Hive::Bot::NotificationBuilders.display_title(row)} — " \
-            "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
+          title = Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.display_title(row))
+          stage = Hive::Bot::Format.html_escape(Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger))
+          "#{title} — #{pr_link_or_dash(row)} — #{stage}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
         (legacy_lines + [ header ] + lines).join("\n")
+      end
+
+      def pr_link_or_dash(row)
+        Hive::Bot::Format.html_pr_link(row.pr_url) || "—"
       end
 
       # Inline keyboard for the /status (and /queue) reply: one button per

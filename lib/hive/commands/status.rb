@@ -10,6 +10,9 @@ require "hive/dependencies"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
+require "hive/gh"
+require "hive/pr"
+require "hive/tui/views/hyperlink"
 
 module Hive
   module Commands
@@ -17,6 +20,29 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      # First stage at which a PR exists; `pr.md` is only read from this
+      # stage onward (see `pr_url_for`). Named here, and the numeric
+      # threshold derived from `Hive::Stages`, so inserting or reordering a
+      # stage can't silently shift which stages read `pr.md`.
+      OPEN_PR_STAGE_DIR = "5-open-pr".freeze
+      OPEN_PR_STAGE_INDEX = Hive::Stages.parse(OPEN_PR_STAGE_DIR).first
+      # Width of the text-mode PR column (`#NNN`, right-justified). Sourced
+      # from the shared `Hive::Pr::NUMBER_WIDTH` so the text and TUI
+      # (`Hive::Tui::Views::TasksPane::PR_WIDTH`) surfaces can't drift on
+      # PR-column width.
+      TEXT_PR_WIDTH = Hive::Pr::NUMBER_WIDTH
+      # Widest rendered id is `#NNNN` (5 cells); a single space separates
+      # each column in the identity string `#id #PR display-name`.
+      TEXT_ID_WIDTH = 5
+      # Display-name budget inside the identity column. Hand-tuned — bump by
+      # hand if names need more room.
+      TEXT_NAME_ALLOWANCE = 36
+      # Total visible width of the identity column (`#id #PR display-name`).
+      # Derived from TEXT_PR_WIDTH (hence Hive::Pr::NUMBER_WIDTH) so a
+      # PR-column-width bump widens this budget in lockstep with the PR cell
+      # instead of silently misaligning `hive status` text output. The id and
+      # name terms are hand-tuned and bump by hand.
+      TEXT_IDENTITY_WIDTH = TEXT_ID_WIDTH + 1 + TEXT_PR_WIDTH + 1 + TEXT_NAME_ALLOWANCE
 
       ICON = {
         none: "·",
@@ -213,6 +239,7 @@ module Hive
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
+          "pr_url" => row[:pr_url],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
@@ -395,7 +422,8 @@ module Hive
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
             state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
-            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{state.ljust(24)} #{command} #{r[:age]}"
+            puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
+                 "#{state.ljust(24)} #{command} #{r[:age]}"
           end
         end
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
@@ -421,7 +449,8 @@ module Hive
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
           state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
-          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{state.ljust(24)} #{command} #{row[:age]}"
+          puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
+               "#{state.ljust(24)} #{command} #{row[:age]}"
         end
       end
 
@@ -433,9 +462,31 @@ module Hive
         puts "  … and #{hidden_count} archived >3d ago (hive archive to view)"
       end
 
-      def display_identity(row)
+      # Identity column = `#id  #PR display-name`, padded to `width` visible
+      # cells. The OSC8 hyperlink for the PR token is spliced in AFTER the
+      # padding (plan U3: "pad the plain token first, then wrap") because
+      # String#ljust counts the OSC 8 framing (~14 bytes) plus the full URL
+      # — 50+ invisible bytes, and URL-length-dependent — and would
+      # otherwise add zero padding in a TTY, collapsing every column to the
+      # right of the task name. NOTE: this method uses plain String#ljust/
+      # rjust (char-counting), not the cell-aware Format.rjust_cells the TUI
+      # uses, so a wide/CJK display_name would misalign the text column — a
+      # known limitation, acceptable because the columns spliced here (`#id`
+      # and the `#NNN` PR cell) are ASCII. The PR token sits at a fixed
+      # offset (`#id ` + rjust padding), so Hyperlink.splice targets the PR
+      # cell by offset rather than a global `sub` — clearer, no per-row regex
+      # compile, no backreference footgun, and the offset always targets the
+      # PR cell rather than any digits inside the name.
+      def display_identity_with_pr(row, width)
         id = row[:id] ? "##{row[:id]}" : "—"
-        "#{id} #{row[:display_name] || row[:slug]}"
+        token = Hive::Pr.number(row[:pr_url]) || "—"
+        pr_cell = token.rjust(TEXT_PR_WIDTH)
+        name = row[:display_name] || row[:slug]
+        padded = "#{id} #{pr_cell} #{name}".ljust(width)
+        return padded if token == "—"
+
+        token_start = id.length + 1 + (pr_cell.length - token.length)
+        Hive::Tui::Views::Hyperlink.splice(padded, token_start, token.length, row[:pr_url], enabled: $stdout.tty?)
       end
 
       def dependency_indicator(row)
@@ -500,6 +551,7 @@ module Hive
                 folder: entry,
                 state_file: task.state_file,
                 worktree_path: worktree_path,
+                pr_url: pr_url_for(task),
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
@@ -625,6 +677,31 @@ module Hive
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
         row[:blocked] = false
+      end
+
+      def pr_url_for(task)
+        return nil if task.stage_index < OPEN_PR_STAGE_INDEX
+
+        value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        value = value.to_s.strip
+        value.empty? ? nil : value
+      rescue Errno::ENOENT
+        # pr.md vanished mid-scan — a TOCTOU race with a stage-move rename
+        # (Hive::Gh.pr_frontmatter guards a missing file with File.exist?, so
+        # a plain absent pr.md returns {} and never reaches here). Degrade to
+        # "no PR"; the row's other in-folder reads in collect_rows handle a
+        # genuine folder move via their own ENOENT contract.
+        nil
+      rescue SystemCallError => e
+        # Any other I/O fault reading pr.md (EACCES/ENOTDIR/ESTALE/…): warn so
+        # the inconsistency is visible (mirrors task_lock_holder's .lock
+        # reader) but still degrade rather than crash this poll-heavy
+        # surface, preserving the plan's never-crash-on-bad-pr.md contract.
+        # Narrowed from a blanket `rescue StandardError` so genuine
+        # programmer errors (e.g. a NoMethodError if pr_frontmatter's return
+        # shape changes) surface as exit-70 instead of being silently hidden.
+        warn "hive: status: failed to read pr.md at #{File.join(task.folder, 'pr.md')}: #{e.class}: #{e.message}"
+        nil
       end
 
       # The production glob over a stage dir's task folders, extracted into its

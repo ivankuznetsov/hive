@@ -559,10 +559,11 @@ module Hive
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered
       projects, ordered by stage. Combine with --json to emit the
-      `hive-status` envelope (schema v2); every row carries a required
+      `hive-status` envelope (schema v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")}); every row carries a required
       nullable `diagnostic` field — null for green rows, populated with
       a bounded summary + artifact tail + marker signature for red
-      recovery/error rows.
+      recovery/error rows, plus a nullable `pr_url` field — null until a
+      PR exists, then the pull-request URL once one is opened.
 
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v1) and emit the diagnostic for a single task. Useful

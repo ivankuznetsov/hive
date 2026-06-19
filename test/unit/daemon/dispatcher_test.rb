@@ -1909,8 +1909,8 @@ end
 def test_dry_run_digest_complete_raise_is_isolated_as_a_fatal_event
   # reap_dry_run's `rescue StandardError` sibling of reap_completed's: when a
   # dry-run digest pseudo-child is reaped and `@digest_scheduler.complete`
-  # raises, the crash must be isolated as a :fatal event instead of crashing the
-  # dry-run poll loop.
+  # raises (e.g. EROFS on the cursor write), the crash must be isolated as a
+  # :fatal event instead of crashing the dry-run poll loop.
   dispatcher, _sup, _ctrl, logger, _mw, _patrol, _digest = make_dispatcher(
     rows: [], dry_run: true, with_digest_scheduler: true
   )

@@ -151,6 +151,41 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_pins_skip_log_against_command_local_overrides
+    with_tmp_dir do |dir|
+      worktree = File.join(dir, "worktree")
+      outside_log = File.join(dir, "outside.log")
+      File.write(outside_log, "existing\n")
+
+      Hive::Babysitter::DryRunEnv.with_env(worktree) do
+        _out, git_err, git_status = Open3.capture3(
+          { "HIVE_BABYSITTER_DRY_RUN_LOG" => outside_log },
+          "git",
+          "commit",
+          "-m",
+          "blocked"
+        )
+        _out, gh_err, gh_status = Open3.capture3(
+          { "HIVE_BABYSITTER_DRY_RUN_LOG" => outside_log },
+          "gh",
+          "pr",
+          "comment",
+          "42",
+          "--body",
+          "blocked"
+        )
+
+        assert git_status.success?, git_err
+        assert gh_status.success?, gh_err
+      end
+
+      assert_equal "existing\n", File.read(outside_log)
+      skipped = File.read(File.join(worktree, ".babysitter-dry-run-skipped.log"))
+      assert_includes skipped, "git commit -m blocked skipped"
+      assert_includes skipped, "gh pr comment 42 --body blocked skipped"
+    end
+  end
+
   def test_stubs_refuse_symlinked_skip_log
     with_tmp_dir do |dir|
       target = File.join(dir, "target.log")

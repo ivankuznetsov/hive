@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "shellwords"
 require "hive"
+require "hive/bot/format"
 require "hive/bot/title_formatter"
 require "hive/markers"
 
@@ -93,13 +94,35 @@ module Hive
         verb = verb_for_action(row.action)
         return nil unless verb
 
+        text, parse_mode = approval_body(row, verb)
         Notification.new(
-          text: header(row) + "\nReady for #{verb}.",
+          text: text,
           keyboard: [
             [ button("Approve", "approve:#{verb}:#{row.project}:#{row.slug}:#{row.stage}") ],
             [ button("Reject", "reject:#{row.project}:#{row.slug}") ]
-          ]
+          ],
+          parse_mode: parse_mode
         )
+      end
+
+      # Returns [text, parse_mode] for a stage-approval notification. A
+      # `ready_for_review` row whose PR URL builds a valid link gets an HTML
+      # body with a clickable PR link (parse_mode :html); every other row —
+      # including a review row whose PR link can't be built — gets the plain
+      # text body with no parse_mode.
+      def approval_body(row, verb)
+        header = header(row)
+        if row.action.to_s == "ready_for_review"
+          pr_link = Hive::Bot::Format.html_pr_link(row.pr_url)
+          if pr_link
+            html = "#{Hive::Bot::Format.html_escape(header)}\n" \
+                   "Ready for #{Hive::Bot::Format.html_escape(verb)}.\n" \
+                   "PR: #{pr_link}"
+            return [ html, :html ]
+          end
+        end
+
+        [ "#{header}\nReady for #{verb}.", nil ]
       end
 
       def needs_input(row)
@@ -396,7 +419,25 @@ module Hive
         registry.shift while registry.size > CALLBACK_REGISTRY_MAX
       end
 
-      Notification = Data.define(:text, :keyboard)
+      # The only valid `parse_mode` values: nil = plain text, :html =
+      # Telegram HTML (the one mode in which `<a>` markup renders as a link
+      # rather than literal text). Enforced at construction below, so a
+      # future HTML message — e.g. an `:html` recovery/reminder rebuild —
+      # can't accidentally ship raw `<a>` tags as plain text (nil) nor reach
+      # the Telegram API with an unsupported mode like `:markdown` (a
+      # runtime 400); the failure surfaces at the call site instead.
+      PARSE_MODES = [ nil, :html ].freeze
+
+      Notification = Data.define(:text, :keyboard, :parse_mode) do
+        def initialize(text:, keyboard:, parse_mode: nil)
+          unless PARSE_MODES.include?(parse_mode)
+            raise ArgumentError,
+                  "unsupported parse_mode #{parse_mode.inspect} (expected one of #{PARSE_MODES.inspect})"
+          end
+
+          super
+        end
+      end
     end
   end
 end

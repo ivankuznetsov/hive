@@ -121,7 +121,7 @@ class ReviewersCodexReviewTest < Minitest::Test
   def test_trims_banner_and_trailing_blanks_to_exact_findings_body
     with_tmp_dir do |dir|
       # Banner before the first header, plus trailing blank lines after the
-      # findings. normalize_output must drop the banner, rstrip the trailing
+      # findings. review_body must drop the banner, rstrip the trailing
       # blanks, and append exactly one newline.
       ENV["HIVE_FAKE_CODEX_STDOUT"] = "OpenAI Codex v0.139.0\nsome banner\n## High\n- [ ] x: y\n\n\n"
       reviewer = build_reviewer(dir)
@@ -351,6 +351,228 @@ class ReviewersCodexReviewTest < Minitest::Test
 
       assert result.ok?, "a real 'No findings.' review must be accepted, got: #{result.error_message}"
       assert File.exist?(reviewer.output_path)
+    end
+  end
+
+  # The real all_failed regression: codex echoes the prompt (carrying the
+  # template's ## headers AND the <finding> placeholder) at the top of its
+  # session, runs a real review, then gives a PROSE "no regressions" verdict
+  # in its final message. The echoed placeholder must NOT fail the pass — the
+  # decision must read codex's real answer, not the prompt-echoed transcript.
+  def test_clean_prose_verdict_after_prompt_echo_is_accepted_as_clean
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.139.0
+        ## High
+        - [ ] <finding>: <one-line justification>
+
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        thinking
+        Let me inspect the branch diff.
+        exec
+        /usr/bin/bash -lc "git diff main...HEAD" in /worktree
+         succeeded in 12ms:
+        some diff output
+        codex
+        No plan was found. I did not find a correctness, security, or maintainability regression in the diff.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "a real clean review whose transcript echoes the prompt must pass, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "## High", "a clean pass must publish the canonical headers"
+      assert_includes body, "No findings.", "a clean pass must record No findings."
+      refute_includes body, "<finding>",
+                       "the echoed prompt placeholder must never reach the findings file"
+      refute_includes body, "succeeded in", "the tool transcript must be dropped"
+    end
+  end
+
+  # codex echoes the prompt placeholder, then its FINAL message carries REAL
+  # findings. The published file must keep the real findings and drop both the
+  # echoed placeholder and the transcript.
+  def test_real_findings_in_final_message_survive_a_prompt_echo
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        ## High
+        - [ ] off-by-one in paginate(): drops the last row
+        ## Medium
+        No findings.
+        ## Nit
+        No findings.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "real findings in codex's final message must be accepted, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "off-by-one in paginate()", "codex's real finding must be published"
+      refute_includes body, "<finding>", "the echoed placeholder must not reach the file"
+      refute_includes body, "succeeded in", "the transcript must be dropped"
+    end
+  end
+
+  # A finding codex describes in PROSE (no checkbox) must NOT be laundered into a
+  # clean pass — the :clean branch requires an affirmative no-findings verdict.
+  def test_prose_finding_without_checkbox_is_not_a_clean_pass
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        I found an off-by-one bug in paginate() that drops the last row; this should be fixed before merge.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?,
+             "a finding codex described in prose (no checkbox) must NOT be recorded as a clean pass"
+      refute File.exist?(reviewer.output_path),
+             "no clean findings file may be written when codex flagged a problem in prose"
+    end
+  end
+
+  # An exit-0 soft-error / abort verdict ("couldn't complete the review") must
+  # not be laundered into a clean pass either.
+  def test_soft_error_final_message_is_not_a_clean_pass
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        Stream error: connection reset. I was unable to complete the review.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?,
+             "an exit-0 soft-error verdict must not be recorded as a clean pass"
+      refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # codex concluded in pure prose (no severity headers anywhere): an affirmative
+  # no-findings verdict must still pass as a clean review.
+  def test_header_less_clean_prose_verdict_is_accepted_as_clean
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.139.0
+        thinking
+        Reviewing the diff.
+        exec
+        /usr/bin/bash -lc "git diff main...HEAD" in /worktree
+         succeeded in 8ms:
+        diff output
+        codex
+        I reviewed the branch diff and found no correctness, security, or maintainability regressions.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "an affirmative no-findings prose verdict must pass, got: #{result.error_message}"
+      assert_includes File.read(reviewer.output_path), "No findings."
+    end
+  end
+
+  # codex emits several `codex`-marked turns; only the FINAL verdict drives the
+  # result (an intermediate planning note must be discarded).
+  def test_multiple_codex_markers_use_only_the_final_verdict
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        thinking
+        Planning the review.
+        codex
+        Let me start by checking the tests.
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        I did not find any regressions in the diff.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?, "the final codex verdict must drive the result, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "No findings."
+      refute_includes body, "Let me start by checking",
+                       "an intermediate codex note must not be treated as the verdict"
+    end
+  end
+
+  # A clean pass preserves codex's verdict as an inert one-line HTML comment,
+  # with angle brackets stripped so it can't break the comment or re-introduce a
+  # `<finding>` placeholder.
+  def test_clean_pass_preserves_codex_verdict_as_an_inert_comment
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        thinking
+        Reviewing.
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        No findings; the <diff> looks clean and I found no regressions.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?
+      body = File.read(reviewer.output_path)
+      assert_includes body, "<!-- codex review summary:",
+                       "codex's verdict must be preserved as an audit comment"
+      refute_includes body, "<diff>",
+                       "angle brackets must be stripped so the verdict can't break the comment"
     end
   end
 

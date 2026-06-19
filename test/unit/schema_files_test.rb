@@ -167,6 +167,7 @@ class SchemaFilesTest < Minitest::Test
       blocked: false,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
+      pr_url: nil,
       marker_name: :waiting,
       marker_attrs: {},
       mtime: Time.now,
@@ -293,60 +294,68 @@ class SchemaFilesTest < Minitest::Test
                  "(errors: #{errors.inspect})"
   end
 
-  # Round-trip: a SuccessPayload carrying a POPULATED v4 Task (real
-  # depends_on / blocked_by / dependency_stage / blocked values) must
-  # validate against the published schema. The legacy_stage_dirs test above
-  # only validates the envelope with `tasks: []`, and the required-keys test
-  # only compares key sets — so a too-narrow field type (e.g.
-  # dependency_stage not allowing null, or blocked not boolean) would slip
-  # past those and be rejected at runtime by external consumers.
-  def test_hive_status_populated_task_validates_against_published_schema
+  # Round-trip: a SuccessPayload carrying POPULATED tasks must validate.
+  # The other success-path round-trips here use empty `tasks` arrays, so a
+  # real producer-shaped Task (every required field present, including the
+  # additive pr_url and v4 dependency fields) is validated against the
+  # published schema. Build the tasks through the producer (#task_payload) so
+  # a missing/renamed key, a pr_url type drift, or a too-narrow dependency
+  # field type fails here. Exercise BOTH the pr_url string and pr_url null
+  # variants, since pr_url is "type": ["string","null"].
+  def test_hive_status_success_payload_with_populated_tasks_validates_against_published_schema
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
-    row = {
-      stage: "1-inbox",
-      slug: "probe",
-      id: 42,
-      display_name: "Probe",
+    base_row = {
+      stage: "6-review",
+      slug: "review-task",
+      id: 7,
+      display_name: "Fix Login",
       depends_on: "base-task",
       blocked_by: "base-task",
       dependency_stage: "7-artifacts",
       blocked: true,
-      folder: "/tmp/probe",
-      state_file: "/tmp/probe/idea.md",
-      marker_name: :waiting,
+      folder: "/tmp/review-task",
+      state_file: "/tmp/review-task/task.md",
+      marker_name: :review_waiting,
       marker_attrs: {},
       mtime: Time.now,
       folder_mtime: Time.now,
       claude_pid: nil,
       claude_pid_alive: nil,
-      action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
-      action_label: "Ready to brainstorm",
-      suggested_command: "hive brainstorm probe --from 1-inbox",
+      action_key: Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
+      action_label: "Ready for review",
+      suggested_command: "hive review review-task",
       diagnostic: nil,
-      worktree_path: nil,
+      worktree_path: "/tmp/wt",
       live_task_lock: false,
       unanswered_questions: 0,
       next_action: nil
     }
-    task = Hive::Commands::Status.new.task_payload(row)
-    payload = JSON.parse(JSON.generate(
-                           "schema" => "hive-status",
-                           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
-                           "ok" => true,
-                           "generated_at" => "2026-06-18T00:00:00Z",
-                           "projects" => [
-                             {
-                               "name" => "alpha",
-                               "path" => "/tmp/alpha",
-                               "hive_state_path" => "/tmp/alpha/.hive-state",
-                               "tasks" => [ task ]
-                             }
-                           ]
-                         ))
+    status = Hive::Commands::Status.new
+    task_with_pr = status.task_payload(base_row.merge(pr_url: "https://github.com/example/repo/pull/561"))
+    task_without_pr = status.task_payload(base_row.merge(slug: "early-task", pr_url: nil))
+
+    payload = {
+      "schema" => "hive-status",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+      "ok" => true,
+      "generated_at" => "2026-06-15T00:00:00Z",
+      "projects" => [
+        {
+          "name" => "demo",
+          "path" => "/tmp/demo",
+          "hive_state_path" => "/tmp/demo/.hive-state",
+          "tasks" => [ task_with_pr, task_without_pr ],
+          "legacy_stage_dirs" => [],
+          "legacy_migrate_command" => nil
+        }
+      ]
+    }
     errors = schemer.validate(payload).map { |e| e["error"] }
     assert_empty errors,
-                 "a populated v4 Task carrying real depends_on/blocked_by/dependency_stage/blocked " \
-                 "must validate against the published schema (errors: #{errors.inspect})"
+                 "populated tasks (dependency fields plus pr_url string + null) must validate against the schema " \
+                 "(errors: #{errors.inspect})"
+    assert_equal "https://github.com/example/repo/pull/561", task_with_pr["pr_url"]
+    assert_nil task_without_pr["pr_url"]
   end
 
   # `legacy_migrate_command` accepts either "hive migrate" (when

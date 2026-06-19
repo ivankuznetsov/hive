@@ -6,7 +6,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          diagnostic: nil, id: nil, display_name: nil)
+          diagnostic: nil, id: nil, display_name: nil, pr_url: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -19,7 +19,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       action: action,
       action_label: "label",
       suggested_command: nil,
-      diagnostic: diagnostic
+      diagnostic: diagnostic,
+      pr_url: pr_url
     )
   end
 
@@ -96,6 +97,52 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_match(/Ready for open-pr/, notification.text)
     assert_equal "approve:open-pr:hive:slug-260514-abcd:4-execute",
                  notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_ready_for_review_appends_clickable_pr_link
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(
+        action: "ready_for_review",
+        marker: "complete",
+        stage: "5-open-pr",
+        id: 12,
+        display_name: "Fix <Login> & More",
+        pr_url: "https://github.com/example/repo/pull/561"
+      )
+    )
+
+    assert_equal :html, notification.parse_mode
+    assert_includes notification.text, "#12 Fix &lt;Login&gt; &amp; More — Open PR"
+    assert_includes notification.text, "Ready for review."
+    assert_includes notification.text, 'PR: <a href="https://github.com/example/repo/pull/561">#561</a>'
+    assert_equal "approve:review:hive:slug-260514-abcd:5-open-pr",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_ready_for_review_without_pr_url_stays_plain
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_for_review", marker: "complete", stage: "5-open-pr")
+    )
+
+    assert_nil notification.parse_mode
+    assert_match(/Ready for review/, notification.text)
+    refute_includes notification.text, "PR:"
+  end
+
+  def test_notification_accepts_documented_parse_modes
+    plain = Hive::Bot::NotificationBuilders::Notification.new(text: "hi", keyboard: nil)
+    html = Hive::Bot::NotificationBuilders::Notification.new(text: "hi", keyboard: nil, parse_mode: :html)
+
+    assert_nil plain.parse_mode
+    assert_equal :html, html.parse_mode
+  end
+
+  def test_notification_rejects_unsupported_parse_mode
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::NotificationBuilders::Notification.new(text: "hi", keyboard: nil, parse_mode: :markdown)
+    end
+
+    assert_match(/unsupported parse_mode :markdown/, error.message)
   end
 
   def test_ready_to_artifacts_builds_artifacts_approval_keyboard
@@ -367,5 +414,18 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     refute_equal Hive::Bot::NotificationBuilders.fingerprint(first),
                  Hive::Bot::NotificationBuilders.fingerprint(second)
+  end
+
+  def test_fingerprint_ignores_pr_url
+    without_pr = row(action: "ready_for_review", marker: "complete", stage: "5-open-pr")
+    with_pr = row(
+      action: "ready_for_review",
+      marker: "complete",
+      stage: "5-open-pr",
+      pr_url: "https://github.com/example/repo/pull/561"
+    )
+
+    assert_equal Hive::Bot::NotificationBuilders.fingerprint(without_pr),
+                 Hive::Bot::NotificationBuilders.fingerprint(with_pr)
   end
 end

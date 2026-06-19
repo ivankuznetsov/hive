@@ -238,13 +238,16 @@ class HiveDigestCategorizerTest < Minitest::Test
   # categorize orchestration (run_dir → prune → runner_task → agent_for →
   # run! → parse_result! → map_output_file) without an AI/process call.
   class FakeAgent
-    def initialize(expected_output:, items:)
+    def initialize(expected_output:, items:, summary: nil)
       @expected_output = expected_output
       @items = items
+      @summary = summary
     end
 
     def run!
-      File.write(@expected_output, JSON.dump({ "items" => @items }))
+      doc = { "items" => @items }
+      doc["summary"] = @summary if @summary
+      File.write(@expected_output, JSON.dump(doc))
       { status: :ok }
     end
   end
@@ -270,13 +273,53 @@ class HiveDigestCategorizerTest < Minitest::Test
         categorizer.categorize(grouped, date: "2026-06-15")
       end
 
-      assert_equal %w[feature fix], result.fetch("alpha").map(&:category)
-      assert_equal "Adds the digest.", result.fetch("alpha").first.summary
-      assert_same grouped.fetch("alpha").first, result.fetch("alpha").first.item
+      assert_equal %w[feature fix], result.by_project.fetch("alpha").map(&:category)
+      assert_equal "Adds the digest.", result.by_project.fetch("alpha").first.summary
+      assert_same grouped.fetch("alpha").first, result.by_project.fetch("alpha").first.item
+      assert_equal "2 updates shipped today.", result.summary,
+                   "with no model summary, categorize must fall back to a neutral count"
       # The orchestration created exactly one scratch run dir under the root.
       run_dirs = Dir.children(run_root).select { |name| File.directory?(File.join(run_root, name)) }
       assert_equal 1, run_dirs.size, "categorize must materialize one per-run scratch dir"
       assert_match(/\A2026-06-15-[0-9a-f]{8}\z/, run_dirs.first)
+    end
+  end
+
+  def test_categorize_surfaces_the_model_overall_summary
+    with_tmp_dir do |run_root|
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }
+      rows = [ { "id" => "alpha/10", "category" => "feature", "summary" => "Adds the digest." } ]
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: nil)
+
+      fake_new = lambda do |**kw|
+        FakeAgent.new(expected_output: kw.fetch(:expected_output), items: rows,
+                      summary: "A quiet maintenance day.")
+      end
+      result = with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        categorizer.categorize(grouped, date: "2026-06-15")
+      end
+
+      assert_equal "A quiet maintenance day.", result.summary,
+                   "the model's top-level summary must reach the Output"
+    end
+  end
+
+  def test_default_overall_summary_is_singular_for_one_item
+    with_tmp_dir do |run_root|
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }
+      rows = [ { "id" => "alpha/10", "category" => "feature", "summary" => "Adds it." } ]
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: nil)
+
+      # No top-level summary in the model output → the count fallback fires, and
+      # must pluralize correctly for a single shipped item.
+      fake_new = lambda do |**kw|
+        FakeAgent.new(expected_output: kw.fetch(:expected_output), items: rows)
+      end
+      result = with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        categorizer.categorize(grouped, date: "2026-06-15")
+      end
+
+      assert_equal "1 update shipped today.", result.summary
     end
   end
 

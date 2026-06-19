@@ -72,6 +72,11 @@ class StagesAgentTest < Minitest::Test
           assert_includes prompt, "</#{tag}>"
           assert_includes prompt, "## brainstorm.md\nrequirements"
           assert_includes prompt, "## idea.md\nseed idea"
+          # Prior artifacts are joined in sorted-basename order, so brainstorm.md must
+          # precede idea.md. Asserting relative position (not just presence) is what
+          # catches a dropped `.sort` in prior_artifacts.
+          assert prompt.index("## brainstorm.md") < prompt.index("## idea.md"),
+                 "prior artifacts must be ordered by sorted basename (brainstorm before idea)"
           refute_includes prompt, "## plan.md"
           refute_includes prompt, "old plan"
         end
@@ -88,6 +93,23 @@ class StagesAgentTest < Minitest::Test
 
       assert_equal 8000, prior.length,
                    "prior_artifacts must cap the joined string at 8000 chars"
+    end
+  end
+
+  def test_prior_artifacts_cap_applies_to_joined_multi_file_string
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      # Two under-cap files whose joined length (headers + 5k + 5k + separator)
+      # exceeds 8000: proves the cap is on the joined string, not per file.
+      File.write(File.join(task.folder, "a.md"), "a" * 5000)
+      File.write(File.join(task.folder, "b.md"), "b" * 5000)
+
+      prior = Hive::Stages::Agent.prior_artifacts(task, "plan.md")
+
+      assert_equal 8000, prior.length,
+                   "the 8000-char cap must apply to the joined multi-file string, not per file"
+      assert prior.start_with?("## a.md\n"),
+             "the joined string must begin with the first sorted file before truncation"
     end
   end
 
@@ -178,6 +200,22 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_spawn_uses_plan_descriptor_budget_and_timeout_defaults
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 100, kwargs.fetch(:max_budget_usd),
+                     "plan must fall back to its descriptor budget_usd (100)"
+        assert_equal 3600, kwargs.fetch(:timeout_sec),
+                     "plan must fall back to its descriptor timeout_sec (3600)"
+      end
+    end
+  end
+
   def test_spawn_honors_cfg_budget_and_timeout_overrides
     with_tmp_dir do |project|
       task = task_for(project, "brainstorm")
@@ -198,8 +236,8 @@ class StagesAgentTest < Minitest::Test
   end
 
   def test_run_accepts_nil_cfg
-    # Exercises the `cfg ||= {}` nil-arm (agent.rb:11): a nil cfg must be
-    # coerced to {} and run identically to an empty config.
+    # Exercises the `cfg ||= {}` guard in `run!`: a nil cfg must be coerced to
+    # {} and run identically to an empty config.
     with_tmp_dir do |project|
       task = task_for(project, "plan")
 

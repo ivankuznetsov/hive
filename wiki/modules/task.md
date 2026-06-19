@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-06-19
 tags: [model, task, parsing, task-id, dependencies]
 ---
 
@@ -11,8 +11,8 @@ tags: [model, task, parsing, task-id, dependencies]
 
 ## Constants
 
-- `STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done]` — 9 stages post-artifacts insertion. `open-pr` is hyphenated; the dash must be allowed by `PATH_RE`.
-- `STATE_FILES` — maps stage name → state file basename (`idea.md`, `brainstorm.md`, `plan.md`, `task.md`, `pr.md`, `task.md`, `artifact.md`, `pr.md`, `task.md`).
+- `STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done]` — 9 stages post-artifacts insertion, derived from `Hive::Workflows::Registry.default`. `open-pr` is hyphenated; the dash must be allowed by `PATH_RE`.
+- `STATE_FILES` — maps stage name → state file basename (`idea.md`, `brainstorm.md`, `plan.md`, `task.md`, `pr.md`, `task.md`, `artifact.md`, `pr.md`, `task.md`), derived from the same ordered workflow descriptor.
 - `PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}` — the only validator for task paths. The `[a-z][a-z0-9-]*` class for `stage_name` (no `\w+`) is what permits the dash in `5-open-pr`.
 
 ## Constructor (`#initialize(folder)`)
@@ -77,6 +77,6 @@ For stages 4 and later:
 ## Backlinks
 
 - [[modules/markers]] · [[modules/lock]] · [[modules/worktree]]
-- [[modules/task_dependencies]]
+- [[modules/task_dependencies]] · [[modules/workflows]]
 - [[commands/run]] · [[commands/status]]
 - [[state-model]]

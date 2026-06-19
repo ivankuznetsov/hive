@@ -1,13 +1,14 @@
 require "hive/workflows/registry"
 
 module Hive
-  # Single source of truth for the workflow verbs (brainstorm, plan,
-  # develop, open-pr, review, artifacts, finalize, archive). Each verb advances a task from one
-  # stage to the next; `Hive::Commands::StageAction` consumes this map
-  # directly, `Hive::TaskAction` uses it to label the "ready to <verb>"
-  # status bucket per stage, and `Hive::Commands::Approve` /
-  # `FindingToggle` use it to derive the next-action command after a
-  # successful move.
+  # Public source of truth for the workflow verbs (brainstorm, plan,
+  # develop, open-pr, review, artifacts, finalize, archive), derived from
+  # the default workflow descriptor. Each verb advances a task from one
+  # stage to the next; consumers all read from the derived `VERBS` map:
+  # `Hive::Commands::StageAction` consumes it to dispatch the move,
+  # `Hive::TaskAction` uses it to label the "ready to <verb>" status
+  # bucket per stage, and `Hive::Commands::Approve` / `FindingToggle` use
+  # it to derive the next-action command after a successful move.
   #
   # Adding or removing a verb follows the default workflow descriptor.
   module Workflows

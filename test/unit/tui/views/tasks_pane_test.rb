@@ -14,6 +14,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 action_label: "Ready to plan", age: 120,
                 marker: "complete", attrs: {},
                 id: 42, display_name: nil,
+                pr_url: nil,
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
@@ -30,6 +31,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
+      "pr_url" => pr_url,
       "marker" => marker,
       "attrs" => attrs,
       "mtime" => mtime,
@@ -54,6 +56,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     Hive::Tui::Model.initial.with(snapshot: snapshot, scope: scope,
                                   pane_focus: pane_focus, cursor: cursor,
                                   filter: filter)
+  end
+
+  # Run the block with `$stdout.tty?` reporting true so the OSC 8 path in
+  # Hyperlink/pr_cell is exercised. Swaps in a tty-reporting StringIO and
+  # restores the original $stdout afterward.
+  def with_tty_stdout
+    original = $stdout
+    io = StringIO.new
+    io.define_singleton_method(:tty?) { true }
+    $stdout = io
+    yield
+  ensure
+    $stdout = original
   end
 
   # ---- Title / scope ----
@@ -111,20 +126,87 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   # ---- Column rendering ----
 
-  def test_renders_5_columns_per_row
+  def test_renders_pr_column_after_id
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "abc-001", id: 7, display_name: "Readable Task", stage: "3-plan",
-                  action_label: "Needs your input", age: 90)
+                  action_label: "Needs your input", age: 90,
+                  pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "   7",             "id column must render"
+    assert_match(/\s7\s+#561\s+Readable Task/, out,
+                 "PR number must render between id and display name")
     assert_includes out, "Readable Task",    "display name column must render"
     refute_includes out, "abc-001",          "slug must not render when a display name is present"
     assert_includes out, "3-plan",           "stage column must render"
     assert_includes out, "Needs your input", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_renders_dash_pr_column_without_url
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "abc-001", id: 7, display_name: "Readable Task")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_match(/\s7\s+—\s+Readable Task/, out,
+                 "rows without a PR must keep the fixed PR column with a dash")
+  end
+
+  # Exercises the TTY/OSC 8 `pr_cell` path directly: the TUI render
+  # pipeline routes rows through lipgloss, which rewrites ANSI under a tty,
+  # so the link contract is pinned on pr_cell itself. Assert the BEHAVIOR
+  # (the two rjust spaces stay outside the link, the link wraps the #561
+  # token) by reconstructing the expected link through the same osc8
+  # builder, so a legitimate framing change (e.g. an added `id=`) doesn't
+  # break the test as long as padding stays outside and the token inside.
+  def test_pr_cell_wraps_token_and_keeps_padding_outside_link_under_tty
+    url = "https://github.com/example/repo/pull/561"
+    row = Struct.new(:pr_url).new(url)
+
+    out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
+
+    link = Hive::Tui::Views::Hyperlink.osc8("#561", url, enabled: true)
+    assert_equal "  #{link}", out,
+                 "two rjust spaces stay outside the OSC 8 link; the link wraps the #561 token"
+  end
+
+  # Over-width PR pin (plan accepts the >99999 width cap): rjust_cells
+  # truncates "#100000" to the 6-cell column and the OSC 8 link must wrap
+  # the *displayed* (truncated) token instead of being silently dropped —
+  # the bug the pre-fix `cell.sub(/#token\z/)` produced once truncation
+  # changed the suffix. Behavior is pinned via the osc8 builder so the
+  # assertion survives an OSC 8 framing change.
+  def test_pr_cell_wraps_displayed_truncated_token_for_over_width_pr_under_tty
+    url = "https://github.com/example/repo/pull/100000"
+    row = Struct.new(:pr_url).new(url)
+
+    out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
+
+    link = Hive::Tui::Views::Hyperlink.osc8("#1000…", url, enabled: true)
+    assert_equal link, out,
+                 "over-width PR must still emit the link, wrapping the truncated #1000… token"
+  end
+
+  # Symmetric negative of the tty pin (and of the status-text path's
+  # refute_match(/\e\]8;;/) guard): a populated pr_url rendered through
+  # pr_cell in a NON-tty must emit zero OSC 8 bytes, so the link is gated on
+  # `$stdout.tty?` and never leaks escape sequences into piped/captured
+  # output. The default test $stdout is non-tty, so pr_cell takes the
+  # disabled branch here without any stubbing.
+  def test_pr_cell_emits_no_osc8_in_non_tty
+    url = "https://github.com/example/repo/pull/561"
+    row = Struct.new(:pr_url).new(url)
+
+    out = Hive::Tui::Views::TasksPane.pr_cell(row, 6)
+
+    refute_match(/\e\]8;;/, out, "non-tty pr_cell must not emit OSC 8 bytes")
+    assert_includes out, "#561", "the plain PR token must still render in non-tty"
   end
 
   def test_name_column_falls_back_to_slug_when_display_name_missing
@@ -555,21 +637,28 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     # Contrast a wide double-cell emoji (🤖) against an action that
     # falls back to the narrow DEFAULT_ICON ("agent_working" is not in
     # ICONS): if either icon mis-pads to the fixed ICON_WIDTH the id
-    # column shifts, so the offsets must stay equal across both.
+    # column shifts, so the offsets must stay equal across both. Both rows
+    # carry a pr_url so the PR column is populated; the id offset is
+    # located by each row's own id token rather than "first digit", which
+    # the PR number would otherwise make ambiguous.
+    pr_url = "https://github.com/example/repo/pull/561"
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
-        make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
-        make_task(slug: "working-task", id: 8, action: "agent_working", action_label: "Agent working")
+        make_task(slug: "running-task", id: 7, action: "agent_running",
+                  action_label: "Agent running", pr_url: pr_url),
+        make_task(slug: "working-task", id: 8, action: "agent_working",
+                  action_label: "Agent working", pr_url: pr_url)
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    rows = out.lines.grep(/running-task|working-task/)
+    ids = { "running-task" => "7", "working-task" => "8" }
 
-    id_offsets = rows.map do |row|
-      prefix = row.split(/\d/, 2).first
+    id_offsets = out.lines.grep(/running-task|working-task/).map do |row|
+      slug = ids.keys.find { |candidate| row.include?(candidate) }
+      prefix = row.split(ids.fetch(slug), 2).first
       Hive::Tui::Views::Format.display_width(prefix)
     end
-    assert_equal [ 7, 7 ], id_offsets,
+    assert_equal [ 7, 7 ], id_offsets.sort,
                  "wide emoji icons must not shift fixed-width columns"
   end
 
@@ -704,41 +793,45 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   # ---- compute_layout adaptive column dropping ----
-  # The full 6-column layout needs ~71 inner cells (icon=2, id=4,
-  # stage=12, status=36, age=4, separators=5, name_min=8). Below that, columns
+  # The full 7-column layout needs ~83 inner cells (icon=2, id=4,
+  # pr=6, stage=12, status=36, age=4, separators=6, name_min=13). Below that, columns
   # drop in priority order: stage first (mostly redundant with status),
   # then status. These tests pin each branch so a future refactor of
   # the threshold values can't silently regress narrow-terminal
-  # behavior — the BubbleModel composer tests at cols=60/69/70 only
-  # exercise the full-5-column branch via single-pane fallback.
+  # behavior — the BubbleModel composer tests at cols=60/69/70 pin
+  # the single-pane and two-pane boundary composition.
 
   def test_compute_layout_full_columns_at_wide_inner_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(80)
-    assert_operator layout[:name], :>=, 8
+    layout = Hive::Tui::Views::TasksPane.compute_layout(84)
+    assert_operator layout[:name], :>=, 13
+    assert_equal 6, layout[:pr]
     assert_equal 12, layout[:stage]
     assert_equal 36, layout[:status]
   end
 
   def test_compute_layout_drops_stage_at_medium_narrow_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(60)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(70)
+    assert_equal 6, layout[:pr], "PR column must never drop"
     assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
     assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
-    assert_operator layout[:name], :>=, 8
+    assert_operator layout[:name], :>=, 13
   end
 
   def test_compute_layout_drops_stage_and_status_at_very_narrow_width
-    # Even narrower — only icon, id, name, age fit.
-    layout = Hive::Tui::Views::TasksPane.compute_layout(24)
+    # Even narrower — only icon, id, PR, name, age fit.
+    layout = Hive::Tui::Views::TasksPane.compute_layout(35)
+    assert_equal 6, layout[:pr], "PR column must survive the narrowest fitted branch"
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
-    assert_operator layout[:name], :>=, 8
+    assert_operator layout[:name], :>=, 13
   end
 
   def test_compute_layout_floors_slug_below_extreme_minimum
     # Below the very-narrow threshold: floor at name_min, dropping all
-    # but icon/id/name/age. Visual overflow is acknowledged — but no crash.
+    # but icon/id/PR/name/age. Visual overflow is acknowledged — but no crash.
     layout = Hive::Tui::Views::TasksPane.compute_layout(10)
-    assert_equal 8, layout[:name]
+    assert_equal 13, layout[:name]
+    assert_equal 6, layout[:pr]
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
   end

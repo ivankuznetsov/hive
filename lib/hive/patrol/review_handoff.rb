@@ -1,6 +1,7 @@
 require "fileutils"
 require "time"
 require "yaml"
+require "hive/pr"
 require "hive/task_counter"
 require "hive/task_meta"
 
@@ -195,8 +196,12 @@ module Hive
         end.join("\n")
       end
 
+      # Delegate to the canonical parser (stripping the `#` it prefixes) so
+      # the `pr_number` written into pr.md frontmatter can't drift from the
+      # `#NNN` every display surface shows. The old end-anchored regex here
+      # disagreed with Hive::Pr.number on trailing-slash/query URLs.
       def pr_number(pr_url)
-        pr_url.to_s[%r{/pull/(\d+)\z}, 1]
+        Hive::Pr.number(pr_url)&.delete_prefix("#")
       end
     end
   end

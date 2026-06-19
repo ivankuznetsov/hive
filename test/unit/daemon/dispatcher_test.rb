@@ -1911,7 +1911,7 @@ def test_dry_run_reap_isolates_digest_complete_raise_as_a_fatal_event
   # dry-run digest pseudo-child is reaped and `@digest_scheduler.complete`
   # raises (e.g. EROFS on the cursor write), the crash must be isolated as a
   # :fatal event instead of crashing the dry-run poll loop.
-  dispatcher, _sup, _ctrl, logger, = make_dispatcher(
+  dispatcher, _sup, _ctrl, logger = make_dispatcher(
     rows: [], dry_run: true, with_digest_scheduler: true
   )
   raising = Object.new

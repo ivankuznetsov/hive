@@ -33,4 +33,33 @@ class WorkflowsCodingTest < Minitest::Test
     assert_nil stages_by_name.fetch("review").status_mode
     assert_equal :inert, stages_by_name.fetch("done").kind
   end
+
+  # Pin the *absence* of metadata on the inert/marker stages so a stray
+  # `budget_usd`/`timeout_sec`/`skill` cannot drift in unnoticed. The
+  # current runtime leaves these fields unread, but the golden contract
+  # should still fail loud if the descriptor sprouts spurious config.
+  def test_inert_and_marker_stages_carry_no_spurious_metadata
+    stages_by_name = Hive::Workflows::Coding::DESCRIPTOR.stages.to_h { |stage| [ stage.name, stage ] }
+
+    inbox = stages_by_name.fetch("inbox")
+    assert_nil inbox.advance_verb
+    assert_nil inbox.skill
+    assert_nil inbox.status_mode
+    assert_nil inbox.budget_usd
+    assert_nil inbox.timeout_sec
+    assert_nil inbox.capability
+
+    review = stages_by_name.fetch("review")
+    assert_nil review.skill
+    assert_nil review.budget_usd
+    assert_nil review.timeout_sec
+    assert_nil review.capability
+
+    done = stages_by_name.fetch("done")
+    assert_nil done.skill
+    assert_nil done.status_mode
+    assert_nil done.budget_usd
+    assert_nil done.timeout_sec
+    assert_nil done.capability
+  end
 end

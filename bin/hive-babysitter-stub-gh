@@ -148,8 +148,8 @@ def api_endpoint_host_override?(rest)
     elsif arg.start_with?("--")
       name = arg.split("=", 2).first
       index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
-    elsif arg.match?(/\A-[HXFfqt]/)
-      index += %w[-H -X -F -f -q -t].include?(arg) ? 2 : 1
+    elsif arg.match?(/\A-[HXFfqtp]/)
+      index += %w[-H -X -F -f -q -t -p].include?(arg) ? 2 : 1
     elsif arg.start_with?("-") && arg != "-"
       index += 1
     else

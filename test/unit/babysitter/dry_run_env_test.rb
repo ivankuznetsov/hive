@@ -313,6 +313,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
       assert_stubbed env, "gh", "api", "https://example.com"
+      # `-p`/`--preview` takes a value; the api endpoint scanner must consume it so it
+      # does not stop on the preview name and miss the trailing external URL. Cover the
+      # separate short, glued short, and long forms.
+      assert_stubbed env, "gh", "api", "-p", "shadow-cat", "https://evil.example.com"
+      assert_stubbed env, "gh", "api", "-pshadow-cat", "https://evil.example.com"
+      assert_stubbed env, "gh", "api", "--preview", "shadow-cat", "https://evil.example.com"
       # An scp-style `git@host:owner/repo` carries a host through a single-slash
       # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
       # disqualify it.
@@ -338,6 +344,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "auth", "status", "-a"
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "graphql"
+      # A `-p`/`--preview` read against a default-host endpoint must still reach real gh:
+      # consuming the preview value must not over-block the safe, host-free form.
+      assert_passes env, "gh", "api", "-p", "shadow-cat", "repos/owner/repo"
+      assert_passes env, "gh", "api", "--preview", "shadow-cat", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
       # The safe positional forms must still reach real gh, so the new positional

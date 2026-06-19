@@ -215,3 +215,18 @@ recorder's own foreground daemon over the pidfile. Open questions:
 On a real run the display-name agent named the task "Agent Work In
 Progress" — an activity description, not a name. The prompt should pin
 "a short noun-phrase name for the TASK" with an example or two.
+
+## codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
+
+`Hive::Reviewers::CodexReview` accepts a prose (non-checkbox) verdict as a
+`:clean` pass only when `clean_verdict?` matches an affirmative no-findings
+phrase (`CLEAN_VERDICT`) and no `CONCERN_SIGNAL`. This closed the `all_failed`
+regression (genuine clean reviews failing) while preventing a prose-described
+finding or an exit-0 soft-error from being laundered into a clean pass. Residual
+risk: the patterns are heuristic. A finding phrased with no concern word AND a
+"no … issues" hedge could still slip to `:clean`, and an unusually-worded
+genuine clean verdict could fail to match and `:error`/retry (worst case
+`all_failed`). The robust long-term fix is to get `codex review` to reliably
+emit the strict `## High/Medium/Nit` + `No findings.` format so the prose path
+is never exercised; until then, watch `reviews/errors-NN.md` tails for
+clean-but-rejected verdicts and extend `CLEAN_VERDICT` as new phrasings appear.

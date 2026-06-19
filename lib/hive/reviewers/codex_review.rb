@@ -84,6 +84,38 @@ module Hive
       # whole pass failing as all_failed.
       CLEAN_FINDINGS = "## High\nNo findings.\n\n## Medium\nNo findings.\n\n## Nit\nNo findings.\n".freeze
 
+      # codex sometimes answers a clean review in PROSE instead of the strict
+      # checkbox format (especially for patrol PRs, where it leads with "no plan
+      # was found"). We accept such a verdict as a clean pass ONLY when it
+      # AFFIRMATIVELY says nothing was found (matches CLEAN_VERDICT and NOT
+      # CONCERN_SIGNAL). Otherwise an arbitrary non-empty reply — a
+      # prose-described bug, or a soft-error like "stream error, unable to
+      # complete the review" — would be silently laundered into a "No findings."
+      # pass. A reply matching neither findings nor a clean verdict fails so it
+      # retries / fails loudly rather than masking a real finding.
+      # Phrasings covered: "did not find", "found no/nothing", "no <...>
+      # regressions/findings/issues/bugs", "nothing to flag/fix/report", and
+      # "the diff is/looks clean".
+      CLEAN_VERDICT = /
+        did\s*n.?t\s+find
+        | found\s+(?:no\b|nothing\b)
+        | \bno\b[^.\n]{0,60}?\b(?:regressions?|findings?|issues?|bugs?|problems?|defects?|concerns?|vulnerabilit\w*)
+        | nothing\s+(?:to\s+(?:flag|fix|report|raise|address)|of\s+concern|stood\s+out)
+        | (?:diff|change|branch|pr|code)\s+(?:is|looks?)\s+clean
+      /xi.freeze
+
+      # If codex's verdict carries any of these it is flagging something, so a
+      # prose reply is NOT a safe clean pass even when it also contains a "no X"
+      # phrase (e.g. "no major issues except a SQL injection"). Forces retry/fail.
+      CONCERN_SIGNAL = /
+        \b(?:vulnerabilit\w*|injection|data[\s-]*loss|race\s+condition|deadlock
+        |high[\s-]severity|critical\s+(?:bug|issue|finding|vulnerabilit\w*)
+        |(?:should|must|needs?\s+to)\s+(?:be\s+)?(?:fix|address|resolv|chang)\w*
+        |introduces?\s+a\s+(?:bug|regression|vulnerabilit\w*|race)
+        |i\s+found\s+(?:a|an|\d|several|multiple|some)
+        |this\s+(?:is|introduces|causes)\s+a\s+(?:bug|regression))\b
+      /xi.freeze
+
       def initialize(spec, ctx, cfg: nil)
         super(spec, ctx)
         @cfg = cfg
@@ -168,18 +200,20 @@ module Hive
       # Classify codex's REAL answer (the echoed prompt + tool transcript
       # stripped — see #review_body):
       #   :findings      — carries ## High/Medium/Nit findings → publish them
-      #   :clean         — codex replied with a prose verdict but no structured
-      #                    findings → publish a canonical "No findings." pass
+      #   :clean         — codex's prose verdict AFFIRMATIVELY reports no findings
+      #                    (and flags no concern) → publish a canonical pass
       #   :template_echo — codex's own answer is the unfilled prompt template
-      #   :error         — launch/timeout/non-zero exit, or banner/interrupted
-      #                    output with no real codex verdict
+      #   :error         — launch/timeout/non-zero exit, banner/interrupted
+      #                    output, OR a prose reply that neither carries findings
+      #                    nor clearly says "nothing found" (retry/fail loudly
+      #                    rather than mask a prose-described finding)
       def review_status(run)
         return :error unless run&.success?
 
         body = review_body(run.stdout)
         return :template_echo if template_echo?(body)
         return :findings if valid_findings?(body)
-        return :clean if !body.empty? && codex_replied?(run.stdout)
+        return :clean if clean_verdict?(body)
 
         :error
       end
@@ -276,15 +310,16 @@ module Hive
         [ head, reply ]
       end
 
-      # Did codex emit a non-empty final assistant message (under the last
-      # `codex` marker)? Distinguishes a genuine no-findings VERDICT (clean)
-      # from banner-only / interrupted output (error).
-      def codex_replied?(stdout)
-        lines = stdout.to_s.lines
-        idx = lines.rindex { |line| line.chomp.match?(CODEX_REPLY) }
-        return false unless idx
+      # Does codex's real answer AFFIRMATIVELY report a clean review — a "no
+      # findings / no regressions / diff is clean" verdict with no concern
+      # signal? Anything else (a prose-described finding, a soft-error/abort
+      # message, banner-only output) returns false so it fails/retries instead
+      # of being silently recorded as a clean pass.
+      def clean_verdict?(body)
+        text = body.to_s
+        return false if text.strip.empty?
 
-        !lines[(idx + 1)..].join.strip.empty?
+        CLEAN_VERDICT.match?(text) && !CONCERN_SIGNAL.match?(text)
       end
 
       def format_body(body)

@@ -25,14 +25,19 @@ Fix (`lib/hive/reviewers/codex_review.rb`): decisions now run on codex's REAL
 answer via `review_body`, which strips the echoed prompt (a leading block whose
 only content is the placeholder is dropped) and the tool transcript, keeping a
 real leading findings block plus codex's final message. New `review_status`
-classifies `:findings` / `:clean` / `:template_echo` / `:error`. A genuine
-prose "no findings" verdict — only when codex actually produced a final reply
-(`codex_replied?`, distinguishing it from a banner/interrupted run) — is
-recorded as a canonical `No findings.` clean pass (`CLEAN_FINDINGS`) instead of
-failing the whole review. The `:template_echo` guard still fires when codex's
-own answer is the unfilled template. Added two regression tests modeling the
-real transcript shape (echoed prompt + transcript + prose verdict; and real
-findings in the final message). Refreshed [[modules/reviewers]].
+classifies `:findings` / `:clean` / `:template_echo` / `:error`. A prose verdict
+is recorded as a `:clean` pass (canonical `No findings.` via `CLEAN_FINDINGS`)
+ONLY when it AFFIRMATIVELY reports nothing found — `clean_verdict?` requires a
+`CLEAN_VERDICT` match ("did not find", "found no/nothing", "no … regressions",
+"the diff is/looks clean") and the absence of any `CONCERN_SIGNAL`. This is
+deliberately stricter than "any non-empty reply": it stops a finding codex
+describes in prose (no checkbox), or an exit-0 soft-error like "stream error,
+unable to complete the review", from being silently laundered into a clean pass
+(flagged in PR review). The `:template_echo` guard still fires when codex's own
+answer is the unfilled template. Added regression tests for the real transcript
+shape, prose-finding → `:error`, soft-error → `:error`, header-less clean
+verdict, multiple `codex` markers, and the audit-comment sanitization. Refreshed
+[[modules/reviewers]]; the heuristic's residual risk is noted in [[gaps]].
 
 Note: these are **patrol** tasks, so codex's "No plan was found" line is
 expected, not an error — patrol skips the brainstorm/plan stages, so

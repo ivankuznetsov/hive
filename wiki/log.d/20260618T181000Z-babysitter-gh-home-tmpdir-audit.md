@@ -1,0 +1,9 @@
+## [2026-06-18T18:10:00Z] wiki - audit gh dry-run tmpdir follow-up coverage
+
+**Action:** Refreshed wiki planning/documentation coverage after `6f3e66ce` committed review-pass wiki residue on top of `fe222022`, which changed the gh dry-run passthrough environment from `HOME=/dev/null` to a fresh empty `Dir.mktmpdir` used for both `HOME` and `GH_CONFIG_DIR`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "babysitter gh host selector dry-run stubs testing gaps"` surfaced existing babysitter/gaps context, and the configured master wiki path had no matching context. Inspected `6f3e66ce`, `fe222022`, the earlier host-selector source commit `44768970`, and current `bin/hive-babysitter-stub-gh`, `test/unit/babysitter/dry_run_env_test.rb`, [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]].
+
+**Coverage:** Confirmed [[commands/babysit]] and [[modules/babysitter]] already describe the gh tmpdir behavior after `fe222022`; refreshed [[testing]] so its unit-test map names the fresh empty `HOME`/`GH_CONFIG_DIR` assertion, and refreshed [[gaps]] so the live-smoke uncertainty reflects the current host-selector plus temp-home dry-run boundary. Page coverage did not change, so [[index]] did not need a catalog update.
+
+**Verified:** `git diff --check -- wiki/commands/babysit.md wiki/modules/babysitter.md wiki/testing.md wiki/gaps.md wiki/log.d/20260618T180046Z-babysitter-gh-host-selector-residual-audit.md wiki/log.d/20260618T181000Z-babysitter-gh-home-tmpdir-audit.md`; `bundle exec ruby -Itest test/unit/wiki_log_test.rb`; `env -u GIT_EXEC_PATH bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`. Did not run `qmd update` or `qmd embed`.
+
+**Links:** [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]]

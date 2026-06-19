@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "tmpdir"
+
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
   message = "[dry-run] gh #{escaped_argv(argv)} skipped"
@@ -356,7 +358,6 @@ if real.empty?
   exit 127
 end
 
-trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
 # The argv gate (host_override?) only inspects argv; gh also reads the target host,
 # repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
 # allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
@@ -367,6 +368,15 @@ trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
   GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
   GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 ].each { |key| ENV.delete(key) }
-ENV["GH_CONFIG_DIR"] = trusted_config_dir unless trusted_config_dir.empty?
-ENV["HOME"] = File::NULL
+# Unlike git — which treats GIT_CONFIG_GLOBAL=/dev/null (and GIT_CONFIG_NOSYSTEM) as an explicit
+# "no config" sentinel — gh has no such escape hatch. It derives its config dir as
+# GH_CONFIG_DIR -> XDG_CONFIG_HOME/gh -> $HOME/.config/gh and then reads and creates files under
+# it, so HOME=/dev/null leaves gh resolving /dev/null/.config/gh and failing with ENOTDIR. Point
+# HOME and GH_CONFIG_DIR at a fresh, empty directory instead: gh finds no attacker-controlled
+# config to honor (the user's real ~/.config/gh is out of reach) yet still has a writable home for
+# its own state. The directory is intentionally left in place — passthrough replaces this process,
+# so the stub never regains control to clean it up; it is empty and the OS tmp reaper sweeps it.
+config_home = Dir.mktmpdir("hive-babysitter-gh")
+ENV["HOME"] = config_home
+ENV["GH_CONFIG_DIR"] = config_home
 exec(real, *argv)

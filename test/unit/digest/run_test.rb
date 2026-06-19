@@ -27,6 +27,19 @@ class HiveDigestRunTest < Minitest::Test
     end
   end
 
+  # Records the order of preflight!/deliver so a test can assert EnvFile.load!
+  # ran before them (the timing the fix depends on).
+  OrderingSender = Struct.new(:order) do
+    def preflight! = order << :preflight
+
+    def deliver(text, dry_run:)
+      order << :deliver
+      Hive::Digest::Sender::SendResult.new(
+        chat_id: dry_run ? nil : 1, responses: [], dry_run: dry_run, text: text
+      )
+    end
+  end
+
   def test_empty_digest_sends_nothing_shipped_message
     sender = FakeSender.new([])
     result = Hive::Digest.run(
@@ -118,6 +131,39 @@ class HiveDigestRunTest < Minitest::Test
     end
 
     assert_equal 0, loaded, "a dry-run must not load the env file"
+  end
+
+  def test_env_file_loads_before_preflight_so_the_token_is_present
+    # The bug this PR fixes is timing: the token must be in ENV BEFORE
+    # Sender#preflight! reads it. A test that only counts that load! ran would
+    # still pass if a refactor moved the load after preflight, silently
+    # reintroducing the exit-78 failure. Pin the order.
+    order = []
+    sender = OrderingSender.new(order)
+    original = Hive::EnvFile.method(:load!)
+    Hive::EnvFile.define_singleton_method(:load!) do |*|
+      order << :load
+      []
+    end
+
+    Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: false,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ shipped_item ] }),
+      categorizer: FakeCategorizer.new(
+        { "alpha" => [ Hive::Digest::CategorizedItem.new(item: shipped_item, category: "feature", summary: "x") ] },
+        nil
+      ),
+      sender: sender
+    )
+
+    assert_equal :load, order.first,
+                 "env must load before preflight/send so the token is present when preflight reads it"
+    assert_operator order.index(:load), :<, order.index(:preflight),
+                    "EnvFile.load! must run before Sender#preflight!"
+  ensure
+    Hive::EnvFile.define_singleton_method(:load!, original)
   end
 
   def test_default_date_is_yesterday_local

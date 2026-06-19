@@ -1,6 +1,9 @@
 module Hive
   Workflow = Data.define(:id, :stages) do
     def initialize(id:, stages:)
+      # Shallow dup+freeze: the element Stage objects stay shared with the
+      # caller, safe only because Stage is itself frozen. Don't add a mutable
+      # field to Stage on the assumption this dup deep-copies — it does not.
       super(id: id, stages: stages.dup.freeze)
     end
   end

@@ -110,8 +110,19 @@ def api_endpoint_operand(rest)
     when "-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header",
          "-p", "--preview", "-q", "--jq", "-t", "--template", "--input", "--cache"
       index += 2
-    when /\A--(?:method|raw-field|field|header|preview|jq|template|input|cache)=/, /\A-[XfFHpqt]=?.+/
+    when /\A--(?:method|raw-field|field|header|preview|jq|template|input|cache)=/, /\A--/
       index += 1
+    when /\A-.+\z/m
+      # Short-option cluster. gh (pflag) consumes shorthands left-to-right, so a
+      # value-taking shorthand reached inside a cluster — the `H` in `-iH`, where
+      # `i` is the boolean `--include` — swallows the rest of the cluster as its
+      # glued value, or, when it ends the cluster, the next argv element:
+      # `gh api -iH 'Accept: x' <url>` parses as `--include --header 'Accept: x'
+      # <url>`. That element is the option value, never the endpoint operand, so
+      # skip it too. Treating `-iH` as a plain self-consuming flag returned the
+      # header value as the operand and let a full-URL endpoint behind the cluster
+      # reach the real gh against an agent-chosen host.
+      index += api_short_cluster_consumes_next?(arg) ? 2 : 1
     when /\A-/
       index += 1
     else
@@ -119,6 +130,21 @@ def api_endpoint_operand(rest)
     end
   end
   nil
+end
+
+# Whether a short-option cluster consumes the following argv element as a value.
+# `gh api`'s value-taking shorthands (-X -f -F -H -p -q -t) can sit anywhere in a
+# cluster; pflag consumes it left-to-right, so the first value-taking shorthand
+# takes the rest of the cluster as its glued value, or — when it ends the cluster
+# — the next argv element. Mirrors short_option_cluster_has_web? / auth_status_*
+# cluster consumption so api_endpoint_operand skips the option value rather than
+# mistaking it for the endpoint.
+def api_short_cluster_consumes_next?(arg)
+  chars = arg[1..]
+  chars.each_char.with_index do |char, index|
+    return index == chars.length - 1 if "XfFHpqt".include?(char)
+  end
+  false
 end
 
 # Yield the bare positional operands, skipping flags and the separate value of

@@ -313,6 +313,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
       assert_stubbed env, "gh", "api", "https://evil.example.com/repos/owner/repo"
+      # A value-taking shorthand clustered behind a boolean (`-iH` = `--include
+      # --header`) consumes the *next* argv element as its header value, so the
+      # full-URL endpoint behind it is the operand. The stub must mirror pflag's
+      # cluster consumption and reject it, not return the header value and wave
+      # the agent-chosen host through.
+      assert_stubbed env, "gh", "api", "-iH", "Accept: application/vnd.github+json",
+                     "https://evil.example.com/repos/owner/repo"
       # An scp-style `git@host:owner/repo` carries a host through a single-slash
       # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
       # disqualify it.
@@ -339,6 +346,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      # The mirror of the cluster bypass above: a safe `OWNER/REPO`-relative endpoint
+      # behind the same `-iH <value>` cluster must still reach real gh — skipping the
+      # header value must not also skip (or over-block) the legitimate endpoint.
+      assert_passes env, "gh", "api", "-iH", "Accept: application/vnd.github+json", "repos/owner/repo"
       # The safe positional forms must still reach real gh, so the new positional
       # gate does not over-block: a bare `OWNER/REPO` slug (one slash) on `repo view`,
       # a numeric operand on `pr view`, and a slash-bearing branch ref the pr-URL rule
@@ -553,6 +564,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
       assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
       assert_includes skipped, "gh api https://evil.example.com/repos/owner/repo skipped"
+      assert_includes skipped,
+                      "gh api -iH Accept: application/vnd.github+json https://evil.example.com/repos/owner/repo skipped"
       assert_includes skipped, "gh -R git@evil.example.com:owner/repo pr view 42 skipped"
       assert_includes skipped, "gh repo view evil.example.com/owner/repo skipped"
       assert_includes skipped, "gh repo view https://evil.example.com/owner/repo skipped"
@@ -589,6 +602,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh pr view feature/topic/branch"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
+      assert_includes real_invocations, "real-gh api -iH Accept: application/vnd.github+json repos/owner/repo"
       assert_includes real_invocations, expected_real_invocation("git", "-C", dir, "status", "--short")
       assert_includes real_invocations, expected_real_invocation("git", "config", "--get", "remote.origin.url")
       assert_includes real_invocations, expected_real_invocation("git", "config", "--get-all", "remote.origin.fetch")

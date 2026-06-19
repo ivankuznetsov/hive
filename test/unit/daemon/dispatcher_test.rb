@@ -245,7 +245,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
-          state_file: nil, folder: nil, marker_attrs: {})
+          state_file: nil, folder: nil, marker_attrs: {},
+          depends_on: nil, blocked_by: nil, dependency_stage: nil,
+          blocked: false)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
@@ -253,7 +255,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
       suggested_command: command, claude_pid_alive: claude_pid_alive,
-      live_task_lock: live_task_lock, marker_attrs: marker_attrs
+      live_task_lock: live_task_lock, marker_attrs: marker_attrs,
+      depends_on: depends_on, blocked_by: blocked_by,
+      dependency_stage: dependency_stage, blocked: blocked
     )
   end
 
@@ -272,6 +276,91 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
+  end
+
+  def test_blocked_dependency_row_does_not_dispatch
+    rows = [
+      row(
+        action: "ready_to_plan",
+        command: "hive plan s1 --from 2-brainstorm",
+        depends_on: "base-task",
+        blocked_by: "base-task",
+        dependency_stage: "7-artifacts",
+        blocked: true
+      )
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event
+    attrs = event.last
+    assert_equal "base-task", attrs[:depends_on]
+    assert_equal "base-task", attrs[:blocked_by]
+    assert_equal "7-artifacts", attrs[:dependency_stage]
+    assert_equal false, attrs[:unresolved],
+                 "a resolved prerequisite (blocked_by present) is a real below-gate wait, not unresolved"
+  end
+
+  # An unresolved block (mistyped/unknown depends_on → blocked_by nil) must
+  # still gate dispatch AND carry unresolved:true, so an operator can tell a
+  # config error apart from a genuine waiting-on-prerequisite block. The
+  # dispatcher derives `unresolved` from blocked_by presence — pin it here so
+  # a regression hardcoding/dropping the field is caught.
+  def test_unresolved_dependency_row_logs_unresolved_true_and_does_not_dispatch
+    rows = [
+      row(
+        action: "ready_to_plan",
+        command: "hive plan s1 --from 2-brainstorm",
+        depends_on: "typo-task",
+        blocked_by: nil,
+        dependency_stage: nil,
+        blocked: true
+      )
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event
+    attrs = event.last
+    assert_equal "typo-task", attrs[:depends_on]
+    assert_nil attrs[:blocked_by]
+    assert_equal true, attrs[:unresolved],
+                 "a blocked row with no identified prerequisite must be flagged unresolved"
+  end
+
+  # Single-source-of-truth invariant (plan decision #2): the daemon trusts the
+  # status JSON's `blocked` flag VERBATIM and never re-derives the gate
+  # threshold itself. This synthetic row sets blocked:true while carrying a
+  # dependency_stage PAST the gate (8-finalize) — a state a naive
+  # re-derivation ("prereq is past the gate ⇒ unblocked") would dispatch. The
+  # dispatcher must still hold, proving no second threshold comparison crept
+  # in. Holds only by construction today; this guard pins it.
+  def test_dispatcher_reads_blocked_verbatim_and_never_rederives_threshold
+    rows = [
+      row(
+        action: "ready_to_develop",
+        command: "hive develop s1 --from 3-plan",
+        depends_on: "base-task",
+        blocked_by: "base-task",
+        dependency_stage: "8-finalize",
+        blocked: true
+      )
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned,
+                 "blocked:true must hold dispatch even when dependency_stage is past the gate"
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event,
+               "the dispatcher must emit :blocked reason=dependency_unmet straight from the blocked flag"
   end
 
   def test_digest_scheduler_dispatches_global_digest_without_project_gate
@@ -939,6 +1028,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil skipped, "must log :skipped reason: baseline_recorded"
   end
 
+  def test_blocked_first_sight_edit_resume_still_records_baseline
+    # A first-sight edit-resume row that is ALSO dependency-blocked must
+    # still seed its mtime baseline (the `:record_baseline` arm passes
+    # through the dependency gate, which only intercepts the terminal
+    # `:dispatch`). Otherwise the row would never get a baseline and could
+    # never resume once the block clears.
+    rows = [ row(action: "needs_input", marker: "waiting",
+                 command: "hive brainstorm s1 --from 2-brainstorm",
+                 mtime: T0 - 600,
+                 depends_on: "base-task", blocked_by: "base-task",
+                 dependency_stage: "7-artifacts", blocked: true) ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size, "a blocked first-sight row must not dispatch"
+    refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1"),
+               "the blocked first-sight row must still seed its mtime baseline"
+    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
+    refute_nil skipped, "must log :skipped reason: baseline_recorded even when blocked"
+  end
+
   def test_plan_needs_input_first_sight_dispatches_without_baseline
     # End-to-end fix for PR #83's P0: the production command for a
     # `plan_waiting` row is `hive plan ...` (per TaskAction; see the
@@ -1203,8 +1313,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   # A forward schema-version skew (newer binary, daemon not restarted) is
   # tolerated: the consumer returns ok=true with a non-fatal `warning`,
-  # the tick proceeds and dispatches, and the dispatcher logs the skew
-  # once instead of crashing the tick.
+  # the tick proceeds and dispatches, and the dispatcher logs the warning
+  # once (under the neutral :status_warning event — the channel also carries
+  # status-stderr breadcrumbs, so the name is deliberately not skew-specific)
+  # instead of crashing the tick.
   def test_forward_schema_skew_warning_is_logged_and_tick_proceeds
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
@@ -1217,7 +1329,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       )
     dispatcher.tick(now: T0)
     assert_equal 1, sup.spawned.size, "forward-skew tick must still dispatch"
-    assert events_include?(logger, :status_schema_skew)
+    assert events_include?(logger, :status_warning)
   end
 
   # ── dry run ───────────────────────────────────────────────────────────
@@ -1792,6 +1904,34 @@ def test_dry_run_reap_completes_digest_so_scheduler_unwedges
   assert_equal [ { date: "2026-06-13", exit_code: 0, now: T0 } ], digest.completed,
                "a dry-run digest reap must clear the scheduler's pending marker, " \
                "or the dry-run daemon wedges after the first digest"
+end
+
+def test_dry_run_reap_isolates_digest_complete_raise_as_a_fatal_event
+  # reap_dry_run's `rescue StandardError` sibling of reap_completed's: when a
+  # dry-run digest pseudo-child is reaped and `@digest_scheduler.complete`
+  # raises (e.g. EROFS on the cursor write), the crash must be isolated as a
+  # :fatal event instead of crashing the dry-run poll loop.
+  dispatcher, _sup, _ctrl, logger, = make_dispatcher(
+    rows: [], dry_run: true, with_digest_scheduler: true
+  )
+  raising = Object.new
+  raising.define_singleton_method(:complete) { |date:, exit_code:, now:| raise IOError, "EROFS on cursor write" }
+  dispatcher.instance_variable_set(:@digest_scheduler, raising)
+  child = ChildExit.new(
+    pid: -1, exit_code: 0, project: "digest", slug: "2026-06-13", stage: "digest",
+    command: "hive digest --date 2026-06-13 --json", state_file_path: nil,
+    started_at: T0, finished_at: T0, json_envelope: nil
+  )
+  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
+
+  dispatcher.tick(now: T0)
+
+  event = logger.events.find { |name, _| name == :fatal }
+  refute_nil event,
+             "a dry-run digest_scheduler.complete crash must be isolated as a :fatal event, not crash the poll loop"
+  assert_match(/digest_scheduler\.complete raised/, event.last.fetch(:message))
+  assert logger.events.any? { |name, attrs| name == :child_exited && attrs[:dry_run] == true },
+         "the dry-run child_exited event must still be logged after an isolated complete crash"
 end
 
 def test_archive_dispatch_reenqueue_errors_are_logged_as_fatal

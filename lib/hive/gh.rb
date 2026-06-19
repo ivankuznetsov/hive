@@ -51,8 +51,13 @@ module Hive
     # Push the branch and return a PushResult. Callers that want to
     # exit on failure can do so explicitly; finalize prefers to write
     # a structured marker.
-    def push_branch(worktree_path, branch, cfg: nil)
-      out, err, status = capture3("git", "-C", worktree_path, "push", "-u", "origin", branch, cfg: cfg)
+    def push_branch(worktree_path, branch, cfg: nil, force: false)
+      args = [ "git", "-C", worktree_path, "push", "-u" ]
+      # --force-with-lease (not --force): a concurrent third-party update to
+      # the branch aborts the push instead of being clobbered.
+      args << "--force-with-lease" if force
+      args.push("origin", branch)
+      out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
     rescue Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)

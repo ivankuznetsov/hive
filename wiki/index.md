@@ -3,15 +3,15 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-06-15
+updated: 2026-06-18
 tags: [index, wiki]
 ---
 
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 80
-Updated: 2026-06-15
+Page count: 81
+Updated: 2026-06-18
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init`'s normal-vs-patrol reviewer split and project-global Claude model/effort pins, `hive patrol` handoff into `6-review`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
 
@@ -79,6 +79,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/stages]] — `wiki/modules/stages.md`
 - [[modules/task]] — `wiki/modules/task.md`
 - [[modules/task_action]] — `wiki/modules/task_action.md`
+- [[modules/task_dependencies]] — `wiki/modules/task_dependencies.md`
 - [[modules/task_resolver]] — `wiki/modules/task_resolver.md`
 - [[modules/workflows]] — `wiki/modules/workflows.md`
 - [[modules/worktree]] — `wiki/modules/worktree.md`

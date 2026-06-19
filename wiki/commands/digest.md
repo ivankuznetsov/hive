@@ -134,6 +134,17 @@ the direct API can still override that with `cfg:`. Supported keys:
 `Hive::Config.telegram_bot_token!`, so the token source is still
 `HIVE_TELEGRAM_BOT_TOKEN`.
 
+For a **real** send (not `--dry-run`), `Hive::Digest.run` first calls
+`Hive::EnvFile.load!`, loading `~/.config/hive/.env` so the token is available
+even when the surrounding environment does not export it. This matters most
+for the daemon: the `DigestScheduler` dispatches `hive digest --date <day>
+--json` from a systemd/detached process whose environment has **no**
+`HIVE_TELEGRAM_BOT_TOKEN`, and only `hive bot start` used to load the `.env`
+(see [[commands/bot]]). Before this, every daemon-scheduled digest failed
+`Sender#preflight!` with exit 78 and the scheduler hot-looped on its failure
+backoff. An exported env var still wins over the file, and a dry-run never
+loads it (it never sends). See [[modules/digest]] and [[modules/config]].
+
 The daemon schedules the command through `Hive::Daemon::DigestScheduler` when
 `digest.enabled` is on, dispatching `hive digest --date <day> --json` once per
 owed local day. The digest is **opt-out**: when the operator has not set

@@ -17,6 +17,7 @@ class TemplateMarkerLastLineTest < Minitest::Test
   BINDINGS = {
     project_name: "demo", worktree_path: "/wt", task_folder: "/tf",
     slug: "fix-thing-260601-aa11", branch: "fix-thing-260601-aa11",
+    base_branch: nil,
     pr_url: "https://github.com/o/r/pull/7", user_supplied_tag: "user-data",
     plan_text: "PLAN", execute_output_text: "EXEC", reviews_summary: "REVIEWS",
     artifact_file: "artifact.md", brainstorm_text: "BRAINSTORM",

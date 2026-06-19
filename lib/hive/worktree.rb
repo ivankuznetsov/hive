@@ -5,6 +5,19 @@ require "hive/config"
 
 module Hive
   class Worktree
+    NONINTERACTIVE_FETCH_ENV = {
+      "GIT_TERMINAL_PROMPT" => "0",
+      "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10",
+      # Bound HTTPS fetches too. The SSH options only cap the SSH connect;
+      # on an HTTPS origin a stalled remote (dead TCP, hung proxy) makes
+      # `git fetch` hang indefinitely, wedging the now-non-daemonized
+      # 4-execute (freshest_override_base) and 5-open-pr
+      # (origin_branch_exists?) stage paths this branch introduced. Abort
+      # the transfer if it stays under ~1 KB/s for 30 contiguous seconds.
+      "GIT_HTTP_LOW_SPEED_LIMIT" => "1000",
+      "GIT_HTTP_LOW_SPEED_TIME" => "30"
+    }.freeze
+
     attr_reader :project_root, :slug
 
     def initialize(project_root, slug, worktree_root: nil)
@@ -32,12 +45,19 @@ module Hive
       list_worktree_paths.include?(path)
     end
 
-    def create!(branch_name, default_branch:)
+    def create!(branch_name, default_branch:, base_override: nil)
       FileUtils.mkdir_p(File.dirname(path))
 
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
       if exists.success?
+        # A local branch named `branch_name` already exists — only reachable
+        # on a re-run with a stale branch (a normal first creation has no
+        # such branch). Attach the worktree to it as-is; `base_override`
+        # (dependency stacking) is intentionally NOT honored on this path
+        # because the branch already carries history and re-basing it could
+        # discard committed work. `base_override` is honored on the normal
+        # first-creation else-branch below.
         args = [ "worktree", "add", path, branch_name ]
       else
         # Branch new worktrees from `origin/<default>` (after a quick
@@ -50,7 +70,11 @@ module Hive
         # fall back to the local default with a stderr warning.
         # Never touches local `<default>` — preserves any unpushed
         # commits the user has there.
-        base = freshest_base(default_branch)
+        base = if base_override.to_s.strip.empty?
+                 freshest_base(default_branch)
+        else
+                 freshest_override_base(base_override, default_branch)
+        end
         args = [ "worktree", "add", path, "-b", branch_name, base ]
       end
       out, err, status = Open3.capture3("git", "-C", @project_root, *args)
@@ -89,16 +113,9 @@ module Hive
     # `GitOps#fetch_default_branch` (PR #69) so credential prompts
     # cannot hang the worktree-creation path.
     def freshest_base(default_branch)
-      _, _, has_origin = Open3.capture3("git", "-C", @project_root,
-                                        "config", "remote.origin.url")
-      return default_branch unless has_origin.success?
+      return default_branch unless self.class.origin_configured?(@project_root)
 
-      env = {
-        "GIT_TERMINAL_PROMPT" => "0",
-        "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10"
-      }
-      _, err, status = Open3.capture3(env, "git", "-C", @project_root,
-                                      "fetch", "origin", default_branch)
+      _, err, status = self.class.fetch_origin_branch(@project_root, default_branch)
       unless status.success?
         warn "[hive] worktree base: fetch origin #{default_branch} failed " \
              "(#{err.strip[0, 200]}); branching from local #{default_branch}"
@@ -106,6 +123,40 @@ module Hive
       end
 
       "origin/#{default_branch}"
+    end
+
+    def freshest_override_base(base_override, default_branch)
+      branch = base_override.to_s.strip
+      return freshest_base(default_branch) if branch.empty?
+
+      unless self.class.origin_configured?(@project_root)
+        # No origin remote, so the requested stacked base can't be fetched.
+        # Warn like the sibling branches below so a dropped stack request is
+        # observable instead of silently collapsing onto the default.
+        warn "[hive] worktree base: no origin remote; cannot stack on #{branch}, " \
+             "falling back to the default branch base (origin/#{default_branch} when reachable)"
+        return freshest_base(default_branch)
+      end
+
+      # The fallbacks below call freshest_base, which returns
+      # `origin/<default>` on a successful fetch (only local `<default>` if
+      # that fetch also fails) — so the message names the default branch
+      # base rather than a specific ref.
+      _, err, status = self.class.fetch_origin_branch(@project_root, branch)
+      unless status.success?
+        warn "[hive] worktree base: fetch origin #{branch} failed " \
+             "(#{err.strip[0, 200]}); falling back to the default branch base " \
+             "(origin/#{default_branch} when reachable)"
+        return freshest_base(default_branch)
+      end
+
+      unless self.class.origin_branch_ref_exists?(@project_root, branch)
+        warn "[hive] worktree base: origin/#{branch} not found after fetch; " \
+             "falling back to the default branch base (origin/#{default_branch} when reachable)"
+        return freshest_base(default_branch)
+      end
+
+      "origin/#{branch}"
     end
 
     def list_worktree_paths
@@ -163,6 +214,49 @@ module Hive
         cfg["worktree_root"] ||
           default_worktree_root(File.basename(File.expand_path(project_root)))
       )
+    end
+
+    def self.origin_branch_exists?(project_root, branch_name)
+      branch = branch_name.to_s.strip
+      return false if branch.empty?
+      return false unless origin_configured?(project_root)
+
+      _, _, status = fetch_origin_branch(project_root, branch)
+      return false unless status.success?
+
+      origin_branch_ref_exists?(project_root, branch)
+    end
+
+    def self.origin_configured?(project_root)
+      _, _, has_origin = Open3.capture3("git", "-C", project_root,
+                                        "config", "remote.origin.url")
+      has_origin.success?
+    end
+
+    def self.fetch_origin_branch(project_root, branch_name)
+      # Fetch into an EXPLICIT colon-refspec so the local tracking ref
+      # `refs/remotes/origin/<branch>` is written deterministically,
+      # independent of the clone's configured fetch refspec. A plain
+      # `git fetch origin <branch>` only updates FETCH_HEAD and relies on
+      # git's opportunistic tracking-ref update, which fires SOLELY when a
+      # configured wildcard refspec (+refs/heads/*:refs/remotes/origin/*)
+      # matches. On a `--single-branch` / shallow / narrow-refspec clone
+      # that wildcard is absent, so the tracking ref is never created and
+      # `origin_branch_ref_exists?` wrongly reports a genuinely-present
+      # branch as missing — silently collapsing dependency stacking onto
+      # the default base (4-execute branches off origin/<default>,
+      # 5-open-pr drops `--base <prereq>`). The leading `+` force-updates
+      # the tracking ref exactly as the wildcard refspec would.
+      Open3.capture3(NONINTERACTIVE_FETCH_ENV, "git", "-C", project_root,
+                     "fetch", "origin",
+                     "+#{branch_name}:refs/remotes/origin/#{branch_name}")
+    end
+
+    def self.origin_branch_ref_exists?(project_root, branch_name)
+      _, _, status = Open3.capture3("git", "-C", project_root,
+                                    "rev-parse", "--verify", "--quiet",
+                                    "refs/remotes/origin/#{branch_name}")
+      status.success?
     end
 
     # Resolve symlinks before the prefix check — File.expand_path normalises

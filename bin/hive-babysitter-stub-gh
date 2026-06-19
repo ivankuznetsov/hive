@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "tmpdir"
+
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
   message = "[dry-run] gh #{escaped_argv(argv)} skipped"
@@ -11,8 +13,17 @@ end
 
 def append_skip_log(path)
   raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+  raise IOError, "File::NONBLOCK unavailable" unless File.const_defined?(:NONBLOCK)
 
-  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW, 0o600) do |file|
+  begin
+    stat = File.lstat(path)
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+  rescue Errno::ENOENT
+    # Missing logs are created below; the fstat check still verifies the opened target.
+  end
+
+  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW | File::NONBLOCK, 0o600) do |file|
     stat = file.stat
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
@@ -262,19 +273,75 @@ def read_only?(rest)
   end
 end
 
-def external_launcher_option?(rest)
-  return true if rest.any? { |arg| arg == "--web" || arg.start_with?("--web=") }
-  return false unless [
-    %w[pr checks],
-    %w[pr diff],
-    %w[pr list],
-    %w[pr view],
-    %w[repo view],
-    %w[run view],
-    %w[workflow view]
-  ].include?(rest[0, 2])
+GH_BROWSER_COMMAND_VALUE_OPTIONS = {
+  %w[pr checks] => {
+    short: %w[i q t R],
+    long: %w[--interval --jq --json --template --repo]
+  },
+  %w[pr diff] => {
+    short: %w[e R],
+    long: %w[--color --exclude --repo]
+  },
+  %w[pr list] => {
+    short: %w[a A B H q l L S s t R],
+    long: %w[
+      --app --assignee --author --base --head --jq --json --label --limit --search --state --template --repo
+    ]
+  },
+  %w[pr view] => {
+    short: %w[q t R],
+    long: %w[--jq --json --template --repo]
+  },
+  %w[repo view] => {
+    short: %w[b q t],
+    long: %w[--branch --jq --json --template]
+  },
+  %w[run view] => {
+    short: %w[a j q t R],
+    long: %w[--attempt --job --jq --json --template --repo]
+  },
+  %w[workflow view] => {
+    short: %w[r R],
+    long: %w[--ref --repo]
+  }
+}.freeze
 
-  rest.drop(2).any? { |arg| arg.start_with?("-") && !arg.start_with?("--") && arg.include?("w") }
+def short_option_cluster_has_web?(arg, value_options)
+  chars = arg[1..].chars
+  chars.each_with_index do |char, index|
+    return [ true, false ] if char == "w"
+    return [ false, index == chars.length - 1 ] if value_options.include?(char)
+  end
+
+  [ false, false ]
+end
+
+def external_launcher_option?(rest)
+  spec = GH_BROWSER_COMMAND_VALUE_OPTIONS[rest[0, 2]]
+  return false unless spec
+
+  index = 2
+  while index < rest.length
+    arg = rest[index]
+
+    if arg == "--"
+      break
+    elsif arg == "--web" || arg.start_with?("--web=")
+      return true
+    elsif arg.start_with?("--")
+      name = arg.split("=", 2).first
+      index += spec.fetch(:long).include?(name) && !arg.include?("=") ? 2 : 1
+    elsif arg.start_with?("-") && arg != "-"
+      has_web, consumes_next = short_option_cluster_has_web?(arg, spec.fetch(:short))
+      return true if has_web
+
+      index += consumes_next ? 2 : 1
+    else
+      index += 1
+    end
+  end
+
+  false
 end
 
 rest = stripped_global_options(argv)
@@ -291,7 +358,6 @@ if real.empty?
   exit 127
 end
 
-trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
 # The argv gate (host_override?) only inspects argv; gh also reads the target host,
 # repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
 # allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
@@ -302,6 +368,15 @@ trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
   GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
   GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 ].each { |key| ENV.delete(key) }
-ENV["GH_CONFIG_DIR"] = trusted_config_dir unless trusted_config_dir.empty?
-ENV["HOME"] = File::NULL
+# Unlike git — which treats GIT_CONFIG_GLOBAL=/dev/null (and GIT_CONFIG_NOSYSTEM) as an explicit
+# "no config" sentinel — gh has no such escape hatch. It derives its config dir as
+# GH_CONFIG_DIR -> XDG_CONFIG_HOME/gh -> $HOME/.config/gh and then reads and creates files under
+# it, so HOME=/dev/null leaves gh resolving /dev/null/.config/gh and failing with ENOTDIR. Point
+# HOME and GH_CONFIG_DIR at a fresh, empty directory instead: gh finds no attacker-controlled
+# config to honor (the user's real ~/.config/gh is out of reach) yet still has a writable home for
+# its own state. The directory is intentionally left in place — passthrough replaces this process,
+# so the stub never regains control to clean it up; it is empty and the OS tmp reaper sweeps it.
+config_home = Dir.mktmpdir("hive-babysitter-gh")
+ENV["HOME"] = config_home
+ENV["GH_CONFIG_DIR"] = config_home
 exec(real, *argv)

@@ -886,11 +886,13 @@ module Hive
         return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
 
         [ Integer(value), 1 ].max
-      rescue ArgumentError, TypeError
+      rescue ArgumentError, TypeError, RangeError
         # Config::POSITIVE_INTEGER_KEYS rejects a bad value at load time, but
         # programmatic/test configs bypass that gate. Mirror the reviewer
         # adapters (Hive::Reviewers::Agent#max_attempts_from_spec): warn and fall
         # back rather than aborting the whole 6-review run with a runner_exception.
+        # RangeError covers Integer(Float::INFINITY)/Integer(Float::NAN), which
+        # raise FloatDomainError (a RangeError, NOT an ArgumentError/TypeError).
         warn "hive: invalid review.triage.max_attempts=#{value.inspect}; " \
              "using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
         Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS

@@ -1657,6 +1657,46 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_raises_when_review_triage_max_attempts_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          triage:
+            max_attempts: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.triage\.max_attempts/, err.message)
+      assert_match(/positive integer/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_triage_max_attempts_is_negative
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          triage:
+            max_attempts: -1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.triage\.max_attempts/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_triage_max_attempts_is_non_integer
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          triage:
+            max_attempts: 1.5
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.triage\.max_attempts/, err.message)
+    end
+  end
+
   def test_load_raises_when_review_browser_test_max_attempts_is_zero
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

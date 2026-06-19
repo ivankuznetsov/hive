@@ -63,6 +63,22 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
     assert_match(/invalid review.triage.max_attempts/, out.join)
   end
 
+  def test_triage_max_attempts_falls_back_on_infinity_or_nan_instead_of_raising
+    # Integer(Float::INFINITY) / Integer(Float::NAN) raise FloatDomainError — a
+    # RangeError, NOT an ArgumentError/TypeError — so a programmatic config of
+    # those values must still fall back to the default rather than escaping the
+    # rescue and aborting the whole 6-review run with a runner_exception.
+    [ Float::INFINITY, Float::NAN ].each do |bad|
+      cfg = { "review" => { "triage" => { "max_attempts" => bad } } }
+      out = capture_io do
+        assert_equal Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS,
+                     Hive::Stages::Review.send(:triage_max_attempts, cfg),
+                     "#{bad} must fall back to the default, not raise FloatDomainError"
+      end
+      assert_match(/invalid review.triage.max_attempts/, out.join)
+    end
+  end
+
   def test_run_triage_with_retries_bails_when_wall_clock_exceeded_between_attempts
     # A transient :error with attempts left, but the review wall-clock budget is
     # spent → don't start another ~1800s triage spawn; signal the caller to

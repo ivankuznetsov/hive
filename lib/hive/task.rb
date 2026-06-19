@@ -7,9 +7,7 @@ require "hive/worktree"
 module Hive
   class Task
     STAGE_NAMES = Hive::Workflows::Registry.default.stages.map(&:name).freeze
-    STATE_FILES = Hive::Workflows::Registry.default.stages.each_with_object({}) do |stage, state_files|
-      state_files[stage.name] = stage.state_file
-    end.freeze
+    STATE_FILES = Hive::Workflows::Registry.default.stages.to_h { |stage| [ stage.name, stage.state_file ] }.freeze
     PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,

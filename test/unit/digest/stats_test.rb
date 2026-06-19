@@ -58,7 +58,69 @@ class HiveDigestStatsTest < Minitest::Test
                  "when no stats can be fetched the renderer omits Lines/Commits"
   end
 
+  def test_whole_digest_stats_blackout_logs_one_aggregate_error
+    # gh down across the board: each PR drops with a per-PR warn, but the
+    # blackout must ALSO surface ONE aggregate error so a systemic outage is
+    # distinguishable from a quiet day (not just N look-alike warnings).
+    logger = CapturingLogger.new
+    fetch = ->(_url) { raise Hive::GhError, "gh unavailable" }
+    items = [ item(pr_number: 10), item(pr_number: 11) ]
+
+    Hive::Digest::Stats.new(fetch: fetch, logger: logger).for_items(items)
+
+    aggregate = logger.errors.grep(/measured 0\/2 PRs/)
+    assert_equal 1, aggregate.size,
+                 "a whole-digest stats blackout must log exactly one aggregate error"
+  end
+
+  def test_partial_measurement_does_not_log_the_aggregate_error
+    logger = CapturingLogger.new
+    fetch = lambda do |url|
+      raise Hive::GhError, "gone" if url.end_with?("/11")
+
+      { additions: 1, deletions: 1, commits: 1 }
+    end
+
+    Hive::Digest::Stats.new(fetch: fetch, logger: logger).for_items([ item(pr_number: 10), item(pr_number: 11) ])
+
+    assert_empty logger.errors.grep(/measured/),
+                 "a partial measurement is not a blackout — no aggregate error"
+  end
+
+  def test_empty_items_returns_zeroed_totals
+    totals = Hive::Digest::Stats.new(fetch: ->(_url) { flunk "must not fetch" }, logger: nil).for_items([])
+
+    assert_equal 0, totals.prs
+    assert_equal 0, totals.measured_prs
+    assert_equal 0, totals.additions
+  end
+
+  def test_totals_guard_rejects_measured_exceeding_prs
+    error = assert_raises(ArgumentError) do
+      Hive::Digest::Totals.new(prs: 1, commits: 0, additions: 0, deletions: 0, measured_prs: 2)
+    end
+    assert_match(/measured_prs .* cannot exceed prs/, error.message)
+  end
+
+  def test_totals_guard_rejects_negative_counts
+    assert_raises(ArgumentError) do
+      Hive::Digest::Totals.new(prs: -1, commits: 0, additions: 0, deletions: 0, measured_prs: 0)
+    end
+  end
+
   private
+
+  class CapturingLogger
+    attr_reader :errors, :warnings
+
+    def initialize
+      @errors = []
+      @warnings = []
+    end
+
+    def error(message) = @errors << message
+    def warn(message) = @warnings << message
+  end
 
   def item(pr_number:, pr_url: nil)
     Hive::Digest::ShippedItem.new(

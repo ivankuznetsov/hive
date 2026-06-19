@@ -149,6 +149,19 @@ class HiveDigestRendererTest < Minitest::Test
     assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
   end
 
+  def test_truncate_overall_summary_caps_an_overlong_summary_with_an_ellipsis
+    # The model's overall summary is untrusted, length-unbounded text; it must be
+    # bounded before escaping (its own constant, independent of the per-item cap)
+    # so the rendered Summary block can't approach Telegram's 4096 chunk limit.
+    over = "y" * (Hive::Digest::Renderer::MAX_OVERALL_SUMMARY_LENGTH + 50)
+
+    truncated = Hive::Digest::Renderer.truncate_overall_summary(over)
+
+    assert_equal Hive::Digest::Renderer::MAX_OVERALL_SUMMARY_LENGTH, truncated.length,
+                 "an overlong overall summary must be capped"
+    assert truncated.end_with?("…"), "the cap must mark the truncation with an ellipsis"
+  end
+
   def test_truncate_label_caps_an_overlong_label_with_an_ellipsis
     over = "c" * (Hive::Digest::Renderer::MAX_LABEL_LENGTH + 50)
 

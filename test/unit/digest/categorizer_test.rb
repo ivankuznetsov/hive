@@ -304,6 +304,25 @@ class HiveDigestCategorizerTest < Minitest::Test
     end
   end
 
+  def test_default_overall_summary_is_singular_for_one_item
+    with_tmp_dir do |run_root|
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }
+      rows = [ { "id" => "alpha/10", "category" => "feature", "summary" => "Adds it." } ]
+      categorizer = Hive::Digest::Categorizer.new(cfg: {}, run_root: run_root, logger: nil)
+
+      # No top-level summary in the model output → the count fallback fires, and
+      # must pluralize correctly for a single shipped item.
+      fake_new = lambda do |**kw|
+        FakeAgent.new(expected_output: kw.fetch(:expected_output), items: rows)
+      end
+      result = with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        categorizer.categorize(grouped, date: "2026-06-15")
+      end
+
+      assert_equal "1 update shipped today.", result.summary
+    end
+  end
+
   def test_agent_spawn_failure_becomes_a_model_error
     with_tmp_dir do |run_root|
       grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }

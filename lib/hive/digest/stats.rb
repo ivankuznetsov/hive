@@ -8,7 +8,26 @@ module Hive
     # of those PRs we actually fetched stats for, so the renderer can omit
     # Lines/Commits when none could be measured (e.g. gh is unavailable) and
     # show a 0 only when it is a real zero.
-    Totals = Data.define(:prs, :commits, :additions, :deletions, :measured_prs)
+    Totals = Data.define(:prs, :commits, :additions, :deletions, :measured_prs) do
+      # Guard the counts at the boundary (mirroring the module's other Data
+      # types) so the renderer's `measured_prs`-sentinel logic can trust them:
+      # all counts are non-negative integers, and you can't measure more PRs
+      # than shipped. A violation would make the footer hide real numbers or
+      # show a misleading `+0/-0`, so make it structural rather than incidental.
+      def initialize(prs:, commits:, additions:, deletions:, measured_prs:)
+        { prs: prs, commits: commits, additions: additions,
+          deletions: deletions, measured_prs: measured_prs }.each do |field, value|
+          unless value.is_a?(Integer) && value >= 0
+            raise ArgumentError, "Totals #{field} must be a non-negative Integer; got #{value.inspect}"
+          end
+        end
+        if measured_prs > prs
+          raise ArgumentError, "Totals measured_prs (#{measured_prs}) cannot exceed prs (#{prs})"
+        end
+
+        super
+      end
+    end
 
     # Aggregates per-PR `gh` stats for the footer. The fetch seam is injectable
     # so unit tests never hit the network; the default fetches via Hive::Gh.
@@ -40,6 +59,15 @@ module Hive
           deletions += stats[:deletions].to_i
           commits += stats[:commits].to_i
           measured += 1
+        end
+
+        # A single dropped PR is a per-PR `warn` above, but a whole-digest stats
+        # blackout (gh missing / auth expired / network down) would otherwise
+        # surface only as N indistinguishable warnings while the footer silently
+        # drops Lines/Commits. Emit ONE aggregate error so a systemic outage is
+        # loud and distinct from a legitimately quiet day.
+        if prs.positive? && measured.zero?
+          @logger&.error("digest stats: measured 0/#{prs} PRs — gh stats unavailable for the whole digest")
         end
 
         Totals.new(prs: prs, commits: commits, additions: additions,

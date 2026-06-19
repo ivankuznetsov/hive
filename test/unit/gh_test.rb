@@ -411,6 +411,25 @@ def test_pr_stats_raises_on_failed_lookup
   end
 end
 
+# These two raise-paths are exactly what Digest::Stats relies on to DROP a PR
+# gracefully (rescue Hive::Error); if a refactor turned either into a silent
+# nil/crash, "one bad PR never fails the digest" would break unnoticed.
+def test_pr_stats_raises_on_unparseable_json
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "not json", "", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
+    assert_match(/unparseable JSON/, err.message)
+  end
+end
+
+def test_pr_stats_raises_when_json_is_not_a_hash
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "[]", "", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
+    assert_match(/expected Hash/, err.message)
+  end
+end
+
 def test_pr_failing_job_logs_tail_clips_each_job
   calls = []
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)

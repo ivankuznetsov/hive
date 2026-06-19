@@ -7,8 +7,8 @@ module Hive
   # stage to the next; consumers all read from the derived `VERBS` map:
   # `Hive::Commands::StageAction` consumes it to dispatch the move,
   # `Hive::TaskAction` uses it to label the "ready to <verb>" status
-  # bucket per stage, and `Hive::Commands::Approve` / `FindingToggle` use
-  # it to derive the next-action command after a successful move.
+  # bucket per stage, and `Hive::Commands::Approve` uses it to derive
+  # the next-action command after a successful move.
   #
   # Adding or removing a verb follows the default workflow descriptor.
   module Workflows

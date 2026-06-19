@@ -32,6 +32,7 @@ class WorkflowTest < Minitest::Test
     verb = Hive::Workflow::AdvanceVerb.new(name: "manual-review", interactive: true)
 
     assert verb.interactive, "interactive: true must surface on the value object the VERBS derivation reads"
+    assert verb.frozen?
   end
 
   def test_workflow_freezes_stage_array

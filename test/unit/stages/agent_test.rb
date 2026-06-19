@@ -79,6 +79,41 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_prior_artifacts_capped_at_8000_chars
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      File.write(File.join(task.folder, "huge.md"), "x" * 20_000)
+
+      prior = Hive::Stages::Agent.prior_artifacts(task, "plan.md")
+
+      assert_equal 8000, prior.length,
+                   "prior_artifacts must cap the joined string at 8000 chars"
+    end
+  end
+
+  def test_run_raises_stage_error_when_stage_absent_from_registry
+    with_tmp_dir do |project|
+      folder = File.join(project, ".hive-state", "stages", "99-mystery", "demo-260619-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = TaskStub.new(
+        project_root: project,
+        folder: folder,
+        state_file: File.join(folder, "mystery.md"),
+        stage_name: "mystery",
+        slug: "demo-260619-aaaa",
+        stage_index: 99,
+        log_dir: File.join(project, ".hive-state", "logs", "demo-260619-aaaa"),
+        project_name: File.basename(project)
+      )
+
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::Agent.run!(task, {})
+      end
+
+      assert_equal "no agent stage mystery", error.message
+    end
+  end
+
   def test_empty_prior_artifacts_render_without_error
     with_tmp_dir do |project|
       task = task_for(project, "plan")
@@ -162,7 +197,7 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
-  def test_marker_actions_match_brainstorm_mapping
+  def test_marker_actions_map_to_commit_and_status
     {
       "<!-- WAITING -->\n" => [ "round_waiting", :waiting ],
       "<!-- COMPLETE -->\n" => [ "complete", :complete ],

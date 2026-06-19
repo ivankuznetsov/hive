@@ -9,7 +9,11 @@ module Hive
 
       def run!(task, cfg)
         cfg ||= {}
+        # U3 seam: the stage is re-resolved from Registry.default here rather than from the
+        # descriptor the dispatcher matched. When U3 threads the dispatched descriptor through,
+        # this lookup is the call site that should consume it instead of the global default.
         stage = Hive::Workflows::Registry.default.stages.find { |candidate| candidate.name == task.stage_name }
+        stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
         prompt = render_prompt(task, cfg, stage, profile: profile)
@@ -46,12 +50,13 @@ module Hive
       end
 
       def prior_artifacts(task, output_file)
-        # Guardrail against flooding the prompt with historical artifacts.
+        # Guardrail against flooding the prompt with historical artifacts: a hard 8000-char cap
+        # on the whole joined string (not per-file or token-based), applied by the [0, 8000] slice.
         Dir.glob(File.join(task.folder, "*.md")).sort.filter_map do |path|
           next if File.basename(path) == output_file
 
           "## #{File.basename(path)}\n#{File.read(path)}"
-        end.join("\n\n")[0, 8000].to_s
+        end.join("\n\n")[0, 8000]
       end
 
       def action_for(marker_name)

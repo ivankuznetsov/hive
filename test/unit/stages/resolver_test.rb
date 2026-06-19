@@ -6,7 +6,7 @@ require "hive/workflow"
 require "hive/workflows/coding"
 
 class StagesResolverTest < Minitest::Test
-  TaskStub = Struct.new(:stage_name, keyword_init: true)
+  TaskStub = Struct.new(:stage_name, :workflow, keyword_init: true)
 
   CODING_EXPECTATIONS = {
     "inbox" => [ "hive/stages/inbox", Hive::Stages, :Inbox ],
@@ -20,8 +20,8 @@ class StagesResolverTest < Minitest::Test
     "done" => [ "hive/stages/done", Hive::Stages, :Done ]
   }.freeze
 
-  def task(stage_name)
-    TaskStub.new(stage_name: stage_name)
+  def task(stage_name, workflow: Hive::Workflows::Registry.default)
+    TaskStub.new(stage_name: stage_name, workflow: workflow)
   end
 
   def expected_runner(require_path, namespace, const_name)
@@ -43,6 +43,14 @@ class StagesResolverTest < Minitest::Test
       assert_equal expected_runner(require_path, namespace, const_name),
                    command.send(:pick_runner, task(stage_name))
     end
+  end
+
+  def test_run_pick_runner_uses_task_workflow_for_agent_stage
+    command = Hive::Commands::Run.new("demo")
+
+    runner = command.send(:pick_runner, task("gather", workflow: research_workflow))
+
+    assert_equal Hive::Stages::Agent.method(:run!), runner
   end
 
   def test_non_coding_agent_stage_resolves_to_generic_agent_runner

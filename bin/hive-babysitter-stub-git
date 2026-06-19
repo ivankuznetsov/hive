@@ -181,8 +181,8 @@ def unsafe_env?
   #   * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject those keys as well.
   #   * GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM repoint config at an attacker-written file that
   #     can carry the same keys.
-  # GIT_PAGER / core.pager is intentionally left alone — non-TTY dry-run stdout does not
-  # auto-spawn a pager, so guarding it would only over-block legitimate reads.
+  # Pager config/env is scrubbed or neutralized at passthrough time. It is not a reason to
+  # skip an otherwise read-only command.
   return true if env_set?("GIT_EXEC_PATH")
   return true if env_set?("GIT_EXTERNAL_DIFF")
   return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
@@ -285,7 +285,7 @@ def hardened_passthrough_argv(argv, rest)
     passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
   end
 
-  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", *passthrough ]
+  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", "--no-pager", *passthrough ]
 end
 
 unsafe_global, rest = split_global_options(argv)
@@ -306,7 +306,7 @@ end
 # write files if these env vars or config files reach real git, and argv
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
-%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS].each { |key| ENV.delete(key) }
+%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL

@@ -20,7 +20,8 @@ module Hive
         id: normalize_id(raw["id"] || raw[:id]),
         slug: normalize_string(raw["slug"] || raw[:slug]),
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
-        depends_on: normalize_string(raw["depends_on"] || raw[:depends_on])
+        depends_on: normalize_string(raw["depends_on"] || raw[:depends_on]),
+        workflow: normalize_string(raw["workflow"] || raw[:workflow])
       }
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
@@ -83,7 +84,7 @@ module Hive
     end
 
     def empty
-      { id: nil, slug: nil, display_name: nil, depends_on: nil }
+      { id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }
     end
 
     def normalize_id(value)

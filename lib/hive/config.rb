@@ -11,6 +11,7 @@ module Hive
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
       "default_branch" => nil,
+      "default_workflow" => "coding",
       "dependency_gate_stage" => "8-finalize",
       "project_name" => nil,
       "claude" => {

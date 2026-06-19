@@ -5,6 +5,9 @@ module Hive
     end
   end
 
+  # Reopened (not redefined): nested Stage/AdvanceVerb constants must live in a
+  # class body so they resolve as Workflow::Stage — they can't be declared inside
+  # the Data.define block above.
   class Workflow
     Stage = Data.define(
       :name,

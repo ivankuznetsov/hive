@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "tmpdir"
+require "uri"
 
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
@@ -90,6 +91,8 @@ end
 # `gh pr view feature/branch` refs legitimately carry slashes; for pr reads only a
 # full `scheme://host` URL names a host.
 def positional_host_override?(rest)
+  return api_endpoint_host_override?(rest) if rest[0] == "api"
+
   case rest[0, 2]
   when %w[repo view]
     target_operands(rest.drop(2)).any? { |arg| arg.include?(":") || arg.count("/") > 1 }
@@ -119,6 +122,42 @@ def target_operands(operands)
     end
   end
   positionals
+end
+
+def uri_scheme_or_host?(value)
+  value = value.to_s
+  return true if value.match?(/\A[A-Za-z][A-Za-z0-9+\-.]*:/) || value.start_with?("//")
+
+  uri = URI.parse(value)
+  !uri.scheme.to_s.empty? || (uri.respond_to?(:host) && !uri.host.to_s.empty?)
+rescue URI::InvalidURIError
+  false
+end
+
+API_ENDPOINT_VALUE_OPTIONS = %w[
+  --cache --field --header --input --jq --method --preview --raw-field --template
+].freeze
+
+def api_endpoint_host_override?(rest)
+  index = 1
+  while index < rest.length
+    arg = rest[index]
+
+    if arg == "--"
+      return uri_scheme_or_host?(rest[index + 1])
+    elsif arg.start_with?("--")
+      name = arg.split("=", 2).first
+      index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
+    elsif arg.match?(/\A-[HXFfqt]/)
+      index += %w[-H -X -F -f -q -t].include?(arg) ? 2 : 1
+    elsif arg.start_with?("-") && arg != "-"
+      index += 1
+    else
+      return uri_scheme_or_host?(arg)
+    end
+  end
+
+  false
 end
 
 def stripped_global_options(argv)

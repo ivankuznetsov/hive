@@ -312,6 +312,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
+      assert_stubbed env, "gh", "api", "https://example.com"
       # An scp-style `git@host:owner/repo` carries a host through a single-slash
       # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
       # disqualify it.
@@ -336,6 +337,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
       assert_passes env, "gh", "api", "repos/owner/repo"
+      assert_passes env, "gh", "api", "graphql"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
       # The safe positional forms must still reach real gh, so the new positional
@@ -551,6 +553,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
       assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
+      assert_includes skipped, "gh api https://example.com skipped"
       assert_includes skipped, "gh -R git@evil.example.com:owner/repo pr view 42 skipped"
       assert_includes skipped, "gh repo view evil.example.com/owner/repo skipped"
       assert_includes skipped, "gh repo view https://evil.example.com/owner/repo skipped"
@@ -582,6 +585,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh auth status"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
+      assert_includes real_invocations, "real-gh api graphql"
       assert_includes real_invocations, "real-gh repo view owner/repo"
       assert_includes real_invocations, "real-gh pr view 42"
       assert_includes real_invocations, "real-gh pr view feature/topic/branch"

@@ -404,6 +404,50 @@ def test_list_open_prs_raises_on_gh_error
   end
 end
 
+def test_pr_stats_returns_line_and_commit_counts_keyed_off_the_url
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  json = '{"additions":2111,"deletions":1102,"commits":[{"oid":"a"},{"oid":"b"}]}'
+  captured = nil
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+    captured = cmd
+    [ json, "", status ]
+  }) do
+    stats = Hive::Gh.pr_stats("https://github.com/o/r/pull/7")
+    assert_equal 2111, stats[:additions]
+    assert_equal 1102, stats[:deletions]
+    assert_equal 2, stats[:commits], "commits must be the commit count, not the raw array"
+  end
+  assert_includes captured, "https://github.com/o/r/pull/7"
+  assert_match(/(^|,)commits(,|$)/, captured[captured.index("--json") + 1])
+end
+
+def test_pr_stats_raises_on_failed_lookup
+  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "no pull requests found", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
+    assert_match(/gh pr view.*failed/, err.message)
+  end
+end
+
+# These two raise-paths are exactly what Digest::Stats relies on to DROP a PR
+# gracefully (rescue Hive::Error); if a refactor turned either into a silent
+# nil/crash, "one bad PR never fails the digest" would break unnoticed.
+def test_pr_stats_raises_on_unparseable_json
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "not json", "", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
+    assert_match(/unparseable JSON/, err.message)
+  end
+end
+
+def test_pr_stats_raises_when_json_is_not_a_hash
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "[]", "", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.pr_stats("https://github.com/o/r/pull/7") }
+    assert_match(/expected Hash/, err.message)
+  end
+end
+
 def test_pr_failing_job_logs_tail_clips_each_job
   calls = []
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)

@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-18
+updated: 2026-06-19
 tags: [digest, shipped, telegram, module]
 ---
 
@@ -19,13 +19,14 @@ through `Hive::Config.load_global_digest_config`.
 
 | API | Purpose |
 |-----|---------|
-| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil)` | Orchestrates collection, categorization/rendering, and delivery. Defaults `cfg` via `Config.load_global_digest_config`. Returns `Result(status:, date:, message:, delivery:)`. |
+| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil, stats: nil)` | Orchestrates collection, categorization, stats, rendering, and delivery. Defaults `cfg` via `Config.load_global_digest_config` and `stats` to `Stats.new`. For a real send (not `dry_run`) it first calls `Hive::EnvFile.load!` so `~/.config/hive/.env` supplies `HIVE_TELEGRAM_BOT_TOKEN` even when the environment doesn't export it — this is what lets the daemon-dispatched `hive digest` authenticate (its systemd/detached launch env has no token; previously only `hive bot start` loaded the `.env`). An exported env var still wins; a dry-run never loads it. Returns `Result(status:, date:, message:, delivery:)`. |
 | `Digest::Window.local_today`, `previous_local_day`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. `previous_local_day(now:)` is the shared "yesterday local" default used by both the CLI command and `Digest.run`. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
 | `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
 | `Digest::Collector#for_date(date)` | Scans registered projects and builds grouped `ShippedItem` rows from `9-done` task folders, `meta.yml`, `pr.md`, and ship times. |
-| `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. |
-| `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items, defaulting bad/missing categories safely. |
-| `Digest::Renderer.render`, `.empty`, `.failed`, `.escape_mdv2` | Builds Telegram MarkdownV2 text. |
+| `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. Returns `Digest::Output(by_project:, summary:)`. |
+| `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items (the `{project => [CategorizedItem]}` shape), defaulting bad/missing categories safely. `load_doc!` reads/parses the file; `summary_from` extracts the overall summary with a count fallback. |
+| `Digest::Stats#for_items(items)` | Sums per-PR `Hive::Gh.pr_stats(pr_url)` (injectable `fetch:`) into `Totals(prs:, commits:, additions:, deletions:, measured_prs:)`; a per-PR `gh` failure is logged and skipped. |
+| `Digest::Renderer.render(by_project, date:, summary:, totals:)`, `.empty`, `.failed`, `.escape_mdv2` | Builds the Telegram MarkdownV2 message: brand header + date, `_Summary_`, per-project sections, and the global stats footer. |
 | `Digest::Sender#deliver(text, dry_run:)` | Returns dry-run text or sends the Telegram MarkdownV2 message (chunked into one `send_message` per chunk above Telegram's 4096-char limit). |
 
 `Digest::Result#status` is one of:
@@ -42,11 +43,20 @@ registered projects
   -> .hive-state/stages/9-done/* folders
   -> Digest::ShipTimes over git log hive/state
   -> ShippedItem(project, slug, display_name, pr_url, pr_number, pr_title, pr_body, shipped_at)
-  -> Digest::Categorizer (agent writes items.json)
-  -> CategorizedItem(item, category, summary)
-  -> Digest::Renderer (Telegram MarkdownV2)
+  -> Digest::Categorizer (agent writes {summary, items} to items.json)
+  -> Output(by_project: {project => [CategorizedItem(item, category, summary)]}, summary:)
+  -> Digest::Stats.for_items (gh pr view per PR) -> Totals(prs, commits, additions, deletions, measured_prs)
+  -> Digest::Renderer.render(by_project, date:, summary:, totals:) (Telegram MarkdownV2)
   -> Digest::Sender (Telegram bot client)
 ```
+
+The rendered message is: a brand header (`*Hive* #Digest`) + human date, an
+italic `_Summary_` block (the model's one-line overview, or a neutral count
+fallback), one **per-project** section (`*Hive*`, capitalized) each with
+`Features`/`Fixes`/`Patrol` subsections in fixed order, then a global footer
+under a divider — `Lines +A/-D · PRs P · Commits C`. Lines/Commits are shown
+only when `Totals#measured_prs` is positive, so a `gh`-unavailable run degrades
+to just the PR count instead of a misleading `+0/-0`.
 
 Collection is deliberately tolerant of incomplete task artifacts:
 

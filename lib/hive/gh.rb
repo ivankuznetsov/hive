@@ -174,6 +174,31 @@ module Hive
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
+    # PR diff/commit stats for the digest footer, keyed off the PR URL (which
+    # carries its own owner/repo context, so no worktree/chdir is needed).
+    # Returns { additions:, deletions:, commits: } where commits is the commit
+    # count. Raises Hive::GhError on a failed/unparseable lookup so the caller
+    # can drop just that PR's numbers without failing the whole digest send.
+    def pr_stats(pr_url, cfg: nil)
+      out, err, status = capture3("gh", "pr", "view", pr_url.to_s,
+                                  "--json", "additions,deletions,commits",
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{pr_url}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      {
+        additions: doc["additions"].to_i,
+        deletions: doc["deletions"].to_i,
+        commits: Array(doc["commits"]).size
+      }
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned unparseable JSON: #{e.message}"
+    end
+
     def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)
       rollup = pr_status_rollup(worktree_path, number, cfg: cfg)
       failing_jobs_with_logs(worktree_path, rollup, cfg: cfg, byte_cap: byte_cap)

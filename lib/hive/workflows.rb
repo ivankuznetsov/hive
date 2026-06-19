@@ -1,3 +1,5 @@
+require "hive/workflows/registry"
+
 module Hive
   # Single source of truth for the workflow verbs (brainstorm, plan,
   # develop, open-pr, review, artifacts, finalize, archive). Each verb advances a task from one
@@ -7,7 +9,7 @@ module Hive
   # `FindingToggle` use it to derive the next-action command after a
   # successful move.
   #
-  # Adding or removing a verb is a one-file change here.
+  # Adding or removing a verb follows the default workflow descriptor.
   module Workflows
     # Optional `interactive: true` flag marks verbs that need the user's
     # tty during execution (stdin prompts, interactive `gh pr create`,
@@ -24,16 +26,19 @@ module Hive
     # verb that DOES need stdin (e.g., a manual review prompt) can
     # opt in with one line — without re-introducing foreground
     # takeover for everything.
-    VERBS = {
-      "brainstorm" => { source: "1-inbox", target: "2-brainstorm", force_source: true },
-      "plan"       => { source: "2-brainstorm", target: "3-plan" },
-      "develop"    => { source: "3-plan", target: "4-execute" },
-      "open-pr"    => { source: "4-execute", target: "5-open-pr" },
-      "review"     => { source: "5-open-pr", target: "6-review" },
-      "artifacts"  => { source: "6-review", target: "7-artifacts" },
-      "finalize"   => { source: "7-artifacts", target: "8-finalize" },
-      "archive"    => { source: "8-finalize", target: "9-done" }
-    }.freeze
+    stages = Hive::Workflows::Registry.default.stages
+    VERBS = stages.each_with_index.each_with_object({}) do |(stage, index), verbs|
+      advance_verb = stage.advance_verb
+      next unless advance_verb
+
+      entry = {
+        source: stages.fetch(index - 1).dir,
+        target: stage.dir
+      }
+      entry[:force_source] = true if advance_verb.force_source
+      entry[:interactive] = true if advance_verb.interactive
+      verbs[advance_verb.name] = entry
+    end.freeze
 
     # Reverse lookup by source: verb that advances OUT of stage_dir.
     # nil for `9-done` (no further verb).

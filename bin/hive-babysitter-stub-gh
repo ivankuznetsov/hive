@@ -138,6 +138,26 @@ API_ENDPOINT_VALUE_OPTIONS = %w[
   --cache --field --header --input --jq --method --preview --raw-field --template
 ].freeze
 
+# The short forms of gh api's value-taking options (`-H`/`-X`/`-F`/`-f`/`-q`/`-t`/`-p`).
+API_VALUE_SHORT_OPTIONS = %w[H X F f q t p].freeze
+
+# Mirror pflag's left-to-right shorthand-cluster parsing: scan each char of a
+# `-iXp`-style cluster and stop at the first value-taking shorthand. It consumes
+# the *next* argv only when it is the cluster's last char; otherwise the rest of
+# the cluster is its glued value and the next argv stands alone. Booleans (`-i`)
+# before it are skipped. Without this, a boolean shorthand ahead of a value option
+# (`gh api -ip shadow-cat <URL>`, which gh reads as `-i -p shadow-cat <URL>`) would
+# let the scanner treat the option value as the endpoint and wave the trailing
+# attacker host through to real gh.
+def api_short_cluster_consumes_next?(arg)
+  chars = arg[1..].chars
+  chars.each_with_index do |char, index|
+    return index == chars.length - 1 if API_VALUE_SHORT_OPTIONS.include?(char)
+  end
+
+  false
+end
+
 def api_endpoint_host_override?(rest)
   index = 1
   while index < rest.length
@@ -148,10 +168,8 @@ def api_endpoint_host_override?(rest)
     elsif arg.start_with?("--")
       name = arg.split("=", 2).first
       index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
-    elsif arg.match?(/\A-[HXFfqtp]/)
-      index += %w[-H -X -F -f -q -t -p].include?(arg) ? 2 : 1
     elsif arg.start_with?("-") && arg != "-"
-      index += 1
+      index += api_short_cluster_consumes_next?(arg) ? 2 : 1
     else
       return uri_scheme_or_host?(arg)
     end
@@ -190,6 +208,23 @@ def field_uses_file?(value)
   value.to_s.sub(/\A=/, "").split("=", 2).last.to_s.start_with?("@")
 end
 
+# pflag clusters short options, and a value-taking shorthand consumes the rest of
+# its cluster (or the next argv). A boolean shorthand ahead of it — `gh api -iX POST`
+# (read as `-i -X POST`) or `gh api -ifbody=hi` (`-i -f body=hi`) — would otherwise
+# hide the method/payload option from the classifier below and let a mutating call
+# pass as a read. Drop the leading boolean run so the first value-taking shorthand
+# leads the token the `case` already understands; its glued value (or next argv)
+# stays in place for that branch to consume.
+def expose_api_value_shorthand(arg)
+  return arg unless arg.start_with?("-") && !arg.start_with?("--") && arg.length > 1
+
+  chars = arg[1..].chars
+  first = chars.index { |char| API_VALUE_SHORT_OPTIONS.include?(char) }
+  return arg if first.nil? || first.zero?
+
+  "-#{chars[first..].join}"
+end
+
 def api_read_only?(rest)
   return false unless rest.first == "api"
 
@@ -199,7 +234,7 @@ def api_read_only?(rest)
   cache = false
   index = 1
   while index < rest.length
-    arg = rest[index]
+    arg = expose_api_value_shorthand(rest[index])
     case arg
     when "-X", "--method"
       method = rest[index + 1]

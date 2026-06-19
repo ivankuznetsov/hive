@@ -6,6 +6,7 @@ require "hive/lock"
 require "hive/git_ops"
 require "hive/agent"
 require "hive/stages"
+require "hive/stages/resolver"
 require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
@@ -134,37 +135,7 @@ module Hive
       end
 
       def pick_runner(task)
-        case task.stage_name
-        when "inbox"
-          require "hive/stages/inbox"
-          Hive::Stages::Inbox.method(:run!)
-        when "brainstorm"
-          require "hive/stages/brainstorm"
-          Hive::Stages::Brainstorm.method(:run!)
-        when "plan"
-          require "hive/stages/plan"
-          Hive::Stages::Plan.method(:run!)
-        when "execute"
-          require "hive/stages/execute"
-          Hive::Stages::Execute.method(:run!)
-        when "open-pr"
-          require "hive/stages/open_pr"
-          Hive::Stages::OpenPr.method(:run!)
-        when "review"
-          require "hive/stages/review"
-          Hive::Stages::Review.method(:run!)
-        when "artifacts"
-          require "hive/stages/artifacts"
-          Hive::Stages::Artifacts.method(:run!)
-        when "finalize"
-          require "hive/stages/finalize"
-          Hive::Stages::Finalize.method(:run!)
-        when "done"
-          require "hive/stages/done"
-          Hive::Stages::Done.method(:run!)
-        else
-          raise StageError, "no runner for stage #{task.stage_name}"
-        end
+        Hive::Stages::Resolver.resolve(task)
       end
 
       def commit_after(task, result)

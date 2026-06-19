@@ -9,10 +9,11 @@ tags: [stage, agent, workflow]
 
 **TLDR**: `Hive::Stages::Agent` is the shared headless runner for descriptor
 stages whose `kind` is `:agent` and whose name does not already have a bespoke
-coding runner. It reads the active stage from `Hive::Workflows::Registry.default`,
-renders `templates/agent_prompt.md.erb`, spawns one folder-isolated agent, and
-maps the resulting state-file marker to the same commit actions as
-[[stages/brainstorm]].
+coding runner. `Hive::Stages::Resolver` reaches it as the fallback after the
+coding-name runner table. The runner reads the active stage from
+`Hive::Workflows::Registry.default`, renders `templates/agent_prompt.md.erb`,
+spawns one folder-isolated agent, and maps the resulting state-file marker to the
+same commit actions as [[stages/brainstorm]].
 
 ## Runtime Contract
 
@@ -30,7 +31,8 @@ maps the resulting state-file marker to the same commit actions as
    `COMPLETE` → `complete`, `ERROR` → `error`, otherwise `marker.name.to_s`.
 
 The coding pipeline's `brainstorm` and `plan` names still use their bespoke
-tmux-capable runners; the generic runner is for future descriptor-backed stages.
+tmux-capable runners even though their descriptor entries are `kind: :agent`;
+name-first resolver precedence preserves the current coding runtime.
 
 ## Tests
 

@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "hive/commands/run"
 require "hive/stages/resolver"
 require "hive/workflow"
@@ -98,14 +99,40 @@ class StagesResolverTest < Minitest::Test
                  "every CODING_RUNNERS key must name a stage in Coding::DESCRIPTOR; drifted: #{drifted.inspect}"
   end
 
-  def test_resolving_one_bespoke_stage_does_not_load_other_bespoke_files
-    before = $LOADED_FEATURES.dup
+  def test_resolving_one_bespoke_stage_does_not_eager_load_other_runners
+    # Must run in a clean subprocess: under the gated suite execute.rb is already
+    # in $LOADED_FEATURES (the coverage gate's load_all_sources! and the integration
+    # prompt_injection_test both require it), so an in-process $LOADED_FEATURES delta
+    # can never witness an eager-load regression and the guard would pass vacuously.
+    # A fresh interpreter resolves `inbox` and reports which sibling runner constants
+    # came into existence: a resolver that eagerly required every runner at load time
+    # would define Execute and fail this assertion.
+    lib = File.expand_path("../../../lib", __dir__)
+    script = <<~RUBY
+      require "hive/stages/resolver"
+      task = Struct.new(:stage_name).new("inbox")
+      Hive::Stages::Resolver.resolve(task)
+      inbox = Hive::Stages.const_defined?(:Inbox, false)
+      execute = Hive::Stages.const_defined?(:Execute, false)
+      print "inbox=\#{inbox} execute=\#{execute}"
+    RUBY
 
-    Hive::Stages::Resolver.resolve(task("inbox"))
+    out, status = Open3.capture2e(RbConfig.ruby, "-I", lib, "-e", script)
 
-    newly_loaded = $LOADED_FEATURES - before
-    refute newly_loaded.any? { |feature| feature.end_with?("/hive/stages/execute.rb") },
-           "resolving inbox should not require execute runner"
+    assert status.success?, "resolver subprocess exited non-zero: #{out}"
+    assert_equal "inbox=true execute=false", out,
+                 "resolving inbox must load its own runner but never eager-load the execute runner"
+  end
+
+  def test_every_coding_descriptor_stage_resolves_to_a_runner
+    # Round-trip companion to the subset guard above: every stage declared in
+    # Coding::DESCRIPTOR must resolve to a callable runner. A bespoke-less coding
+    # stage would otherwise raise at dispatch instead of failing here.
+    Hive::Workflows::Coding::DESCRIPTOR.stages.each do |stage|
+      runner = Hive::Stages::Resolver.resolve(task(stage.name))
+      assert_respond_to runner, :call,
+                        "coding stage #{stage.name} must resolve to a callable runner"
+    end
   end
 
   private

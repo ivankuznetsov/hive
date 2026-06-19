@@ -331,6 +331,56 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_falls_back_to_default_when_override_ref_missing_after_successful_fetch
+    # `freshest_override_base`'s post-fetch ref-existence guard (the
+    # `unless origin_branch_ref_exists?` arm): origin IS configured and the
+    # override-branch fetch SUCCEEDS, but `origin/<override>` still does not
+    # exist afterward (e.g. a server that 200s the fetch yet wrote no tracking
+    # ref). This is distinct from the fetch-failure arm above — here the fetch
+    # reports success, so only the ref-existence check catches the miss. The
+    # branch must fall back to the default base with a "not found after fetch"
+    # warning. The fetch is stubbed to report success without writing the
+    # tracking ref because a real colon-refspec fetch of an absent branch
+    # exits non-zero (that path is already covered by the fetch-failure test).
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        origin_master_sha = run!("git", "-C", origin_dir, "rev-parse", "master").strip
+
+        wt = Hive::Worktree.new(dir, "dependent-ghost-ref", worktree_root: root)
+        # fetch_origin_branch is also called for the default branch inside
+        # freshest_base; override it to report success uniformly so the
+        # override fetch "succeeds" and the default fallback resolves to
+        # origin/master. A real successful Process::Status stands in for the
+        # fetch's exit status.
+        _out, _err, ok_status = Open3.capture3("git", "-C", dir, "fetch", "origin", "master")
+        Hive::Worktree.singleton_class.send(:alias_method, :__real_fetch_origin_branch, :fetch_origin_branch)
+        Hive::Worktree.singleton_class.send(:alias_method, :__real_origin_branch_ref_exists?, :origin_branch_ref_exists?)
+        Hive::Worktree.define_singleton_method(:fetch_origin_branch) { |_root, _branch| [ "", "", ok_status ] }
+        Hive::Worktree.define_singleton_method(:origin_branch_ref_exists?) { |_root, _branch| false }
+
+        _, err = capture_io do
+          wt.create!("dependent-ghost-ref", default_branch: "master", base_override: "ghost-base")
+        end
+        worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+        assert_equal origin_master_sha, worktree_sha,
+                     "an override ref missing after a successful fetch must fall back to origin/default"
+        assert_match(/origin\/ghost-base not found after fetch/, err,
+                     "the ghost-ref fallback must surface a 'not found after fetch' warning")
+      ensure
+        if Hive::Worktree.singleton_class.method_defined?(:__real_fetch_origin_branch)
+          Hive::Worktree.singleton_class.send(:alias_method, :fetch_origin_branch, :__real_fetch_origin_branch)
+          Hive::Worktree.singleton_class.send(:alias_method, :origin_branch_ref_exists?, :__real_origin_branch_ref_exists?)
+          Hive::Worktree.singleton_class.send(:remove_method, :__real_fetch_origin_branch)
+          Hive::Worktree.singleton_class.send(:remove_method, :__real_origin_branch_ref_exists?)
+        end
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
   def test_create_falls_back_to_local_when_fetch_fails
     # Origin remote configured but unreachable — fetch fails, fallback
     # to local <default> with a stderr warning. The worktree must

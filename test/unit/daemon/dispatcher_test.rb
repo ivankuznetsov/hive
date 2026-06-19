@@ -1906,6 +1906,34 @@ def test_dry_run_reap_completes_digest_so_scheduler_unwedges
                "or the dry-run daemon wedges after the first digest"
 end
 
+def test_dry_run_reap_isolates_digest_complete_raise_as_a_fatal_event
+  # reap_dry_run's `rescue StandardError` sibling of reap_completed's: when a
+  # dry-run digest pseudo-child is reaped and `@digest_scheduler.complete`
+  # raises (e.g. EROFS on the cursor write), the crash must be isolated as a
+  # :fatal event instead of crashing the dry-run poll loop.
+  dispatcher, _sup, _ctrl, logger, = make_dispatcher(
+    rows: [], dry_run: true, with_digest_scheduler: true
+  )
+  raising = Object.new
+  raising.define_singleton_method(:complete) { |date:, exit_code:, now:| raise IOError, "EROFS on cursor write" }
+  dispatcher.instance_variable_set(:@digest_scheduler, raising)
+  child = ChildExit.new(
+    pid: -1, exit_code: 0, project: "digest", slug: "2026-06-13", stage: "digest",
+    command: "hive digest --date 2026-06-13 --json", state_file_path: nil,
+    started_at: T0, finished_at: T0, json_envelope: nil
+  )
+  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
+
+  dispatcher.tick(now: T0)
+
+  event = logger.events.find { |name, _| name == :fatal }
+  refute_nil event,
+             "a dry-run digest_scheduler.complete crash must be isolated as a :fatal event, not crash the poll loop"
+  assert_match(/digest_scheduler\.complete raised/, event.last.fetch(:message))
+  assert logger.events.any? { |name, attrs| name == :child_exited && attrs[:dry_run] == true },
+         "the dry-run child_exited event must still be logged after an isolated complete crash"
+end
+
 def test_archive_dispatch_reenqueue_errors_are_logged_as_fatal
   dispatcher, _sup, ctrl, logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
   ctrl.instance_variable_set(:@max_concurrent_runs, 1)

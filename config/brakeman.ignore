@@ -43,8 +43,16 @@
     {
       "fingerprint": "a11d1f5701bcc1ab87021515e2fdf48ea34cd74a6c848aea5f04da176726f86e",
       "note": "False positive: array-form Open3.capture3 (no shell) \u2014 slug is passed as its own discrete argv element immediately after a standalone `--grep` flag (not interpolated into a `--grep=<slug>` token), so it cannot inject a command; `-F` makes it a fixed string, so at worst it is a benign literal git-log grep, and matches are re-filtered by exact substring on the subject afterward. slug is a controlled hive task slug."
+    },
+    {
+      "fingerprint": "441ba8780a4fcbfa2d292765749020b9457cae8f2e854d8036df4d049ed70781",
+      "note": "False positive. Open3.capture3 array form in Worktree.fetch_origin_branch: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is a hive task slug / dependency branch name interpolated only into a single refspec literal (`+<branch>:refs/remotes/origin/<branch>`) that becomes one argv member; no shell ever sees it. The first arg is a static GIT_* env hash, not a command string."
+    },
+    {
+      "fingerprint": "dab5a53227ca623d05f4399366043b21068b6b015f607da01a55331b607ae7e5",
+      "note": "False positive. Open3.capture3 array form in Worktree.origin_branch_ref_exists?: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a single ref-path literal (`refs/remotes/origin/<branch>`) passed to `git rev-parse --verify --quiet` as one argv member; no shell ever sees it."
     }
   ],
-  "updated": "2026-06-03",
-  "brakeman_version": "8.0.4"
+  "updated": "2026-06-19",
+  "brakeman_version": "8.0.5"
 }

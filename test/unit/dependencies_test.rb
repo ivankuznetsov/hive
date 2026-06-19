@@ -219,6 +219,32 @@ class DependenciesTest < Minitest::Test
     assert_nil result.blocked_by
   end
 
+  def test_resolve_raises_when_prerequisite_has_no_valid_stage
+    err = assert_raises(ArgumentError) do
+      Hive::Dependencies.resolve(
+        depends_on: "prereq",
+        tasks: [ { slug: "prereq", id: 1, stage: "not-a-stage" } ],
+        threshold_stage: "8-finalize"
+      )
+    end
+    assert_match(/no valid stage/, err.message)
+  end
+
+  def test_resolve_warns_and_skips_unrecognized_task_shape
+    # `field`'s else arm: a task that is neither hash-like nor reader-exposing
+    # leaves a breadcrumb and resolves the field to nil (prerequisite not
+    # found ⟹ blocked + unresolved), never a crash.
+    result = nil
+    _out, err = capture_io do
+      result = Hive::Dependencies.resolve(
+        depends_on: "x", tasks: [ Object.new ], threshold_stage: "8-finalize"
+      )
+    end
+    assert result.blocked
+    assert_nil result.blocked_by
+    assert_match(/unrecognized task shape/, err)
+  end
+
   private
 
   def task(slug, id: nil, stage_index: nil, stage: nil)

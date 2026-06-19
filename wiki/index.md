@@ -85,8 +85,8 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/workflows]] — `wiki/modules/workflows.md`
 - [[modules/worktree]] — `wiki/modules/worktree.md`
 - [[operating]] — `wiki/operating.md`
-- [[stages/artifacts]] — `wiki/stages/artifacts.md`
 - [[stages/agent]] — `wiki/stages/agent.md`
+- [[stages/artifacts]] — `wiki/stages/artifacts.md`
 - [[stages/brainstorm]] — `wiki/stages/brainstorm.md`
 - [[stages/done]] — `wiki/stages/done.md`
 - [[stages/execute]] — `wiki/stages/execute.md`

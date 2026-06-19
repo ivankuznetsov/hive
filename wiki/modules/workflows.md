@@ -12,7 +12,7 @@ tags: [module, workflow, verbs]
 ## Descriptor and registry
 
 - `Hive::Workflow` — frozen `Data` value object with `id` and ordered `stages`.
-- `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `status_mode`, `budget_usd`, `timeout_sec`, and `capability` is carried for runner selection and prompt rendering. In U2, only `kind: :agent`, `skill`, `budget_usd`, and `timeout_sec` are consumed by the generic runner path; other metadata stays descriptive.
+- `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `status_mode`, `budget_usd`, `timeout_sec`, and `capability` is carried for runner selection and prompt rendering. In U2, the generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:17`), `skill`, `budget_usd`, and `timeout_sec`. `status_mode` is **not** read from the descriptor — the runner hardcodes `:state_file_marker` (`agent.rb:30`) — and the remaining metadata (`capability`) stays descriptive.
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
 - `Hive::Workflows::Coding::DESCRIPTOR` — the only built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.

@@ -73,6 +73,7 @@ class StatusTest < Minitest::Test
       folder: "/tmp/task",
       state_file: "/tmp/task/brainstorm.md",
       worktree_path: nil,
+      pr_url: nil,
       marker_name: :waiting,
       marker_attrs: {},
       mtime: Time.utc(2026, 6, 14, 18, 31, 27, 899_132),
@@ -104,8 +105,8 @@ class StatusTest < Minitest::Test
 
         out, = capture_io { Hive::Commands::Status.new.call }
 
-        assert_includes out, "#1 Pretty Row"
-        assert_includes out, "#2 #{File.basename(fallback)}"
+        assert_match(/#1\s+—\s+Pretty Row/, out)
+        assert_match(/#2\s+—\s+#{Regexp.escape(File.basename(fallback))}/, out)
       end
     end
   end

@@ -6,13 +6,13 @@ require "hive/update_check/state"
 # Pins the bot's once-per-version update push (plan 2026-05-27-002, U5).
 class HiveBotSupervisorUpdateNudgeTest < Minitest::Test
   FakeTelegram = Struct.new(:messages, :fail_first, :fail_all, keyword_init: true) do
-    def send_message(chat_id:, text:, reply_markup: nil)
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
       raise "telegram down" if fail_all
       if fail_first && messages.empty? && !@failed
         @failed = true
         raise "telegram boom"
       end
-      messages << { chat_id: chat_id, text: text }
+      messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
     end
   end
 

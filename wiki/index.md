@@ -72,6 +72,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/markers]] — `wiki/modules/markers.md`
 - [[modules/metrics]] — `wiki/modules/metrics.md`
 - [[modules/patrol]] — `wiki/modules/patrol.md`
+- [[modules/pr]] — `wiki/modules/pr.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
 - [[modules/rebase]] — `wiki/modules/rebase.md`
 - [[modules/reviewers]] — `wiki/modules/reviewers.md`

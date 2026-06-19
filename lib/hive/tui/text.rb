@@ -31,6 +31,11 @@ module Hive
       # one-cell-per-character. nil/non-string input returns the empty
       # string — every caller is concerned with display safety, not
       # with surfacing a TypeError on a missing field.
+      #
+      # Cross-reference: `Hive::Bot::Format.strip_control_chars` does the
+      # reverse for HTML output — it DELETES control bytes (no column
+      # constraint there). The replace-vs-delete split is deliberate; do
+      # not unify the two.
       def sanitize(text)
         text.to_s.gsub(ANSI_CSI_PATTERN, "").gsub(CONTROL_CHARS_PATTERN, "?")
       end

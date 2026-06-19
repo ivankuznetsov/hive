@@ -20,6 +20,7 @@ class TuiSnapshotTest < Minitest::Test
       "blocked" => true,
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
+      "pr_url" => nil,
       "marker" => marker,
       "attrs" => {},
       "mtime" => "2026-04-27T12:00:00Z",
@@ -74,6 +75,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal true, first.blocked
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
+    assert_nil first.pr_url
     assert_equal "waiting", first.marker
     assert_equal({}, first.attrs)
     assert_equal "2026-04-27T12:00:00Z", first.mtime
@@ -162,6 +164,7 @@ class TuiSnapshotTest < Minitest::Test
     first = sample_task(slug: "slug-a")
     first["id"] = 17
     first["display_name"] = "Readable Alpha"
+    first["pr_url"] = "https://github.com/example/repo/pull/561"
     second = sample_task(slug: "slug-b")
     second["id"] = 23
     second["display_name"] = "Other Beta"
@@ -177,6 +180,7 @@ class TuiSnapshotTest < Minitest::Test
 
     assert_equal [ "slug-a" ], snapshot.filter_by_slug("readable").rows.map(&:slug)
     assert_equal [ "slug-b" ], snapshot.filter_by_slug("23").rows.map(&:slug)
+    assert_equal "https://github.com/example/repo/pull/561", snapshot.rows.first.pr_url
   end
 
   def test_filter_by_slug_with_empty_substring_returns_self

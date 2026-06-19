@@ -1,5 +1,6 @@
 require "lipgloss"
 require "hive/commands/status"
+require "hive/dependencies"
 require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/views/format"
@@ -63,7 +64,7 @@ module Hive
         ICON_WIDTH = 2
         ID_WIDTH = 4
         STAGE_WIDTH = 12
-        STATUS_WIDTH = 18
+        STATUS_WIDTH = 36
         AGE_WIDTH = 4
         SEPARATORS = 5 # spaces between the 6 columns
 
@@ -154,7 +155,8 @@ module Hive
             { name: inner_width - fixed_full, stage: STAGE_WIDTH, status: STATUS_WIDTH }
           elsif inner_width >= ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4 + name_min
             # Drop the stage column; separators reduce from 4 to 3.
-            { name: inner_width - (ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4), stage: 0, status: STATUS_WIDTH }
+            width_without_name = ICON_WIDTH + ID_WIDTH + STATUS_WIDTH + AGE_WIDTH + 4
+            { name: inner_width - width_without_name, stage: 0, status: STATUS_WIDTH }
           elsif inner_width >= ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3 + name_min
             # Drop both stage and status.
             { name: inner_width - (ICON_WIDTH + ID_WIDTH + AGE_WIDTH + 3), stage: 0, status: 0 }
@@ -180,10 +182,36 @@ module Hive
         end
 
         def status_label(row)
+          base = action_state_label(row)
+          return base unless row.blocked
+
+          # Append the dependency block rather than replace the action-state
+          # label, mirroring Commands::Status (text mode), which composes
+          # `state_label` with `dependency_indicator` via compact.join. A row
+          # that is blocked AND in an error/recover_review state then surfaces
+          # BOTH labels in either renderer instead of the TUI dropping the
+          # error/recover context.
+          [ base, dependency_status(row) ].reject { |part| part.to_s.empty? }.join(" ")
+        end
+
+        # The action-state portion of the status column, independent of any
+        # dependency block. Shared by status_label so the blocked and
+        # unblocked paths compute the same base label.
+        def action_state_label(row)
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"
 
           row.action_label.to_s
+        end
+
+        def dependency_status(row)
+          # Shared with Commands::Status#dependency_indicator so text mode
+          # and the TUI can never diverge on the unresolved discriminator.
+          Hive::Dependencies.blocked_label(
+            depends_on: row.depends_on,
+            blocked_by: row.blocked_by,
+            dependency_stage: row.dependency_stage
+          )
         end
 
         def display_name(row)

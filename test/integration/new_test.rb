@@ -35,6 +35,8 @@ class NewTest < Minitest::Test
         assert_equal 1, meta[:id]
         assert_equal File.basename(glob.first), meta[:slug]
         assert_nil meta[:display_name]
+        assert_nil meta[:depends_on]
+        refute_includes File.read(File.join(glob.first, "meta.yml")), "depends_on:"
         refute File.directory?(File.join(glob.first, "assets")),
                "plain CLI-compatible ideas must not create an empty assets directory"
 
@@ -42,6 +44,38 @@ class NewTest < Minitest::Test
         assert_match(%r{\Ahive: 1-inbox/add-inbox-filter-\d{6}-[0-9a-f]{4} captured\z}, log)
         diff_files = run!("git", "-C", File.join(dir, ".hive-state"), "show", "--name-only", "--format=")
         assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/meta.yml"
+      end
+    end
+  end
+
+  def test_creates_idea_with_dependency
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io { Hive::Commands::New.new(project, "dependent task", depends_on: "base-task").call }
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")].first
+        assert_equal "base-task", Hive::TaskMeta.read(folder)[:depends_on]
+        assert_includes File.read(File.join(folder, "meta.yml")), "depends_on: base-task"
+      end
+    end
+  end
+
+  def test_rejects_invalid_dependency
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "dependent task", depends_on: "../base").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "invalid dependency"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")]
       end
     end
   end

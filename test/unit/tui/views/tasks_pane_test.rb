@@ -16,11 +16,17 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 id: 42, display_name: nil,
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
+                depends_on: nil, blocked_by: nil, dependency_stage: nil,
+                blocked: false,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
       "id" => id,
       "display_name" => display_name,
+      "depends_on" => depends_on,
+      "blocked_by" => blocked_by,
+      "dependency_stage" => dependency_stage,
+      "blocked" => blocked,
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
@@ -127,6 +133,106 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "abc-001"
+  end
+
+  def test_blocked_row_status_shows_dependency
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "dependent-task", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "7-artifacts",
+                  blocked: true)
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    # The dependency block is APPENDED to the action-state label, not a
+    # replacement — so both appear. The fixed-width status column truncates
+    # the tail, so assert the leading, truncation-stable portion here; the
+    # exact composition is pinned by the direct status_label tests below.
+    assert_includes out, "Ready to plan",
+                    "a blocked row must keep its action-state label, not drop it for the block"
+    assert_includes out, "blocked by",
+                    "a blocked row must still surface the dependency block"
+  end
+
+  def test_status_label_appends_dependency_to_action_state
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "dependent-task", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "7-artifacts",
+                  blocked: true)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "a blocked row must append the dependency block to its action-state label"
+  end
+
+  # CLAUDE.md test-rule 10: an at-gate dependent (blocked:false, prereq past
+  # the gate) still carries depends_on/blocked_by but must NOT render the
+  # "⏸ blocked by" indicator — status_label keys off `blocked`, not field
+  # presence. Only an absence check catches a regression that keyed the badge
+  # off depends_on/blocked_by presence and labelled a dispatchable task held.
+  def test_status_label_omits_dependency_block_for_unblocked_dependent
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "unblocked-dependent", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "8-finalize",
+                  blocked: false)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "Ready to plan",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "an unblocked dependent must show only its action-state label"
+    refute_includes Hive::Tui::Views::TasksPane.status_label(row), "blocked by",
+                    "an unblocked dependent must NOT render the dependency block"
+  end
+
+  def test_render_omits_dependency_block_for_unblocked_dependent
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "unblocked-dependent", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "8-finalize",
+                  blocked: false)
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    refute_includes out, "blocked by",
+                    "a dispatchable (unblocked) dependent must not render the held indicator"
+  end
+
+  # A task can be blocked AND in an error/recover_review state (e.g. a human
+  # manually `hive run`s a frozen dependent). Text mode appends the
+  # dependency block to the error label via compact.join; the TUI must do the
+  # same instead of dropping the error context for only the block.
+  def test_status_label_blocked_error_row_keeps_both_error_and_dependency
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "blocked-and-errored",
+          stage: "4-execute",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: { "reason" => "exit_code", "exit_code" => "1" },
+          depends_on: "base-task",
+          blocked_by: "base-task",
+          dependency_stage: "7-artifacts",
+          blocked: true,
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "ERROR exit_code=1 ⏸ blocked by base-task (7-artifacts)",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "a blocked error row must surface BOTH its error state and the dependency block"
   end
 
   def test_recover_review_status_shows_marker_reason
@@ -335,7 +441,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   def test_error_status_falls_back_to_reason_when_exit_code_missing
-    # `panic` keeps the status string under the 18-char column width so
+    # `panic` keeps the status string under the fixed status column width so
     # the assertion compares against unrenderered text. Longer reasons
     # are truncated by the layout and a fragile substring assertion
     # would couple this test to STATUS_WIDTH; the renderer guarantee
@@ -598,8 +704,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   # ---- compute_layout adaptive column dropping ----
-  # The full 6-column layout needs ~53 inner cells (icon=2, id=4,
-  # stage=12, status=18, age=4, separators=5, name_min=8). Below that, columns
+  # The full 6-column layout needs ~71 inner cells (icon=2, id=4,
+  # stage=12, status=36, age=4, separators=5, name_min=8). Below that, columns
   # drop in priority order: stage first (mostly redundant with status),
   # then status. These tests pin each branch so a future refactor of
   # the threshold values can't silently regress narrow-terminal
@@ -607,14 +713,14 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # exercise the full-5-column branch via single-pane fallback.
 
   def test_compute_layout_full_columns_at_wide_inner_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(64)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(80)
     assert_operator layout[:name], :>=, 8
     assert_equal 12, layout[:stage]
-    assert_equal 18, layout[:status]
+    assert_equal 36, layout[:status]
   end
 
   def test_compute_layout_drops_stage_at_medium_narrow_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(45)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(60)
     assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
     assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
     assert_operator layout[:name], :>=, 8

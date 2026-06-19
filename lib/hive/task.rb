@@ -68,6 +68,10 @@ module Hive
       meta[:display_name]
     end
 
+    def depends_on
+      meta[:depends_on]
+    end
+
     def display_label
       display_name || slug
     end

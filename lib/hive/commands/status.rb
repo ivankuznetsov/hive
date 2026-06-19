@@ -6,6 +6,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/stages"
 require "hive/archive_filter"
+require "hive/dependencies"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -102,7 +103,30 @@ module Hive
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
           "generated_at" => Time.now.utc.iso8601,
-          "projects" => projects.map { |p| project_payload(p, project_count: projects.size) }
+          "projects" => projects.map { |p| project_payload_or_degraded(p, project_count: projects.size) }
+        }
+      end
+
+      # Isolate per-project failures. A single project with a malformed
+      # config.yml (e.g. an invalid `dependency_gate_stage`) used to raise
+      # out of `project_payload` and abort the entire `hive status --json`;
+      # the daemon's StatusConsumer then reads `ok:false` and skips the
+      # whole tick, freezing auto-advance fleet-wide. Degrade the offending
+      # project to an empty task list (with a stderr breadcrumb in
+      # daemon.log) so the rest of the fleet keeps advancing. The fallback
+      # entry still validates against the published hive-status schema.
+      def project_payload_or_degraded(project, project_count:)
+        project_payload(project, project_count: project_count)
+      rescue StandardError => e
+        warn "hive: status: project #{project['name'].inspect} payload failed " \
+             "(#{e.class}: #{e.message}); reporting it with no tasks so other projects still advance"
+        {
+          "name" => project["name"],
+          "path" => project["path"],
+          "hive_state_path" => project["hive_state_path"],
+          "tasks" => [],
+          "legacy_stage_dirs" => [],
+          "legacy_migrate_command" => nil
         }
       end
 
@@ -123,6 +147,7 @@ module Hive
           # external consumers (TUI, daemon, bots) read `diagnostic` off
           # every row. Schema mandates the field.
           rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
+          rows = annotate_dependencies(rows, project)
           rows = archive_rows(rows) if @archive
           out = base.merge("tasks" => rows.map { |r| task_payload(r) })
           # Always emit `legacy_stage_dirs` (default empty array) so
@@ -181,6 +206,10 @@ module Hive
           "slug" => row[:slug],
           "id" => row[:id],
           "display_name" => row[:display_name],
+          "depends_on" => row[:depends_on],
+          "blocked_by" => row[:blocked_by],
+          "dependency_stage" => row[:dependency_stage],
+          "blocked" => row[:blocked] == true,
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
@@ -343,6 +372,7 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
+        rows = annotate_dependencies(rows, project)
         if @archive
           render_archive_project(project, rows)
           return
@@ -364,7 +394,8 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
+            state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
+            puts "    #{r[:icon]} #{display_identity(r).ljust(42)} #{state.ljust(24)} #{command} #{r[:age]}"
           end
         end
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
@@ -389,7 +420,8 @@ module Hive
         puts "  Archived"
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
-          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{row[:state_label].ljust(24)} #{command} #{row[:age]}"
+          state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
+          puts "    #{row[:icon]} #{row[:slug].ljust(36)} #{state.ljust(24)} #{command} #{row[:age]}"
         end
       end
 
@@ -404,6 +436,19 @@ module Hive
       def display_identity(row)
         id = row[:id] ? "##{row[:id]}" : "—"
         "#{id} #{row[:display_name] || row[:slug]}"
+      end
+
+      def dependency_indicator(row)
+        return nil unless row[:blocked]
+
+        # Shared with the TUI's renderer so the unresolved-vs-resolved
+        # discriminator (blocked_by presence) can never diverge between
+        # text mode and the TUI. See Hive::Dependencies.blocked_label.
+        Hive::Dependencies.blocked_label(
+          depends_on: row[:depends_on],
+          blocked_by: row[:blocked_by],
+          dependency_stage: row[:dependency_stage]
+        )
       end
 
       def render_legacy_stage_warning(legacy)
@@ -451,6 +496,7 @@ module Hive
                 slug: slug,
                 id: task.id,
                 display_name: task.display_name,
+                depends_on: task.depends_on,
                 folder: entry,
                 state_file: task.state_file,
                 worktree_path: worktree_path,
@@ -511,6 +557,74 @@ module Hive
           end
         end
         drop_transient_stage_moves(rows)
+      end
+
+      def annotate_dependencies(rows, project)
+        threshold_stage = dependency_gate_stage_for(project)
+        # filter_map + next: a future row source lacking :task must not
+        # KeyError on this never-fail surface (production rows always carry
+        # it). Rows without :task simply don't participate in the snapshot.
+        snapshot = rows.filter_map do |row|
+          task = row[:task]
+          next unless task
+
+          {
+            slug: row[:slug],
+            id: row[:id],
+            stage: row[:stage],
+            stage_index: task.stage_index
+          }
+        end
+
+        rows.each { |row| apply_dependency_result(row, snapshot, threshold_stage) }
+        rows
+      end
+
+      # Threshold stage for the dependency gate. Config.load validates the
+      # key and raises ConfigError on a bad value (e.g. an operator typo
+      # `dependency_gate_stage: 5-open-pr`); degrade to the global default
+      # with a warn rather than let one project's bad config abort the
+      # whole `hive status --json` and freeze daemon auto-advance.
+      def dependency_gate_stage_for(project)
+        Hive::Config.load(project.fetch("path")).fetch("dependency_gate_stage")
+      rescue StandardError => e
+        # The degrade direction is security-relevant: the default
+        # (8-finalize) is MORE permissive than a deliberately-raised gate
+        # (e.g. 9-done), so this fallback can LOOSEN the gate and let a
+        # dependent dispatch one stage early. Erring toward dispatchable is
+        # the documented safe default (a transient/unrelated config error
+        # must not freeze fleet-wide auto-advance), but the warn names the
+        # direction so an operator can tell a genuine loosening apart from a
+        # no-op fallback.
+        default = Hive::Config::DEFAULTS["dependency_gate_stage"]
+        warn "hive: status: unusable dependency_gate_stage for project " \
+             "#{project['name'].inspect} (#{e.class}: #{e.message}); gate LOOSENED to " \
+             "default #{default} — a stricter configured gate is ignored, so a dependent " \
+             "may dispatch one stage early until the config loads cleanly"
+        default
+      end
+
+      # Resolve and stamp dependency state onto one row, failing OPEN on any
+      # resolver error (corrupt stage / malformed prereq shape): treat the
+      # row as unblocked with a breadcrumb. The gate erring toward
+      # "dispatchable" is the documented safe default, and a single bad task
+      # must not blank dependency state for the rest of the project.
+      def apply_dependency_result(row, snapshot, threshold_stage)
+        result = Hive::Dependencies.resolve(
+          depends_on: row[:depends_on],
+          tasks: snapshot,
+          threshold_stage: threshold_stage,
+          task: row
+        )
+        row[:blocked_by] = result.blocked_by
+        row[:dependency_stage] = result.dependency_stage
+        row[:blocked] = result.blocked
+      rescue StandardError => e
+        warn "hive: status: dependency resolve failed for #{row[:slug].inspect} " \
+             "(#{e.class}: #{e.message}); treating as unblocked"
+        row[:blocked_by] = nil
+        row[:dependency_stage] = nil
+        row[:blocked] = false
       end
 
       # The production glob over a stage dir's task folders, extracted into its

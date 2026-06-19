@@ -46,6 +46,10 @@ module Hive
       module_function
 
       def resolve(task, descriptor: Hive::Workflows::Registry.default)
+        # Name-first precedence: a bespoke runner registered by stage name always wins over the
+        # descriptor's kind. This is why brainstorm/plan stay on their bespoke runners even though
+        # they are declared kind: :agent in the coding descriptor. Do not fold this into the
+        # kind == :agent check below — the early return is load-bearing.
         runner = CODING_RUNNERS[task.stage_name]
         return runner.call if runner
 

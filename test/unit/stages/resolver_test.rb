@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/run"
 require "hive/stages/resolver"
 require "hive/workflow"
+require "hive/workflows/coding"
 
 class StagesResolverTest < Minitest::Test
   TaskStub = Struct.new(:stage_name, keyword_init: true)
@@ -61,12 +62,40 @@ class StagesResolverTest < Minitest::Test
     assert_equal Hive::Stages::Agent.method(:run!), runner
   end
 
+  def test_present_non_agent_stage_raises_stage_error
+    descriptor = Hive::Workflow.new(
+      id: :synthetic,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "research",
+          index: 1,
+          state_file: "research.md",
+          kind: :marker
+        )
+      ]
+    )
+
+    error = assert_raises(Hive::StageError) do
+      Hive::Stages::Resolver.resolve(task("research"), descriptor: descriptor)
+    end
+
+    assert_equal "no runner for stage research", error.message
+  end
+
   def test_unknown_stage_raises_same_stage_error_message
     error = assert_raises(Hive::StageError) do
       Hive::Stages::Resolver.resolve(task("mystery"), descriptor: empty_descriptor)
     end
 
     assert_equal "no runner for stage mystery", error.message
+  end
+
+  def test_coding_runner_keys_are_a_subset_of_descriptor_stage_names
+    descriptor_names = Hive::Workflows::Coding::DESCRIPTOR.stages.map(&:name)
+    drifted = Hive::Stages::Resolver::CODING_RUNNERS.keys - descriptor_names
+
+    assert_empty drifted,
+                 "every CODING_RUNNERS key must name a stage in Coding::DESCRIPTOR; drifted: #{drifted.inspect}"
   end
 
   def test_resolving_one_bespoke_stage_does_not_load_other_bespoke_files

@@ -9,9 +9,13 @@ module Hive
 
       def run!(task, cfg)
         cfg ||= {}
-        # U3 seam: the stage is re-resolved from Registry.default here rather than from the
-        # descriptor the dispatcher matched. When U3 threads the dispatched descriptor through,
-        # this lookup is the call site that should consume it instead of the global default.
+        # U3 seam: the stage is re-resolved from Registry.default here. No dispatcher threads a
+        # matched descriptor today — `pick_runner` (commands/run.rb) always calls
+        # `Resolver.resolve(task)` with the default, and that resolver's `descriptor:` param is
+        # test-only. `Resolver.resolve` shares the same global-default coupling (see its early
+        # `descriptor: Hive::Workflows::Registry.default` binding). When descriptor threading is
+        # introduced, this lookup is the call site that should consume the dispatched descriptor
+        # instead of the global default.
         stage = Hive::Workflows::Registry.default.stages.find { |candidate| candidate.name == task.stage_name }
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
         output_path = File.join(task.folder, stage.state_file)

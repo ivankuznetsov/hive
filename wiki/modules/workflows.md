@@ -1,17 +1,25 @@
 ---
 title: Hive::Workflows
 type: module
-source: lib/hive/workflows.rb
+source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb
 created: 2026-04-26
-updated: 2026-05-22
+updated: 2026-06-19
 tags: [module, workflow, verbs]
 ---
 
-**TLDR**: Single source of truth for the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`). Each verb advances a task from one stage to the next; `Hive::Commands::StageAction` consumes `Hive::Workflows::VERBS` directly, `Hive::TaskAction` uses it to label the next action per stage, and `Hive::Commands::Approve` / `FindingToggle` use it to derive the next-action command after a successful operation.
+**TLDR**: The coding workflow is now described once as `Hive::Workflows::Coding::DESCRIPTOR`: an ordered `Hive::Workflow` value object whose stages carry directory names, state files, and incoming advance verbs. `Hive::Workflows::Registry.default` returns that descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. Stage runners and hardcoded stage consumers still read the old constants; this is a behavior-preserving foundation for later workflow-as-data work.
+
+## Descriptor and registry
+
+- `Hive::Workflow` — frozen `Data` value object with `id` and ordered `stages`.
+- `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; inert metadata such as `kind`, `skill`, `status_mode`, `budget_usd`, `timeout_sec`, and `capability` is carried for later units but not read by the current runtime.
+- `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
+- `Hive::Workflows::Coding::DESCRIPTOR` — the only built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.
+- `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
 
 ## Constants
 
-- `VERBS` — frozen hash, verb name → `{ source:, target:, force_source? }`. Source and target are `Hive::Stages::DIRS` entries.
+- `VERBS` — frozen hash, verb name → `{ source:, target:, force_source? }`. It is derived by walking adjacent stages in `Registry.default`; false `force_source` / `interactive` flags are omitted entirely to preserve the historical hash shape.
 - `VERB_BY_SOURCE` — reverse lookup: source stage_dir → verb. nil for `9-done` (no verb advances out).
 - `VERB_BY_TARGET` — reverse lookup: target stage_dir → verb. nil for `1-inbox` (no verb arrives there; tasks are created via `hive new`).
 
@@ -47,10 +55,11 @@ Hive::Workflows.workflow_verb?("findings") # false (a generic verb, not workflow
 
 ## Why a separate module?
 
-`StageAction` previously owned an `ACTIONS` table; `TaskAction` had its own `ACTIONS` map; `Approve#workflow_command_for` had a hard-coded `{2 => "brainstorm", …}` literal. Three sources of truth for the same five-row map. Renaming `develop` → `execute` would silently leave one of them on the old name. The shared module ensures every consumer stays in lockstep.
+`StageAction` previously owned an `ACTIONS` table; `TaskAction` had its own `ACTIONS` map; `Approve#workflow_command_for` had a hard-coded `{2 => "brainstorm", …}` literal. Three sources of truth for the same map meant renaming a verb could silently leave one consumer on the old value. The shared `VERBS` module-level API fixed that drift class; the descriptor now moves the stage dirs, task state-file map, and verb adjacency behind the same ordered source while keeping the old constants for callers.
 
 ## Backlinks
 
 - [[commands/run]] — workflow verb dispatch via `Hive::Commands::StageAction`
 - [[modules/task_action]] — uses VERBS to build per-state next-action commands
 - [[modules/stages]] — the canonical stage list this module references
+- [[modules/task]] — task stage validation and state-file lookup derived from the descriptor-backed constants

@@ -48,12 +48,14 @@ module Hive
       SEVERITY_HEADER = /^##\s+(High|Medium|Nit)\b/i.freeze
 
       # The prompt's example block (templates/reviewer_codex_native_review.md.erb)
-      # spells findings as `- [ ] <finding>: <one-line justification>`. When
-      # codex echoes the prompt template instead of reviewing, the output
-      # carries the `## High/Medium/Nit` headers (so it passes SEVERITY_HEADER)
-      # but still has these literal angle-bracket placeholders — a real review
-      # never emits them. Treat that as a reviewer failure so it retries rather
-      # than recording a hollow clean pass.
+      # spells findings as `- [ ] <finding>: <one-line justification>`. codex
+      # ALWAYS echoes the prompt (including this example) at the top of its
+      # session transcript, so the RAW stdout almost always contains this
+      # placeholder even for a genuine review. The check therefore runs against
+      # codex's real answer (see #review_body) with the echoed prompt stripped —
+      # a placeholder surviving there means codex's OWN answer is the unfilled
+      # template (a hollow run): fail so it retries instead of recording a fake
+      # clean pass.
       TEMPLATE_ECHO = /-\s*\[\s*\]\s*<finding>:\s*<one-line justification>/.freeze
 
       # Bytes of the captured codex transcript retained in the failure message
@@ -71,9 +73,16 @@ module Hive
       # cat'd files, diffs, even a full test run), then codex's final
       # assistant message under the last `codex` marker. A bare line that is
       # exactly one of these markers delimits the transcript that
-      # `normalize_output` drops; `CODEX_REPLY` is the final-message marker.
+      # `review_body` drops; `CODEX_REPLY` is the final-message marker.
       SESSION_MARKER = /\A(?:exec|thinking|codex)\z/.freeze
       CODEX_REPLY = /\Acodex\z/.freeze
+
+      # Canonical clean-pass findings, in the exact shape the prompt asks for an
+      # empty review ("No findings." under each header). Published when codex
+      # genuinely reviewed but produced a prose verdict with no structured
+      # findings — so triage sees a well-formed zero-finding file instead of the
+      # whole pass failing as all_failed.
+      CLEAN_FINDINGS = "## High\nNo findings.\n\n## Medium\nNo findings.\n\n## Nit\nNo findings.\n".freeze
 
       def initialize(spec, ctx, cfg: nil)
         super(spec, ctx)
@@ -134,24 +143,45 @@ module Hive
       end
 
       def finalize(run, attempts, max_attempts)
-        if usable_review?(run)
-          File.write(output_path, normalize_output(run.stdout))
-          return Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
+        case review_status(run)
+        when :findings
+          File.write(output_path, format_body(review_body(run.stdout)))
+          Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
+        when :clean
+          File.write(output_path, clean_findings(review_body(run.stdout)))
+          Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
+        else
+          # Failure: leave no malformed findings file behind — triage would
+          # otherwise treat it as real reviewer output.
+          delete_output!
+          error_result(base_reason(run), attempts, max_attempts, detail: captured_tail(run))
         end
-
-        # Failure: leave no malformed findings file behind — triage would
-        # otherwise treat it as real reviewer output.
-        delete_output!
-        error_result(base_reason(run), attempts, max_attempts, detail: captured_tail(run))
       end
 
-      # A run is usable only when it exited 0, carries the severity headers, and
-      # is NOT the prompt template echoed back (which would otherwise pass the
-      # header check as a hollow clean pass).
+      # A run is usable when codex's real answer is either structured findings
+      # or a genuine no-findings verdict. The run! loop breaks on this.
       def usable_review?(run)
-        return false unless run&.success?
+        status = review_status(run)
+        status == :findings || status == :clean
+      end
 
-        valid_findings?(run.stdout) && !template_echo?(run.stdout)
+      # Classify codex's REAL answer (the echoed prompt + tool transcript
+      # stripped — see #review_body):
+      #   :findings      — carries ## High/Medium/Nit findings → publish them
+      #   :clean         — codex replied with a prose verdict but no structured
+      #                    findings → publish a canonical "No findings." pass
+      #   :template_echo — codex's own answer is the unfilled prompt template
+      #   :error         — launch/timeout/non-zero exit, or banner/interrupted
+      #                    output with no real codex verdict
+      def review_status(run)
+        return :error unless run&.success?
+
+        body = review_body(run.stdout)
+        return :template_echo if template_echo?(body)
+        return :findings if valid_findings?(body)
+        return :clean if !body.empty? && codex_replied?(run.stdout)
+
+        :error
       end
 
       # Terse, single-line failure reason (no captured output — `captured_tail`
@@ -161,9 +191,16 @@ module Hive
         return "codex review produced no output" if run.nil?
         return run.error if run.error
         return "codex review exited with status=#{run.exit_code.inspect}" unless run.exit_code&.zero?
-        return "codex review echoed the prompt template instead of producing findings" if template_echo?(run.stdout)
+        return "codex review echoed the prompt template instead of producing findings" if echoed_template?(run)
 
         "codex review output missing High/Medium/Nit findings headers"
+      end
+
+      # True when codex's real answer is the unfilled template, or when nothing
+      # but the echoed prompt template survived (a hollow run with no verdict).
+      def echoed_template?(run)
+        body = review_body(run.stdout)
+        template_echo?(body) || (body.empty? && template_echo?(run.stdout))
       end
 
       # The last FAILURE_TAIL_BYTES of codex's combined stdout+stderr, indented
@@ -205,32 +242,65 @@ module Hive
         stdout.to_s.match?(TEMPLATE_ECHO)
       end
 
-      # Trim codex's stdout to the findings triage needs to read: drop the
-      # leading banner (start at the first severity header) AND the tool-call
-      # transcript in the middle, keeping the leading findings block plus
-      # codex's final message. Handing triage the raw transcript (seen at
-      # 96 KB–565 KB) bloats its prompt and has caused triage timeouts.
-      def normalize_output(stdout)
+      # codex's REAL review answer, with the echoed prompt AND the exec/thinking
+      # tool transcript stripped. codex review streams: [banner][echoed prompt,
+      # carrying the template's own "## High / - [ ] <finding>:..." example]
+      # [thinking/exec transcript][final assistant message]. We keep a leading
+      # findings block ONLY when it is real (not the verbatim placeholder
+      # template) plus codex's final message — so the raw prompt echo never
+      # drives the usable/echo decision and never bloats the published file.
+      # (Handing triage the raw transcript, seen at 96 KB–565 KB, has timed it
+      # out.)
+      def review_body(stdout)
         text = stdout.to_s
         idx = text =~ SEVERITY_HEADER
         body = idx ? text[idx..] : text
-        body = drop_session_transcript(body).rstrip
+        head, reply = split_session_transcript(body)
+        head = "" if template_echo?(head) # the echoed prompt example, not findings
+        [ head.rstrip, reply.strip ].reject(&:empty?).join("\n\n")
+      end
+
+      # Split a (header-leading) body into the leading findings block and
+      # codex's final assistant message, discarding the exec/thinking/codex
+      # transcript between them. No session marker → it is all "head" (an
+      # already-clean output, or a shape we don't recognize — never worse than
+      # the raw body).
+      def split_session_transcript(body)
+        lines = body.lines
+        first = lines.index { |line| line.chomp.match?(SESSION_MARKER) }
+        return [ body, "" ] unless first
+
+        last_reply = lines.rindex { |line| line.chomp.match?(CODEX_REPLY) }
+        head = lines[0...first].join
+        reply = last_reply && last_reply >= first ? lines[(last_reply + 1)..].join : ""
+        [ head, reply ]
+      end
+
+      # Did codex emit a non-empty final assistant message (under the last
+      # `codex` marker)? Distinguishes a genuine no-findings VERDICT (clean)
+      # from banner-only / interrupted output (error).
+      def codex_replied?(stdout)
+        lines = stdout.to_s.lines
+        idx = lines.rindex { |line| line.chomp.match?(CODEX_REPLY) }
+        return false unless idx
+
+        !lines[(idx + 1)..].join.strip.empty?
+      end
+
+      def format_body(body)
         body.empty? ? body : "#{body}\n"
       end
 
-      # Discard the `exec`/`thinking`/`codex` session transcript that sits
-      # between the leading findings block and codex's final assistant message.
-      # No session marker → return the body unchanged (already-clean output, or
-      # a shape we don't recognize — never produce worse than the raw body).
-      def drop_session_transcript(body)
-        lines = body.lines
-        first = lines.index { |line| line.chomp.match?(SESSION_MARKER) }
-        return body unless first
+      # codex reviewed and gave a prose verdict with no structured findings:
+      # publish the canonical clean pass, preserving codex's verdict as a
+      # single-line trailing comment for the audit trail (triage parses
+      # `- [ ]` checkbox lines, so an inert one-line HTML comment is ignored).
+      def clean_findings(body)
+        note = body.gsub(/\s+/, " ").delete("<>").strip
+        return CLEAN_FINDINGS if note.empty?
 
-        last_reply = lines.rindex { |line| line.chomp.match?(CODEX_REPLY) }
-        head = lines[0...first].join.rstrip
-        reply = last_reply && last_reply >= first ? lines[(last_reply + 1)..].join.strip : ""
-        reply.empty? ? head : "#{head}\n\n#{reply}"
+        note = "#{note[0, 500].rstrip}…" if note.length > 500
+        "#{CLEAN_FINDINGS}\n<!-- codex review summary: #{note} -->\n"
       end
 
       # Run `codex review --title <title> <prompt>` in the worktree, capturing

@@ -19,7 +19,35 @@ class ConfigTest < Minitest::Test
       assert_equal 50, cfg["budget_usd"]["digest"]
       assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
+      assert_equal "coding", cfg["default_workflow"]
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_accepts_default_workflow_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        default_workflow: research
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "research", cfg["default_workflow"]
+    end
+  end
+
+  def test_load_keeps_default_workflow_when_other_keys_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        dependency_gate_stage: 9-done
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "coding", cfg["default_workflow"]
+      assert_equal "9-done", cfg["dependency_gate_stage"]
     end
   end
 

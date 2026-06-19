@@ -959,6 +959,37 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_signature_verification_before_local_gpg_program_runs
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "gpg-ran")
+      fake_gpg = executable_touch_binary(dir, "fake-gpg", pwn_path)
+      run!("git", "-C", dir, "config", "gpg.program", fake_gpg)
+      install_commit_with_gpgsig(dir)
+      env = real_git_env(dir)
+
+      [
+        [ "log", "--show-signature", "-1" ],
+        [ "log", "--format=%G?", "-1" ],
+        [ "show", "--format=%G?", "--no-patch" ],
+        [ "rev-list", "--format=%G?", "HEAD", "-1" ]
+      ].each do |args|
+        FileUtils.rm_f(pwn_path)
+
+        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        assert_includes err, "[dry-run] git -C #{dir} #{args.join(' ')} skipped"
+        refute_path_exists pwn_path, "local gpg.program ran for git #{args.join(' ')}"
+      end
+
+      out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "log", "--format=%H", "-1")
+
+      assert status.success?, err
+      refute_empty out
+      refute_path_exists pwn_path, "plain log format must not verify signatures"
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")
@@ -1106,5 +1137,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     RUBY
     FileUtils.chmod("+x", path)
     path
+  end
+
+  def install_commit_with_gpgsig(dir)
+    tree = run!("git", "-C", dir, "write-tree").strip
+    commit = [
+      "tree #{tree}",
+      "author Test <test@example.com> 1700000000 +0000",
+      "committer Test <test@example.com> 1700000000 +0000",
+      "gpgsig -----BEGIN PGP SIGNATURE-----",
+      " ",
+      " fake-signature",
+      " -----END PGP SIGNATURE-----",
+      "",
+      "signed",
+      ""
+    ].join("\n")
+    commit_path = File.join(dir, "commit-with-gpgsig.txt")
+    File.write(commit_path, commit)
+    oid = run!("git", "-C", dir, "hash-object", "-t", "commit", "-w", commit_path).strip
+    run!("git", "-C", dir, "update-ref", "refs/heads/master", oid)
   end
 end

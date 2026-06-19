@@ -1,4 +1,5 @@
 require "test_helper"
+require "tmpdir"
 
 class TasksTest < ActionDispatch::IntegrationTest
   setup do
@@ -197,6 +198,20 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}/media/missing.png"
     assert_response :not_found
+  end
+
+  test "media route refuses a symlinked media directory" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+    outside = Pathname.new(Dir.mktmpdir("hive-media-escape"))
+    File.binwrite(outside.join("01-home.png"), png_bytes)
+    FileUtils.rm_rf(folder.join("media"))
+    File.symlink(outside, folder.join("media"))
+
+    get "/tasks/#{@project}/#{@slug}/media/01-home.png"
+    assert_response :not_found
+  ensure
+    FileUtils.rm_rf(outside) if outside
   end
 
   test "media route 404s a valid-shape slug that names no task" do

@@ -271,6 +271,14 @@ the log path still applies `File.basename(params[:slug])` before joining under
 that registry-derived log root. See [[commands/web]] for the task log-tail
 surface.
 
+The hivebox task media route also carries a Brakeman file-access ignore. The
+route constrains `:filename` to a single PNG/JPEG/GIF component, then
+`TasksController#resolved_media_path` applies `File.basename`, repeats the
+extension check, resolves the real task folder and media directory, refuses a
+symlinked `media/` root, and streams only files whose realpath remains below
+that media root. `web/test/integration/tasks_test.rb` covers inline streaming,
+traversal/extension/missing-file refusal, and symlinked media-root refusal.
+
 Commit `c4e2cab5` adds the current `hive bench submit` Brakeman ignore for
 `gh pr create`: `Open3.capture3` is argv-form, and the resolved `9-done` slug
 is interpolated only into PR title/body text. The paired source change splits

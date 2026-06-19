@@ -1,5 +1,6 @@
 require "date"
 require "hive/config"
+require "hive/env_file"
 require "hive/digest/errors"
 require "hive/digest/window"
 require "hive/digest/shipped_item"
@@ -34,6 +35,16 @@ module Hive
             collector: nil, categorizer: nil, sender: nil)
       local_date = date ? Window.parse_date(date) : Window.previous_local_day(now: clock.call)
       cfg ||= Hive::Config.load_global_digest_config
+      # Load ~/.config/hive/.env (if present) so a real send can authenticate
+      # even when the surrounding environment carries no HIVE_TELEGRAM_BOT_TOKEN
+      # — most importantly the daemon-dispatched `hive digest`, whose
+      # systemd/detached launch environment does not inherit the token (until
+      # now only `hive bot start` loaded it, via lib/hive/commands/bot.rb, so a
+      # daemon-scheduled digest failed preflight with exit 78 every tick). An
+      # existing exported env var always wins. A dry-run never sends, so it
+      # skips this entirely — matching the dry-run "no token/chat lookup"
+      # contract.
+      Hive::EnvFile.load! unless dry_run
       collector ||= Collector.new
       sender ||= Sender.new(cfg: cfg)
 

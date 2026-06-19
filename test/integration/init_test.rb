@@ -607,6 +607,68 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_non_tty_skips_visual_artifact_prereq_prompts_silently
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        out, err = capture_io { Hive::Commands::Init.new(dir).call }
+
+        assert_includes out, "hive: initialized"
+        refute_includes out, "Visual artifact capture"
+        refute_includes err, "Visual artifact capture"
+        refute_includes out, "Screenote hosting"
+        refute_includes err, "Screenote hosting"
+      end
+    end
+  end
+
+  def test_init_interactive_visual_prereqs_skip_screenote_and_complete
+    input_text = visual_prereq_interactive_defaults(screenote_answer: "")
+
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |dir|
+        input = StringIO.new(input_text)
+        input.define_singleton_method(:tty?) { true }
+        prompt_output = StringIO.new
+        readiness = Object.new
+        readiness.define_singleton_method(:capture_tooling_status) do
+          {
+            ffmpeg: { present: true, path: "/usr/bin/ffmpeg" },
+            asciinema: { present: true, path: "/usr/bin/asciinema" },
+            missing: [],
+            satisfied: true
+          }
+        end
+        readiness.define_singleton_method(:screenote_status) do
+          { connected: false, base_url: nil, reason: "missing token" }
+        end
+        installer = Object.new
+        installer.define_singleton_method(:package_manager) { nil }
+        installer.define_singleton_method(:command_for) { |missing:| "install #{missing.join(' ')}" }
+        prereqs = Hive::Commands::Init::VisualArtifactsPrereqs.new(
+          input: input,
+          output: prompt_output,
+          readiness: readiness,
+          installer: installer
+        )
+        prompts = Hive::Commands::Init::Prompts.new(
+          input: input,
+          output: prompt_output,
+          summary_io: StringIO.new,
+          visual_artifacts_prereqs: prereqs
+        )
+
+        out, _err = capture_io { Hive::Commands::Init.new(dir, prompts: prompts).call }
+
+        assert_includes out, "hive: initialized"
+        assert_includes prompt_output.string, "visual capture tooling: ffmpeg ✓ asciinema ✓"
+        assert_includes prompt_output.string, "Screenote hosting is optional"
+        assert_includes prompt_output.string, "screenote: skipped"
+        global = YAML.safe_load(File.read(File.join(home, "config.yml")))
+        refute global.key?("screenote")
+      end
+    end
+  end
+
   # --- U5: piped interactive flow ----------------------------------------
 
   # Build a Prompts instance backed by a tty-flagged StringIO so we can
@@ -641,6 +703,16 @@ class InitTest < Minitest::Test
       answers
     end
     prompts
+  end
+
+  def visual_prereq_interactive_defaults(screenote_answer:)
+    answers = []
+    answers.concat([ "" ] * 10) # planning through triage bias
+    answers.concat([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size)
+    answers.concat([ "", "", "" ]) # daemon, babysitter, daemon autostart
+    answers << "" # final confirmation
+    answers << screenote_answer
+    answers.map { |answer| "#{answer}\n" }.join
   end
 
   def assert_clean_failed_init(dir)

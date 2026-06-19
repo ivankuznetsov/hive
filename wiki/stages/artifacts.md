@@ -27,6 +27,12 @@ tags: [stage, artifacts, release]
 
 Screenote processing is deliberately fail-soft and never turns a completed artifacts stage red. Only invalid manifest JSON, a misconfigured screenote endpoint (`Hive::ConfigError`), individual upload failures, and the outer `StandardError` rescue actually warn. The per-item skips — missing credentials (the whole batch short-circuits), skipped/failed manifests, missing files, non-still GIF entries, and traversal-/symlink-shaped item filenames — are silently skipped.
 
+The runtime capture/upload mechanics remain fail-soft, but host readiness is
+now surfaced earlier: interactive [[commands/init]] can optionally install
+baseline capture tooling (`ffmpeg` and `asciinema`) and connect screenote by
+validating a REST API token into global config, while [[commands/doctor]]
+reports the same readiness as non-fatal warning rows.
+
 ## Media manifest
 
 The agent writes `<task>/media/manifest.json`:

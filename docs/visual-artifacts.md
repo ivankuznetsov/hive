@@ -37,6 +37,21 @@ capture tool is missing, the agent writes `status: "failed"` with a short reason
 and still completes the stage. Pure backend/refactor/docs tasks write
 `status: "skipped"` instead.
 
+## Init and doctor readiness
+
+Interactive `hive init` offers two optional visual-artifact setup steps after
+the final confirmation and before project files are written:
+
+- install missing baseline capture tools (`ffmpeg` and `asciinema`) through a
+  detected package manager, or print the exact command to run manually;
+- connect screenote by opening the token settings page, validating a pasted API
+  token with an authenticated REST request, and saving it only to the global
+  Hive config.
+
+Every prompt defaults to skip. Non-TTY init skips these prompts silently.
+`hive doctor` reports the same readiness later as warning rows; missing visual
+artifact prerequisites never make doctor fail.
+
 ## screenote
 
 After the agent completes, Hive uploads PNG/JPEG stills with
@@ -63,7 +78,12 @@ in hivebox.
 
 ## Capture tools
 
-Recommended tools where artifacts agents run:
+Baseline tools that `hive init` and `hive doctor` understand:
+
+- `ffmpeg`
+- `asciinema`
+
+Additional tools may still be needed where artifacts agents run:
 
 - UI/browser: agent-browser or Playwright with a browser installed.
 - TUI/CLI: `vhs` (records straight to GIF), or `asciinema` to record a `.cast`

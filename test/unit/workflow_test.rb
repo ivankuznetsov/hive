@@ -28,6 +28,12 @@ class WorkflowTest < Minitest::Test
     refute verb.interactive
   end
 
+  def test_advance_verb_can_flag_interactive
+    verb = Hive::Workflow::AdvanceVerb.new(name: "manual-review", interactive: true)
+
+    assert verb.interactive, "interactive: true must surface on the value object the VERBS derivation reads"
+  end
+
   def test_workflow_freezes_stage_array
     stages = [
       Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md")
@@ -37,6 +43,7 @@ class WorkflowTest < Minitest::Test
 
     assert workflow.frozen?
     assert workflow.stages.frozen?
+    refute stages.frozen?, "the caller's array must stay unfrozen — the workflow freezes its own dup"
   end
 
   def test_value_objects_are_immutable_and_copyable

@@ -76,4 +76,25 @@ class WorkflowGoldenTest < Minitest::Test
     end
     assert Hive::Workflows::VERBS.frozen?
   end
+
+  # v1 keeps every verb non-interactive by design (no descriptor sets
+  # `interactive: true`), so the derived map must carry no `:interactive`
+  # key. Locking this against the real VERBS guards the inert path the
+  # descriptor relies on.
+  def test_no_workflow_verb_is_interactive_in_v1
+    Hive::Workflows::VERBS.each do |verb, cfg|
+      refute cfg.key?(:interactive), "#{verb} unexpectedly carries an :interactive key"
+    end
+  end
+
+  # Exercise every reachable branch of the real `interactive?` predicate:
+  # a known non-interactive verb, an unknown verb (nil cfg), nil input,
+  # and a Symbol (coerced via `to_s`). The true return stays unreachable
+  # while v1 ships no interactive verb.
+  def test_interactive_predicate_is_false_for_all_real_verbs
+    assert_equal false, Hive::Workflows.interactive?("review")
+    assert_equal false, Hive::Workflows.interactive?(:review)
+    assert_equal false, Hive::Workflows.interactive?("does-not-exist")
+    assert_equal false, Hive::Workflows.interactive?(nil)
+  end
 end

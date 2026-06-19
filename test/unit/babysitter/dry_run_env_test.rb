@@ -312,6 +312,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
+      assert_stubbed env, "gh", "api", "https://evil.example.com/repos/owner/repo"
       # An scp-style `git@host:owner/repo` carries a host through a single-slash
       # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
       # disqualify it.
@@ -551,6 +552,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
       assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
+      assert_includes skipped, "gh api https://evil.example.com/repos/owner/repo skipped"
       assert_includes skipped, "gh -R git@evil.example.com:owner/repo pr view 42 skipped"
       assert_includes skipped, "gh repo view evil.example.com/owner/repo skipped"
       assert_includes skipped, "gh repo view https://evil.example.com/owner/repo skipped"

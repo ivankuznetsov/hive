@@ -87,8 +87,8 @@ end
 # (or a URL / scp `git@host:owner/repo`) and `gh pr {view,checks,diff} <url>`.
 # Reject those positionals too. The host-qualified slug rule (a colon or a second
 # slash) is scoped to `repo view`, because `gh api repos/owner/repo` endpoints and
-# `gh pr view feature/branch` refs legitimately carry slashes; for pr reads only a
-# full `scheme://host` URL names a host.
+# `gh pr view feature/branch` refs legitimately carry slashes; for api/pr reads
+# only a full `scheme://host` URL names a host.
 def positional_host_override?(rest)
   case rest[0, 2]
   when %w[repo view]
@@ -96,8 +96,29 @@ def positional_host_override?(rest)
   when %w[pr view], %w[pr checks], %w[pr diff]
     target_operands(rest.drop(2)).any? { |arg| arg.include?("://") }
   else
-    false
+    rest.first == "api" && api_endpoint_operand(rest).to_s.include?("://")
   end
+end
+
+def api_endpoint_operand(rest)
+  index = 1
+  while index < rest.length
+    arg = rest[index]
+    case arg
+    when "--"
+      return rest[index + 1]
+    when "-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header",
+         "-p", "--preview", "-q", "--jq", "-t", "--template", "--input", "--cache"
+      index += 2
+    when /\A--(?:method|raw-field|field|header|preview|jq|template|input|cache)=/, /\A-[XfFHpqt]=?.+/
+      index += 1
+    when /\A-/
+      index += 1
+    else
+      return arg
+    end
+  end
+  nil
 end
 
 # Yield the bare positional operands, skipping flags and the separate value of

@@ -197,6 +197,22 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_accepts_nil_cfg
+    # Exercises the `cfg ||= {}` nil-arm (agent.rb:11): a nil cfg must be
+    # coerced to {} and run identically to an empty config.
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_stubbed_spawn do
+        assert_equal(
+          { commit: "complete", status: :complete },
+          Hive::Stages::Agent.run!(task, nil),
+          "nil cfg must be coerced to {} and run like an empty config"
+        )
+      end
+    end
+  end
+
   def test_marker_actions_map_to_commit_and_status
     {
       "<!-- WAITING -->\n" => [ "round_waiting", :waiting ],

@@ -263,6 +263,24 @@ def test_push_branch_returns_failure_when_capture_raises_gh_error
   end
 end
 
+def test_push_branch_force_passes_force_with_lease
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+    captured = cmd
+    [ "", "", ok ]
+  }) do
+    Hive::Gh.push_branch("/tmp/wt", "feature", force: true)
+    assert_includes captured, "--force-with-lease",
+                    "force: true must pass --force-with-lease to git push"
+
+    captured = nil
+    Hive::Gh.push_branch("/tmp/wt", "feature")
+    refute_includes captured, "--force-with-lease",
+                    "a default push must not force"
+  end
+end
+
 def test_lookup_existing_pr_rejects_unparseable_json
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "not-json", "", status ] }) do

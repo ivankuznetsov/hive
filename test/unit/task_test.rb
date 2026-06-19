@@ -275,5 +275,4 @@ class TaskTest < Minitest::Test
       assert_includes derived, "add-foo"
     end
   end
-
 end

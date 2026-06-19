@@ -47,8 +47,26 @@ class TaskTest < Minitest::Test
         folder = File.join(dir, ".hive-state", "stages", stage_dir, "x-260424-7a3b")
         FileUtils.mkdir_p(folder)
         task = Hive::Task.new(folder)
+        stage_name = stage_dir.split("-", 2).last
+
+        assert_equal :coding, task.workflow.id
+        assert_equal Hive::Task::STAGE_NAMES, task.stage_names
+        assert_equal File.join(folder, Hive::Task::STATE_FILES.fetch(stage_name)), task.state_file
         assert_equal state_file, File.basename(task.state_file)
       end
+    end
+  end
+
+  def test_rejects_stage_index_mismatch
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "3-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      assert_match(/stage directory 3-brainstorm/, error.message)
+      assert_match(/expected 2-brainstorm/, error.message)
     end
   end
 
@@ -74,9 +92,104 @@ class TaskTest < Minitest::Test
 
   def test_invalid_stage_name
     with_tmp_dir do |dir|
-      folder = File.join(dir, ".hive-state", "stages", "9-elsewhere", "x-260424-7a3b")
+      folder = File.join(dir, ".hive-state", "stages", "4-nonsense", "x-260424-7a3b")
       FileUtils.mkdir_p(folder)
-      assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+      assert_match(/unknown stage name: 4-nonsense/, error.message)
+      assert_match(/workflow :coding/, error.message)
+    end
+  end
+
+  def test_meta_workflow_selector_resolves_task_workflow
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "meta.yml"), "workflow: research\n")
+
+        task = Hive::Task.new(folder)
+
+        assert_equal :research, task.workflow.id
+        assert_equal %w[intake gather report], task.stage_names
+        assert_equal File.join(folder, "notes.md"), task.state_file
+      end
+    end
+  end
+
+  def test_project_default_workflow_resolves_fieldless_task
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: research\n")
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+
+        task = Hive::Task.new(folder)
+
+        assert_equal :research, task.workflow.id
+        assert_equal %w[intake gather report], task.stage_names
+        assert_equal File.join(folder, "notes.md"), task.state_file
+      end
+    end
+  end
+
+  def test_blank_task_workflow_selector_falls_back_to_project_default
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: research\n")
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "meta.yml"), "workflow: \"  \"\n")
+
+        task = Hive::Task.new(folder)
+
+        assert_equal :research, task.workflow.id
+      end
+    end
+  end
+
+  def test_unknown_workflow_selector_raises_invalid_task_path
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "workflow: nope\n")
+
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      assert_match(/unknown workflow :nope/, error.message)
+    end
+  end
+
+  def test_malformed_meta_selector_falls_back_to_coding
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "workflow: [unterminated\n")
+
+      task = nil
+      _out, err = capture_io { task = Hive::Task.new(folder) }
+
+      assert_equal :coding, task.workflow.id
+      assert_match(/task_meta: failed to read/, err)
+    end
+  end
+
+  def test_broken_project_config_default_workflow_falls_back_to_coding
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), "dependency_gate_stage: 7-artifacts\n")
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+
+      task = nil
+      _out, err = capture_io { task = Hive::Task.new(folder) }
+
+      assert_equal :coding, task.workflow.id
+      assert_match(/failed to read default_workflow/, err)
+      assert_match(/falling back to coding/, err)
     end
   end
 
@@ -161,5 +274,26 @@ class TaskTest < Minitest::Test
       derived = task.worktree_path
       assert_includes derived, "add-foo"
     end
+  end
+
+  private
+
+  def research_workflow
+    Hive::Workflow.new(
+      id: :research,
+      stages: [
+        Hive::Workflow::Stage.new(name: "intake", index: 1, state_file: "intake.md", kind: :inert),
+        Hive::Workflow::Stage.new(name: "gather", index: 2, state_file: "notes.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "report", index: 3, state_file: "report.md", kind: :marker)
+      ]
+    )
+  end
+
+  def with_registered_workflow(descriptor)
+    original_fetch = Hive::Workflows::Registry.method(:fetch)
+    replacement = lambda { |id|
+      id == descriptor.id ? descriptor : original_fetch.call(id)
+    }
+    with_replaced_singleton_method(Hive::Workflows::Registry, :fetch, replacement) { yield }
   end
 end

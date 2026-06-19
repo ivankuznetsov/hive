@@ -6,6 +6,7 @@ class CommandsRunTest < Minitest::Test
   TaskDouble = Struct.new(
     :slug, :stage_name, :stage_index, :folder, :state_file,
     :hive_state_path, :project_root, :project_name, :worktree_path,
+    :workflow,
     keyword_init: true
   )
   MarkerDouble = Struct.new(:name, :attrs, keyword_init: true)
@@ -29,7 +30,8 @@ class CommandsRunTest < Minitest::Test
       hive_state_path: File.join(folder, "..", "..", ".."),
       project_root: "/tmp/project",
       project_name: "project",
-      worktree_path: "/tmp/worktree"
+      worktree_path: "/tmp/worktree",
+      workflow: Hive::Workflows::Registry.default
     )
   end
 
@@ -68,10 +70,46 @@ class CommandsRunTest < Minitest::Test
 
   def test_pick_runner_rejects_unknown_stage_name
     err = assert_raises(Hive::StageError) do
-      command.send(:pick_runner, TaskDouble.new(stage_name: "mystery"))
+      command.send(:pick_runner, task(stage_name: "mystery"))
     end
 
     assert_match(/no runner for stage mystery/, err.message)
+  end
+
+  def test_pick_runner_passes_task_workflow_to_resolver
+    run = command
+    descriptor = research_workflow
+    t = task(stage_name: "gather")
+    t.workflow = descriptor
+    calls = []
+    replacement = lambda do |resolved_task, descriptor:|
+      calls << [ resolved_task, descriptor ]
+      :runner
+    end
+
+    with_replaced_singleton_method(Hive::Stages::Resolver, :resolve, replacement) do
+      assert_equal :runner, run.send(:pick_runner, t)
+    end
+
+    assert_equal [ [ t, descriptor ] ], calls
+  end
+
+  def test_pick_runner_uses_on_disk_task_workflow_selector
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "meta.yml"), "workflow: research\n")
+
+        t = Hive::Task.new(folder)
+        runner = command.send(:pick_runner, t)
+
+        assert_equal :research, t.workflow.id
+        assert_equal %w[intake gather report], t.stage_names
+        assert_equal File.join(folder, "notes.md"), t.state_file
+        assert_equal Hive::Stages::Agent.method(:run!), runner
+      end
+    end
   end
 
   def test_quiet_report_still_raises_for_error_markers

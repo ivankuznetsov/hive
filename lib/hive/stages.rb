@@ -1,19 +1,11 @@
+require "hive/workflows/registry"
+
 module Hive
-  # Single source of truth for the stage list. Consumers (GitOps init, Status
+  # Public source of truth for the stage list. Consumers (GitOps init, Status
   # ordering, Run#next_stage_dir, Approve resolution) all read from here so
-  # adding or renaming a stage is a one-file change.
+  # adding or renaming a stage follows the default workflow descriptor.
   module Stages
-    DIRS = %w[
-      1-inbox
-      2-brainstorm
-      3-plan
-      4-execute
-      5-open-pr
-      6-review
-      7-artifacts
-      8-finalize
-      9-done
-    ].freeze
+    DIRS = Hive::Workflows::Registry.default.stages.map(&:dir).freeze
     NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
     SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze
 

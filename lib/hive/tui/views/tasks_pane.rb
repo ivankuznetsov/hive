@@ -75,6 +75,7 @@ module Hive
         STATUS_WIDTH = 36
         AGE_WIDTH = 4
         SEPARATORS = 6 # spaces between the 7 columns
+        NAME_MIN_WIDTH = 13
 
         module_function
 
@@ -150,32 +151,31 @@ module Hive
           snap.visible_projection(scope: model.scope, filter: model.filter)
         end
 
-        # Below `inner_width = ICON+ID+PR+STAGE+STATUS+AGE+SEPARATORS+name_min`
-        # (~60 cells) the full layout overflows. Drop columns in
+        # Below `inner_width = ICON+ID+PR+STAGE+STATUS+AGE+SEPARATORS+NAME_MIN_WIDTH`
+        # (~83 cells) the full layout overflows. Drop columns in
         # priority order — first stage (mostly redundant with status),
         # then status — to keep the line within `inner_width` even on
         # very narrow terminals. The PR column is fixed and never drops.
         # The dropped columns silently shrink to zero width; row-line
         # builder pads with the remaining widths.
         def compute_layout(inner_width)
-          name_min = 8
           # Bind each branch's fixed (non-name) column cost to a local so the
           # guard threshold and the `name:` subtraction can never drift out
           # of sync — they read the same value by construction.
           fixed_full     = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
           fixed_no_stage = ICON_WIDTH + ID_WIDTH + PR_WIDTH + STATUS_WIDTH + AGE_WIDTH + (SEPARATORS - 1)
           fixed_minimal  = ICON_WIDTH + ID_WIDTH + PR_WIDTH + AGE_WIDTH + (SEPARATORS - 2)
-          if inner_width >= fixed_full + name_min
+          if inner_width >= fixed_full + NAME_MIN_WIDTH
             { name: inner_width - fixed_full, pr: PR_WIDTH, stage: STAGE_WIDTH, status: STATUS_WIDTH }
-          elsif inner_width >= fixed_no_stage + name_min
+          elsif inner_width >= fixed_no_stage + NAME_MIN_WIDTH
             # Drop the stage column; separators reduce from 6 to 5.
             { name: inner_width - fixed_no_stage, pr: PR_WIDTH, stage: 0, status: STATUS_WIDTH }
-          elsif inner_width >= fixed_minimal + name_min
+          elsif inner_width >= fixed_minimal + NAME_MIN_WIDTH
             # Drop both stage and status.
             { name: inner_width - fixed_minimal, pr: PR_WIDTH, stage: 0, status: 0 }
           else
-            # Floor at name_min; row will overflow visually but won't crash.
-            { name: name_min, pr: PR_WIDTH, stage: 0, status: 0 }
+            # Floor at NAME_MIN_WIDTH; row will overflow visually but won't crash.
+            { name: NAME_MIN_WIDTH, pr: PR_WIDTH, stage: 0, status: 0 }
           end
         end
 

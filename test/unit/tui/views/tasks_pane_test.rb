@@ -793,17 +793,17 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   # ---- compute_layout adaptive column dropping ----
-  # The full 7-column layout needs ~78 inner cells (icon=2, id=4,
-  # pr=6, stage=12, status=36, age=4, separators=6, name_min=8). Below that, columns
+  # The full 7-column layout needs ~83 inner cells (icon=2, id=4,
+  # pr=6, stage=12, status=36, age=4, separators=6, name_min=13). Below that, columns
   # drop in priority order: stage first (mostly redundant with status),
   # then status. These tests pin each branch so a future refactor of
   # the threshold values can't silently regress narrow-terminal
-  # behavior — the BubbleModel composer tests at cols=60/69/70 only
-  # exercise the full-5-column branch via single-pane fallback.
+  # behavior — the BubbleModel composer tests at cols=60/69/70 pin
+  # the single-pane and two-pane boundary composition.
 
   def test_compute_layout_full_columns_at_wide_inner_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(80)
-    assert_operator layout[:name], :>=, 8
+    layout = Hive::Tui::Views::TasksPane.compute_layout(84)
+    assert_operator layout[:name], :>=, 13
     assert_equal 6, layout[:pr]
     assert_equal 12, layout[:stage]
     assert_equal 36, layout[:status]
@@ -814,7 +814,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_equal 6, layout[:pr], "PR column must never drop"
     assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
     assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
-    assert_operator layout[:name], :>=, 8
+    assert_operator layout[:name], :>=, 13
   end
 
   def test_compute_layout_drops_stage_and_status_at_very_narrow_width
@@ -823,14 +823,14 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_equal 6, layout[:pr], "PR column must survive the narrowest fitted branch"
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
-    assert_operator layout[:name], :>=, 8
+    assert_operator layout[:name], :>=, 13
   end
 
   def test_compute_layout_floors_slug_below_extreme_minimum
     # Below the very-narrow threshold: floor at name_min, dropping all
     # but icon/id/PR/name/age. Visual overflow is acknowledged — but no crash.
     layout = Hive::Tui::Views::TasksPane.compute_layout(10)
-    assert_equal 8, layout[:name]
+    assert_equal 13, layout[:name]
     assert_equal 6, layout[:pr]
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]

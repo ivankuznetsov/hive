@@ -50,6 +50,14 @@
 /.llm-wiki/post-commit-refresh.log
 .worktrees/
 
+# Babysitter dry-run scaffolding dropped into the operated-on worktree by
+# Hive::Babysitter::DryRunEnv (the skip log + the PATH overlay of git/gh stub
+# wrappers). They are ephemeral run artifacts that must never be committed;
+# leaving them untracked makes the 6-review clean-exit auto-commit scope-check
+# reject them as residue (REVIEW_ERROR reason=ensure_clean_on_exit_failed).
+.babysitter-dry-run-skipped.log
+.hive-babysitter-dry-run-bin/
+
 # Telegram E2E headless client (Telethon) — local secrets/artifacts
 test/e2e/tg/.venv/
 test/e2e/tg/*.session

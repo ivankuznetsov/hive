@@ -1344,6 +1344,7 @@ module Hive
     # review.max_wall_clock_sec         | 0 → wall_clock_exceeded? trips on first check
     POSITIVE_INTEGER_KEYS = [
       [ %w[review ci max_attempts], "review.ci.max_attempts" ],
+      [ %w[review triage max_attempts], "review.triage.max_attempts" ],
       [ %w[review browser_test max_attempts], "review.browser_test.max_attempts" ],
       [ %w[review max_passes], "review.max_passes" ],
       [ %w[review max_wall_clock_sec], "review.max_wall_clock_sec" ]

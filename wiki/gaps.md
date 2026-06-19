@@ -7,7 +7,7 @@ updated: 2026-06-19
 tags: [gap, todo]
 ---
 
-**TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, hivebox web, testing/static-analysis, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
+**TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, hivebox web, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## Source-file coverage (representative map)
 
@@ -116,6 +116,9 @@ evidence closing the following June 16 gaps.
 
 47. **Babysitter GH browser-flag parsing is unit-pinned but not live-agent-smoked.** Commit `1dab816a` changes `bin/hive-babysitter-stub-gh` so short `-w` is treated as a browser-launch flag only when the command-specific short-option scanner parses it as an option flag. Value-taking read options now consume attached or following values, allowing examples such as `gh pr diff 42 -eworkflow.yml`, `gh pr list -lwip`, `gh pr view 42 -qweb`, and `gh pr list --search -wip` to pass through. `test/unit/babysitter/dry_run_env_test.rb` pins those cases with a recording fake `gh`, but this refresh did not find an in-tree artifact proving a full live-agent `hive babysit --once PROJECT --dry-run` run after the GH stub parser change.
 
+48. **Fix-prompt whole-defect-class behavior is prose/test-render pinned but not live-smoked.** Commit `ce3f7978` changes `templates/fix_prompt.md.erb` so a 6-review Phase 4 fix agent should grep for and fix every site with the same defect class named by an accepted finding, rather than patching only the cited line. The committed evidence is prompt prose plus the existing `test/integration/prompt_injection_test.rb` render coverage (nonce wrapping, trailers, answered-escalation context); no in-tree artifact yet proves a live review fix agent followed the new instruction by repairing multiple same-defect sites in one pass, named the extra sites, and avoided unrelated refactors.
+
+49. **PR #512 coverage-gate repair is focused-test pinned but not hosted-CI verified in-tree.** Commit `03ba06b9` added regressions for the two lines that made the Ruby CI coverage gate red: `test_wall_clock_returned_from_triage_retry_yields_review_stale` proves `run_triage_with_retries` returning `:wall_clock_exceeded` becomes `REVIEW_STALE reason=wall_clock`, and `test_dry_run_digest_complete_raise_is_isolated_as_a_fatal_event` proves dry-run digest pseudo-child completion write failures log `:fatal` instead of crashing the dispatcher tick. The committed fragment records the failed job's uncovered-line evidence and [[testing]] now names both contracts, but this refresh did not find an in-tree artifact showing the hosted Ruby CI / `bundle exec rake coverage` job passing after `03ba06b9`.
 49. **Status/TUI/Telegram PR URL surfacing is unit-pinned but not live-smoked.** Commits `42fd5e2b`, `5e4e1ffa`, `408192cb`, `50552435`, and `06e37a80` add `tasks[].pr_url` to the current `hive-status` task payload, preserve it through `Hive::Bot::StatusWatcher` and `Hive::Tui::Snapshot::Row`, add `Hive::Pr.number`, render fixed PR columns in text status/archive output and the TUI, render Telegram `/status`/`/queue` PR links with HTML escaping, and append a PR link to the existing `ready_for_review` push without changing its fingerprint. Focused tests cover status extraction from `pr.md`, nil behavior before `5-open-pr` / missing / malformed sidecars, quiet mid-scan `pr.md` `ENOENT` degradation, schema required-key drift, bot row parsing, snapshot preservation, PR-number formatting, invalid URI rejection for link safety, text/archive status rendering, TUI column layout, OSC 8 hyperlink sanitization, Telegram HTML PR-link escaping, queue parse-mode forwarding, ready-for-review push enrichment, and fingerprint stability. This refresh did not find an in-tree artifact showing a real task with an opened PR feeding live `hive status` text output, a live `hive tui` TTY frame whose PR number is clickable in the operator's terminal, or a real Telegram dev chat receiving `/status` plus the open-PR push with clickable links.
 
 ## Release install follow-ups
@@ -221,6 +224,34 @@ On a real run the display-name agent named the task "Agent Work In
 Progress" — an activity description, not a name. The prompt should pin
 "a short noun-phrase name for the TASK" with an example or two.
 
+## Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)
+
+Live task `xbookmark` #1333 (`we-need-to-add-an-260616-094b`) failed at the
+triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with
+`reason=triage_failed`. The real `error_message` was discarded by
+`mark_review_phase_failure` (now fixed — it surfaces a `message=` attr and
+triage retries; see [[stages/review]]), so the underlying trigger was never
+captured. Open questions:
+- What exactly made `wait_for_expected_output` exit before its 1800s deadline?
+  No 300s/5-min constant exists in `claude_launcher.rb`; the early-exit paths
+  are limit-reached, `tmux_session_terminated` (single-shot
+  `expected_output_session_alive?` — one `tmux has-session` `TmuxError` →
+  `false`, with no streak tolerance unlike the 3-streak pane-read path), or
+  3× consecutive unreadable-pane errors.
+- The box had ~130 agent procs and fully-exhausted swap (no OOM-kill in the
+  kernel log). Did swap thrash make a `tmux has-session` call transiently fail
+  and get misread as a dead session? If so, `expected_output_session_alive?`
+  should tolerate a transient `TmuxError` like the pane-read streak does.
+- Or did the interactive `claude` triage agent end its turn / exit before
+  writing `escalations-NN.md` (the log showed it spinning at "5m 0s" right as
+  it was about to write its output files)?
+Commit `e5c26edc` adds direct helper coverage for bounded `message=`
+truncation and capped retry backoff. Commit `c4045dfe` then clamps the retry
+loop against `review.max_wall_clock_sec` before another triage spawn and dedups
+the retry/backoff/truncation helpers, but it still does not provide a live
+post-fix failure sample. Next live triage failure should now carry the
+`message=` attr — use it to pick between these before hardening
+`expected_output_session_alive?`.
 ## codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
 
 `Hive::Reviewers::CodexReview` accepts a prose (non-checkbox) verdict as a

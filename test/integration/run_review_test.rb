@@ -536,7 +536,9 @@ class RunReviewTest < Minitest::Test
         end
         begin
           capture_io do
-            assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
+            with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
+              assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
+            end
           end
           marker = Hive::Markers.current(File.join(folder, "task.md"))
           assert_equal :review_error, marker.name
@@ -545,6 +547,8 @@ class RunReviewTest < Minitest::Test
                        "a non-limit triage failure must stay terminal (no false self-heal)"
           assert_nil marker.attrs["retry_after"],
                      "a terminal triage_failed must not carry a retry_after"
+          assert_includes marker.attrs["message"].to_s, "triage agent failed (timeout)",
+                          "the terminal triage_failed marker must surface the real error_message"
         ensure
           Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_np!)
           Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_np!)
@@ -1238,6 +1242,66 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # A transient triage failure (e.g. a momentary tmux blip misread as a dead
+  # session) must not stick the task: the bounded retry re-runs triage and,
+  # on recovery, the pass advances normally instead of parking on a terminal
+  # triage_failed marker the daemon never auto-retries.
+  def test_triage_transient_error_is_retried_then_recovers
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        reviews = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews)
+
+        Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers_retry, :run_reviewers)
+        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task, **_kwargs|
+          File.write(File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md"),
+                     "## High\n- [ ] human-review-only\n")
+          :ok
+        end
+
+        triage_calls = 0
+        Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_retry!, :run!)
+        Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
+          triage_calls += 1
+          if triage_calls == 1
+            Hive::Stages::Review::Triage::Result.new(
+              status: :error,
+              escalations_path: nil,
+              error_message: "tmux_session_terminated before writing expected output file",
+              tampered_files: []
+            )
+          else
+            esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+            File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n- [ ] needs human review\n")
+            Hive::Stages::Review::Triage::Result.new(
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            )
+          end
+        end
+
+        begin
+          capture_io do
+            with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
+              Hive::Commands::Run.new(folder).call
+            end
+          end
+
+          assert_equal 2, triage_calls, "triage must be retried once after a transient error"
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_waiting, marker.name,
+                       "a recovered triage must advance to the normal waiting state, not stay review_error"
+          refute_equal "triage_failed", marker.attrs["reason"]
+        ensure
+          Hive::Stages::Review.singleton_class.alias_method(:run_reviewers, :__orig_run_reviewers_retry)
+          Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_run_reviewers_retry)
+          Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_retry!)
+          Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_retry!)
+        end
+      end
+    end
+  end
+
   # --- T-002 (3): fix tampered → REVIEW_ERROR phase=fix ---------------
 
   def test_fix_tampered_yields_review_error
@@ -1577,6 +1641,37 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_wall_clock_returned_from_triage_retry_yields_review_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **_kwargs|
+          reviews = File.join(ctx.task_folder, "reviews")
+          FileUtils.mkdir_p(reviews)
+          File.write(
+            File.join(reviews, "stub-reviewer-01.md"),
+            "## High\n- [ ] needs human\n"
+          )
+          :ok
+        }) do
+          with_replaced_singleton_method(
+            Hive::Stages::Review,
+            :run_triage_with_retries,
+            ->(_cfg, _ctx, _task, **_kwargs) { :wall_clock_exceeded }
+          ) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        assert_equal "wall_clock", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
   def test_triage_tampered_and_error_statuses_yield_review_error
     cases = [
       [ :tampered, "triage_tampered", [ "reviews/stub-reviewer-01.md" ] ],
@@ -1602,8 +1697,10 @@ class RunReviewTest < Minitest::Test
                 tampered_files: tampered_files
               )
             }) do
-              _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-              assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+              with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
+                _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+                assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+              end
             end
           end
 
@@ -1613,6 +1710,7 @@ class RunReviewTest < Minitest::Test
           assert_equal expected_reason, marker.attrs["reason"]
           assert_equal "1", marker.attrs["pass"]
           assert_equal tampered_files.join(","), marker.attrs["files"] if triage_status == :tampered
+          assert_equal "triage error", marker.attrs["message"] if triage_status == :error
         end
       end
     end

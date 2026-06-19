@@ -12,6 +12,21 @@ module Hive
   # class body so they resolve as Workflow::Stage — they can't be declared inside
   # the Data.define block above.
   class Workflow
+    def stage_named(name)
+      stages.find { |stage| stage.name == name }
+    end
+
+    def state_file_for(name)
+      stage = stage_named(name)
+      return stage.state_file if stage
+
+      raise KeyError, "unknown stage #{name.inspect} for workflow #{id.inspect}"
+    end
+
+    def stage_names
+      stages.map(&:name)
+    end
+
     Stage = Data.define(
       :name,
       :index,

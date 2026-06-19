@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb
 created: 2026-06-08
-updated: 2026-06-08
+updated: 2026-06-19
 tags: [github, gh, module, pr]
 ---
 
@@ -23,6 +23,7 @@ tags: [github, gh, module, pr]
 | `list_open_prs(worktree_path, cfg: nil)` | Runs `gh pr list --state open --limit 1000` and includes `mergeStateStatus`; [[modules/babysitter]] uses that field to prioritize dirty/conflicted PRs before age. |
 | `pr_status_rollup` / `pr_failing_job_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter repair context. |
 | `pr_diff_stat` / `pr_base_divergence` | Fetch base and compute diff/divergence context for babysitter prompts. `pr_base_divergence` is best-effort and returns blank fields on git hiccups. |
+| `pr_stats(pr_url, cfg:)` | Fetch a PR's `additions`/`deletions`/commit count via `gh pr view <url> --json additions,deletions,commits` (keyed off the URL, no worktree/chdir needed) for the [[modules/digest]] footer. Returns `{additions:, deletions:, commits:}` (commits as a count); raises `Hive::GhError` on a failed/unparseable lookup so the caller can drop just that PR. |
 | `pr_frontmatter(path)` | Safe YAML frontmatter reader for `pr.md`; malformed YAML warns and returns `{}`. |
 | `scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)` | Scans local state-file text plus remote PR body for `Hive::SecretPatterns`; returns `ScanResult` with `fetch_failed` instead of silently treating remote fetch errors as clean. |
 | `capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil)` | Shared subprocess wrapper used by the helpers above. |

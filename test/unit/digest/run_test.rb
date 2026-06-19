@@ -6,12 +6,18 @@ class HiveDigestRunTest < Minitest::Test
     def for_date(_date) = grouped
   end
 
-  FakeCategorizer = Struct.new(:categorized, :error) do
+  FakeCategorizer = Struct.new(:categorized, :error, :summary) do
     def categorize(_grouped, date:)
       raise error if error
 
-      categorized
+      Hive::Digest::Output.new(
+        by_project: categorized, summary: summary || "Overall summary."
+      )
     end
+  end
+
+  FakeStats = Struct.new(:totals) do
+    def for_items(_items) = totals
   end
 
   FakeSender = Struct.new(:deliveries) do
@@ -46,22 +52,27 @@ class HiveDigestRunTest < Minitest::Test
     categorized = { "alpha" => [ Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.") ] }
     sender = FakeSender.new([])
 
+    totals = Hive::Digest::Totals.new(prs: 1, commits: 3, additions: 10, deletions: 2, measured_prs: 1)
     result = Hive::Digest.run(
       date: Date.new(2026, 6, 13),
       dry_run: true,
       cfg: {},
       collector: FakeCollector.new({ "alpha" => [ item ] }),
-      categorizer: FakeCategorizer.new(categorized, nil),
-      sender: sender
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(totals)
     )
 
     assert_equal :sent, result.status
     assert_equal true, sender.deliveries.first.fetch(:dry_run)
-    # Assert the categorized summary and display label reached the message,
-    # not the renderer's exact link markdown (which renderer_test owns).
+    # Assert the categorized summary, the overall summary, and the footer
+    # totals reached the message — not the renderer's exact markdown (which
+    # renderer_test owns).
     delivered = sender.deliveries.first.fetch(:text)
     assert_includes delivered, "Adds digest"
     assert_includes delivered, "Task"
+    assert_includes delivered, "Shipped the digest"
+    assert_includes delivered, "PRs 1"
   end
 
   def test_model_error_sends_failed_notice

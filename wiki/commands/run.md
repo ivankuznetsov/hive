@@ -26,7 +26,9 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
 3. If the current marker is `MANUAL_STEERING`, skip before auto-rebase or runner dispatch and report `marker=manual_steering` with `next_action.kind=no_op`. JSON sets `rebase.reason="manual_steering"`.
 4. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see "Auto-rebase pre-step" below.
-5. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,OpenPr,Review,Artifacts,Finalize,Done}.method(:run!)`. Unknown stage → `StageError`.
+5. `pick_runner(task)` delegates to `Hive::Stages::Resolver.resolve`. The resolver
+   first checks the bespoke coding runner table, then falls back to descriptor
+   `kind: :agent` stages via `Hive::Stages::Agent`. Unknown stage → `StageError`.
 6. Call the runner inside `Hive::Stages::Base.with_stage_events(task) { runner.call(task, cfg) }`. The wrapper emits a `stage_enter` event before the call, a `stage_exit` event after it, plus marker-driven `round_waiting` / `round_complete` (brainstorm, plan) or `error` (any error-class marker) events between them. Any raise emits a paired `error` + `stage_exit` so `events.jsonl` brackets stay balanced. See [[modules/events]].
 7. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
 8. `report`: print the current marker, the state file path, and a stage-aware next step.
@@ -131,6 +133,11 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 `next_stage_dir` increments `task.stage_index`; `9-done` has no `next:`.
 
 ## Stage routing
+
+`Hive::Stages::Resolver` is name-first for coding compatibility: any registered
+coding stage name resolves to its bespoke runner, even when the descriptor says
+`kind: :agent` for `brainstorm` or `plan`. Descriptor `kind: :agent` only selects
+the generic [[stages/agent]] runner for non-coding stage names.
 
 | Stage name | Runner | Page |
 |-----------|--------|------|

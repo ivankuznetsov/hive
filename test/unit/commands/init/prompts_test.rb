@@ -12,13 +12,25 @@ class InitPromptsTest < Minitest::Test
   AGENT_NAMES = %w[claude codex pi].freeze
   REVIEWER_NAMES = Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES
 
+  class NoopPrereqs
+    attr_reader :runs
+
+    def initialize
+      @runs = 0
+    end
+
+    def run
+      @runs += 1
+    end
+  end
+
   # Build prompts instance with a tty-flagged StringIO for interactive
   # tests, or a plain StringIO for non-TTY tests. `output` carries prompt
   # UI (defaults to stderr in production); `summary_io` carries the
   # non-TTY result line (defaults to stdout in production). Both are
   # injected as separate StringIOs so tests can assert against each
   # stream independently.
-  def make_prompts(input_text, tty: true, registered_agents: AGENT_NAMES)
+  def make_prompts(input_text, tty: true, registered_agents: AGENT_NAMES, visual_artifacts_prereqs: NoopPrereqs.new)
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true } if tty
     output = StringIO.new
@@ -27,7 +39,8 @@ class InitPromptsTest < Minitest::Test
       input: input,
       output: output,
       summary_io: summary_io,
-      registered_agents: registered_agents
+      registered_agents: registered_agents,
+      visual_artifacts_prereqs: visual_artifacts_prereqs
     )
     [ prompts, output, summary_io ]
   end
@@ -151,12 +164,30 @@ class InitPromptsTest < Minitest::Test
     assert_equal "codex",  answers["development_agent"]
   end
 
+  def test_non_tty_does_not_run_visual_artifacts_prereqs
+    prereqs = NoopPrereqs.new
+    prompts, _output = make_prompts("", tty: false, visual_artifacts_prereqs: prereqs)
+
+    prompts.collect
+
+    assert_equal 0, prereqs.runs
+  end
+
   # --- happy path: all defaults ---------------------------------------------
 
   def test_interactive_all_defaults
     prompts, _output = make_prompts(interactive_input)
     answers = prompts.collect
     assert_equal all_defaults, answers
+  end
+
+  def test_interactive_runs_visual_artifacts_prereqs_after_confirmation
+    prereqs = NoopPrereqs.new
+    prompts, _output = make_prompts(interactive_input(confirm: "y"), visual_artifacts_prereqs: prereqs)
+
+    prompts.collect
+
+    assert_equal 1, prereqs.runs
   end
 
   def test_interactive_all_defaults_summary_says_so

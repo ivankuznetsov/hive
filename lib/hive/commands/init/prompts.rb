@@ -1,5 +1,6 @@
 require "hive/agent_profiles"
 require "hive/config"
+require "hive/commands/init/visual_artifacts_prereqs"
 
 module Hive
   module Commands
@@ -96,10 +97,11 @@ module Hive
         # Tests inject `output: StringIO.new, summary_io: StringIO.new` to assert
         # both streams independently.
         def initialize(input: $stdin, output: $stderr, summary_io: $stdout,
-                       registered_agents: nil)
+                       registered_agents: nil, visual_artifacts_prereqs: nil)
           @input = input
           @output = output
           @summary_io = summary_io
+          @visual_artifacts_prereqs = visual_artifacts_prereqs
           # registered_agents is a list of strings (agent profile names).
           # When not injected, ask the live registry. Tests inject a fixed
           # list so they don't depend on registration order.
@@ -176,6 +178,7 @@ module Hive
 
           summarize(answers)
           confirm!
+          run_visual_artifacts_prereqs
           answers
         end
 
@@ -663,6 +666,12 @@ module Hive
 
             @output.puts "  please answer y or n"
           end
+        end
+
+        def run_visual_artifacts_prereqs
+          prereqs = @visual_artifacts_prereqs ||
+                    Hive::Commands::Init::VisualArtifactsPrereqs.new(input: @input, output: @output)
+          prereqs.run
         end
 
         def read_line

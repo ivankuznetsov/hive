@@ -617,10 +617,13 @@ class InitTest < Minitest::Test
   def make_tty_prompts(input_text)
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true }
+    prereqs = Object.new
+    prereqs.define_singleton_method(:run) { }
     Hive::Commands::Init::Prompts.new(
       input: input,
       output: StringIO.new,
-      summary_io: StringIO.new
+      summary_io: StringIO.new,
+      visual_artifacts_prereqs: prereqs
     )
   end
 

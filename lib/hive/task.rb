@@ -1,22 +1,15 @@
 require "yaml"
 require "hive/stages"
 require "hive/task_meta"
+require "hive/workflows/registry"
 require "hive/worktree"
 
 module Hive
   class Task
-    STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done].freeze
-    STATE_FILES = {
-      "inbox" => "idea.md",
-      "brainstorm" => "brainstorm.md",
-      "plan" => "plan.md",
-      "execute" => "task.md",
-      "open-pr" => "pr.md",
-      "review" => "task.md",
-      "artifacts" => "artifact.md",
-      "finalize" => "pr.md",
-      "done" => "task.md"
-    }.freeze
+    STAGE_NAMES = Hive::Workflows::Registry.default.stages.map(&:name).freeze
+    STATE_FILES = Hive::Workflows::Registry.default.stages.each_with_object({}) do |stage, state_files|
+      state_files[stage.name] = stage.state_file
+    end.freeze
     PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,

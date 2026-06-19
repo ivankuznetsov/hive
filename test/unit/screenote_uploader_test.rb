@@ -93,6 +93,23 @@ class ScreenoteUploaderTest < Minitest::Test
     end
   end
 
+  def test_invalid_json_success_body_returns_nil_with_diagnostic
+    with_tmp_dir do |dir|
+      image = File.join(dir, "shot.png")
+      File.binwrite(image, "png")
+      uploader = Hive::ScreenoteUploader.new(
+        base_url: "https://screenote.test",
+        api_token: "secret",
+        http: ->(*) { Response.new(code: "201", body: "{") }
+      )
+
+      _out, err = capture_io do
+        assert_nil uploader.upload(path: image, title: "Home")
+      end
+      assert_includes err, "invalid JSON"
+    end
+  end
+
   def test_relative_annotate_url_is_rejected
     with_tmp_dir do |dir|
       image = File.join(dir, "shot.png")
@@ -298,6 +315,50 @@ class ScreenoteUploaderTest < Minitest::Test
 
       assert_equal "abc-123", result["screenshot_id"],
                    "the screenshot_id is passed through untouched for the manifest"
+    end
+  end
+
+  def test_default_transport_uses_net_http_with_configured_timeouts
+    with_tmp_dir do |dir|
+      image = File.join(dir, "shot.png")
+      File.binwrite(image, "png")
+      seen = {}
+      fake_http = Object.new
+      fake_http.define_singleton_method(:request) do |request|
+        seen[:request] = request
+        Response.new(code: "201", body: JSON.generate("annotate_url" => "https://screenote.test/s/1"))
+      end
+
+      original_start = Net::HTTP.method(:start)
+      Net::HTTP.define_singleton_method(:start) do |host, port, use_ssl:, open_timeout:, read_timeout:, &block|
+        seen[:host] = host
+        seen[:port] = port
+        seen[:use_ssl] = use_ssl
+        seen[:open_timeout] = open_timeout
+        seen[:read_timeout] = read_timeout
+        block.call(fake_http)
+      end
+
+      begin
+        uploader = Hive::ScreenoteUploader.new(
+          base_url: "https://screenote.test:8443",
+          api_token: "secret",
+          open_timeout: 2,
+          read_timeout: 5
+        )
+
+        result = uploader.upload(path: image, title: "Home")
+      ensure
+        Net::HTTP.define_singleton_method(:start, original_start)
+      end
+
+      assert_equal "https://screenote.test/s/1", result["annotate_url"]
+      assert_equal "screenote.test", seen[:host]
+      assert_equal 8443, seen[:port]
+      assert_equal true, seen[:use_ssl]
+      assert_equal 2, seen[:open_timeout]
+      assert_equal 5, seen[:read_timeout]
+      assert_equal "Bearer secret", seen[:request]["Authorization"]
     end
   end
 end

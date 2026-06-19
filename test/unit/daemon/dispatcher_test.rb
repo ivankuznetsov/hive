@@ -1911,30 +1911,30 @@ def test_dry_run_digest_complete_raise_is_isolated_as_a_fatal_event
   # dry-run digest pseudo-child is reaped and `@digest_scheduler.complete`
   # raises (e.g. EROFS on the cursor write), the crash must be isolated as a
   # :fatal event instead of crashing the dry-run poll loop.
-  dispatcher, _sup, _ctrl, logger, _mw, _patrol, _digest = make_dispatcher(
+  dispatcher, _sup, ctrl, logger, _mw, _patrol, digest = make_dispatcher(
     rows: [], dry_run: true, with_digest_scheduler: true
   )
-  raising = Object.new
-  raising.define_singleton_method(:complete) do |date:, exit_code:, now:|
-    raise IOError, "EROFS on dry-run cursor write"
-  end
-  dispatcher.instance_variable_set(:@digest_scheduler, raising)
   child = ChildExit.new(
-    pid: -1, exit_code: 0, project: "digest", slug: "2026-06-13", stage: "digest",
+    pid: -1, exit_code: 1, project: "digest", slug: "2026-06-13", stage: "digest",
     command: "hive digest --date 2026-06-13 --json", state_file_path: nil,
     started_at: T0, finished_at: T0, json_envelope: nil
   )
   dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
+  ctrl.record_dispatch(pid: -1, project: "digest", slug: "2026-06-13", stage: "digest",
+                       command: "hive digest --date 2026-06-13 --json",
+                       started_at: T0, state_file_mtime: T0 - 60)
+  digest.define_singleton_method(:complete) { |**| raise "disk full" }
 
   dispatcher.tick(now: T0)
 
-  event = logger.events.find { |name, _| name == :fatal }
-  refute_nil event,
-             "a dry-run digest_scheduler.complete crash must be isolated as a :fatal event, not crash the poll loop"
-  assert_match(/digest_scheduler\.complete raised/, event.last.fetch(:message))
-  assert_match(/EROFS on dry-run cursor write/, event.last.fetch(:message))
-  assert logger.events.any? { |name, attrs| name == :child_exited && attrs[:dry_run] == true },
-         "the dry-run child_exited event must still be logged after an isolated complete crash"
+  assert_equal 0, ctrl.in_flight_count
+  fatal = logger.events.find do |(name, attrs)|
+    name == :fatal && attrs[:message].include?("digest_scheduler.complete raised: RuntimeError: disk full")
+  end
+  refute_nil fatal,
+             "a dry-run digest_scheduler.complete crash must be isolated as a :fatal event"
+  refute_nil logger.events.find { |(name, attrs)| name == :child_exited && attrs[:dry_run] == true },
+             "the dry-run child_exited event must still be logged after an isolated complete crash"
 end
 
 def test_archive_dispatch_reenqueue_errors_are_logged_as_fatal

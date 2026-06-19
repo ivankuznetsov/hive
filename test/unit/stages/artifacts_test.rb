@@ -144,6 +144,33 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_push_manifest_media_swallows_unexpected_upload_errors
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      media_dir = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media_dir)
+      File.binwrite(File.join(media_dir, "01-home.png"), "png")
+      write_manifest(task, {
+        "schema" => 1,
+        "status" => "captured",
+        "surface" => "ui",
+        "items" => [
+          { "file" => "01-home.png", "type" => "still", "caption" => "Home", "push_to_screenote" => true, "screenote_url" => nil }
+        ]
+      })
+      uploader = Object.new
+      uploader.define_singleton_method(:upload) { |**| raise "network adapter exploded" }
+
+      _out, err = capture_io do
+        Hive::Stages::Artifacts.push_manifest_media_to_screenote(task, uploader: uploader)
+      end
+
+      assert_includes err, "screenote manifest processing failed: RuntimeError: network adapter exploded"
+      manifest = JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_nil manifest.dig("items", 0, "screenote_url")
+    end
+  end
+
   def test_complete_agent_run_pushes_manifest_after_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -197,6 +224,15 @@ class StagesArtifactsTest < Minitest::Test
       assert_nil Hive::Stages::Artifacts.media_item_path(task, "sub/evil.png"),
                  "a nested filename must not resolve to an upload path"
       assert_nil Hive::Stages::Artifacts.media_item_path(task, "")
+    end
+  end
+
+  def test_media_item_path_skips_missing_media_directory
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+
+      assert_nil Hive::Stages::Artifacts.media_item_path(task, "01-home.png"),
+                 "a missing media directory should skip the item, not abort manifest processing"
     end
   end
 

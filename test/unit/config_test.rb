@@ -2785,6 +2785,14 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
       assert_match(/screenote.*must be a Hash/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          api_token: 123
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/screenote\.api_token.*must be a String/, err.message)
     end
   end
 

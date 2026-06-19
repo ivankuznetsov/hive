@@ -135,7 +135,7 @@ module Hive
       end
 
       def pick_runner(task)
-        Hive::Stages::Resolver.resolve(task)
+        Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
       def commit_after(task, result)

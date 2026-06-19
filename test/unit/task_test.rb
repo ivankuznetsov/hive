@@ -276,24 +276,4 @@ class TaskTest < Minitest::Test
     end
   end
 
-  private
-
-  def research_workflow
-    Hive::Workflow.new(
-      id: :research,
-      stages: [
-        Hive::Workflow::Stage.new(name: "intake", index: 1, state_file: "intake.md", kind: :inert),
-        Hive::Workflow::Stage.new(name: "gather", index: 2, state_file: "notes.md", kind: :agent),
-        Hive::Workflow::Stage.new(name: "report", index: 3, state_file: "report.md", kind: :marker)
-      ]
-    )
-  end
-
-  def with_registered_workflow(descriptor)
-    original_fetch = Hive::Workflows::Registry.method(:fetch)
-    replacement = lambda { |id|
-      id == descriptor.id ? descriptor : original_fetch.call(id)
-    }
-    with_replaced_singleton_method(Hive::Workflows::Registry, :fetch, replacement) { yield }
-  end
 end

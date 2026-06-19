@@ -8,7 +8,8 @@ class TaskMetaTest < Minitest::Test
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo")
 
-      assert_equal({ id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil }, Hive::TaskMeta.read(dir))
+      assert_equal({ id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: nil },
+                   Hive::TaskMeta.read(dir))
       assert File.exist?(File.join(dir, "meta.yml"))
       refute Dir.children(dir).any? { |name| name.include?(".meta.yml.tmp") }
     end
@@ -19,22 +20,40 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task")
 
       assert_equal(
-        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task" },
+        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task", workflow: nil },
         Hive::TaskMeta.read(dir)
       )
       assert_includes File.read(File.join(dir, "meta.yml")), "depends_on: base-task"
     end
   end
 
+  def test_read_surfaces_workflow_selector
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "meta.yml"), "workflow: research\n")
+
+      assert_equal "research", Hive::TaskMeta.read(dir)[:workflow]
+    end
+  end
+
+  def test_read_returns_nil_workflow_when_absent_or_blank
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "meta.yml"), "id: 4\n")
+      assert_nil Hive::TaskMeta.read(dir)[:workflow]
+
+      File.write(File.join(dir, "meta.yml"), "workflow: \"  \"\n")
+      assert_nil Hive::TaskMeta.read(dir)[:workflow]
+    end
+  end
+
   def test_missing_or_malformed_file_returns_nil_fields
     with_tmp_dir do |dir|
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil }, Hive::TaskMeta.read(dir))
+      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
 
       File.write(File.join(dir, "meta.yml"), ":\n:not yaml")
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil }, Hive::TaskMeta.read(dir))
+      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
 
       File.write(File.join(dir, "meta.yml"), "- not\n- a hash\n")
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil }, Hive::TaskMeta.read(dir))
+      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
     end
   end
 
@@ -42,11 +61,13 @@ class TaskMetaTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "id: '42'\nslug: from-string-id\n")
       # A YAML-quoted numeric string id is coerced to an Integer via Integer().
-      assert_equal({ id: 42, slug: "from-string-id", display_name: nil, depends_on: nil }, Hive::TaskMeta.read(dir))
+      assert_equal({ id: 42, slug: "from-string-id", display_name: nil, depends_on: nil, workflow: nil },
+                   Hive::TaskMeta.read(dir))
 
       File.write(File.join(dir, "meta.yml"), "id: not-a-number\nslug: bad-id\n")
       # An unparseable, non-empty id falls back to nil (ArgumentError rescue).
-      assert_equal({ id: nil, slug: "bad-id", display_name: nil, depends_on: nil }, Hive::TaskMeta.read(dir))
+      assert_equal({ id: nil, slug: "bad-id", display_name: nil, depends_on: nil, workflow: nil },
+                   Hive::TaskMeta.read(dir))
     end
   end
 
@@ -86,7 +107,7 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.update_display_name(dir, "Readable Name")
 
       assert_equal(
-        { id: 7, slug: "keep-slug", display_name: "Readable Name", depends_on: "base-task" },
+        { id: 7, slug: "keep-slug", display_name: "Readable Name", depends_on: "base-task", workflow: nil },
         Hive::TaskMeta.read(dir)
       )
     end

@@ -215,6 +215,11 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_screenote_scrubbed_child_env_contract
+    assert_nil Hive::Agent::SCRUBBED_CHILD_ENV.fetch("HIVE_SCREENOTE_API_TOKEN")
+    assert_nil Hive::Agent::SCRUBBED_CHILD_ENV.fetch("HIVE_SCREENOTE_BASE_URL")
+  end
+
   def test_claude_headless_permission_mode_auto_uses_permission_mode_flag
     with_tmp_dir do |dir|
       task = make_task(dir)

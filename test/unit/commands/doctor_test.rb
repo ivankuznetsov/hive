@@ -7,6 +7,31 @@ require "hive/commands/doctor"
 class HiveCommandsDoctorTest < Minitest::Test
   include HiveTestHelper
 
+  class FakeVisualReadiness
+    def initialize(capture:, screenote:)
+      @capture = capture
+      @screenote = screenote
+    end
+
+    def capture_tooling_status
+      @capture
+    end
+
+    def screenote_status
+      @screenote
+    end
+  end
+
+  class FakeCaptureInstaller
+    def initialize(command)
+      @command = command
+    end
+
+    def command_for(missing:)
+      "#{@command} #{missing.join(' ')}"
+    end
+  end
+
   def with_fake_home
     with_tmp_dir do |dir|
       old = ENV["HOME"]
@@ -546,6 +571,132 @@ class HiveCommandsDoctorTest < Minitest::Test
   def install_brainstorm_and_plan_skills(home)
     # Install the parked stage skills so the test focuses on reviewer behaviour.
     write_file("#{home}/.claude/commands/x.md")
+  end
+
+  def visual_capture_status(ffmpeg:, asciinema:)
+    missing = []
+    missing << "ffmpeg" unless ffmpeg
+    missing << "asciinema" unless asciinema
+    {
+      ffmpeg: { present: ffmpeg, path: ffmpeg ? "/usr/bin/ffmpeg" : nil },
+      asciinema: { present: asciinema, path: asciinema ? "/usr/bin/asciinema" : nil },
+      missing: missing,
+      satisfied: missing.empty?
+    }
+  end
+
+  def visual_doctor(project:, capture:, screenote:, json: false, installer_command: "sudo pacman -S --needed --noconfirm")
+    out = StringIO.new
+    cfg = cfg_with_reviewers([])
+    doctor = Hive::Commands::Doctor.new(
+      config: cfg,
+      project_root: project,
+      json: json,
+      output: out,
+      visual_artifacts_readiness: FakeVisualReadiness.new(capture: capture, screenote: screenote),
+      capture_tooling_installer: FakeCaptureInstaller.new(installer_command)
+    )
+    [ doctor, out ]
+  end
+
+  def test_visual_artifacts_rows_are_present_when_everything_is_ready
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        doctor, out = visual_doctor(
+          project: project,
+          capture: visual_capture_status(ffmpeg: true, asciinema: true),
+          screenote: { connected: true, base_url: "https://screenote.test", reason: nil }
+        )
+
+        exit_code = doctor.call
+
+        assert_equal 0, exit_code
+        assert_match(%r{visual-artifacts/ffmpeg.*✓ present}, out.string)
+        assert_match(%r{visual-artifacts/asciinema.*✓ present}, out.string)
+        assert_match(%r{visual-artifacts/screenote.*✓ present}, out.string)
+      end
+    end
+  end
+
+  def test_visual_artifacts_missing_tooling_warns_without_failing
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        doctor, out = visual_doctor(
+          project: project,
+          capture: visual_capture_status(ffmpeg: false, asciinema: false),
+          screenote: { connected: true, base_url: "https://screenote.test", reason: nil }
+        )
+
+        exit_code = doctor.call
+
+        assert_equal 0, exit_code
+        assert_match(%r{visual-artifacts/ffmpeg.*! warning}, out.string)
+        assert_match(%r{visual-artifacts/asciinema.*! warning}, out.string)
+        assert_match(/sudo pacman -S --needed --noconfirm ffmpeg asciinema/, out.string)
+      end
+    end
+  end
+
+  def test_visual_artifacts_screenote_not_connected_warns_with_opt_in_copy
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        doctor, out = visual_doctor(
+          project: project,
+          capture: visual_capture_status(ffmpeg: true, asciinema: true),
+          screenote: { connected: false, base_url: nil, reason: "missing token" }
+        )
+
+        exit_code = doctor.call
+
+        assert_equal 0, exit_code
+        assert_match(%r{visual-artifacts/screenote.*! warning}, out.string)
+        assert_match(/hivebox already renders committed visual media/, out.string)
+        assert_match(/screenote\.\{base_url,api_token\}/, out.string)
+        assert_match(/missing token/, out.string)
+      end
+    end
+  end
+
+  def test_visual_artifacts_json_summary_counts_warnings
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        _doctor, out = visual_doctor(
+          project: project,
+          json: true,
+          capture: visual_capture_status(ffmpeg: true, asciinema: false),
+          screenote: { connected: false, base_url: nil, reason: "missing token" }
+        )
+
+        payload = JSON.parse(out.tap { _doctor.call }.string)
+
+        assert_equal "hive-doctor.v1", payload.fetch("schema")
+        assert_equal 2, payload.fetch("summary").fetch("warning")
+        assert(payload.fetch("checks").any? { |row| row["label"] == "visual-artifacts/asciinema" })
+        assert(payload.fetch("checks").any? { |row| row["label"] == "visual-artifacts/screenote" })
+      end
+    end
+  end
+
+  def test_visual_artifacts_malformed_screenote_config_degrades_to_warning
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        doctor, out = visual_doctor(
+          project: project,
+          capture: visual_capture_status(ffmpeg: true, asciinema: true),
+          screenote: { connected: false, base_url: nil, reason: "screenote in global config must be a Hash" }
+        )
+
+        exit_code = doctor.call
+
+        assert_equal 0, exit_code
+        assert_match(/screenote in global config must be a Hash/, out.string)
+      end
+    end
   end
 
   def test_review_reviewers_happy_path_all_present

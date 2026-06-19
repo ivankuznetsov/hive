@@ -9,6 +9,8 @@ require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/claude_launcher"
+require "hive/commands/init/capture_tooling_installer"
+require "hive/visual_artifacts_readiness"
 
 module Hive
   module Commands
@@ -45,16 +47,21 @@ module Hive
       # JSON encoder. Returns `nil` before `#call` has populated it.
       attr_reader :rows
 
-      def initialize(config:, project_root:, json: false, output: $stdout)
+      def initialize(config:, project_root:, json: false, output: $stdout,
+                     visual_artifacts_readiness: Hive::VisualArtifactsReadiness,
+                     capture_tooling_installer: Hive::Commands::Init::CaptureToolingInstaller.new)
         @config = config
         @project_root = project_root
         @json = json
         @output = output
+        @visual_artifacts_readiness = visual_artifacts_readiness
+        @capture_tooling_installer = capture_tooling_installer
         @rows = nil
       end
 
       def call
-        @rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime + check_stages + check_reviewers
+        @rows = check_tmux + check_llm_wiki_qmd + check_visual_artifacts +
+                check_legacy_brainstorm_runtime + check_stages + check_reviewers
         if @json
           @output.puts JSON.generate(envelope(@rows))
         else
@@ -193,6 +200,70 @@ module Hive
 
       def first_diagnostic_line(*parts)
         parts.join("\n").lines.map(&:strip).find { |line| !line.empty? }.to_s
+      end
+
+      def check_visual_artifacts
+        return [] unless @project_root
+
+        capture = @visual_artifacts_readiness.capture_tooling_status
+        rows = %w[ffmpeg asciinema].map { |tool| visual_capture_row(tool, capture) }
+        rows << visual_screenote_row(@visual_artifacts_readiness.screenote_status)
+        rows
+      end
+
+      def visual_capture_row(tool, capture)
+        detail = capture.fetch(tool.to_sym)
+        if detail.fetch(:present)
+          return {
+            kind: "dependency",
+            stage: "7-artifacts",
+            label: "visual-artifacts/#{tool}",
+            agent: "capture",
+            configured_skill: tool,
+            skill: tool,
+            status: "present",
+            message: detail[:path].to_s
+          }
+        end
+
+        command = @capture_tooling_installer.command_for(missing: capture.fetch(:missing))
+        warning_row(
+          stage: "7-artifacts",
+          label: "visual-artifacts/#{tool}",
+          agent: "capture",
+          configured_skill: tool,
+          skill: tool,
+          message: "#{tool} is not on PATH; visual capture is optional. " \
+                   "Run `#{command}` and then `hive doctor` again, or re-run `hive init` on a fresh project."
+        )
+      end
+
+      def visual_screenote_row(status)
+        if status.fetch(:connected)
+          return {
+            kind: "dependency",
+            stage: "7-artifacts",
+            label: "visual-artifacts/screenote",
+            agent: "screenote",
+            configured_skill: "screenote.{base_url,api_token}",
+            skill: "screenote",
+            status: "present",
+            message: status[:base_url].to_s
+          }
+        end
+
+        reason = status[:reason].to_s
+        reason_suffix = reason.empty? ? "" : " Current status: #{reason}."
+        warning_row(
+          stage: "7-artifacts",
+          label: "visual-artifacts/screenote",
+          agent: "screenote",
+          configured_skill: "screenote.{base_url,api_token}",
+          skill: "screenote",
+          message: "screenote is optional; hivebox already renders committed visual media. " \
+                   "Run `hive init` on a fresh project and accept the screenote step, or set " \
+                   "`screenote.{base_url,api_token}` in #{Hive::Config.global_config_path}.#{reason_suffix}"
+        )
       end
 
       def check_legacy_brainstorm_runtime

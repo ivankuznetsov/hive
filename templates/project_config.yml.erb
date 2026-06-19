@@ -53,6 +53,12 @@ artifacts:
 finalize:
   agent: claude
 
+# Optional screenshot hosting for artifacts-stage media lives in the global
+# hive config (or environment), not in agent prompts:
+# screenote:
+#   base_url: https://screenote.example
+#   api_token: set HIVE_SCREENOTE_API_TOKEN instead of writing a secret here
+
 # Generous sanity caps for runaway agents, not cost targets. Most
 # tasks finish well within them; tighten manually only if you hit a
 # cap repeatedly. (The deprecated execute_review key from older

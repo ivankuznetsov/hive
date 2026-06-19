@@ -7,6 +7,7 @@ class TasksController < ApplicationController
   def show
     @row = task_row!
     @files = artifact_files(@row)
+    @media = media_manifest(@row)
     @log = latest_log
     @questions = open_questions(@row)
     @worktree_exists = worktree_exists?(@row)
@@ -47,6 +48,24 @@ class TasksController < ApplicationController
     raise Hive::InvalidTaskPath, "no worktree for #{params[:slug]}" if worktree.empty? || !File.directory?(worktree)
 
     @diff, @diff_truncated = bounded_diff(worktree)
+  end
+
+  def media
+    row = task_row!
+    path = resolved_media_path(row, params[:filename])
+    unless path
+      # A manifest may list a still the media dir no longer holds (a
+      # half-cleaned demo dir, a rename, a traversal/extension probe). Log it so
+      # the otherwise-silent 404 is diagnosable, mirroring the warns at the
+      # brainstorm/config readers below.
+      Rails.logger.warn("media file unresolved for #{params[:slug]}: #{params[:filename].inspect}")
+      return head :not_found
+    end
+
+    expires_in 60.seconds, public: false
+    send_file path,
+              type: Rack::Mime.mime_type(File.extname(path), "application/octet-stream"),
+              disposition: "inline"
   end
 
   def approve
@@ -170,6 +189,93 @@ class TasksController < ApplicationController
     return ARTIFACT_ORDER unless %w[8-finalize 9-done].include?(row["stage"].to_s)
 
     [ "artifact.md" ] + (ARTIFACT_ORDER - [ "artifact.md" ])
+  end
+
+  MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i
+
+  def media_manifest(row)
+    folder = row["folder"]
+    return nil unless folder
+
+    path = File.join(folder, "media", "manifest.json")
+    return nil unless File.file?(path)
+
+    manifest = JSON.parse(File.read(path))
+    # A syntactically-valid manifest whose top level is a JSON array, number,
+    # or null is a half-written agent file — it must not 500 the page (read it
+    # resiliently, like open_questions). Bail before indexing into a non-Hash.
+    return nil unless manifest.is_a?(Hash)
+    # Gate on the known schema version: a future schema reshapes items[], so a
+    # v2 manifest must be ignored, not rendered as garbage v1 items. The schema
+    # int is hoisted into the gem (Hive::MediaManifest::SCHEMA) so the stage and
+    # this reader can't drift apart on a bump.
+    return nil unless manifest["schema"] == Hive::MediaManifest::SCHEMA
+
+    status = manifest["status"].to_s
+    return nil unless %w[captured skipped failed].include?(status)
+
+    {
+      "status" => status,
+      "reason" => manifest["reason"].to_s,
+      "items" => normalized_media_items(row, manifest["items"])
+    }
+  rescue JSON::ParserError, SystemCallError => e
+    Rails.logger.warn("media manifest unreadable for #{params[:slug]}: #{e.class}: #{e.message}")
+    nil
+  end
+
+  def normalized_media_items(row, items)
+    Array(items).filter_map do |item|
+      next unless item.is_a?(Hash)
+
+      file = item["file"].to_s
+      next unless file.match?(MEDIA_FILENAME_RE)
+      next unless File.basename(file) == file
+      unless resolved_media_path(row, file)
+        # A captured manifest naming a still the media dir no longer holds (a
+        # cleaned/renamed demo dir, a missing file) otherwise vanishes from the
+        # Demo gallery with no trace. Log it — mirroring the media action's
+        # breadcrumb — so an empty Demo section is diagnosable without
+        # hand-reading the manifest.
+        Rails.logger.warn("media item unresolved for #{params[:slug]}: #{file.inspect}")
+        next
+      end
+
+      url = item["screenote_url"].to_s
+      {
+        "file" => file,
+        "type" => item["type"].to_s,
+        "caption" => item["caption"].to_s,
+        "screenote_url" => url.match?(%r{\Ahttps?://}) ? url : nil
+      }
+    end
+  end
+
+  def resolved_media_path(row, filename)
+    folder = row["folder"].to_s
+    return nil if folder.empty?
+
+    filename = File.basename(filename.to_s)
+    return nil unless filename.match?(MEDIA_FILENAME_RE)
+
+    # Anchor the media root to the REAL task folder: resolve the folder's
+    # symlinks, then require `media/` to resolve to exactly <folder>/media. A
+    # `media` directory that is itself a symlink out of the task folder must not
+    # become a trusted root, or a task could stream readable files from outside
+    # its folder. Mirrors the stage's media_item_path.
+    folder_root = File.realpath(folder)
+    media_root = File.realpath(File.join(folder_root, "media"))
+    return nil unless media_root == File.join(folder_root, "media")
+
+    candidate = File.join(media_root, filename)
+    return nil unless File.file?(candidate)
+
+    real = File.realpath(candidate)
+    return nil unless real.start_with?("#{media_root}#{File::SEPARATOR}")
+
+    real
+  rescue SystemCallError
+    nil
   end
 
   def open_questions(row)

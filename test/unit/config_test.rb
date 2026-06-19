@@ -2741,6 +2741,61 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_screenote_honors_config_and_env_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: https://screenote.example
+          api_token: from-config
+      YAML
+
+      with_env("HIVE_SCREENOTE_BASE_URL" => "https://screenote.env", "HIVE_SCREENOTE_API_TOKEN" => "from-env") do
+        cfg = Hive::Config.load_global_screenote
+
+        assert_equal "https://screenote.env", cfg["base_url"]
+        assert_equal "from-env", cfg["api_token"]
+      end
+    end
+  end
+
+  def test_load_global_screenote_defaults_to_disabled
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+      cfg = Hive::Config.load_global_screenote
+
+      assert_nil cfg["base_url"]
+      assert_nil cfg["api_token"]
+    end
+  end
+
+  def test_load_global_screenote_validates_shape_and_url
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: ftp://screenote.example
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/screenote\.base_url.*http\(s\) URL/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote: enabled
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/screenote.*must be a Hash/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          api_token: 123
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/screenote\.api_token.*must be a String/, err.message)
+    end
+  end
+
   # ── Daily digest global settings ─────────────────────────────────────
 
   def test_load_returns_documented_digest_defaults_when_key_absent

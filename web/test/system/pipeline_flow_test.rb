@@ -262,6 +262,42 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "the operator's open choice must survive the morph"
   end
 
+  test "task page shows captured visual demo media" do
+    slug = create_task!(@project, "Media probe")
+    folder = stage_dir(@project, "1-inbox").join(slug)
+    write_media_manifest(folder, captured_media_manifest)
+    media_dir = folder.join("media")
+    File.binwrite(media_dir.join("01-home.png"), png_bytes)
+    File.binwrite(media_dir.join("demo.gif"), gif_bytes)
+
+    sign_in!
+    visit "/tasks/#{@project}/#{slug}"
+
+    assert_selector "section.demo h2", text: "Demo", wait: 5
+    assert_selector "section.demo img[alt='Home page after load']", visible: true
+    assert_selector "section.demo img[alt='Dark mode toggle']", visible: true
+    assert_link "View / annotate on screenote", href: "https://screenote.test/shot"
+  end
+
+  test "task page shows failed demo capture without images" do
+    slug = create_task!(@project, "Failed media probe")
+    folder = stage_dir(@project, "1-inbox").join(slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "failed",
+      "reason" => "dev server did not boot",
+      "surface" => "ui",
+      "items" => []
+    })
+
+    sign_in!
+    visit "/tasks/#{@project}/#{slug}"
+
+    assert_selector ".demo-banner", text: /Demo capture failed/, wait: 5
+    assert_selector ".demo-banner", text: /dev server did not boot/
+    assert_no_selector "section.demo img"
+  end
+
   test "a new question round replaces the Q&A form cleanly" do
     folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Round probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
@@ -341,5 +377,43 @@ class PipelineFlowTest < ApplicationSystemTestCase
       File.binwrite(path, png + "fake-png-body")
     end
     path
+  end
+
+  def write_media_manifest(folder, manifest)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+    media_dir.join("manifest.json").write("#{JSON.pretty_generate(manifest)}\n")
+  end
+
+  def captured_media_manifest
+    {
+      "schema" => 1,
+      "status" => "captured",
+      "surface" => "ui",
+      "items" => [
+        {
+          "file" => "01-home.png",
+          "type" => "still",
+          "caption" => "Home page after load",
+          "push_to_screenote" => true,
+          "screenote_url" => "https://screenote.test/shot"
+        },
+        {
+          "file" => "demo.gif",
+          "type" => "gif",
+          "caption" => "Dark mode toggle",
+          "push_to_screenote" => false,
+          "screenote_url" => nil
+        }
+      ]
+    }
+  end
+
+  def png_bytes
+    [ 137, 80, 78, 71, 13, 10, 26, 10 ].pack("C*") + "fake-png-body"
+  end
+
+  def gif_bytes
+    "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".b
   end
 end

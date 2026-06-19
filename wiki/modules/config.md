@@ -7,7 +7,7 @@ updated: 2026-06-18
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, and web settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and screenote settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Artifacts-stage screenote uploads use `Config.load_global_screenote`, with env overrides for the base URL and token.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -103,6 +103,7 @@ tags: [config, yaml, validation]
     }
   },
   "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
+  "screenote" => { "base_url" => nil, "api_token" => nil },
   "bot" => {
     "idea_attachment_max_bytes" => 20 * 1024 * 1024,
     "idea_attachment_max_count" => 10,
@@ -152,6 +153,19 @@ integer chat id, else `false` (the predicate is the private
 scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
 SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
 value applies in both.
+
+## Screenote config
+
+`Hive::Config.load_global_screenote` reads the global `screenote:` block,
+deep-merges it over `Config::DEFAULTS["screenote"]`, applies
+`HIVE_SCREENOTE_BASE_URL` and `HIVE_SCREENOTE_API_TOKEN`, validates the shape,
+and returns a hash with `base_url` and `api_token`.
+
+The block is used only after the artifacts agent has completed: `7-artifacts`
+reads `media/manifest.json`, uploads PNG/JPEG stills marked
+`push_to_screenote: true`, and writes the returned `annotate_url` back into
+`screenote_url`. Blank or missing token/base URL disables upload. The token is
+never interpolated into `artifacts_prompt.md.erb` or shown to the agent.
 
 ## Module functions
 

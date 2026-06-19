@@ -359,6 +359,14 @@ module Hive
         },
         "session_secret_file" => nil
       },
+      # Optional hosted screenshot publishing for 7-artifacts visual
+      # manifests. Tokens are operator-global and may be supplied via the
+      # global config (screenote.api_token) or HIVE_SCREENOTE_API_TOKEN; the
+      # agent never receives them.
+      "screenote" => {
+        "base_url" => nil,
+        "api_token" => nil
+      },
       # Experimental PR babysitter. This is intentionally separate
       # from the pipeline daemon: it polls open GitHub PRs and asks a
       # development agent to keep them mergeable.
@@ -1009,6 +1017,35 @@ module Hive
       merged
     end
 
+    def load_global_screenote
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["screenote"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "screenote in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["screenote"]), override)
+      apply_screenote_env_overrides!(merged)
+      validate_screenote!({ "screenote" => merged }, path)
+      merged
+    end
+
+    def apply_screenote_env_overrides!(screenote)
+      if ENV.key?("HIVE_SCREENOTE_BASE_URL")
+        screenote["base_url"] = ENV["HIVE_SCREENOTE_BASE_URL"]
+      end
+      if ENV.key?("HIVE_SCREENOTE_API_TOKEN")
+        screenote["api_token"] = ENV["HIVE_SCREENOTE_API_TOKEN"]
+      end
+      screenote
+    end
+
     def global_web_defaults
       defaults = deep_dup(DEFAULTS["web"])
       defaults["session_secret_file"] = File.join(Hive::Paths.state_home, ".web.session_secret")
@@ -1264,6 +1301,7 @@ module Hive
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
+      validate_screenote!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_digest!(cfg, source_path)
@@ -1292,6 +1330,7 @@ module Hive
       agents
       daemon
       web
+      screenote
       babysitter
       patrol
       digest
@@ -1813,6 +1852,23 @@ module Hive
 
       raise ConfigError,
             "web.session_secret_file in #{describe_source(source_path)} must be a non-empty String when set"
+    end
+
+    def validate_screenote!(cfg, source_path)
+      screenote = cfg["screenote"]
+      return if screenote.nil?
+
+      base_url = screenote["base_url"]
+      unless base_url.nil? || (base_url.is_a?(String) && (base_url.strip.empty? || base_url.match?(%r{\Ahttps?://})))
+        raise ConfigError,
+              "screenote.base_url in #{describe_source(source_path)} must be blank or an http(s) URL"
+      end
+
+      token = screenote["api_token"]
+      return if token.nil? || token.is_a?(String)
+
+      raise ConfigError,
+            "screenote.api_token in #{describe_source(source_path)} must be a String when set"
     end
 
     # R-02: `daemon.child_verb_timeouts` is an optional map of hive verb

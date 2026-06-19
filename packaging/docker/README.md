@@ -106,3 +106,14 @@ docker exec -it <container> tmux attach -t <name>   # attach; Ctrl-b d to detach
 
 `tmux ls` reporting "no server running" just means no agent is mid-run and no
 tmux session has been started yet.
+
+## Visual artifact capture
+
+Artifacts-stage visual demos are best-effort. The image includes `asciinema`
+(records a terminal `.cast`) and `ffmpeg`, but no terminal-GIF encoder —
+turning a `.cast` into a GIF needs `agg` or `vhs`, neither of which is
+installed, so an in-box TUI/CLI demo writes a failed capture unless the agent
+installs one. Browser captures depend on the project and agent environment
+having agent-browser or Playwright available. If a required capture tool is
+missing, the artifacts agent records a failed capture manifest and the
+pipeline continues.

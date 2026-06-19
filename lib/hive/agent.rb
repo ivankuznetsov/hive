@@ -13,6 +13,16 @@ module Hive
   class Agent
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
 
+    # Screenote credentials are an upload concern of the parent `hive run
+    # artifacts` process; the agent child never uploads, so scrub them from
+    # its environment to keep a config/env-sourced token out of reach of the
+    # agent's Bash tool. nil unsets the var for the child. Mirrors the tmux
+    # path's blanking in Hive::ClaudeLauncher.build_runner / the wrapper.
+    SCRUBBED_CHILD_ENV = {
+      "HIVE_SCREENOTE_API_TOKEN" => nil,
+      "HIVE_SCREENOTE_BASE_URL" => nil
+    }.freeze
+
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode
 
@@ -124,7 +134,7 @@ module Hive
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
       spawn_opts[:in] = stdin_file if stdin_file
-      pid = Process.spawn(*cmd, **spawn_opts)
+      pid = Process.spawn(SCRUBBED_CHILD_ENV, *cmd, **spawn_opts)
       w.close
       pgid = begin
         Process.getpgid(pid)

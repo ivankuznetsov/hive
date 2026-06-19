@@ -363,6 +363,14 @@ module Hive
         env: {
           "ANTHROPIC_API_KEY" => "",
           "CLAUDE_API_KEY" => "",
+          # The screenote upload runs in the parent `hive run artifacts`
+          # process, never the agent — blank the credential vars so a
+          # config/env-sourced token can't be read by the artifacts agent's
+          # Bash tool (that agent spawns through this exact tmux path). The
+          # wrapper additionally `unset`s them; mirrors the headless scrub in
+          # Hive::Agent#spawn_and_wait.
+          "HIVE_SCREENOTE_API_TOKEN" => "",
+          "HIVE_SCREENOTE_BASE_URL" => "",
           "HIVE_TASK_STAGE_DIR" => task.folder
         },
         tmux_bin: tmux_bin,

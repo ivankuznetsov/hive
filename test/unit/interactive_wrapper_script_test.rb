@@ -8,7 +8,8 @@ class InteractiveWrapperScriptTest < Minitest::Test
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
 
   def teardown
-    %w[HIVE_FAKE_CLAUDE_LOG_DIR ANTHROPIC_API_KEY CLAUDE_API_KEY].each { |key| ENV.delete(key) }
+    %w[HIVE_FAKE_CLAUDE_LOG_DIR ANTHROPIC_API_KEY CLAUDE_API_KEY
+       HIVE_SCREENOTE_API_TOKEN HIVE_SCREENOTE_BASE_URL].each { |key| ENV.delete(key) }
   end
 
   def test_script_syntax
@@ -25,7 +26,9 @@ class InteractiveWrapperScriptTest < Minitest::Test
       env = {
         "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir,
         "ANTHROPIC_API_KEY" => "parent-anthropic-key",
-        "CLAUDE_API_KEY" => "parent-claude-key"
+        "CLAUDE_API_KEY" => "parent-claude-key",
+        "HIVE_SCREENOTE_API_TOKEN" => "parent-screenote-token",
+        "HIVE_SCREENOTE_BASE_URL" => "https://screenote.parent"
       }
       _out, err, status = Open3.capture3(
         env,
@@ -41,6 +44,10 @@ class InteractiveWrapperScriptTest < Minitest::Test
       assert_includes argv_log, "cwd=#{dir}"
       assert_includes argv_log, "env_ANTHROPIC_API_KEY=__unset__"
       assert_includes argv_log, "env_CLAUDE_API_KEY=__unset__"
+      # The artifacts agent spawns through this wrapper; its screenote
+      # credentials belong to the parent upload, never the agent's Bash.
+      assert_includes argv_log, "env_HIVE_SCREENOTE_API_TOKEN=__unset__"
+      assert_includes argv_log, "env_HIVE_SCREENOTE_BASE_URL=__unset__"
       refute_includes argv_log, "arg=-p"
       refute_includes argv_log, "arg=--dangerously-skip-permissions"
       assert_equal [ "--add-dir", add_one, "--add-dir", add_two ], argv_args(argv_log)

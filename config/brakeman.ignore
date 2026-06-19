@@ -37,6 +37,10 @@
       "note": "False positive. params[:project] never reaches the filesystem raw: find_project! resolves it against the REGISTERED projects allowlist and returns the registry's own hive_state_path; params[:slug] is route-constrained and additionally File.basename()d. The taint laundering through the registry lookup is invisible to static analysis."
     },
     {
+      "fingerprint": "75bf3e2dbab92663c2976d6000fad8a6d3ff5dce84b8d3e6b5261c380dfe888c",
+      "note": "False positive. The task media route constrains filename to a single png/jpg/jpeg/gif component, resolved_media_path File.basename()s and revalidates it, resolves the real task folder/media directory, refuses a symlinked media root, and only streams files whose realpath stays under that media root. Integration tests cover traversal, disallowed extensions, missing files, symlinked media roots, and inline image streaming."
+    },
+    {
       "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
       "note": "False positive: array-form Open3.capture3 (no shell). slug is a resolved 9-done task slug (ADR-012 regex) interpolated only into the gh PR title/body text, not a shell command. hive bench submit."
     },

@@ -1,2 +1,8 @@
 ---
 registered_projects: []
+
+# Optional hosted screenshot links for 7-artifacts visual demos.
+# HIVE_SCREENOTE_BASE_URL and HIVE_SCREENOTE_API_TOKEN override these values.
+screenote:
+  base_url: null
+  api_token: null

@@ -23,14 +23,27 @@ class ApplicationController < ActionController::Base
   # a request as 422 user errors. The dispatcher owns its verb-map KeyError;
   # ParameterMissing (a KeyError subclass) is a genuine user error.
   rescue_from Hive::Error, ActionController::ParameterMissing do |e|
-    render "errors/show", status: :unprocessable_entity, locals: { heading: "Action failed", message: e.message }
+    render_typed_error(:unprocessable_entity, "Action failed", e.message)
   end
 
   rescue_from Hive::InvalidTaskPath do |e|
-    render "errors/show", status: :not_found, locals: { heading: "Not found", message: e.message }
+    render_typed_error(:not_found, "Not found", e.message)
   end
 
   private
+
+  # Hive's typed errors render an HTML error page for browser requests. Binary
+  # endpoints (the task media route streams png/jpg/gif) carry a non-HTML
+  # request format with no matching errors/show template, so an unknown
+  # task/project there must HEAD the status — otherwise the rescue itself
+  # raises ActionView::MissingTemplate and the clean 404 becomes a 500.
+  def render_typed_error(status, heading, message)
+    if request.format.html?
+      render "errors/show", status: status, locals: { heading: heading, message: message }
+    else
+      head status
+    end
+  end
 
   def current_login
     session[:github_login]

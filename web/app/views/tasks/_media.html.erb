@@ -1,0 +1,39 @@
+<% media = local_assigns.fetch(:media) %>
+<% project = local_assigns.fetch(:project) %>
+<% row = local_assigns.fetch(:row) %>
+
+<% if media && media["status"] == "failed" %>
+  <section class="demo" aria-labelledby="demo-heading">
+    <h2 id="demo-heading">Demo</h2>
+    <div class="demo-banner" role="status">
+      <strong>Demo capture failed</strong>
+      <% if media["reason"].present? %>
+        <span><%= media["reason"] %></span>
+      <% end %>
+    </div>
+  </section>
+<% elsif media && media["status"] == "captured" && media["items"].present? %>
+  <section class="demo" aria-labelledby="demo-heading">
+    <h2 id="demo-heading">Demo</h2>
+    <div class="demo-gallery">
+      <% media["items"].each do |item| %>
+        <figure class="demo-item">
+          <img src="<%= task_media_path(project["name"], row["slug"], item["file"]) %>"
+               alt="<%= item["caption"].presence || item["file"] %>"
+               loading="lazy">
+          <% if item["caption"].present? || item["screenote_url"].present? %>
+            <figcaption>
+              <% if item["caption"].present? %>
+                <span><%= item["caption"] %></span>
+              <% end %>
+              <% if item["screenote_url"].present? %>
+                <%= link_to "View / annotate on screenote", item["screenote_url"],
+                      target: "_blank", rel: "noopener noreferrer" %>
+              <% end %>
+            </figcaption>
+          <% end %>
+        </figure>
+      <% end %>
+    </div>
+  </section>
+<% end %>

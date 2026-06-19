@@ -98,8 +98,10 @@ def unsafe_command_options?(rest)
   # Only tokens before the `--` pathspec separator are options; everything after it is a
   # literal pathspec, so `git log -- -o` targets a file named `-o`, not the output flag.
   options = (rest[1..] || []).take_while { |arg| arg != "--" }
-  options.any? { |arg| unsafe_read_option?(subcommand, arg) }
+  options.each_with_index.any? { |arg, index| unsafe_read_option?(subcommand, arg, options[index + 1]) }
 end
+
+SIGNATURE_VERIFYING_SUBCOMMANDS = %w[log show rev-list].freeze
 
 # `git grep` short options that consume the remainder of a cluster as their value. Once one
 # appears, the characters after it are an operand (a pattern, file, or count) — not packed
@@ -115,7 +117,7 @@ def grep_short_cluster_has_pager?(arg)
   false
 end
 
-def unsafe_read_option?(subcommand, arg)
+def unsafe_read_option?(subcommand, arg, next_arg = nil)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
   # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts any
@@ -128,6 +130,9 @@ def unsafe_read_option?(subcommand, arg)
   # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
   # hardening never sees, since cat-file stays a plain allowlisted passthrough.
   return true if arg == "--filters"
+  # `--show-signature` and pretty-format `%G*` placeholders verify commit signatures and can
+  # invoke the repo-local `gpg.program` during otherwise read-only history commands.
+  return true if signature_verification_option?(subcommand, arg, next_arg)
 
   # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
   # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the
@@ -158,6 +163,20 @@ def unsafe_read_option?(subcommand, arg)
   # The file-writing `--output` / `-o` (separate or glued `-o<path>`) defeats the no-mutation
   # boundary on an allowed read (`diff` / `log` / `show` write the requested file).
   arg == "--output" || arg.start_with?("--output=", "-o")
+end
+
+def signature_verification_option?(subcommand, arg, next_arg)
+  return false unless SIGNATURE_VERIFYING_SUBCOMMANDS.include?(subcommand.to_s)
+
+  name, value = arg.split("=", 2)
+  return true if name.length >= "--show-s".length && "--show-signature".start_with?(name)
+  return false unless signature_format_option?(name)
+
+  (value || next_arg).to_s.include?("%G")
+end
+
+def signature_format_option?(name)
+  "--format".start_with?(name) || "--pretty".start_with?(name)
 end
 
 def textconv_abbreviation?(arg)

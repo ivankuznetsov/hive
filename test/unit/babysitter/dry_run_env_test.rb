@@ -959,6 +959,43 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_signature_verification_before_local_gpg_program
+    with_tmp_git_repo do |dir|
+      marker_path = File.join(dir, "gpg-ran")
+      gpg = File.join(dir, "gpg-helper")
+      File.write(gpg, <<~RUBY)
+        #!/usr/bin/env ruby
+        File.write(#{marker_path.dump}, ARGV.join("\\n"))
+        warn "[GNUPG:] SIG_CREATED D 1 1 00 0 0 0 0 TESTKEY"
+        puts "-----BEGIN PGP SIGNATURE-----"
+        puts
+        puts "ZmFrZQ=="
+        puts "-----END PGP SIGNATURE-----"
+      RUBY
+      FileUtils.chmod("+x", gpg)
+      run!("git", "-C", dir, "config", "gpg.program", gpg)
+      run!("git", "-C", dir, "config", "user.signingkey", "test-key")
+      File.write(File.join(dir, "README.md"), "signed\n")
+      run!("git", "-C", dir, "add", "README.md")
+      run!("git", "-C", dir, "commit", "-S", "-m", "signed", "--quiet")
+
+      [
+        [ "log", "--show-signature", "-1" ],
+        [ "show", "--format=%G?", "--no-patch", "HEAD" ],
+        [ "rev-list", "--pretty=format:%GS", "-1", "HEAD" ],
+        [ "log", "--format", "%GK", "-1" ]
+      ].each do |args|
+        FileUtils.rm_f(marker_path)
+
+        _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        assert_includes err, "[dry-run] git -C #{dir} #{args.join(' ')} skipped"
+        refute_path_exists marker_path
+      end
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")

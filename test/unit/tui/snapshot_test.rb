@@ -14,6 +14,10 @@ class TuiSnapshotTest < Minitest::Test
       "slug" => slug,
       "id" => 42,
       "display_name" => "First Task",
+      "depends_on" => "base-task",
+      "blocked_by" => "base-task",
+      "dependency_stage" => "7-artifacts",
+      "blocked" => true,
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
       "marker" => marker,
@@ -64,6 +68,10 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "first-task", first.slug
     assert_equal 42, first.id
     assert_equal "First Task", first.display_name
+    assert_equal "base-task", first.depends_on
+    assert_equal "base-task", first.blocked_by
+    assert_equal "7-artifacts", first.dependency_stage
+    assert_equal true, first.blocked
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
     assert_equal "waiting", first.marker

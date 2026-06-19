@@ -121,7 +121,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 3,
+    assert_equal 4,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
@@ -130,6 +130,25 @@ class SchemaFilesTest < Minitest::Test
     assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
     assert_includes doc.dig("$defs", "Task", "properties", "stage", "enum"), "6-pr"
     assert_includes doc.dig("$defs", "Task", "properties", "action", "enum"), "ready_for_pr"
+  end
+
+  # v3 (the pre-dependency schema) is preserved for external validators
+  # pinned to the release before the task-dependency fields landed in v4.
+  # The daemon fails closed on a v3 payload via schema-skew, so correctness
+  # holds — but unlike hive-approve there was no test guarding v3 against
+  # accidental mutation. v3's Task must NOT carry the v4 dependency fields.
+  def test_hive_status_v3_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 3)))
+    assert_equal 3, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+
+    v3_required = doc.dig("$defs", "Task", "required")
+    v3_props = doc.dig("$defs", "Task", "properties").keys
+    %w[depends_on blocked_by dependency_stage blocked].each do |field|
+      refute_includes v3_required, field,
+                      "v3 Task must not require the v4 dependency field #{field.inspect}"
+      refute_includes v3_props, field,
+                      "v3 Task must not declare the v4 dependency property #{field.inspect}"
+    end
   end
 
   def test_hive_status_required_keys_match_producer_emission
@@ -142,6 +161,10 @@ class SchemaFilesTest < Minitest::Test
       slug: "probe",
       id: 42,
       display_name: "Probe",
+      depends_on: nil,
+      blocked_by: nil,
+      dependency_stage: nil,
+      blocked: false,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       marker_name: :waiting,
@@ -268,6 +291,62 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors,
                  "hive-status SuccessPayload with legacy_stage_dirs must validate " \
                  "(errors: #{errors.inspect})"
+  end
+
+  # Round-trip: a SuccessPayload carrying a POPULATED v4 Task (real
+  # depends_on / blocked_by / dependency_stage / blocked values) must
+  # validate against the published schema. The legacy_stage_dirs test above
+  # only validates the envelope with `tasks: []`, and the required-keys test
+  # only compares key sets — so a too-narrow field type (e.g.
+  # dependency_stage not allowing null, or blocked not boolean) would slip
+  # past those and be rejected at runtime by external consumers.
+  def test_hive_status_populated_task_validates_against_published_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+    row = {
+      stage: "1-inbox",
+      slug: "probe",
+      id: 42,
+      display_name: "Probe",
+      depends_on: "base-task",
+      blocked_by: "base-task",
+      dependency_stage: "7-artifacts",
+      blocked: true,
+      folder: "/tmp/probe",
+      state_file: "/tmp/probe/idea.md",
+      marker_name: :waiting,
+      marker_attrs: {},
+      mtime: Time.now,
+      folder_mtime: Time.now,
+      claude_pid: nil,
+      claude_pid_alive: nil,
+      action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
+      action_label: "Ready to brainstorm",
+      suggested_command: "hive brainstorm probe --from 1-inbox",
+      diagnostic: nil,
+      worktree_path: nil,
+      live_task_lock: false,
+      unanswered_questions: 0,
+      next_action: nil
+    }
+    task = Hive::Commands::Status.new.task_payload(row)
+    payload = JSON.parse(JSON.generate(
+                           "schema" => "hive-status",
+                           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+                           "ok" => true,
+                           "generated_at" => "2026-06-18T00:00:00Z",
+                           "projects" => [
+                             {
+                               "name" => "alpha",
+                               "path" => "/tmp/alpha",
+                               "hive_state_path" => "/tmp/alpha/.hive-state",
+                               "tasks" => [ task ]
+                             }
+                           ]
+                         ))
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "a populated v4 Task carrying real depends_on/blocked_by/dependency_stage/blocked " \
+                 "must validate against the published schema (errors: #{errors.inspect})"
   end
 
   # `legacy_migrate_command` accepts either "hive migrate" (when

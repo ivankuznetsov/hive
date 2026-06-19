@@ -18,7 +18,36 @@ class ConfigTest < Minitest::Test
       assert_equal 3600, cfg["timeout_sec"]["patrol"]
       assert_equal 50, cfg["budget_usd"]["digest"]
       assert_equal 1800, cfg["timeout_sec"]["digest"]
+      assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_accepts_dependency_gate_stage_done_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        dependency_gate_stage: 9-done
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "9-done", cfg["dependency_gate_stage"]
+    end
+  end
+
+  def test_load_rejects_invalid_dependency_gate_stage
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        dependency_gate_stage: 7-artifacts
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes err.message, "dependency_gate_stage"
+      assert_includes err.message, "8-finalize"
+      assert_includes err.message, "9-done"
     end
   end
 

@@ -839,7 +839,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     out = @model.view
     assert_includes out, "Projects",      "left pane (Projects header) must render at >=70 cols"
     assert_includes out, "★ All projects"
-    assert_includes out, "fix-cache-x",   "right pane task row must render"
+    assert_includes out, "Ready to plan", "right pane task row must render"
     assert_includes out, "Tasks ·",       "tasks pane title must render"
     assert_includes out, "[Tab] switch",  "default footer hints must appear"
     assert_includes out, "[Enter] action", "Enter footer hint must describe contextual behavior"

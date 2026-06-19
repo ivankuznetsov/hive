@@ -222,6 +222,72 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  # The auto-rebase-during-review case: HEAD is a strict SUPERSET of its
+  # upstream by patch-id (the remote holds an older, patch-identical version
+  # of the same work) but carries an extra genuine commit, so
+  # resync_stale_rebase! does not apply. Finalize must force-push
+  # (--force-with-lease) and complete, NOT strand on unpushed_commits.
+  def test_finalize_force_pushes_when_head_supersedes_diverged_upstream
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        slug = "fix-bug-260424-aaaa"
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+
+        # Local fix commit (patch P).
+        File.write(File.join(worktree_path, "fixfile"), "fix\n")
+        run!("git", "-C", worktree_path, "add", ".")
+        run!("git", "-C", worktree_path, "commit", "-m", "fix", "--quiet")
+
+        # Upstream re-applies P patch-identically on a DIVERGENT commit. Done
+        # inline (not via advance_upstream!) to avoid an empty advance commit:
+        # git cherry would mark an empty upstream commit as missing from HEAD
+        # and wrongly block the superset check.
+        bare = "#{worktree_path}-remote.git"
+        scratch = Dir.mktmpdir("scratch-#{slug}-")
+        @worktree_paths << scratch
+        run!("git", "clone", "--quiet", "--branch", slug, bare, scratch)
+        run!("git", "-C", scratch, "config", "user.email", "t@t")
+        run!("git", "-C", scratch, "config", "user.name", "t")
+        run!("git", "-C", scratch, "config", "commit.gpgsign", "false")
+        File.write(File.join(scratch, "fixfile"), "fix\n")
+        run!("git", "-C", scratch, "add", ".")
+        run!("git", "-C", scratch, "commit", "-m", "fix (rebased)", "--quiet")
+        run!("git", "-C", scratch, "push", "--quiet", "origin", slug)
+        run!("git", "-C", worktree_path, "fetch", "--quiet", "origin")
+
+        # The worktree ALSO holds an extra genuine commit Q on top, so
+        # resync_stale_rebase! bails and HEAD strictly supersedes upstream.
+        File.write(File.join(worktree_path, "extrafile"), "extra\n")
+        run!("git", "-C", worktree_path, "add", ".")
+        run!("git", "-C", worktree_path, "commit", "-m", "extra", "--quiet")
+        head_before = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://example.com/pr/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+        MD
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name,
+                     "force-with-lease push must let finalize complete when HEAD supersedes upstream"
+        head_after = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+        assert_equal head_before, head_after, "finalize must not reset a superset worktree"
+        remote_head = run!("git", "-C", "#{worktree_path}-remote.git", "rev-parse", slug).strip
+        assert_equal head_before, remote_head, "force-push must update the remote to HEAD"
+      end
+    end
+  end
+
   # After the `stages.ensure_clean_on_exit` plan landed, the legacy
   # `dirty_worktree` marker is replaced by `ensure_clean_on_exit_failed`
   # for the scope-violating residue case. The Telegram bot routes that

@@ -3,11 +3,11 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-06-03
-tags: [model, task, parsing, task-id]
+updated: 2026-06-18
+tags: [model, task, parsing, task-id, dependencies]
 ---
 
-**TLDR**: Value object and sidecar helpers for task identity. `Hive::Task` turns a task folder path into a structured `(project_root, hive_state_path, stage_index, stage_name, slug)` tuple plus derived paths; `Hive::TaskMeta` reads `<task>/meta.yml`; `Hive::TaskCounter` allocates global numeric ids for newly captured tasks.
+**TLDR**: Value object and sidecar helpers for task identity. `Hive::Task` turns a task folder path into a structured `(project_root, hive_state_path, stage_index, stage_name, slug)` tuple plus derived paths; `Hive::TaskMeta` reads `<task>/meta.yml` identity and dependency metadata; `Hive::TaskCounter` allocates global numeric ids for newly captured tasks.
 
 ## Constants
 
@@ -35,6 +35,7 @@ tags: [model, task, parsing, task-id]
 | `#meta_yml_path` | `Hive::TaskMeta.path(folder)` |
 | `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
 | `#display_name` | `display_name` from `meta.yml`, or nil |
+| `#depends_on` | Single id-or-slug prerequisite from `meta.yml`, or nil |
 | `#display_label` | `display_name || slug` |
 | `#lock_file` | `File.join(folder, ".lock")` |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
@@ -56,9 +57,9 @@ For stages 4 and later:
 
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
-- `read(task_folder)` returns `{id:, slug:, display_name:}` and is total over missing, malformed, or non-Hash YAML.
-- `write(task_folder, id:, slug:, display_name:)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
-- `update_display_name(task_folder, name)` preserves the existing id and slug, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
+- `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:}` and is total over missing, malformed, or non-Hash YAML.
+- `write(task_folder, id:, slug:, display_name:, depends_on: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes `depends_on` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `update_display_name(task_folder, name)` preserves the existing id, slug, and `depends_on`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
@@ -76,5 +77,6 @@ For stages 4 and later:
 ## Backlinks
 
 - [[modules/markers]] · [[modules/lock]] · [[modules/worktree]]
+- [[modules/task_dependencies]]
 - [[commands/run]] · [[commands/status]]
 - [[state-model]]

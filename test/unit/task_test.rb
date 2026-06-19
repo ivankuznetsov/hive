@@ -103,7 +103,21 @@ class TaskTest < Minitest::Test
       assert_equal File.join(folder, "meta.yml"), task.meta_yml_path
       assert_equal 42, task.id
       assert_equal "Add Foo", task.display_name
+      assert_nil task.depends_on
       assert_equal "Add Foo", task.display_label
+    end
+  end
+
+  def test_depends_on_reader_uses_sidecar
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"),
+                 { "id" => 42, "slug" => "add-foo", "depends_on" => "base-task" }.to_yaml)
+
+      task = Hive::Task.new(folder)
+
+      assert_equal "base-task", task.depends_on
     end
   end
 
@@ -115,12 +129,14 @@ class TaskTest < Minitest::Test
       task = Hive::Task.new(folder)
       assert_nil task.id
       assert_nil task.display_name
+      assert_nil task.depends_on
       assert_equal "add-foo", task.display_label
 
       File.write(File.join(folder, "meta.yml"), ":\n:not yaml")
       task = Hive::Task.new(folder)
       assert_nil task.id
       assert_nil task.display_name
+      assert_nil task.depends_on
       assert_equal "add-foo", task.display_label
     end
   end

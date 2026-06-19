@@ -9,6 +9,7 @@ require "hive/digest/collector"
 require "hive/digest/categorizer"
 require "hive/digest/renderer"
 require "hive/digest/sender"
+require "hive/digest/stats"
 
 module Hive
   module Digest
@@ -32,7 +33,7 @@ module Hive
     module_function
 
     def run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now },
-            collector: nil, categorizer: nil, sender: nil)
+            collector: nil, categorizer: nil, sender: nil, stats: nil)
       local_date = date ? Window.parse_date(date) : Window.previous_local_day(now: clock.call)
       cfg ||= Hive::Config.load_global_digest_config
       # Load ~/.config/hive/.env (if present) so a real send can authenticate
@@ -47,6 +48,7 @@ module Hive
       Hive::EnvFile.load! unless dry_run
       collector ||= Collector.new
       sender ||= Sender.new(cfg: cfg)
+      stats ||= Stats.new
 
       grouped = collector.for_date(local_date)
       message, status =
@@ -58,7 +60,7 @@ module Hive
           # wasting a full LLM run (and, with the scheduler's backoff,
           # hot-looping it). Skipped for dry-run, which never sends.
           sender.preflight! unless dry_run
-          render_digest(grouped, local_date, cfg, categorizer)
+          render_digest(grouped, local_date, cfg, categorizer, stats)
         end
 
       delivery = sender.deliver(message, dry_run: dry_run)
@@ -75,10 +77,12 @@ module Hive
       grouped.empty? || grouped.values.all? { |items| Array(items).empty? }
     end
 
-    def render_digest(grouped, date, cfg, categorizer)
+    def render_digest(grouped, date, cfg, categorizer, stats)
       categorizer ||= Categorizer.new(cfg: cfg)
-      categorized = categorizer.categorize(grouped, date: date)
-      [ Renderer.render(categorized), :sent ]
+      output = categorizer.categorize(grouped, date: date)
+      totals = stats.for_items(grouped.values.flatten)
+      message = Renderer.render(output.by_project, date: date, summary: output.summary, totals: totals)
+      [ message, :sent ]
     end
   end
 end

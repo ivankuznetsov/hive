@@ -25,6 +25,17 @@ module Hive
       # well under 4096 even after MarkdownV2 escaping.
       MAX_LABEL_LENGTH = 200
 
+      # The digest's brand title and its Telegram hashtag, rendered as
+      # "*Hive* #Digest" above the date. The hashtag is left outside the bold
+      # span so Telegram still parses it as a tappable tag.
+      BRAND = "Hive".freeze
+      HASHTAG = "#Digest".freeze
+      # Thin divider above the global stats footer.
+      FOOTER_DIVIDER = "──────────".freeze
+      # Cap the model's one-line overall summary the same way as per-item
+      # summaries so the rendered Summary block can't approach the chunk limit.
+      MAX_OVERALL_SUMMARY_LENGTH = 600
+
       RESERVED_MDV2 = /([\\_*\[\]()~`>#+\-=|{}.!])/
 
       # Inside a MarkdownV2 inline link destination only ')' and '\'
@@ -35,14 +46,19 @@ module Hive
 
       module_function
 
-      def render(grouped)
-        sections = Array(grouped).filter_map do |project_name, items|
+      def render(grouped, date:, summary: nil, totals: nil)
+        projects = Array(grouped).filter_map do |project_name, items|
           render_project(project_name, Array(items))
         end
 
-        return empty if sections.empty?
+        return empty if projects.empty?
 
-        sections.join("\n\n")
+        blocks = [ header(date) ]
+        blocks << render_summary(summary) unless blank?(summary)
+        blocks.concat(projects)
+        footer = render_footer(totals)
+        blocks << footer if footer
+        blocks.join("\n\n")
       end
 
       def empty
@@ -57,6 +73,38 @@ module Hive
         text.to_s.gsub(RESERVED_MDV2) { "\\#{$1}" }
       end
 
+      # "*Hive* #Digest" then a human date line, e.g. "Fri, 19 June 2026".
+      def header(date)
+        "*#{escape_mdv2(BRAND)}* #{escape_mdv2(HASHTAG)}\n#{escape_mdv2(format_date(date))}"
+      end
+
+      def format_date(date)
+        Window.parse_date(date).strftime("%a, %-d %B %Y")
+      end
+
+      # The model's one friendly sentence overview, under an italic heading.
+      # Bounded + escaped because it is untrusted, length-unbounded model text.
+      def render_summary(summary)
+        "_Summary_\n#{escape_mdv2(truncate_overall_summary(summary))}"
+      end
+
+      # Global totals across every shipped project, on one line under a thin
+      # divider. PRs is always known from the collected items; Lines/Commits
+      # come from a per-PR `gh` lookup, so they appear only when at least one
+      # PR's stats were fetched — the digest never fails for want of them.
+      def render_footer(totals)
+        return nil unless totals
+
+        measured = totals.measured_prs.to_i.positive?
+        parts = []
+        parts << "Lines +#{totals.additions.to_i}/-#{totals.deletions.to_i}" if measured
+        parts << "PRs #{totals.prs.to_i}"
+        parts << "Commits #{totals.commits.to_i}" if measured
+        return nil if parts.empty?
+
+        "#{FOOTER_DIVIDER}\n#{escape_mdv2(parts.join(' · '))}"
+      end
+
       def render_project(project_name, items)
         category_sections = CATEGORY_ORDER.filter_map do |category, label|
           category_items = items.select { |entry| entry.category == category }
@@ -66,7 +114,27 @@ module Hive
         end
         return nil if category_sections.empty?
 
-        ([ "*#{escape_mdv2(project_name)}*" ] + category_sections).join("\n")
+        ([ "*#{escape_mdv2(display_project(project_name))}*" ] + category_sections).join("\n")
+      end
+
+      # Title-case only the first letter so registered names like
+      # "hive"/"screenote" read as "Hive"/"Screenote" in the section header
+      # without mangling the rest of a multi-word slug.
+      def display_project(project_name)
+        project_name.to_s.sub(/\A./, &:upcase)
+      end
+
+      def blank?(value)
+        value.to_s.strip.empty?
+      end
+
+      # Bound the model's overall summary on the raw text (before escaping) so
+      # a cut can never split a MarkdownV2 `\x` escape pair.
+      def truncate_overall_summary(text)
+        text = text.to_s
+        return text if text.length <= MAX_OVERALL_SUMMARY_LENGTH
+
+        "#{text[0, MAX_OVERALL_SUMMARY_LENGTH - 1].rstrip}…"
       end
 
       def render_line(entry)

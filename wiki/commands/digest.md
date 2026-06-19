@@ -46,16 +46,27 @@ Options:
    today" message and no agent is spawned.
 4. If items shipped, `Digest::Categorizer` renders `templates/digest_prompt.md.erb`,
    spawns the resolved `AgentProfile` with `status_mode: :output_file_exists`,
-   requires an `items.json` output, then maps rows back by the project-scoped
-   categorizer id (`<project_name>/<pr_number>`, or `<project_name>/<slug>` when
-   there is no PR number) so two projects sharing a PR number on one day don't
-   collide. Allowed categories are `feature`, `fix`, and `patrol`;
-   missing/invalid/duplicate-id rows log a warning and default to `feature`
-   with a fallback summary.
-5. `Digest::Renderer` groups by project, renders categories in fixed order
-   (`New features`, `Fixes`, `Patrol tasks`), escapes Telegram MarkdownV2
-   dynamic text, and links to PR URLs when present.
-6. `Digest::Sender` sends the message with `parse_mode: :markdown_v2` (one
+   requires an `items.json` output (`{"summary": "...", "items": [...]}`), then
+   maps rows back by the project-scoped categorizer id (`<project_name>/<pr_number>`,
+   or `<project_name>/<slug>` when there is no PR number) so two projects sharing
+   a PR number on one day don't collide. Allowed categories are `feature`, `fix`,
+   and `patrol`; missing/invalid/duplicate-id rows log a warning and default to
+   `feature` with a fallback summary. The model's top-level `summary` (one
+   sentence about the day) is surfaced too, falling back to a neutral count when
+   omitted. `categorize` returns a `Digest::Output(by_project:, summary:)`.
+5. `Digest::Stats` fetches per-PR additions/deletions/commits via
+   `Hive::Gh.pr_stats(pr_url)` (keyed off the PR URL, no worktree needed) and
+   aggregates global `Totals(prs:, commits:, additions:, deletions:, measured_prs:)`.
+   A per-PR `gh` failure is logged and skipped — the digest never fails for want
+   of footer numbers.
+6. `Digest::Renderer` renders the brand header `*Hive* #Digest` + a human date
+   (`Fri, 19 June 2026`), an italic `_Summary_` block, then **per-project**
+   sections (`*Hive*`, `*Screenote*`, …) each with categories in fixed order
+   (`Features`, `Fixes`, `Patrol`), and a global footer under a divider
+   (`Lines +A/-D · PRs P · Commits C`; Lines/Commits appear only when at least
+   one PR's stats were measured). All dynamic text is MarkdownV2-escaped and
+   links to PR URLs when present.
+7. `Digest::Sender` sends the message with `parse_mode: :markdown_v2` (one
    `send_message` per chunk above Telegram's 4096-char limit), or returns the
    text without credentials in dry-run mode.
 

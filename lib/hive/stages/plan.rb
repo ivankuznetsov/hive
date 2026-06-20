@@ -44,7 +44,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task),
+            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task), # coding-scoped: coding plan stage tmux session
             allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
           )
         else

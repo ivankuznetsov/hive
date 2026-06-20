@@ -41,7 +41,7 @@ module Hive
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
-      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -736,6 +736,7 @@ module Hive
         decision = Policy.decide(
           action: row.action,
           stage: row.stage,
+          workflow: row.workflow,
           command: row.suggested_command,
           state_file_mtime: row.state_file_mtime,
           last_dispatched_state_file_mtime:

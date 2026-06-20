@@ -196,6 +196,16 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    last_dispatched_state_file_mtime: nil)
   end
 
+  def test_generic_plan_named_needs_input_does_not_hit_coding_plan_approval
+    assert_equal :record_baseline,
+                 decide(action: "needs_input",
+                        workflow: "dispatch",
+                        stage: "3-plan",
+                        command: "hive run slug-a",
+                        state_file_mtime: T0 - 600,
+                        last_dispatched_state_file_mtime: nil)
+  end
+
   def test_needs_input_first_sight_with_fresh_mtime_records_baseline
     # First-sight always records baseline regardless of mtime age.
     assert_equal :record_baseline, decide(action: "needs_input",
@@ -502,12 +512,13 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   private
 
-  def decide(action:, command:, stage: nil, state_file_mtime: nil,
+  def decide(action:, command:, stage: nil, workflow: nil, state_file_mtime: nil,
              last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
              answers_pending: false, blocked: false)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
+      workflow: workflow,
       command: command,
       state_file_mtime: state_file_mtime,
       last_dispatched_state_file_mtime: last_dispatched_state_file_mtime,

@@ -96,7 +96,7 @@ module Hive
         validate_dependency!(depends_on) if depends_on
 
         hive_state = project["hive_state_path"]
-        task_dir = File.join(hive_state, "stages", "1-inbox", slug)
+        task_dir = File.join(hive_state, "stages", "1-inbox", slug) # coding-scoped: hive new seeds the coding inbox
         if File.exist?(task_dir)
           raise SlugCollisionError.new(
             "slug collision at #{task_dir} (rare; retry the command)",
@@ -124,7 +124,7 @@ module Hive
 
         ops = Hive::GitOps.new(project["path"])
         Hive::Lock.with_commit_lock(hive_state) do
-          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured")
+          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured") # coding-scoped: hive new seeds the coding inbox
         end
         spawn_name_generator(task_dir)
 

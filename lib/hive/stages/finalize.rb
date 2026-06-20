@@ -117,7 +117,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task),
+            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task), # coding-scoped: coding finalize stage tmux session
             allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           )
         else
@@ -187,7 +187,7 @@ module Hive
         unless out.empty?
           result = Hive::Stages::CleanExit.run!(
             worktree_path: worktree_path,
-            stage: "8-finalize",
+            stage: "8-finalize", # coding-scoped: coding finalize stage event
             task: task,
             cfg: cfg || {},
             reason: :finalize_entry_backstop

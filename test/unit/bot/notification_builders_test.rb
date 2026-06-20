@@ -6,13 +6,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          diagnostic: nil, id: nil, display_name: nil, pr_url: nil)
+          diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding")
     Row.new(
       project: "hive",
       slug: slug,
       id: id,
       display_name: display_name,
       stage: stage,
+      workflow: workflow,
       marker: marker,
       attrs: attrs,
       folder: "/tmp/#{slug}",
@@ -194,6 +195,17 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     assert_equal [ "Answer in chat" ], labels,
                  "brainstorm-waiting keyboard is deterministic Q-by-Q only — no Codex draft, no laptop button"
+  end
+
+  def test_generic_waiting_row_uses_neutral_details_notification
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "waiting", stage: "2-gather", workflow: "dispatch")
+    )
+
+    assert_match(/Needs input: waiting/, notification.text)
+    refute_match(/Brainstorm questions/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Show details" ], labels
   end
 
   def test_generic_needs_input_marker_builds_show_details_only_keyboard

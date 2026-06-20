@@ -4,15 +4,15 @@ module Hive
   module Bot
     module TitleFormatter
       STAGE_LABELS = {
-        "1-inbox" => "Inbox",
-        "2-brainstorm" => "Brainstorm",
-        "3-plan" => "Plan",
-        "4-execute" => "Execute",
-        "5-open-pr" => "Open PR",
-        "6-review" => "Review",
-        "7-artifacts" => "Artifacts",
-        "8-finalize" => "Finalize",
-        "9-done" => "Done"
+        "1-inbox" => "Inbox", # coding-scoped: bespoke coding label; generic stages titleize
+        "2-brainstorm" => "Brainstorm", # coding-scoped: bespoke coding label; generic stages titleize
+        "3-plan" => "Plan", # coding-scoped: bespoke coding label; generic stages titleize
+        "4-execute" => "Execute", # coding-scoped: bespoke coding label; generic stages titleize
+        "5-open-pr" => "Open PR", # coding-scoped: bespoke PR label; generic stages titleize
+        "6-review" => "Review", # coding-scoped: bespoke coding review label; generic stages titleize
+        "7-artifacts" => "Artifacts", # coding-scoped: bespoke coding label; generic stages titleize
+        "8-finalize" => "Finalize", # coding-scoped: bespoke coding label; generic stages titleize
+        "9-done" => "Done" # coding-scoped: bespoke coding terminal label; generic stages titleize
       }.freeze
 
       SLUG_SUFFIX = /-\d{6}-[a-f0-9]{4,}\z/

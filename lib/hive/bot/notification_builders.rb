@@ -133,7 +133,18 @@ module Hive
           # Label them distinctly so a plan pause isn't mis-announced as
           # "Brainstorm questions" (it isn't, and the daemon usually
           # auto-approves it — see suppress_daemon_plan_pause?).
-          row.stage.to_s == "3-plan" ? plan_waiting(row) : brainstorm_waiting(row)
+          if coding_workflow?(row) && row.stage.to_s == "3-plan" # coding-scoped: plan approval pause only exists in coding workflow
+            plan_waiting(row)
+          elsif coding_workflow?(row) && row.stage.to_s == "2-brainstorm" # coding-scoped: brainstorm Q&A answer flow is coding-specific
+            brainstorm_waiting(row)
+          else
+            Notification.new(
+              text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
+              keyboard: [
+                [ button("Show details", details_callback(row)) ]
+              ]
+            )
+          end
         when "review_waiting"
           review_waiting(row)
         else
@@ -357,6 +368,13 @@ module Hive
         normalized = row.attrs.to_h.transform_keys(&:to_s)
         attrs = normalized.to_a.sort_by(&:first).map { |key, value| "#{key}=#{value}" }.join(" ")
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
+      end
+
+      def coding_workflow?(row)
+        return true unless row.respond_to?(:workflow)
+
+        workflow = row.workflow.to_s
+        workflow.empty? || workflow == "coding"
       end
 
       def details_callback(row)

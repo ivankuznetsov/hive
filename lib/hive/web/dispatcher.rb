@@ -238,7 +238,7 @@ module Hive
 
       private
 
-      # Map the task's current stage dir (e.g. "6-review") to the directory
+      # Map the task's current stage dir (e.g. "6-review") to the directory # not-a-stage-ref: documentation example
       # of the stage immediately before it. An absent `from` falls back to
       # the first stage (a supported call shape), but an unparseable one
       # RAISES: reject runs forced, so "guess 1-inbox" would silently drag

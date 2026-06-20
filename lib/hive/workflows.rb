@@ -63,8 +63,8 @@ module Hive
     end
 
     # Stage directory that follows stage_dir in the pipeline, or nil at the
-    # terminal stage. Use this instead of hardcoding `"7-artifacts"` /
-    # `"8-finalize"` etc. so a future renumber doesn't strand call sites.
+    # terminal stage. Use this instead of hardcoding `"7-artifacts"` / # not-a-stage-ref: documentation example
+    # `"8-finalize"` etc. so a future renumber doesn't strand call sites. # not-a-stage-ref: documentation example
     def next_dir_after(stage_dir)
       verb = VERB_BY_SOURCE[stage_dir]
       verb && VERBS.fetch(verb).fetch(:target)

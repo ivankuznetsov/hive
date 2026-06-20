@@ -101,12 +101,20 @@ module Hive
       # `suppress_ready_action?`'s daemon-aware gating.
       def suppress_daemon_plan_pause?(row)
         return false unless row.action == "needs_input"
-        return false unless row.stage.to_s == "3-plan" && row.marker.to_s == "waiting"
+        return false unless coding_workflow?(row)
+        return false unless row.stage.to_s == "3-plan" && row.marker.to_s == "waiting" # coding-scoped: daemon auto-approval only applies to coding plan pauses
         return false unless daemon_enabled_for?(row.project)
 
         @logger.event(:notification_skipped_daemon_plan_pause,
                       project: row.project, slug: row.slug, marker: row.marker)
         true
+      end
+
+      def coding_workflow?(row)
+        return true unless row.respond_to?(:workflow)
+
+        workflow = row.workflow.to_s
+        workflow.empty? || workflow == "coding"
       end
 
       def immediate_on_fresh_install?(row)

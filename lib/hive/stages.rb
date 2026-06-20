@@ -53,7 +53,7 @@ module Hive
       DIRS[current_array_idx - 1]
     end
 
-    # Resolve a user-provided stage string ("3-plan" or "plan") to a
+    # Resolve a user-provided stage string ("3-plan" or "plan") to a # not-a-stage-ref: documentation of accepted input shape
     # canonical DIRS entry, or nil if neither shape matches.
     def resolve(name)
       return name if DIRS.include?(name)

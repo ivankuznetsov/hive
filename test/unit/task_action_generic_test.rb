@@ -41,6 +41,7 @@ class TaskActionGenericTest < Minitest::Test
     Hive::Daemon::Policy.decide(
       action: action.key,
       stage: "#{action.task.stage_index}-#{action.task.stage_name}",
+      workflow: action.task.workflow.id.to_s,
       command: action.command,
       state_file_mtime: Time.utc(2026, 6, 20, 12, 0, 0),
       last_dispatched_state_file_mtime: nil,

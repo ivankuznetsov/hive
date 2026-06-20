@@ -12,7 +12,7 @@ module Hive
       "worktree_root" => nil,
       "default_branch" => nil,
       "default_workflow" => "coding",
-      "dependency_gate_stage" => "8-finalize",
+      "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
       "project_name" => nil,
       "claude" => {
         "mode" => "tmux",

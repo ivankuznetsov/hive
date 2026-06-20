@@ -37,7 +37,7 @@ module Hive
       end
 
       def session_name_for(task)
-        Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
+        Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task) # coding-scoped: coding brainstorm stage tmux session
       end
 
       def preflight_tmux!(tmux_bin: Hive::ClaudeLauncher.tmux_bin)

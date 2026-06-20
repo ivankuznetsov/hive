@@ -1451,7 +1451,7 @@ module Hive
         title = nb.display_title(row)
         action = row.action.to_s
 
-        if action == "needs_input" && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
+        if action == "needs_input" && coding_workflow?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting" # coding-scoped: Telegram answer flow edits coding brainstorm.md
           nb.button("✏️ #{title}", "answer:#{row.project}:#{row.slug}")
         elsif action.start_with?("ready_to_")
           verb = nb.verb_for_action(row.action)
@@ -1463,6 +1463,13 @@ module Hive
             nb.button("🔍 #{title}", nb.details_callback(row))
           end
         end
+      end
+
+      def coding_workflow?(row)
+        return true unless row.respond_to?(:workflow)
+
+        workflow = row.workflow.to_s
+        workflow.empty? || workflow == "coding"
       end
 
       def render_details(rows, project, slug)
@@ -1526,7 +1533,7 @@ module Hive
 
       def brainstorm_path_for(slug, project: nil)
         entry = brainstorm_project_entry_for(slug, project: project)
-        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil
+        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil # coding-scoped: Telegram answer flow edits coding brainstorm.md
       end
 
       # Resolve the project name a brainstorm slug currently lives in.
@@ -1543,7 +1550,7 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |entry| entry["name"] == project } if project && !project.empty?
         projects.find do |entry|
-          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md")
+          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") # coding-scoped: Telegram answer flow edits coding brainstorm.md
           File.exist?(path)
         end
       end

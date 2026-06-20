@@ -20,12 +20,12 @@ module Hive
     class Status
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
-      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
       # First stage at which a PR exists; `pr.md` is only read from this
       # stage onward (see `pr_url_for`). Named here, and the numeric
       # threshold derived from `Hive::Stages`, so inserting or reordering a
       # stage can't silently shift which stages read `pr.md`.
-      OPEN_PR_STAGE_DIR = "5-open-pr".freeze
+      OPEN_PR_STAGE_DIR = "5-open-pr".freeze # coding-scoped: PR metadata exists only in coding open-pr and later stages
       OPEN_PR_STAGE_INDEX = Hive::Stages.parse(OPEN_PR_STAGE_DIR).first
       # Width of the text-mode PR column (`#NNN`, right-justified). Sourced
       # from the shared `Hive::Pr::NUMBER_WIDTH` so the text and TUI

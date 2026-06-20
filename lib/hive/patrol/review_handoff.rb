@@ -21,7 +21,7 @@ module Hive
         return nil if pr_url.to_s.strip.empty?
 
         slug = unique_slug(finding)
-        task_folder = File.join(@project_root, ".hive-state", "stages", "6-review", slug)
+        task_folder = File.join(@project_root, ".hive-state", "stages", "6-review", slug) # coding-scoped: patrol handoff creates coding review tasks
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
         write_meta(task_folder, slug, finding)
         write_idea_md(task_folder, slug, finding, now)

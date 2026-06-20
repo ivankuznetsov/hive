@@ -86,7 +86,10 @@ module Hive
       # Decide what to do with one task row.
       #
       # @param action [String] the `tasks[].action` value from hive-status JSON
-      # @param stage [String, nil] the `tasks[].stage` value (e.g. "3-plan")
+      # @param stage [String, nil] the `tasks[].stage` value (e.g. "3-plan") # coding-scoped: example dir only
+      # @param workflow [String, nil] the `tasks[].workflow` value. Nil is
+      #   treated as coding for backward-compatible test doubles and older
+      #   status payloads.
       # @param command [String, nil] the `suggested_command` for the row (may be nil)
       # @param state_file_mtime [Time, nil] mtime of the task's state file
       # @param last_dispatched_state_file_mtime [Time, nil] mtime captured at the
@@ -116,7 +119,7 @@ module Hive
       # the dispatcher does NOT spawn a child, but it MUST call
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
-      def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
+      def decide(action:, stage: nil, workflow: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
                  now:, edit_debounce_sec: 30, answers_pending: false, blocked: false)
         return :skip if action.nil?
         # Three branches dispatch the row's command verbatim (advance,
@@ -127,12 +130,12 @@ module Hive
         # (`needs_input`); a future refactor extending plan_approval?
         # to a non-edit_resume action would otherwise silently lose
         # this coverage. PR #83 code review finding #3.
-        if (advance?(action) || edit_resume?(action) || plan_approval?(action, stage)) &&
+        if (advance?(action) || edit_resume?(action) || plan_approval?(action, stage, workflow)) &&
            (command.nil? || command.empty?)
           return :skip
         end
 
-        if advance?(action) || plan_approval?(action, stage)
+        if advance?(action) || plan_approval?(action, stage, workflow)
           blocked ? :blocked_on_dependency : :dispatch
         elsif action == MERGE_WAIT_ACTION
           :poll_for_merge
@@ -175,8 +178,8 @@ module Hive
         EDIT_RESUME_ACTIONS.include?(action)
       end
 
-      # Literal `"3-plan"` equality matches every other stage-identity
-      # check in the codebase (e.g., `bubble_model.rb:1833 when "3-plan"`
+      # Literal `"3-plan"` equality matches every other stage-identity # coding-scoped: plan auto-approval is a coding workflow rule
+      # check in the codebase (e.g., `bubble_model.rb:1833 when "3-plan"` # coding-scoped: historical coding TUI reference
       # and `Hive::Stages::DIRS` membership). Earlier drafts used
       # `/\A\d+-plan\z/` but the regex matched any digit-prefixed plan
       # stage; today's `Hive::Stages::DIRS` is a closed 8-entry enum
@@ -185,8 +188,12 @@ module Hive
       # silently inherit auto-approval. PR #83 code review finding #4
       # (cross-corroborated by reliability + testing + maintainability +
       # project-standards reviewers).
-      def plan_approval?(action, stage)
-        action == "needs_input" && stage == "3-plan"
+      def plan_approval?(action, stage, workflow)
+        action == "needs_input" && coding_workflow?(workflow) && stage == "3-plan" # coding-scoped: daemon auto-approval only applies to coding plan pauses
+      end
+
+      def coding_workflow?(workflow)
+        workflow.nil? || workflow.to_s.empty? || workflow.to_s == "coding"
       end
 
       def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:)

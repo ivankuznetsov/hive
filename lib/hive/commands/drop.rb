@@ -35,7 +35,7 @@ module Hive
         :from_stages, keyword_init: true
       )
 
-      # `from` accepts either the long stage dir ("4-execute") or the
+      # `from` accepts either the long stage dir ("4-execute") or the # not-a-stage-ref: CLI help example
       # short name ("execute"); see `Hive::Stages.resolve` for the map.
       def initialize(target, project: nil, from: nil, json: false)
         @target = target

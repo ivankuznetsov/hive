@@ -89,11 +89,11 @@ module Hive
         end
 
         def self.retry_verb_for_stage(stage)
-          return nil if stage.to_s == "9-done"
+          return nil if stage.to_s == "9-done" # coding-scoped: coding retry verbs have no terminal retry
 
           Hive::Workflows.verb_arriving_at(stage) || {
-            "4-execute" => "develop",
-            "5-review" => "review",
+            "4-execute" => "develop", # not-a-stage-ref: legacy pre-open-pr retry mapping
+            "5-review" => "review", # not-a-stage-ref: legacy pre-open-pr retry mapping
             "6-pr" => "pr"
           }[stage]
         end

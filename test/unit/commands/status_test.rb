@@ -186,6 +186,38 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_coding_status_rows_and_legacy_dirs_are_characterized
+    # U6 characterization: descriptor routing must not change the coding row
+    # actions or legacy-stage warning shape.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(hive_state, "2-brainstorm", "brainstorm-task-260620-aaaa",
+                        state_file: "brainstorm.md", marker: "COMPLETE")
+      write_status_task(hive_state, "3-plan", "plan-task-260620-bbbb",
+                        state_file: "plan.md", marker: "WAITING")
+      write_status_task(hive_state, "4-execute", "execute-task-260620-cccc",
+                        state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      legacy = File.join(hive_state, "stages", "5-review", "legacy-task-260620-dddd")
+      FileUtils.mkdir_p(legacy)
+      File.write(File.join(legacy, "task.md"), "<!-- COMPLETE -->\n")
+
+      payload = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ])
+      project = payload.fetch("projects").first
+      actions_by_slug = project.fetch("tasks").to_h { |task| [ task.fetch("slug"), task.fetch("action") ] }
+
+      assert_equal({
+        "brainstorm-task-260620-aaaa" => "ready_to_plan",
+        "plan-task-260620-bbbb" => "needs_input",
+        "execute-task-260620-cccc" => "ready_to_open_pr"
+      }, actions_by_slug)
+      assert_equal [ { "stage_dir" => "5-review", "task_count" => 1 } ],
+                   project.fetch("legacy_stage_dirs")
+      assert_equal "hive migrate", project.fetch("legacy_migrate_command")
+    end
+  end
+
   def test_json_payload_unblocks_dependency_at_gate_stage
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

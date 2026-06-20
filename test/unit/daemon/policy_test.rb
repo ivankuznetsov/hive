@@ -51,6 +51,45 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive approve slug-a --from 2-gather")
   end
 
+  def test_coding_policy_decision_matrix_is_characterized
+    # U6 characterization: adding generic workflow dispatch keys must leave
+    # the existing coding daemon policy outcomes byte-for-byte equivalent.
+    cases = [
+      {
+        name: "advance",
+        expected: :dispatch,
+        args: { action: "ready_to_develop", stage: "3-plan",
+                command: "hive develop slug-a --from 3-plan" }
+      },
+      {
+        name: "plan approval",
+        expected: :dispatch,
+        args: { action: "needs_input", stage: "3-plan",
+                command: "hive plan slug-a --from 3-plan",
+                state_file_mtime: T0 - 60,
+                last_dispatched_state_file_mtime: nil }
+      },
+      {
+        name: "edit resume",
+        expected: :dispatch,
+        args: { action: "needs_input", stage: "2-brainstorm",
+                command: "hive brainstorm slug-a --from 2-brainstorm",
+                state_file_mtime: T0 - 60,
+                last_dispatched_state_file_mtime: T0 - 600 }
+      },
+      {
+        name: "merge wait",
+        expected: :poll_for_merge,
+        args: { action: "ready_to_archive", stage: "8-finalize",
+                command: "hive archive slug-a --from 8-finalize" }
+      }
+    ]
+
+    cases.each do |example|
+      assert_equal example.fetch(:expected), decide(**example.fetch(:args)), example.fetch(:name)
+    end
+  end
+
   # ── merge wait: hand off to PrMergeWatcher ─────────────────────────────
 
   def test_ready_to_archive_polls_for_merge

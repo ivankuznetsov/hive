@@ -1,5 +1,6 @@
 require "test_helper"
 require "open3"
+require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
 
@@ -1163,7 +1164,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def recording_binary(dir, name)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
@@ -1175,7 +1176,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def cache_writing_gh_binary(dir, name)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       require "fileutils"
       cache_path = File.join(ENV.fetch("XDG_CACHE_HOME"), "gh")
       FileUtils.mkdir_p(cache_path)
@@ -1192,7 +1193,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def recording_env_binary(dir, name, keys)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       keys = #{keys.inspect}
       File.open(#{File.join(dir, "env.log").dump}, "a") do |file|
         keys.each do |key|
@@ -1249,7 +1250,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def executable_touch_binary(dir, name, pwn_path, after_touch = "")
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       File.write(#{pwn_path.dump}, "ran")
       #{after_touch}
     RUBY

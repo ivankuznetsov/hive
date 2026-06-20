@@ -151,9 +151,24 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.update_id(dir, 42)
 
       assert_equal(
-        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task" },
+        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task", workflow: nil },
         Hive::TaskMeta.read(dir)
       )
+    end
+  end
+
+  # The id backfiller assigns an id to a task created outside `hive new`; it must
+  # preserve a non-coding `workflow:` selector, not silently revert the task to
+  # the project default by dropping the field on rewrite.
+  def test_update_id_preserves_workflow_selector
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: nil, slug: "keep-slug", display_name: nil,
+                           depends_on: nil, workflow: "research")
+
+      Hive::TaskMeta.update_id(dir, 99)
+
+      assert_equal "research", Hive::TaskMeta.read(dir)[:workflow],
+                   "the id backfiller must not drop a non-coding workflow selector"
     end
   end
 

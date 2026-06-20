@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/workflows"
 require "hive/tui/text"
 
 module Hive
@@ -111,7 +112,13 @@ module Hive
           File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
           copy_attachments!(task_dir)
           id = allocate_task_id
-          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on)
+          # Pin workflow: coding so the new 1-inbox task resolves against the
+          # coding descriptor regardless of the project's default_workflow — a
+          # non-coding default would otherwise make this field-less folder
+          # resolve to that descriptor and vanish from status as an invalid task.
+          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil,
+                               depends_on: depends_on,
+                               workflow: Hive::Workflows::CODING_ID.to_s) # coding-scoped: hive new seeds the coding inbox
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as

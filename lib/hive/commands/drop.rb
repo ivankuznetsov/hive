@@ -26,9 +26,6 @@ module Hive
       # in lockstep.
       ARCHIVE_STAGE = Hive::Stages::DIRS.last
 
-      # Mirror `schemas/hive-drop.v1.json#from_stages.enum`.
-      ACTIVE_STAGE_DIRS = Hive::Stages::DIRS.reject { |stage| stage == ARCHIVE_STAGE }.freeze
-
       AlreadyArchived = Class.new(Hive::InvalidTaskPath)
 
       TaskContext = Struct.new(
@@ -445,11 +442,11 @@ module Hive
 
       def remove_task_folders(context)
         # Remove exactly the stages the task was found in (`from_stages`), not
-        # a fixed coding-only ACTIVE_STAGE_DIRS sweep — otherwise a generic
-        # task whose stage dir isn't in the coding set would be reported
-        # dropped while its folder survived on disk. `from_stages` is the
-        # authoritative found-set (archive copies are already excluded by the
-        # resolver), so this is a no-op for the same coding rows as before.
+        # a fixed coding-only stage sweep — otherwise a generic task whose stage
+        # dir isn't in the coding set would be reported dropped while its folder
+        # survived on disk. `from_stages` is the authoritative found-set (archive
+        # copies are already excluded by the resolver), so this is a no-op for
+        # the same coding rows as before.
         context.from_stages.each do |stage|
           FileUtils.rm_rf(File.join(context.hive_state_path, "stages", stage, context.slug))
         end

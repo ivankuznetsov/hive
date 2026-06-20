@@ -17,14 +17,18 @@ module HiveWorkflowTestHelper
     )
   end
 
-  # Guard-discriminating descriptor for the `:none` entry split at
-  # task_action.rb. The entry stage is `:agent` (not inert) and the middle
-  # stage is `:inert` but non-entry, so each conjunct of
-  # `entry && !terminal && stage.kind == :inert` is exercised in isolation:
-  #   - dropping `stage.kind == :inert` would wrongly advance the `:agent` entry,
-  #   - dropping `entry` would wrongly advance the inert middle stage.
-  # research_workflow can't catch either regression (its only inert stage is the
-  # entry, so both conjuncts move together there).
+  # Guard-discriminating descriptor for the `:none` advance gate at
+  # task_action.rb (`!terminal && stage.kind == :inert`). The entry stage is
+  # `:agent` (not inert) and the middle stage is `:inert` but non-entry, so the
+  # two surviving conjuncts are each exercised in isolation:
+  #   - the `:agent` ENTRY must RUN — dropping `stage.kind == :inert` would
+  #     wrongly advance it.
+  #   - the inert NON-entry MIDDLE must ADVANCE — the earlier `entry &&` conjunct
+  #     was deliberately dropped (U6.6), because `Resolver.resolve` raises
+  #     `StageError` for `kind: :inert`, so routing it to `hive run` would strand
+  #     the task (neither runnable nor advanceable).
+  # research_workflow can't catch either case (its only inert stage is the entry,
+  # so kind and position move together there).
   def agent_entry_workflow
     Hive::Workflow.new(
       id: :agent_entry,

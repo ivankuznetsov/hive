@@ -82,7 +82,11 @@ module Hive
         id: id,
         slug: slug,
         display_name: current[:display_name],
-        depends_on: current[:depends_on]
+        depends_on: current[:depends_on],
+        # Preserve the workflow selector — without it, the daemon's id
+        # backfiller would silently drop a non-coding `workflow:` and revert
+        # the task to the project default (mirrors update_display_name).
+        workflow: current[:workflow]
       )
     end
 

@@ -308,6 +308,18 @@ def hardened_passthrough_argv(argv, rest)
     "-c", "core.fsmonitor=false",
     "-c", "core.askPass=",
     "-c", "log.showSignature=false",
+    # `log.showSignature=false` only suppresses the implicit `--show-signature`; it does NOT
+    # stop `%G*` pretty placeholders from verifying signatures. A `%G` format can reach git
+    # without ever appearing in argv: a worktree-local `pretty.<name>=format:%G?` alias selected
+    # by `format.pretty=<name>` resolves to `%G?` even for a bare `git log`, and the argv scan
+    # cannot see config-resolved formats. Every `%G*` verification execs the repo's gpg.program /
+    # gpg.<format>.program helper, so pin all of them to the no-op `false` — these `-c` overrides
+    # outrank the worktree config, so no attacker-configured helper runs no matter how the
+    # placeholder is reached.
+    "-c", "gpg.program=false",
+    "-c", "gpg.openpgp.program=false",
+    "-c", "gpg.x509.program=false",
+    "-c", "gpg.ssh.program=false",
     *passthrough
   ]
 end

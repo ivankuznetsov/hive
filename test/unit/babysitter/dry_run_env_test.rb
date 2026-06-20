@@ -91,7 +91,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations,
-                      "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false status --short"
+                      "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
+                      "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
+                      "-c gpg.ssh.program=false status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
       refute_includes real_invocations, "pwn-git"
       refute_includes real_invocations, "pwn-gh"
@@ -1002,6 +1004,32 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_disables_config_resolved_signature_format_before_passthrough
+    with_tmp_signed_git_repo do |dir, marker_path|
+      # The argv scan only sees literal `%G` in argv. A worktree-local pretty alias selected as
+      # the default format resolves to a `%G?` signature placeholder even for a bare `git log`,
+      # so the gate lets the read through. The passthrough must still neutralize the gpg exec
+      # seam (`-c gpg.program=false` and friends) so the configured gpg.program helper cannot
+      # run — `log.showSignature=false` does not suppress `%G*` placeholders.
+      run!("git", "-C", dir, "config", "pretty.pwn", "format:%G?")
+      run!("git", "-C", dir, "config", "format.pretty", "pwn")
+
+      [
+        [ "log", "-1" ],
+        [ "log", "--pretty=pwn", "-1" ],
+        [ "show", "--pretty=pwn", "HEAD" ]
+      ].each do |args|
+        FileUtils.rm_f(marker_path)
+
+        _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        refute_path_exists marker_path,
+                           "config-resolved %G format ran gpg.program during #{args.join(' ')} passthrough"
+      end
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")
@@ -1074,7 +1102,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
     "real-git #{([
       "-c", "core.fsmonitor=false",
       "-c", "core.askPass=",
-      "-c", "log.showSignature=false"
+      "-c", "log.showSignature=false",
+      "-c", "gpg.program=false",
+      "-c", "gpg.openpgp.program=false",
+      "-c", "gpg.x509.program=false",
+      "-c", "gpg.ssh.program=false"
     ] + passthrough).join(' ')}"
   end
 

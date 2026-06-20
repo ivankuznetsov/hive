@@ -484,7 +484,7 @@ def test_emit_json_summary_swallows_epipe
   }
   cmd.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "closed pipe" }
 
-  assert_nil cmd.send(:emit_json_summary, entry: entry, ops: ops, answers: answers)
+  assert_nil cmd.send(:emit_json_summary, entry: entry, ops: ops, answers: answers, workflow: :coding)
 end
 
   def test_current_binary_path_resolves_hive_from_path

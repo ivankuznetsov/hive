@@ -5,6 +5,7 @@ require "hive/task"
 require "hive/markers"
 require "hive/lock"
 require "hive/stages"
+require "hive/workflows"
 require "hive/archive_filter"
 require "hive/dependencies"
 require "hive/task_action"
@@ -211,7 +212,7 @@ module Hive
         return [] unless File.directory?(stages_root)
 
         Dir.children(stages_root).filter_map do |basename|
-          next if Hive::Stages::DIRS.include?(basename)
+          next if Hive::Workflows.all_stage_dirs.include?(basename)
           next if STATUS_PRIVATE_STAGE_DIRS.include?(basename)
 
           dir = File.join(stages_root, basename)
@@ -513,7 +514,7 @@ module Hive
 
       def collect_rows(hive_state)
         rows = []
-        Hive::Stages::DIRS.each do |stage|
+        Hive::Workflows.all_stage_dirs.each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 

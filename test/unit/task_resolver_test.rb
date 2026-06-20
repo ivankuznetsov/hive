@@ -48,6 +48,35 @@ class TaskResolverTest < Minitest::Test
     end
   end
 
+  def test_slug_target_resolves_registered_generic_stage_dirs
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_global_config do |home|
+        project_root = File.join(home, "project-a")
+        folder = task_folder(project_root, "2-gather", "generic-task")
+        Hive::TaskMeta.write(folder, id: 43, slug: "generic-task", display_name: nil, workflow: descriptor.id.to_s)
+        write_registered_project(home, "project-a", project_root)
+
+        assert_equal folder, Hive::TaskResolver.new("generic-task").resolve.folder
+        assert_equal folder, Hive::TaskResolver.new("generic-task", stage_filter: "gather").resolve.folder
+      end
+    end
+  end
+
+  def test_unknown_stage_filter_lists_registered_generic_stage_dirs
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::TaskResolver.new("generic-task", stage_filter: "nope").resolve
+      end
+
+      assert_includes error.message, "2-gather"
+      assert_includes error.message, "gather"
+    end
+  end
+
   def test_numeric_target_with_no_match_raises_id_specific_error
     with_tmp_global_config do |home|
       project_root = File.join(home, "project-a")

@@ -192,8 +192,13 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_status_task_enums_match_closed_sets
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
 
-    assert_equal Hive::Stages::DIRS.sort,
-                 doc.dig("$defs", "Task", "properties", "stage", "enum").sort
+    stage_pattern = "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+    assert_equal stage_pattern,
+                 doc.dig("$defs", "Task", "properties", "stage", "pattern")
+    assert_equal stage_pattern,
+                 doc.dig("$defs", "Task", "properties", "dependency_stage", "pattern")
+    assert_nil doc.dig("$defs", "Task", "properties", "stage", "enum"),
+               "generic workflow stage dirs are runtime-registered, so stage must not be a coding enum"
     assert_equal Hive::Commands::Status::ICON.keys.map(&:to_s).sort,
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,

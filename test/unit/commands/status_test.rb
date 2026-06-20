@@ -94,6 +94,32 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_scans_registered_generic_stage_dirs
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        slug = "generic-task-260620-abcd"
+        folder = File.join(hive_state, "stages", "2-gather", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 77, slug: slug, display_name: "Generic Task", workflow: descriptor.id.to_s)
+        File.write(File.join(folder, "gather.md"), "<!-- WAITING -->\n")
+
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+        project = payload.fetch("projects").first
+        task = project.fetch("tasks").find { |candidate| candidate.fetch("slug") == slug }
+
+        refute_nil task
+        assert_equal "2-gather", task.fetch("stage")
+        assert_equal "dispatch", task.fetch("workflow")
+        assert_equal [], project.fetch("legacy_stage_dirs")
+      end
+    end
+  end
+
   def test_json_payload_populates_pr_url_from_pr_md_frontmatter_in_review_stage
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

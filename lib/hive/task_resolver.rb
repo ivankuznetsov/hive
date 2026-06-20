@@ -2,6 +2,7 @@ require "hive/config"
 require "hive/task"
 require "hive/task_meta"
 require "hive/stages"
+require "hive/workflows"
 
 module Hive
   # Resolve a CLI TARGET (folder path or bare slug) to a `Hive::Task`.
@@ -108,7 +109,7 @@ module Hive
     def find_slug_across_projects(slug)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-      stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+      stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
       projects.flat_map do |project|
         stages.filter_map do |stage|
           folder = File.join(project["hive_state_path"], "stages", stage, slug)
@@ -122,7 +123,7 @@ module Hive
     def find_id_across_projects(id)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-      stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+      stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
       projects.flat_map do |project|
         stages.flat_map do |stage|
           stage_dir = File.join(project["hive_state_path"], "stages", stage)
@@ -164,10 +165,18 @@ module Hive
     def resolve_stage_filter(stage_filter)
       return nil if stage_filter.nil? || stage_filter.to_s.strip.empty?
 
-      Hive::Stages.resolve(stage_filter) ||
-        raise(Hive::InvalidTaskPath,
-              "unknown stage '#{stage_filter}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
-              "or short names #{Hive::Stages::NAMES.join(', ')}")
+      raw = stage_filter.to_s.strip
+      matches = Hive::Workflows::Registry.all.filter_map { |workflow| workflow.resolve_stage_ref(raw) }.uniq
+      return matches.first if matches.one?
+
+      if matches.size > 1
+        raise Hive::InvalidTaskPath,
+              "ambiguous stage '#{stage_filter}'; matches: #{matches.join(', ')}"
+      end
+
+      raise Hive::InvalidTaskPath,
+            "unknown stage '#{stage_filter}'; valid: #{Hive::Workflows.all_stage_dirs.join(', ')} " \
+            "or short names #{Hive::Workflows.all_stage_names.join(', ')}"
     end
   end
 end

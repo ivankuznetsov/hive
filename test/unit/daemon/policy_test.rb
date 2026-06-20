@@ -51,6 +51,11 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive approve slug-a --from 2-gather")
   end
 
+  def test_ready_to_run_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_run",
+                                   command: "hive run slug-a")
+  end
+
   def test_coding_policy_decision_matrix_is_characterized
     # U6 characterization: adding generic workflow dispatch keys must leave
     # the existing coding daemon policy outcomes byte-for-byte equivalent.
@@ -113,6 +118,13 @@ class HiveDaemonPolicyTest < Minitest::Test
     assert_equal :blocked_on_dependency,
                  decide(action: "ready_to_advance",
                         command: "hive approve slug-a --from 2-gather",
+                        blocked: true)
+  end
+
+  def test_blocked_ready_to_run_does_not_dispatch
+    assert_equal :blocked_on_dependency,
+                 decide(action: "ready_to_run",
+                        command: "hive run slug-a",
                         blocked: true)
   end
 

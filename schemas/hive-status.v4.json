@@ -201,17 +201,7 @@
       "properties": {
         "stage": {
           "type": "string",
-          "enum": [
-            "1-inbox",
-            "2-brainstorm",
-            "3-plan",
-            "4-execute",
-            "5-open-pr",
-            "6-review",
-            "7-artifacts",
-            "8-finalize",
-            "9-done"
-          ]
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
         },
         "slug": {
           "type": "string"
@@ -252,18 +242,7 @@
             "string",
             "null"
           ],
-          "enum": [
-            "1-inbox",
-            "2-brainstorm",
-            "3-plan",
-            "4-execute",
-            "5-open-pr",
-            "6-review",
-            "7-artifacts",
-            "8-finalize",
-            "9-done",
-            null
-          ]
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
         },
         "blocked": {
           "description": "True when the daemon must suppress automatic forward dispatch for this task because its dependency is unresolved or below dependency_gate_stage.",
@@ -359,6 +338,7 @@
             "ready_to_finalize",
             "ready_to_archive",
             "ready_to_advance",
+            "ready_to_run",
             "needs_input",
             "recover_execute",
             "recover_review",

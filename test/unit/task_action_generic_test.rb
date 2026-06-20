@@ -179,16 +179,16 @@ class TaskActionGenericTest < Minitest::Test
                  "generic run command must carry --stage when status.rb flags a slug collision"
   end
 
-  def test_generic_markerless_non_entry_row_surfaces_run_command_without_advance_decision
+  def test_generic_markerless_non_entry_row_surfaces_dispatchable_run_command
     action = action_for("gather", :none)
 
-    assert_equal "needs_input", action.key
+    assert_equal "ready_to_run", action.key
     assert_equal "Ready to run", action.label
     assert_equal "hive run #{SLUG}", action.command
-    assert_equal :record_baseline, policy_decision(action)
+    assert_equal :dispatch, policy_decision(action)
   end
 
-  def test_generic_unknown_resting_marker_surfaces_run_command_without_advance_decision
+  def test_generic_unknown_resting_marker_surfaces_dispatchable_run_command
     # Two semantically distinct unknown markers pin the contract that every
     # non-{complete,waiting,none} marker hits the `else` arm -> generic_ready_to_run.
     # A second sample guards against an accidental future `when` clause that
@@ -196,10 +196,10 @@ class TaskActionGenericTest < Minitest::Test
     %i[synthetic_resting custom_checkpoint].each do |marker_name|
       action = action_for("gather", marker_name)
 
-      assert_equal "needs_input", action.key, "#{marker_name} should classify as needs_input"
+      assert_equal "ready_to_run", action.key, "#{marker_name} should classify as ready_to_run"
       assert_equal "Ready to run", action.label, "#{marker_name} should label as Ready to run"
       assert_equal "hive run #{SLUG}", action.command, "#{marker_name} should surface hive run"
-      assert_equal :record_baseline, policy_decision(action), "#{marker_name} must not auto-dispatch"
+      assert_equal :dispatch, policy_decision(action), "#{marker_name} should auto-dispatch"
     end
   end
 
@@ -212,7 +212,7 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal "hive approve #{SLUG} --from 1-intake", entry.command
 
     middle = action_for("gather", :none)
-    assert_equal "needs_input", middle.key
+    assert_equal "ready_to_run", middle.key
     assert_equal "Ready to run", middle.label
     assert_equal "hive run #{SLUG}", middle.command
   end
@@ -226,7 +226,7 @@ class TaskActionGenericTest < Minitest::Test
     # `stage.kind == :inert` conjunct: a markerless `:agent` ENTRY must run its
     # agent, not be approved past it. Dropping the kind check would advance here.
     agent_entry = action_for("draft", :none, descriptor: agent_entry_workflow)
-    assert_equal "needs_input", agent_entry.key
+    assert_equal "ready_to_run", agent_entry.key
     assert_equal "Ready to run", agent_entry.label
     assert_equal "hive run #{SLUG}", agent_entry.command,
                  "a markerless :agent entry must run, not advance"
@@ -234,7 +234,7 @@ class TaskActionGenericTest < Minitest::Test
     # `entry` conjunct: an inert but NON-entry, non-terminal stage must still
     # run. Dropping the entry check would wrongly advance this inert middle.
     inert_middle = action_for("hold", :none, descriptor: agent_entry_workflow)
-    assert_equal "needs_input", inert_middle.key
+    assert_equal "ready_to_run", inert_middle.key
     assert_equal "Ready to run", inert_middle.label
     assert_equal "hive run #{SLUG}", inert_middle.command,
                  "an inert non-entry stage must run, not advance"
@@ -254,9 +254,9 @@ class TaskActionGenericTest < Minitest::Test
   def test_generic_degenerate_single_stage_markerless_entry_does_not_advance
     action = action_for("only", :none, descriptor: single_stage_workflow)
 
-    assert_equal "needs_input", action.key
+    assert_equal "ready_to_run", action.key
     assert_equal "Ready to run", action.label
     assert_equal "hive run #{SLUG}", action.command
-    assert_equal :record_baseline, policy_decision(action)
+    assert_equal :dispatch, policy_decision(action)
   end
 end

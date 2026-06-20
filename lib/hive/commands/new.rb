@@ -52,6 +52,14 @@ module Hive
       # message can name config.yml and the `call` rescue can report it cleanly
       # instead of letting a bare UnknownWorkflow block ALL task creation.
       class UnregisteredProjectWorkflow < TypedValueError; end
+      # Raised when the project config.yml exists but is unreadable/unparseable
+      # (corrupt YAML, a non-hash document, an I/O fault). Unlike the read-only
+      # status/daemon surfaces, which degrade a bad config to a coding fallback,
+      # `hive new` is a mutation: creating a task under a silently-assumed
+      # default could be wrong, so it fails loudly with a typed error naming
+      # config.yml (mirroring UnregisteredProjectWorkflow) instead of crashing
+      # with a raw Psych backtrace that escapes call's rescue list.
+      class ProjectConfigUnreadable < TypedValueError; end
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil,
                      workflow: nil)
@@ -86,10 +94,15 @@ module Hive
       def call
         call!
       rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidAttachmentError,
-             SlugCollisionError, UnregisteredProjectWorkflow, Hive::Workflows::UnknownWorkflow,
+             SlugCollisionError, UnregisteredProjectWorkflow, ProjectConfigUnreadable,
+             Hive::Workflows::UnknownWorkflow,
              SystemCallError, IOError => e
         warn "hive: #{e.message}"
-        exit 1
+        # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
+        # USAGE 64 so an agent can tell "typo'd --workflow, fix the flag" from a
+        # transient GENERIC failure); fall back to 1 for the untyped
+        # SystemCallError/IOError arms.
+        exit(e.respond_to?(:exit_code) ? e.exit_code : 1)
       end
 
       def call!
@@ -130,10 +143,11 @@ module Hive
                                workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
-          # uncommitted task on disk that the snapshot would surface as
-          # a broken `1-inbox/` entry. Roll the directory back so the
-          # capture is atomic — either the task is committed or it
-          # never existed.
+          # uncommitted task on disk that the snapshot would surface as a
+          # broken entry under the workflow's entry stage dir (`entry_stage.dir`
+          # — `1-inbox` for coding, but different for other workflows). Roll the
+          # directory back so the capture is atomic — either the task is
+          # committed or it never existed.
           FileUtils.rm_rf(task_dir)
           raise
         end
@@ -156,14 +170,16 @@ module Hive
 
       def resolve_workflow(project)
         override = normalize_workflow(@workflow_name)
+        # With an explicit --workflow the project default is irrelevant (an
+        # override always pins), so don't read config.yml at all — an
+        # unreadable/corrupt config must not block a fully-specified `hive new`.
+        return { descriptor: Hive::WorkflowSelection.fetch!(override), pin: true } if override
+
         cfg_default = project_default_workflow(project.fetch("path"))
-        descriptor =
-          if override
-            Hive::WorkflowSelection.fetch!(override)
-          else
-            fetch_project_default_workflow!(cfg_default, project)
-          end
-        { descriptor: descriptor, pin: !override.nil? || !Hive::Workflows.coding_id?(cfg_default) }
+        {
+          descriptor: fetch_project_default_workflow!(cfg_default, project),
+          pin: !Hive::Workflows.coding_id?(cfg_default)
+        }
       end
 
       # A typo'd or later-removed PROJECT default_workflow would otherwise raise
@@ -186,6 +202,17 @@ module Hive
       def project_default_workflow(project_root)
         configured = Hive::Config.load(project_root)["default_workflow"].to_s.strip
         configured.empty? ? Hive::Config::DEFAULTS["default_workflow"] : configured
+      rescue Psych::Exception, Hive::ConfigError, SystemCallError, IOError => e
+        # A corrupt/unparseable config.yml raises Psych::SyntaxError (or
+        # ConfigError for a non-hash document) out of Config.load — neither a
+        # Hive::Error nor caught by call's rescue list, so it would escape as a
+        # raw backtrace (exit 1). Re-raise as a typed error naming config.yml so
+        # the failure is clean and actionable.
+        cfg_path = File.join(File.expand_path(project_root), ".hive-state", "config.yml")
+        raise ProjectConfigUnreadable.new(
+          "could not read #{cfg_path} (#{e.class}: #{e.message}); fix the file or pass --workflow",
+          value: cfg_path
+        )
       end
 
       def normalize_workflow(value)

@@ -163,7 +163,8 @@ class NewTest < Minitest::Test
             Hive::Commands::New.new(project, "bad workflow", workflow: "bogus").call
           end
 
-          assert_equal 1, status
+          assert_equal Hive::ExitCodes::USAGE, status,
+                       "a typo'd --workflow is a USAGE (64) error so an agent can tell it from a transient failure"
           assert_includes err, "unknown workflow \"bogus\""
           assert_includes err, "content_fixture"
           assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "bad-workflow-*")]
@@ -195,6 +196,50 @@ class NewTest < Minitest::Test
         assert_includes err, "config.yml"
         assert_includes err, "not a registered workflow"
         assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "orphaned-default-*")]
+      end
+    end
+  end
+
+  def test_new_corrupt_config_fails_typed_without_seeding
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        # A corrupt config.yml makes Config.load raise Psych::SyntaxError, which
+        # is neither a Hive::Error nor in call's rescue list — it would crash
+        # with a raw backtrace. It must instead fail with a typed error naming
+        # config.yml, and seed nothing.
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: [unclosed\n")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "corrupt config probe").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "config.yml"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "corrupt-config-probe-*")]
+      end
+    end
+  end
+
+  def test_new_with_explicit_workflow_ignores_corrupt_config
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          # An explicit --workflow never reads the project default, so a corrupt
+          # config.yml must not block a fully-specified `hive new`.
+          File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: [unclosed\n")
+
+          capture_io { Hive::Commands::New.new(project, "explicit workflow", workflow: "content_fixture").call }
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "explicit-workflow-*")].first
+          assert folder, "an explicit --workflow must create the task despite a corrupt config"
+          assert_equal "content_fixture", Hive::TaskMeta.read(folder)[:workflow]
+        end
       end
     end
   end

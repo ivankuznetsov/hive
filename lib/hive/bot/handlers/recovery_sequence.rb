@@ -92,19 +92,37 @@ module Hive
           stage = stage.to_s
           # A non-coding workflow has one universal re-run verb: `hive run`
           # (the generic stage runner). Routes here when the caller carries
-          # the row's workflow (slash /autofix, web recover). When the
-          # workflow is nil/coding — including the inline-button path, whose
-          # callback_data carries no workflow token — the coding verb table
-          # applies unchanged (an unknown/empty stage still yields nil →
-          # "No retry verb").
-          return "run" unless Hive::Workflows.coding_id?(workflow)
+          # the row's workflow (slash /autofix, web recover, and the inline
+          # Autofix button now that its callback_data threads the id). When
+          # the workflow is nil/coding the coding verb table applies unchanged
+          # (an unknown/empty stage still yields nil → "No retry verb").
+          unless Hive::Workflows.coding_id?(workflow)
+            # The terminal stage has no agent to re-run — offering `hive run`
+            # there would dispatch `hive run --stage <terminal>` and raise
+            # StageError. Guard it the way the coding path guards `9-done` below.
+            return nil if generic_terminal_stage?(stage, workflow)
+
+            return "run"
+          end
           return nil if stage == "9-done" # coding-scoped: coding retry verbs have no terminal retry
 
           Hive::Workflows.verb_arriving_at(stage) || {
-            "4-execute" => "develop", # not-a-stage-ref: fallback retry table for legacy/renamed stage dirs
-            "5-review" => "review", # not-a-stage-ref: fallback retry table for legacy/renamed stage dirs
-            "6-pr" => "pr"
+            "5-review" => "review", # not-a-stage-ref: defensive fallback, reached only when verb_arriving_at returns nil (legacy/renamed dirs)
+            "6-pr" => "pr" # not-a-stage-ref: defensive fallback, reached only when verb_arriving_at returns nil (legacy/renamed dirs)
           }[stage]
+        end
+
+        # True when `stage` is the terminal (last) stage of a registered
+        # non-coding workflow — the generic analog of the coding `9-done`
+        # guard. An unregistered workflow id (none ship in production yet)
+        # can't be introspected, so it conservatively reports false and the
+        # caller falls back to offering `hive run`.
+        def self.generic_terminal_stage?(stage, workflow)
+          descriptor = Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+          last = descriptor.stages.last
+          !last.nil? && last.dir == stage
+        rescue Hive::Workflows::UnknownWorkflow
+          false
         end
 
         # 9-done returns an empty command list (no retry verb), and

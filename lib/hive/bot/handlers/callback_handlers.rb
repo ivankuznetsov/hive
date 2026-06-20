@@ -71,7 +71,8 @@ module Hive
         end
 
         def clear_and_retry(data)
-          _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
+          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
+          match_attr, workflow = recovery_tail(rest)
           # Legacy clear_retry: buttons (from messages predating the Autofix
           # rename) route here. Go through RecoverySequence.build, not
           # retry_commands directly, so a stale clear_retry on a manual-only
@@ -82,16 +83,18 @@ module Hive
           # uses the marker-only manual-only check (ALWAYS_MANUAL_MARKERS).
           RecoverySequence.build(
             project: project, slug: slug, stage: stage,
-            marker: marker, match_attr: match_attr,
+            marker: marker, match_attr: match_attr, workflow: workflow,
             result_class: @result_class, clear_keyboard: true
           )
         end
 
         def autofix(data)
-          _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
+          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
+          match_attr, workflow = recovery_tail(rest)
           RecoverySequence.build(
             project: project, slug: slug, stage: stage, marker: marker,
-            match_attr: match_attr, result_class: @result_class, clear_keyboard: true
+            match_attr: match_attr, workflow: workflow,
+            result_class: @result_class, clear_keyboard: true
           )
         end
 
@@ -261,6 +264,18 @@ module Hive
           raise ArgumentError, "malformed callback" unless counts.include?(parts.length)
 
           parts
+        end
+
+        # The recovery callbacks (autofix / clear_and_retry) carry up to two
+        # optional trailing tokens — a match_attr and a workflow id — in either
+        # order. They're disambiguated by content: a match_attr is always a
+        # `key=value` pair (contains `=`), a workflow id never contains `=`.
+        # Coding rows omit the workflow token (nil ⟹ coding), so older 5/6-part
+        # callbacks parse unchanged.
+        def recovery_tail(rest)
+          match_attr = rest.find { |token| token.to_s.include?("=") }
+          workflow = rest.find { |token| !token.to_s.include?("=") }
+          [ match_attr, workflow ]
         end
       end
     end

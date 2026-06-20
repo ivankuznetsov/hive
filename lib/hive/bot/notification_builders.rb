@@ -131,33 +131,36 @@ module Hive
       def needs_input(row)
         case row.marker
         when "waiting"
-          # A `waiting` marker is used by BOTH 2-brainstorm (genuine
-          # operator questions) and 3-plan (a plan-draft/approval pause).
-          # Label them distinctly so a plan pause isn't mis-announced as
-          # "Brainstorm questions" (it isn't, and the daemon usually
-          # auto-approves it — see suppress_daemon_plan_pause?).
-          if coding_workflow?(row) && row.stage.to_s == "3-plan" # coding-scoped: plan approval pause only exists in coding workflow
-            plan_waiting(row)
-          elsif coding_workflow?(row) && row.stage.to_s == "2-brainstorm" # coding-scoped: brainstorm Q&A answer flow is coding-specific
-            brainstorm_waiting(row)
-          else
-            Notification.new(
-              text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
-              keyboard: [
-                [ button("Show details", details_callback(row)) ]
-              ]
-            )
-          end
+          waiting_input(row)
         when "review_waiting"
           review_waiting(row)
         else
-          Notification.new(
-            text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
-            keyboard: [
-              [ button("Show details", details_callback(row)) ]
-            ]
-          )
+          default_needs_input(row)
         end
+      end
+
+      # A `waiting` marker is used by BOTH the coding 2-brainstorm stage
+      # (genuine operator questions) and the coding 3-plan stage (a
+      # plan-draft/approval pause); each gets its own label so a plan pause
+      # isn't mis-announced as "Brainstorm questions" (it isn't, and the daemon
+      # usually auto-approves it — see suppress_daemon_plan_pause?). Only the
+      # coding workflow has those two stages, so a `waiting` marker from any
+      # other workflow — or any other coding stage — falls through to the
+      # neutral default below.
+      def waiting_input(row)
+        return plan_waiting(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: plan approval pause only exists in coding workflow
+        return brainstorm_waiting(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" # coding-scoped: brainstorm Q&A answer flow is coding-specific
+
+        default_needs_input(row)
+      end
+
+      def default_needs_input(row)
+        Notification.new(
+          text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
+          keyboard: [
+            [ button("Show details", details_callback(row)) ]
+          ]
+        )
       end
 
       def brainstorm_waiting(row)
@@ -236,6 +239,14 @@ module Hive
         parts = [ "autofix", row.project, row.slug, row.stage, row.marker ]
         match_attr = recovery_match_attr(row)
         parts << match_attr if match_attr
+        # Thread the workflow id so RecoverySequence routes a generic row to the
+        # universal `hive run` verb instead of the coding retry-verb table (slash
+        # /autofix and web recover already thread it). Coding is the nil default
+        # (coding_row? ⟹ true), so it's omitted to save callback bytes; a
+        # non-coding id is appended as a trailing token. The recovery handler
+        # disambiguates it from match_attr by content — match_attr always
+        # contains `=`, a workflow id never does.
+        parts << row.workflow if row.respond_to?(:workflow) && !Hive::Workflows.coding_row?(row)
         parts.join(":")
       end
 
@@ -371,10 +382,6 @@ module Hive
         normalized = row.attrs.to_h.transform_keys(&:to_s)
         attrs = normalized.to_a.sort_by(&:first).map { |key, value| "#{key}=#{value}" }.join(" ")
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
-      end
-
-      def coding_workflow?(row)
-        Hive::Workflows.coding_row?(row)
       end
 
       def details_callback(row)

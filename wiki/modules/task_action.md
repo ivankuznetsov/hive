@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-06-11
+updated: 2026-06-20
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -58,9 +58,57 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
 | `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
+| `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
+| `generic_ready_to_run` | `NEEDS_INPUT` | "Ready to run" | run |
+| `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
+
+`generic_ready_to_run` and `generic_needs_input` deliberately collapse onto the
+same `NEEDS_INPUT` key and `run` command, differing only by label. This is a
+**lossy merge on the JSON wire**: a bot/SDK consumer reading `key` alone cannot
+distinguish "stage hasn't produced a `WAITING` marker yet" (ready to run, never
+executed) from "the agent ran and is now waiting on the user" (needs input). The
+distinction survives only in the human `label`. This is intentional (plan R3/Q2):
+daemon routing never relies on the key for this — it discriminates first-run vs
+re-run via the state-file mtime baseline (`Hive::Daemon::Policy`), so the merge is
+safe for dispatch. A future stage may split these into distinct keys if a wire
+consumer needs the run-vs-input signal.
+
+## Workflow-aware branch
+
+`TaskAction#action` keeps the coding workflow on the existing hand-tuned
+stage-name `case` after the workflow-agnostic short-circuits (`live_task_lock`,
+`AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`). Routing is decided by
+`coding_workflow?`: a resolved `task.workflow.id == :coding` — and also a nil
+workflow, reachable only from test doubles — stays on the coding path. Tasks
+whose resolved `task.workflow.id` is any other value use a descriptor-positioned
+generic classifier instead:
+
+- `COMPLETE` at the terminal descriptor stage -> `archived`.
+- `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
+- `WAITING` -> `needs_input`.
+- markerless inert entry stage (non-terminal) -> `ready_to_advance`. A markerless
+  entry stage of any non-inert kind (`:agent`, `:marker`, or `nil` — the gate is
+  `stage.kind == :inert`) or a degenerate single-stage workflow (entry ==
+  terminal) falls through to the next case instead.
+- markerless non-entry stage -> `needs_input` with label "Ready to run".
+
+This keeps coding behavior byte-stable while letting registered non-coding
+workflows surface non-error status rows once a task has resolved to its
+descriptor. Post-U5, the `Commands::Approve` and `Commands::Run` command methods
+resolve generic advance destinations through the task's descriptor, so when one
+is driven directly with a folder path a generic `ready_to_advance` row moves to
+its own next stage rather than a coding stage. The **end-to-end daemon/agent
+advance path is also U6-gated**, not just the first-run gap: the Thor
+`APPROVE_TO_ENUM` (`cli.rb`) rejects a generic `--from <dir>`,
+`Status#collect_rows` (`status.rb`) scans only the coding `Hive::Stages::DIRS`
+so generic rows never reach the daemon, and `TaskResolver` can't find a
+generic-only-dir task by bare slug. The separate first-run gap is generic
+auto-dispatch: markerless non-inert generic stages still collapse to
+`NEEDS_INPUT` on the JSON wire and are routed through the daemon edit-baseline
+path until U6 splits that signal. Both gaps are tracked in [[gaps]].
 
 ## Marker carve-outs
 
@@ -79,6 +127,12 @@ Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This m
 Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`artifacts`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
 
 Generic verbs (`findings`/`accept-finding`/`reject-finding`) include `--stage <stage>` only when slug-stage ambiguity actually exists (`stage_collision: true`).
+
+For non-coding workflows, command emission bypasses the coding
+`Hive::Workflows::VERBS` table. `ready_to_advance` emits
+`hive approve <slug> --from <descriptor-stage-dir>` and generic run/input rows
+emit `hive run <slug>` (plus `--project` when the status snapshot spans multiple
+projects, and `--stage` for run rows only when a stage collision was reported).
 
 `--project <name>` is appended whenever `project_count > 1` so multi-project status output emits unambiguous commands.
 

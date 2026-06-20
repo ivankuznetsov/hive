@@ -3,7 +3,7 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-06-11
+updated: 2026-06-19
 tags: [stage, index]
 ---
 
@@ -23,6 +23,10 @@ tags: [stage, index]
 
 All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. In tmux mode, marker-owned Claude launches wait through `Hive::ClaudeLauncher.wait_for_terminal_marker`; if the managed tmux session disappears before a terminal marker is written, the launcher stamps `ERROR reason=tmux_session_terminated` immediately instead of waiting for the stage timeout. If the pane shows a provider-limit menu first, it stamps `ERROR reason=limits_reached` instead of the generic timeout/session-failure shape. The daemon auto-retries a bounded marker-id-guarded subset of terminal errors when no live task lock exists: non-review `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned`, `8-finalize` `reason=unpushed_commits`, and elapsed `reason=limits_reached` cooldown markers. `3-plan` is the one terminal-error clear that also writes a `hive plan ... --from 3-plan` dispatch request, because clearing can leave an empty markerless `plan.md` that the normal row scan skips. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns; Claude reviewers use one shared tmux session per pass when `claude.mode: tmux`.
 
+`Hive::Stages::Agent` is a reusable descriptor-backed headless runner for
+future `kind: :agent` stages outside the coding runner names. See
+[[stages/agent]].
+
 ## 6-review phase order
 
 1. **CI** (`Review::CiFix`, U7) — runs `review.ci.command` once on entry; on failure feeds log to fix agent up to `review.ci.max_attempts`. Hard-block → `REVIEW_CI_STALE` + `reviews/ci-blocked.md`.
@@ -38,4 +42,4 @@ Loop terminates with one of: `REVIEW_COMPLETE` (clean) · `REVIEW_WAITING` (user
 
 ## Backlinks
 
-- [[architecture]] · [[state-model]] · [[cli]] · [[commands/approve]] · [[commands/run]] · [[modules/markers]]
+- [[architecture]] · [[state-model]] · [[cli]] · [[commands/approve]] · [[commands/run]] · [[modules/markers]] · [[stages/agent]]

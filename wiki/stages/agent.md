@@ -1,0 +1,47 @@
+---
+title: Generic Agent Stage Runner
+type: stage
+source: lib/hive/stages/agent.rb, templates/agent_prompt.md.erb
+created: 2026-06-19
+updated: 2026-06-19
+tags: [stage, agent, workflow]
+---
+
+**TLDR**: `Hive::Stages::Agent` is the shared headless runner for descriptor
+stages whose `kind` is `:agent` and whose name does not already have a bespoke
+coding runner. `Hive::Stages::Resolver` reaches it as the fallback after the
+coding-name runner table. The runner reads the active stage from
+`Hive::Workflows::Registry.default`, renders `templates/agent_prompt.md.erb`,
+spawns one folder-isolated agent, and maps the resulting state-file marker to the
+same commit actions as [[stages/brainstorm]].
+
+## Runtime Contract
+
+1. Resolve the stage descriptor by `task.stage_name`.
+2. Use `stage.state_file` as the output and marker file.
+3. Build prior context from sorted `*.md` files in the task folder, excluding the
+   stage's own output file. The context is capped at 8000 characters.
+4. Wrap prior context in a fresh `Hive::Stages::Base.user_supplied_tag` nonce so
+   prior artifacts are treated as untrusted input.
+5. Use `stage.skill` through `profile.format_skill_invocation` when present;
+   otherwise use the generic "produce the best stage output" instruction.
+6. Spawn via `Hive::Stages::Base.spawn_agent` with `add_dirs: [task.folder]`,
+   `cwd: task.folder`, `status_mode: :state_file_marker`, and the stage profile.
+7. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
+   `COMPLETE` → `complete`, `ERROR` → `error`, otherwise `marker.name.to_s`.
+
+The coding pipeline's `brainstorm` and `plan` names still use their bespoke
+tmux-capable runners even though their descriptor entries are `kind: :agent`;
+name-first resolver precedence preserves the current coding runtime.
+
+## Tests
+
+- `test/unit/stages/agent_test.rb` covers prior-artifact selection, nonce
+  wrapping, nil-skill fallback, formatted skill invocation, spawn arguments,
+  budget/timeout overrides, and marker-to-action mapping.
+
+## Backlinks
+
+- [[modules/workflows]]
+- [[stages/index]]
+- [[modules/markers]]

@@ -1574,6 +1574,25 @@ class CommandsStatusTest < Minitest::Test
     assert_includes out, "no red-status diagnostic"
   end
 
+  def test_invalid_task_row_degrades_when_folder_mtime_is_unreadable
+    cmd = Hive::Commands::Status.new
+    folder = "/tmp/missing-invalid-task"
+    original = File.method(:mtime)
+
+    row = with_replaced_singleton_method(File, :mtime, lambda { |candidate|
+      raise Errno::ENOENT, "gone" if candidate == folder
+
+      original.call(candidate)
+    }) do
+      cmd.send(:invalid_task_row, stage: "1-inbox", slug: "bad-task-260620-abcd",
+                                   folder: folder, message: "bad workflow")
+    end
+
+    assert_equal :error, row.fetch(:marker_name)
+    assert_equal "invalid_task", row.fetch(:marker_attrs).fetch("reason")
+    assert_kind_of Time, row.fetch(:folder_mtime)
+  end
+
   private
 
   def status_project(project_root, hive_state)

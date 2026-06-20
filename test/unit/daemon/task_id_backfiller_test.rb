@@ -250,6 +250,43 @@ class HiveDaemonTaskIdBackfillerTest < Minitest::Test
     assert_empty backfill_events
   end
 
+  # The real commit_id success path: a registered project + a clean commit
+  # returns true, so the success event carries committed:true and hive_commit
+  # is called with the per-task stage/slug.
+  def test_real_commit_path_success_marks_committed
+    folder = make_task_folder(id: nil, slug: "s1")
+    bf = Hive::Daemon::TaskIdBackfiller.new(logger: @logger, dry_run: false, allocate: -> { 100 })
+    fake_project = { "name" => "p", "path" => "/tmp/x", "hive_state_path" => "/tmp/x/.hive-state" }
+    commit_calls = []
+    fake_gitops = Object.new
+    fake_gitops.define_singleton_method(:hive_commit) { |**kw| commit_calls << kw; :committed }
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_n) { fake_project }) do
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(*_a, &blk) { blk.call }) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { fake_gitops }) do
+          bf.backfill([ make_row(folder, project: "p", slug: "s1", stage: "2-brainstorm") ])
+        end
+      end
+    end
+
+    assert_equal 100, Hive::TaskMeta.read(folder)[:id]
+    assert_equal true, backfill_events.first[1][:committed], "a successful commit → committed:true"
+    assert_equal [ { stage_name: "2-brainstorm", slug: "s1", action: "id-assigned" } ], commit_calls,
+                 "hive_commit must be called once with the task's stage/slug under the lock"
+  end
+
+  # A raise during iteration (outside the per-row rescue) must be caught by
+  # #backfill's top-level rescue and logged :fatal, never propagating.
+  def test_backfill_top_level_rescue_catches_iteration_error
+    bad_rows = Object.new
+    def bad_rows.each(*); raise "iteration boom"; end
+
+    backfiller(allocate: FakeAllocator.new(start: 100)).backfill(bad_rows)
+
+    assert(fatal_events.any? { |_, a| a[:message].to_s.include?("backfill raised") },
+           "an iteration error must be caught by the top-level rescue and logged :fatal")
+  end
+
   def test_never_raises_on_bad_row_and_keeps_processing
     good = make_task_folder(id: nil, slug: "good")
     rows = [ Object.new, make_row(good, slug: "good") ] # first row has no #folder

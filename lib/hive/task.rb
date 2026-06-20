@@ -7,9 +7,13 @@ require "hive/worktree"
 
 module Hive
   class Task
+    # Coding-default only: pinned to Registry.default. Prefer the
+    # descriptor-driven Task#stage_names instance accessor for workflow-aware
+    # callers — these constants diverge for non-coding workflows (full consumer
+    # migration is U6).
     STAGE_NAMES = Hive::Workflows::Registry.default.stages.map(&:name).freeze
     STATE_FILES = Hive::Workflows::Registry.default.stages.to_h { |stage| [ stage.name, stage.state_file ] }.freeze
-    PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
+    PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_dir>(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*))/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,
                 :stage_name, :slug, :state_dir_basename, :workflow
@@ -27,7 +31,7 @@ module Hive
       @stage_name = m[:stage_name]
       @slug = m[:slug]
       @workflow = resolve_workflow
-      validate_workflow_stage!("#{m[:stage_idx]}-#{m[:stage_name]}")
+      validate_workflow_stage!(m[:stage_dir])
     end
 
     def project_name
@@ -109,19 +113,21 @@ module Hive
 
     def resolve_workflow
       selector = meta[:workflow]
-      selector = project_default_workflow if selector.nil? || selector.empty?
+      # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
+      # always nil here (no .empty? branch needed).
+      selector ||= project_default_workflow
       Hive::Workflows::Registry.fetch(selector.to_sym)
     rescue Hive::Workflows::UnknownWorkflow => e
       raise InvalidTaskPath, e.message
     end
 
     def project_default_workflow
-      workflow = Hive::Config.load(@project_root)["default_workflow"].to_s.strip
-      workflow.empty? ? "coding" : workflow
+      configured = Hive::Config.load(@project_root)["default_workflow"].to_s.strip
+      configured.empty? ? Hive::Config::DEFAULTS["default_workflow"] : configured
     rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
       warn "hive: task: failed to read default_workflow from #{File.join(@hive_state_path, "config.yml")} " \
-           "(#{e.class}: #{e.message}); falling back to coding"
-      "coding"
+           "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"
+      Hive::Config::DEFAULTS["default_workflow"]
     end
 
     def validate_workflow_stage!(stage_dir)
@@ -131,7 +137,7 @@ module Hive
               "unknown stage name: #{stage_dir} for workflow #{workflow.id.inspect}; " \
               "run `hive migrate` if this task uses pre-open-pr stage names"
       end
-      return if stage.index == @stage_index
+      return if stage.dir == stage_dir
 
       raise InvalidTaskPath,
             "stage directory #{stage_dir} does not match workflow #{workflow.id.inspect}; expected #{stage.dir}"

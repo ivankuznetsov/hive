@@ -226,6 +226,35 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_json_next_action_collision_workflow_avoids_coding_stage
+    run = command
+
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "some-slug")
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "brainstorm.md")
+        File.write(state_file, "# brainstorm\n")
+        Hive::Markers.set(state_file, :complete)
+        t = task(
+          folder: folder,
+          stage_name: "brainstorm",
+          stage_index: 2,
+          state_file: state_file,
+          hive_state_path: File.join(dir, ".hive-state"),
+          workflow: collision_workflow
+        )
+
+        action = run.send(:json_next_action, t, marker(:complete))
+
+        assert_equal Hive::Schemas::NextActionKind::APPROVE, action.fetch("kind")
+        assert_match(%r{/\.hive-state/stages/3-report/\z}, action.fetch("to"))
+        assert_equal "3-report", action.fetch("to_stage")
+        refute_match(%r{/3-plan/\z}, action.fetch("to"))
+      end
+    end
+  end
+
   def test_json_next_action_generic_terminal_complete_is_no_op
     run = command
     t = task(stage_name: "report", stage_index: 3, workflow: research_workflow)

@@ -186,4 +186,20 @@ class WorkflowsTest < Minitest::Test
       assert_includes error.message, "1-plan"
     end
   end
+
+  def test_resolve_stage_ref_across_workflows_rejects_production_done_short_name
+    # Unlike the synthetic `:alternate_plan` case above (which only proves the
+    # ambiguity *mechanism*), this pins the real registered workflows: `done`
+    # is the terminal short name of BOTH coding (`9-done`) and content
+    # (`6-done`). Pre-`:content` the bare ref resolved cleanly to `9-done`, so
+    # a regression flipping the resolver back to `matches.first` would silently
+    # misroute `hive drop --from done` / `--stage done` instead of erroring.
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Workflows.resolve_stage_ref_across_workflows("done")
+    end
+
+    assert_includes error.message, "ambiguous stage 'done'"
+    assert_includes error.message, "9-done"
+    assert_includes error.message, "6-done"
+  end
 end

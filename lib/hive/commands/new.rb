@@ -152,7 +152,7 @@ module Hive
         cfg_default = project_default_workflow(project.fetch("path"))
         selected = override || cfg_default
         descriptor = Hive::WorkflowSelection.fetch!(selected)
-        { descriptor: descriptor, pin: !override.nil? || !Hive::WorkflowSelection.coding?(cfg_default) }
+        { descriptor: descriptor, pin: !override.nil? || !Hive::Workflows.coding_id?(cfg_default) }
       end
 
       def project_default_workflow(project_root)
@@ -229,7 +229,7 @@ module Hive
 
       def render_initial_state(slug, text, body_override:, workflow:)
         content = render_idea(slug, text, body_override: body_override)
-        return content if Hive::WorkflowSelection.coding?(workflow.id)
+        return content if Hive::Workflows.coding_id?(workflow.id)
 
         replacement = workflow.stages.first&.kind == :inert ? "\n<!-- COMPLETE -->\n" : "\n"
         content.sub(/\n?<!-- WAITING -->\n?\z/, replacement)

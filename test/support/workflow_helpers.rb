@@ -165,10 +165,22 @@ module HiveWorkflowTestHelper
     Hive::Workflows::Registry.define_singleton_method(:ids) do
       (original_ids.call + [ descriptor.id ]).uniq
     end
+    # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union
+    # (the registry is frozen in production, so the cache is permanent there).
+    # This helper is the ONE place the registry mutates, so it must drop the
+    # cache on both enter and exit or the fixture's stage dirs would be missing
+    # inside the block and leak after it.
+    reset_workflow_union_cache!
     yield
   ensure
     Hive::Workflows::Registry.define_singleton_method(:fetch, original_fetch) if original_fetch
     Hive::Workflows::Registry.define_singleton_method(:all, original_all) if original_all
     Hive::Workflows::Registry.define_singleton_method(:ids, original_ids) if original_ids
+    reset_workflow_union_cache!
+  end
+
+  def reset_workflow_union_cache!
+    Hive::Workflows.instance_variable_set(:@all_stage_dirs, nil)
+    Hive::Workflows.instance_variable_set(:@all_stage_names, nil)
   end
 end

@@ -16,9 +16,5 @@ module Hive
     def valid_names
       Hive::Workflows::Registry.ids.map(&:to_s)
     end
-
-    def coding?(name)
-      Hive::Workflows.coding_id?(name)
-    end
   end
 end

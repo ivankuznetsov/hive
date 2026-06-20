@@ -129,12 +129,17 @@ module Hive
       coding_id?(row.workflow)
     end
 
+    # Memoized: the registry is frozen at load, so the union of every
+    # workflow's stage dirs/names never changes after boot. Recomputing a
+    # frozen array on every call (status snapshots, drop, resolver) is pure
+    # waste. Not an eager constant — that would re-enter the require cycle
+    # (workflows.rb ⇆ registry.rb) before the registry is populated.
     def all_stage_dirs
-      Registry.all.flat_map(&:stage_dirs).uniq.freeze
+      @all_stage_dirs ||= Registry.all.flat_map(&:stage_dirs).uniq.freeze
     end
 
     def all_stage_names
-      Registry.all.flat_map(&:stage_names).uniq.freeze
+      @all_stage_names ||= Registry.all.flat_map(&:stage_names).uniq.freeze
     end
 
     # Resolve a user-provided stage ref (a full N-name dir or a bare short

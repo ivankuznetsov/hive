@@ -232,14 +232,7 @@ module Hive
       # (cross-corroborated by reliability + testing + maintainability +
       # project-standards reviewers).
       def plan_approval?(action, stage, workflow)
-        action == "needs_input" && coding_workflow_id?(workflow) && stage == "3-plan" # coding-scoped: daemon auto-approval only applies to coding plan pauses
-      end
-
-      # Value predicate: takes a workflow *id* (Symbol/String/nil), unlike the
-      # bot modules' row-shaped `Hive::Workflows.coding_row?`. The distinct name
-      # keeps the two argument shapes from colliding under one `coding_workflow?`.
-      def coding_workflow_id?(workflow)
-        Hive::Workflows.coding_id?(workflow)
+        action == "needs_input" && Hive::Workflows.coding_id?(workflow) && stage == "3-plan" # coding-scoped: daemon auto-approval only applies to coding plan pauses
       end
 
       # Generic-stage run decision. First sight (no prior dispatch) runs the

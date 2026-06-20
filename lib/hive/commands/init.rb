@@ -143,7 +143,7 @@ module Hive
         lines = content.lines
         existing = lines.index { |line| line.match?(/\Adefault_workflow:/) }
 
-        if Hive::WorkflowSelection.coding?(workflow_id)
+        if Hive::Workflows.coding_id?(workflow_id)
           lines.delete_at(existing) if existing
         elsif existing
           lines[existing] = "default_workflow: #{workflow_id}\n"

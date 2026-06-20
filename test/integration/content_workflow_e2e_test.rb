@@ -27,6 +27,7 @@ class ContentWorkflowE2ETest < Minitest::Test
           supervisor = InlineSupervisor.new(
             run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }
           )
+          logger = CollectingLogger.new
           dispatcher = Hive::Daemon::Dispatcher.new(
             config: { "daemon" => { "edit_debounce_sec" => 0, "poll_interval_sec" => 30 } },
             controller: Hive::Daemon::ConcurrencyController.new(
@@ -36,7 +37,7 @@ class ContentWorkflowE2ETest < Minitest::Test
             ),
             supervisor: supervisor,
             status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
-            logger: CollectingLogger.new
+            logger: logger
           )
 
           30.times do
@@ -47,7 +48,23 @@ class ContentWorkflowE2ETest < Minitest::Test
             dispatcher.tick(now: now)
           end
 
+          # Rest proof (Decision 2 / R1): once article.md exists the terminal
+          # `done` stage must REST — a further tick re-classifies it without
+          # re-dispatching or error-looping. Without this the loop only proves
+          # `done` does not *advance* (the break fires before the tick), never
+          # that a regression making it re-dispatchable would be caught.
+          ran_at_rest = ran.dup
+          spawned_at_rest = supervisor.spawned.size
+          now = Time.now
+          supervisor.now = now
+          dispatcher.tick(now: now)
+          assert_equal ran_at_rest, ran,
+                       "terminal done stage must not re-dispatch an agent after article.md exists"
+          assert_equal spawned_at_rest, supervisor.spawned.size,
+                       "terminal done stage must not spawn another command after article.md exists"
+
           @spawned_commands = supervisor.spawned.map { |spawn| spawn.fetch(:command) }
+          @logged_event_names = logger.events.map { |entry| entry.fetch(:name) }
         end
 
         final = task_folder(project_root, "6-done", slug)
@@ -58,6 +75,11 @@ class ContentWorkflowE2ETest < Minitest::Test
           assert File.file?(path), "#{artifact} should be carried into the final task folder"
           refute_empty File.read(path), "#{artifact} should be non-empty"
         end
+
+        refute_includes @logged_event_names, :fatal,
+                        "dispatcher must drive the content workflow to completion without a :fatal event"
+        refute_includes @logged_event_names, :markerless_stalled,
+                        "no content stage should stall markerless during a clean run"
 
         assert(@spawned_commands.any? { |command| command.start_with?("hive run") },
                "daemon must dispatch `hive run` through the supervisor")
@@ -79,7 +101,16 @@ class ContentWorkflowE2ETest < Minitest::Test
   private
 
   class CollectingLogger
-    def event(_name, **_attrs); end
+    attr_reader :events
+
+    def initialize
+      @events = []
+    end
+
+    def event(name, **attrs)
+      @events << { name: name, attrs: attrs }
+    end
+
     def close; end
   end
 

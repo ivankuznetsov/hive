@@ -86,8 +86,6 @@ class ContentWorkflowStageTest < Minitest::Test
     end
     yield captured
   ensure
-    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*args, **kwargs, &block|
-      original.call(*args, **kwargs, &block)
-    end
+    Hive::Stages::Base.define_singleton_method(:spawn_agent, original) if original
   end
 end

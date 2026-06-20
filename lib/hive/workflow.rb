@@ -26,17 +26,26 @@ module Hive
     # unknown name. Callers can't distinguish the two from the return value — a
     # typo'd `name` collapses into the same "no next stage" signal as the real
     # final stage (e.g. resolve_destination attributes it to FinalStageReached).
+    # The only current caller (Approve#resolve_destination) passes a
+    # `Task#validate_workflow_stage!`-validated `task.stage_name`, so the
+    # unknown-name arm is unreachable on every live path today — the
+    # mis-reported FinalStageReached can only surface if a future caller feeds
+    # an unvalidated name.
     def next_stage_after(name)
       index = stages.index { |stage| stage.name == name }
       index && stages[index + 1]
     end
 
+    # Returns the verb that ARRIVES AT this stage (the descriptor's inbound
+    # advance verb), not the verb that advances OUT of it — the bare name reads
+    # the opposite way.
     # Soft lookup: nil means EITHER the stage advances by bare mv (no incoming
     # verb in the descriptor) OR the name is unknown — both fold into one nil.
     def advance_verb_for(name)
       stage_named(name)&.advance_verb&.name
     end
 
+    # Soft lookup: returns nil if no stage has this dir.
     def stage_for_dir(dir)
       stages.find { |stage| stage.dir == dir }
     end

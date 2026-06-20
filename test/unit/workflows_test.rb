@@ -118,9 +118,12 @@ class WorkflowsTest < Minitest::Test
     assert_equal "6-review", cfg[:target]
   end
 
-  def test_all_stage_dirs_and_names_default_to_coding_descriptor
-    assert_equal Hive::Workflows::Registry.default.stage_dirs, Hive::Workflows.all_stage_dirs
-    assert_equal Hive::Workflows::Registry.default.stage_names, Hive::Workflows.all_stage_names
+  def test_all_stage_dirs_and_names_default_to_registered_descriptors
+    expected_dirs = Hive::Workflows::Registry.all.flat_map(&:stage_dirs).uniq
+    expected_names = Hive::Workflows::Registry.all.flat_map(&:stage_names).uniq
+
+    assert_equal expected_dirs, Hive::Workflows.all_stage_dirs
+    assert_equal expected_names, Hive::Workflows.all_stage_names
   end
 
   def test_all_stage_dirs_and_names_include_registered_workflows
@@ -132,8 +135,8 @@ class WorkflowsTest < Minitest::Test
     end
   end
 
-  def test_all_terminal_stage_dirs_defaults_to_coding_terminal
-    assert_equal [ "9-done" ], Hive::Workflows.all_terminal_stage_dirs
+  def test_all_terminal_stage_dirs_defaults_to_registered_terminals
+    assert_equal [ "9-done", "6-done" ], Hive::Workflows.all_terminal_stage_dirs
   end
 
   def test_all_terminal_stage_dirs_includes_registered_workflow_terminal

@@ -20,8 +20,9 @@ class WorkflowsRegistryTest < Minitest::Test
   end
 
   def test_all_and_ids_expose_registered_workflows
-    assert_equal [ Hive::Workflows::Registry.default ], Hive::Workflows::Registry.all
-    assert_equal [ :coding ], Hive::Workflows::Registry.ids
+    assert_equal [ Hive::Workflows::Registry.fetch(:coding), Hive::Workflows::Registry.fetch(:content) ],
+                 Hive::Workflows::Registry.all
+    assert_equal [ :coding, :content ], Hive::Workflows::Registry.ids
   end
 
   def test_registered_test_workflow_is_visible_to_enumeration

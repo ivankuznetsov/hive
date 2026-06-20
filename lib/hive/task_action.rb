@@ -226,11 +226,15 @@ module Hive
     # Returns a copy-paste-executable shell command, or nil for actions
     # whose state requires manual recovery (agent_running, archived, error).
     #
-    # Workflow-verb commands ALWAYS include `--from <stage>`: that's the
-    # idempotency lever — a retry after a successful advance fails with
-    # WRONG_STAGE (4) instead of silently advancing twice. Generic verbs
-    # (findings/accept-finding/reject-finding) only include `--stage`
-    # when slug-stage ambiguity actually exists.
+    # Non-coding workflows return early through `generic_command` (below),
+    # which emits `--from <stage>` for `approve` and `--stage <stage>` (only
+    # on a slug-stage collision) for `run` — it never adds `--from` to `run`.
+    #
+    # On the coding path, workflow-verb commands ALWAYS include `--from
+    # <stage>`: that's the idempotency lever — a retry after a successful
+    # advance fails with WRONG_STAGE (4) instead of silently advancing twice.
+    # Coding recovery verbs (findings/accept-finding/reject-finding) only
+    # include `--stage` when slug-stage ambiguity actually exists.
     def command
       return generic_command unless coding_workflow?
 
@@ -300,12 +304,19 @@ module Hive
       end
     end
 
+    # Routes a row to the coding state machine. A nil workflow — only
+    # reachable from test doubles that don't respond to `#workflow`; a real
+    # `Hive::Task` always resolves one — defaults to the coding path, not the
+    # generic one.
     def coding_workflow?
       workflow = task.respond_to?(:workflow) ? task.workflow : nil
       workflow.nil? || workflow.id == :coding
     end
 
     def generic_action
+      # `validate_workflow_stage!` runs at Task construction (task.rb), so a
+      # real `Hive::Task` always resolves a stage here; this guard only
+      # defends test doubles that bypass that construction-time invariant.
       stage = workflow_stage
       return ACTIONS.fetch(:error) unless stage
 
@@ -318,26 +329,27 @@ module Hive
       when :waiting
         ACTIONS.fetch(:generic_needs_input)
       when :none
-        entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+        # Auto-advance a markerless entry stage only when it is inert (no
+        # agent to run) AND not also terminal: a `kind: :agent` entry must
+        # run its agent rather than be approved past it, and a degenerate
+        # single-stage workflow (entry == terminal) has nowhere to advance,
+        # so both fall through to ready-to-run.
+        entry && !terminal && stage.kind == :inert ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end
     end
 
     def generic_command
-      selected_action = action
-      verb = selected_action[:command]
+      verb = action[:command]
       return nil unless verb
 
-      parts = [ "hive", generic_command_verb(verb), task.slug ]
+      stage = workflow_stage
+      parts = [ "hive", verb, task.slug ]
       parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
-      parts.concat([ "--stage", workflow_stage.dir ]) if verb == "run" && @stage_collision
-      parts.concat([ "--from", workflow_stage.dir ]) if verb == "approve"
+      parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
+      parts.concat([ "--from", stage.dir ]) if verb == "approve"
       parts.shelljoin
-    end
-
-    def generic_command_verb(verb)
-      verb == "approve" ? "approve" : "run"
     end
 
     def review_action
@@ -1137,14 +1149,14 @@ module Hive
     end
 
     # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for
-    # the source-stage assertion; generic verbs (findings/accept-finding/
-    # reject-finding) use --stage for ambiguity disambiguation.
+    # the source-stage assertion; coding recovery verbs (findings/accept-
+    # finding/reject-finding) use --stage for ambiguity disambiguation.
     def from_or_stage_option(verb)
       Hive::Workflows.workflow_verb?(verb) ? "--from" : "--stage"
     end
 
     # Workflow verbs always carry --from for retry idempotency.
-    # Generic verbs only when ambiguity demands disambiguation.
+    # Coding recovery verbs only when ambiguity demands disambiguation.
     def include_stage_filter?(verb)
       Hive::Workflows.workflow_verb?(verb) || @stage_collision
     end

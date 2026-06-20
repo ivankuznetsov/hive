@@ -114,8 +114,9 @@ class DropCommandTest < Minitest::Test
   # Walk every active stage drop is supposed to clean up so a future
   # stage rename can't silently drop the per-stage assertion. Derived the
   # same way production's `active_stage_dirs` is (registered stage dirs minus
-  # the archive stage), now that the dead `ACTIVE_STAGE_DIRS` constant is gone.
-  Hive::Stages::DIRS.reject { |stage| stage == Hive::Commands::Drop::ARCHIVE_STAGE }.each do |stage|
+  # the terminal/archive stage). Only the coding workflow is registered in this
+  # unit, so the archive set is the coding terminal dir (`DIRS.last`).
+  Hive::Stages::DIRS.reject { |stage| stage == Hive::Stages::DIRS.last }.each do |stage|
     define_method("test_drop_removes_task_from_#{stage.tr('-', '_')}_stage") do
       with_drop_project do |dir, ops, project|
         slug = "stage-cov-260522-aaaa"

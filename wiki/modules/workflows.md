@@ -7,7 +7,7 @@ updated: 2026-06-20
 tags: [module, workflow, verbs, selection]
 ---
 
-**TLDR**: The coding workflow is described once as `Hive::Workflows::Coding::DESCRIPTOR`: an ordered `Hive::Workflow` value object whose stages carry directory names, state files, incoming advance verbs, and runner metadata. `Hive::Workflows::Registry.default` returns that descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for runtime/test registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` as a fallback for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`.
+**TLDR**: The coding and content workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, and runner metadata. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in and runtime/test registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` as a fallback for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`.
 
 ## Descriptor and registry
 
@@ -22,9 +22,10 @@ tags: [module, workflow, verbs, selection]
   - `#has_stage?(ref)` — predicate wrapper around `#resolve_stage_ref`. An additive affordance (U6.3) for coding-scoped consumers to skip absent-stage behavior; it has no production call sites yet (the U6 literal-routing sweep used `coding_workflow?` / `== :coding` guards instead) and is currently exercised only by its own unit test.
 - `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `status_mode`, `budget_usd`, and `timeout_sec` is carried for runner selection and prompt rendering. The generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:20`), `skill`, `budget_usd`, and `timeout_sec` (defaulting to `DEFAULT_TIMEOUT_SEC` when both cfg and descriptor omit it). As of U6 the runner also honors the descriptor's `status_mode`, falling back to `:state_file_marker` only when the stage leaves it unset (`agent.rb:35`). The speculative `capability` field was dropped (no producer, no consumer).
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
-- `Hive::Workflows::Coding::DESCRIPTOR` — the only built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.
+- `Hive::Workflows::Coding::DESCRIPTOR` — the default built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.
+- `Hive::Workflows::Content::DESCRIPTOR` — built-in non-coding descriptor (`id: :content`) for `inbox -> research -> outline -> draft -> critique -> done`. `inbox` is inert and captures `idea.md`; every later stage is a generic `kind: :agent` stage with `status_mode: :state_file_marker`, slash-skill metadata, explicit budgets/timeouts, and `done` writing the terminal `article.md`.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
-- `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids. Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
+- `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:content`, plus any scoped test/runtime registrations). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
 - `Hive::WorkflowSelection.fetch!(name)` — CLI-facing selector validation used by [[commands/init]] and [[commands/new]]. Blank/nil normalizes to `coding`; unknown names raise `Hive::Workflows::UnknownWorkflow` with `valid workflows: ...` from the live registry.
 
 ## Constants
@@ -76,6 +77,14 @@ Hive::Workflows.all_stage_names            # union across Registry.all
 ## Test workflow fixture
 
 `test/support/workflow_helpers.rb` registers a scoped `:content_fixture` descriptor for integration proof tests only. Its stages are `1-inbox -> 2-research -> 3-draft -> 4-done`; the entry is inert and the remaining stages are generic agents with `status_mode: :state_file_marker`. `with_deterministic_content_agent` stubs the generic agent seam to write deterministic state artifacts plus `<!-- COMPLETE -->`, so daemon tests exercise real init/new/status/policy/approve orchestration without network or model calls.
+
+## Built-in content workflow
+
+`content` is the first built-in non-coding workflow. It uses the descriptor-generic path from [[stages/agent]] and never touches coding's bespoke runner table. `hive new --workflow content` writes the topic to `1-inbox/<slug>/idea.md` and stamps the inert entry complete, making that file prior context for `research`. The terminal `6-done` stage is also `kind: :agent`; it writes `article.md`, stamps `<!-- COMPLETE -->`, and then `TaskAction` classifies the terminal complete marker as archived.
+
+Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
+`test/integration/content_workflow_stage_test.rb`, and
+`test/integration/content_workflow_e2e_test.rb`.
 
 ## Backlinks
 

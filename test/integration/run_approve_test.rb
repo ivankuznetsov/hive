@@ -1,10 +1,14 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "shellwords"
+require "hive/cli"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/approve"
 require "hive/stages/resolver"
+require "hive/task_action"
+require "hive/markers"
 
 class RunApproveTest < Minitest::Test
   include HiveTestHelper
@@ -56,6 +60,42 @@ class RunApproveTest < Minitest::Test
     File.write(File.join(folder, state_file), "# #{slug}\n")
     write_marker(folder, marker)
     [ folder, slug ]
+  end
+
+  # End-to-end proof for the inert-middle advance. U6.6 dropped the `entry &&`
+  # conjunct so an inert NON-entry middle stage classifies as ready_to_advance;
+  # the daemon-dispatched `hive approve --from <inert> --force` must actually
+  # move it forward, not dead-loop on approve's VALID_TERMINAL_MARKERS gate
+  # (the markerless inert stage has no agent to stamp a terminal marker). Drives
+  # the real classifier → command → CLI approve chain so a regression in
+  # generic_command's --force or in validate_move! would fail here, not ship green.
+  def test_inert_middle_stage_advances_end_to_end_through_dispatched_approve
+    with_registered_workflow(agent_entry_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          slug = "inert-middle-260620-abcd"
+          capture_io { Hive::Commands::Init.new(dir).call }
+          File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: agent_entry\n")
+          hold = File.join(dir, ".hive-state", "stages", "2-hold", slug)
+          FileUtils.mkdir_p(hold)
+          File.write(File.join(hold, "meta.yml"), "slug: #{slug}\nworkflow: agent_entry\n")
+          File.write(File.join(hold, "hold.md"), "# #{slug}\n")
+
+          task = Hive::Task.new(hold)
+          command = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file)).command
+          assert_equal "hive approve #{slug} --from 2-hold --force", command,
+                       "a markerless inert middle stage must dispatch a forced approve"
+
+          # Run the EXACT dispatched command through the CLI (real Thor parsing
+          # of --from/--force), not a hand-built Approve.new, to prove the chain.
+          capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }
+
+          assert File.directory?(File.join(dir, ".hive-state", "stages", "3-ship", slug)),
+                 "the inert middle stage must advance to 3-ship via the dispatched approve"
+          refute File.exist?(hold), "the old 2-hold folder must be gone after the advance"
+        end
+      end
+    end
   end
 
   # ── Happy paths ─────────────────────────────────────────────────────────

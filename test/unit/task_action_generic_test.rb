@@ -53,7 +53,10 @@ class TaskActionGenericTest < Minitest::Test
     fresh_entry = action_for("intake", :none)
     assert_equal "ready_to_advance", fresh_entry.key
     assert_equal "Ready to advance", fresh_entry.label
-    assert_equal "hive approve #{SLUG} --from 1-intake", fresh_entry.command
+    # A markerless inert stage carries --force: it has no agent to stamp a
+    # terminal marker, so approve's VALID_TERMINAL_MARKERS gate would reject the
+    # forward move and the daemon would dead-loop without the override.
+    assert_equal "hive approve #{SLUG} --from 1-intake --force", fresh_entry.command
 
     waiting = action_for("gather", :waiting)
     assert_equal "needs_input", waiting.key
@@ -119,7 +122,7 @@ class TaskActionGenericTest < Minitest::Test
     action = action_for("intake", :none)
 
     assert_equal "ready_to_advance", action.key
-    assert_equal "hive approve #{SLUG} --from 1-intake", action.command
+    assert_equal "hive approve #{SLUG} --from 1-intake --force", action.command
     assert_equal :dispatch, policy_decision(action)
   end
 
@@ -210,7 +213,7 @@ class TaskActionGenericTest < Minitest::Test
   def test_generic_markerless_entry_advances_but_middle_runs
     entry = action_for("intake", :none)
     assert_equal "ready_to_advance", entry.key
-    assert_equal "hive approve #{SLUG} --from 1-intake", entry.command
+    assert_equal "hive approve #{SLUG} --from 1-intake --force", entry.command
 
     middle = action_for("gather", :none)
     assert_equal "ready_to_run", middle.key
@@ -241,8 +244,9 @@ class TaskActionGenericTest < Minitest::Test
     inert_middle = action_for("hold", :none, descriptor: agent_entry_workflow)
     assert_equal "ready_to_advance", inert_middle.key
     assert_equal "Ready to advance", inert_middle.label
-    assert_equal "hive approve #{SLUG} --from 2-hold", inert_middle.command,
-                 "an inert non-entry middle stage must advance, not strand on hive run"
+    assert_equal "hive approve #{SLUG} --from 2-hold --force", inert_middle.command,
+                 "an inert non-entry middle stage must advance with --force, not strand on hive run " \
+                 "or dead-loop on approve's terminal-marker gate"
     assert_equal :dispatch, policy_decision(inert_middle)
   end
 

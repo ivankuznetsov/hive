@@ -990,6 +990,41 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  # The argv guard above only sees `--show-signature` / a literal `%G` in argv. The repo's own
+  # `.git/config` can request verification without either token — `log.showSignature=true` makes
+  # a plain `git log -1` verify, and a named `pretty.<name>=format:%G?` alias smuggles `%G?` in
+  # via `--pretty=name` — and both exec the local `gpg.program`. These reads still pass through
+  # (they are allowlisted), so the passthrough must neutralize the config-driven verification.
+  def test_git_stub_neutralizes_config_driven_signature_verification
+    with_tmp_git_repo do |dir|
+      pwn_path = File.join(dir, "gpg-ran")
+      fake_gpg = executable_touch_binary(dir, "fake-gpg", pwn_path)
+      run!("git", "-C", dir, "config", "gpg.program", fake_gpg)
+      run!("git", "-C", dir, "config", "log.showSignature", "true")
+      run!("git", "-C", dir, "config", "pretty.evil", "format:%G?")
+      install_commit_with_gpgsig(dir)
+      env = real_git_env(dir)
+
+      [
+        # `log.showSignature=true` in repo config: a plain read verifies, no argv signature flag.
+        %w[log -1 --oneline],
+        # A `%G?` pretty alias reached by name carries no literal `%G` in argv.
+        %w[log --pretty=evil -1],
+        %w[show --pretty=evil --no-patch],
+        %w[rev-list --pretty=evil HEAD -1]
+      ].each do |args|
+        FileUtils.rm_f(pwn_path)
+
+        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        refute_empty out, "git #{args.join(' ')} should still produce read output"
+        refute_path_exists pwn_path,
+                           "config-driven signature verification ran local gpg.program for git #{args.join(' ')}"
+      end
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")
@@ -1050,16 +1085,30 @@ class BabysitterDryRunEnvTest < Minitest::Test
                     "#{binary} #{args.join(' ')} passed (exit 0) but never reached real #{binary}"
   end
 
+  # `log`/`show`/`rev-list` reads get config-driven signature verification force-disabled and
+  # every gpg program key blanked, so a `log.showSignature=true` or `pretty.<name>=format:%G?`
+  # alias in the repo's `.git/config` cannot exec a local gpg.program during dry-run passthrough.
+  SIGNATURE_VERIFICATION_OVERRIDES = [
+    "-c", "log.showSignature=false",
+    "-c", "gpg.program=",
+    "-c", "gpg.openpgp.program=",
+    "-c", "gpg.x509.program=",
+    "-c", "gpg.ssh.program="
+  ].freeze
+
   def expected_real_invocation(binary, *args)
     return "real-#{binary} #{args.join(' ')}" unless binary == "git"
 
     passthrough = args.dup
     index = git_subcommand_index(passthrough)
-    if %w[diff log show].include?(passthrough[index].to_s)
+    subcommand = passthrough[index].to_s
+    if %w[diff log show].include?(subcommand)
       passthrough.insert(index + 1, "--no-ext-diff", "--no-textconv")
     end
 
-    "real-git #{([ "-c", "core.fsmonitor=false", "-c", "core.askPass=" ] + passthrough).join(' ')}"
+    prefix = [ "-c", "core.fsmonitor=false", "-c", "core.askPass=" ]
+    prefix += SIGNATURE_VERIFICATION_OVERRIDES if %w[log show rev-list].include?(subcommand)
+    "real-git #{(prefix + passthrough).join(' ')}"
   end
 
   def git_subcommand_index(args)

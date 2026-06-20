@@ -294,7 +294,27 @@ def hardened_passthrough_argv(argv, rest)
     passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
   end
 
-  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", *passthrough ]
+  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", *signature_verification_overrides(rest), *passthrough ]
+end
+
+# `log` / `show` / `rev-list` verify commit signatures — and exec the local
+# `gpg.<format>.program` — the instant the repo's own `.git/config` asks for it, through two
+# seams the argv guard structurally cannot see: `log.showSignature=true` makes a plain
+# `git log -1` verify, and a named `pretty.<name>=format:%G?` alias reached via `--pretty=name`
+# smuggles the `%G?` placeholder in without a literal `%G` in argv. Force-disable config-driven
+# verification and blank every gpg program key so even a surviving `%G?` cannot launch an
+# attacker-controlled binary. Command-line `-c` outranks repo config, so these win over
+# whatever the local `.git/config` set.
+def signature_verification_overrides(rest)
+  return [] unless %w[log show rev-list].include?(rest.first.to_s)
+
+  [
+    "-c", "log.showSignature=false",
+    "-c", "gpg.program=",
+    "-c", "gpg.openpgp.program=",
+    "-c", "gpg.x509.program=",
+    "-c", "gpg.ssh.program="
+  ]
 end
 
 unsafe_global, rest = split_global_options(argv)

@@ -1,5 +1,6 @@
 require "thor"
 require "hive/stages"
+require "hive/workflows/registry"
 
 module Hive
   class CLI < Thor
@@ -14,6 +15,12 @@ module Hive
     # this derives the same list from the default coding workflow descriptor —
     # no literal stage dirs in source, so it stays in sync with a renumber.
     STAGE_VOCABULARY = "stages: #{Hive::Stages::DIRS.join(', ')}".freeze
+
+    # Registered workflow names embedded in the `--workflow` option help so an
+    # agent reading `hive help init|new` discovers valid workflows from
+    # `--help` instead of via a failed call — the STAGE_VOCABULARY pattern,
+    # applied to workflows.
+    WORKFLOW_VOCABULARY = "valid: #{Hive::Workflows::Registry.ids.join(', ')}".freeze
 
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, and the workflow verbs
@@ -93,7 +100,7 @@ module Hive
     DESC
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     option :workflow, type: :string,
-                      desc: "set this project's default workflow (valid: runtime workflow registry names)"
+                      desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
       Hive::Commands::Init.new(
@@ -323,7 +330,7 @@ module Hive
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
     option :workflow, type: :string,
-                      desc: "pin this task to a registered workflow"
+                      desc: "pin this task to a registered workflow (#{WORKFLOW_VOCABULARY})"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")

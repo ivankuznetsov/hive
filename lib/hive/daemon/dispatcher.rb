@@ -754,7 +754,7 @@ module Hive
           # auto-advance from regular advance-action dispatches. An
           # agent or operator reading daemon.log can then audit WHICH
           # policy branch fired without re-implementing Policy.decide.
-          trigger = Policy.plan_approval?(row.action, row.stage) ? "plan_approval" : "advance"
+          trigger = Policy.plan_approval?(row.action, row.stage, row.workflow) ? "plan_approval" : "advance"
           dispatch_or_block(row, now: now, trigger: trigger)
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,

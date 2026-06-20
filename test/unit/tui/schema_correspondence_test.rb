@@ -21,6 +21,7 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
   # values are placeholders — the test only inspects keys.
   FAKE_ROW = {
     stage: "1-inbox",
+    workflow: "coding",
     slug: "probe",
     folder: "/tmp/hive/probe",
     state_file: "/tmp/hive/probe/idea.md",

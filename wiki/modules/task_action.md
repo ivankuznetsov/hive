@@ -69,14 +69,18 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 
 `TaskAction#action` keeps the coding workflow on the existing hand-tuned
 stage-name `case` after the workflow-agnostic short-circuits (`live_task_lock`,
-`AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`). Tasks whose resolved
-`task.workflow.id` is not `:coding` use a descriptor-positioned generic
-classifier instead:
+`AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`). Routing is decided by
+`coding_workflow?`: a resolved `task.workflow.id == :coding` — and also a nil
+workflow, reachable only from test doubles — stays on the coding path. Tasks
+whose resolved `task.workflow.id` is any other value use a descriptor-positioned
+generic classifier instead:
 
 - `COMPLETE` at the terminal descriptor stage -> `archived`.
 - `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
 - `WAITING` -> `needs_input`.
-- markerless entry stage -> `ready_to_advance`.
+- markerless inert entry stage (non-terminal) -> `ready_to_advance`. A markerless
+  entry stage with an agent (`kind: :agent`) or a degenerate single-stage
+  workflow (entry == terminal) falls through to the next case instead.
 - markerless non-entry stage -> `needs_input` with label "Ready to run".
 
 This keeps coding behavior byte-stable while letting registered non-coding

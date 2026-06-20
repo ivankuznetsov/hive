@@ -17,6 +17,18 @@ module HiveWorkflowTestHelper
     )
   end
 
+  # Degenerate single-stage descriptor: its only stage is simultaneously entry
+  # and terminal. Used to pin that a markerless inert entry does NOT auto-advance
+  # when there is nowhere to advance to.
+  def single_stage_workflow
+    Hive::Workflow.new(
+      id: :single,
+      stages: [
+        Hive::Workflow::Stage.new(name: "only", index: 1, state_file: "only.md", kind: :inert)
+      ]
+    )
+  end
+
   def with_registered_workflow(descriptor)
     original_fetch = Hive::Workflows::Registry.method(:fetch)
     Hive::Workflows::Registry.define_singleton_method(:fetch) do |id|

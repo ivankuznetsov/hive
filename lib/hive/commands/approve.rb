@@ -94,7 +94,7 @@ module Hive
         Hive::TaskResolver.new(
           @target,
           project_filter: @project_filter,
-          stage_filter: Hive::Stages.resolve(@from)
+          stage_filter: @from
         ).resolve
       rescue Hive::InvalidTaskPath
         # Preserve --from's idempotency contract: if a retry runs after the
@@ -135,9 +135,7 @@ module Hive
       end
 
       def validate_move!(task, dest_stage, marker)
-        dest = task.workflow.stage_for_dir(dest_stage) ||
-               raise(Hive::InvalidTaskPath,
-                     "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
+        dest = stage_for_dest!(task, dest_stage)
         return if dest.index <= task.stage_index || @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
@@ -147,19 +145,35 @@ module Hive
               "Use --force to override or --to to move backward."
       end
 
+      # No `|| raise` here, unlike its three `stage_for_dest!` siblings: a nil
+      # dest is treated as "not the same stage" (falsy) so the pipeline proceeds
+      # to validate_move!, which is the loud backstop that raises InvalidTaskPath
+      # on an unresolved dir. Reachable only via a test double today.
       def same_stage?(task, dest_stage)
         dest = task.workflow.stage_for_dir(dest_stage)
         dest && dest.index == task.stage_index && dest.name == task.stage_name
       end
 
       def direction_of(task, dest_stage)
-        dest = task.workflow.stage_for_dir(dest_stage) ||
-               raise(Hive::InvalidTaskPath,
-                     "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
+        dest = stage_for_dest!(task, dest_stage)
         return "forward" if dest.index > task.stage_index
         return "backward" if dest.index < task.stage_index
 
         "same"
+      end
+
+      # Belt-and-suspenders: every caller passes a `dest_stage` that came from
+      # `resolve_destination`, which only returns validated descriptor dirs, so
+      # the raise is unreachable on every live path. It exists so that if a
+      # future caller ever reaches one of these helpers with an unresolved dir,
+      # the failure is a typed `InvalidTaskPath` rather than a `NoMethodError`
+      # on nil. The single source of the message keeps it from drifting across
+      # the three guard sites. The non-raising `same_stage?` deliberately opts
+      # out — see its comment.
+      def stage_for_dest!(task, dest_stage)
+        task.workflow.stage_for_dir(dest_stage) ||
+          raise(Hive::InvalidTaskPath,
+                "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
       end
 
       # ── Mutation ────────────────────────────────────────────────────────
@@ -351,9 +365,7 @@ module Hive
       end
 
       def success_payload(task, dest_stage, new_folder, marker, commit_action, direction, noop: false)
-        dest = task.workflow.stage_for_dir(dest_stage) ||
-               raise(Hive::InvalidTaskPath,
-                     "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
+        dest = stage_for_dest!(task, dest_stage)
         payload = {
           "schema" => "hive-approve",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-approve"),
@@ -389,7 +401,12 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         action = Hive::TaskAction.for(task, marker)
         { "kind" => kind::RUN, "folder" => new_folder, "command" => action.command || "hive run #{new_folder}" }
-      rescue Hive::InvalidTaskPath
+      rescue Hive::InvalidTaskPath => e
+        # The move succeeded but re-parsing the task at its new path failed
+        # (e.g. an unregisterable `meta.yml workflow:`). Degrade to a generic
+        # `hive run` hint so the agent still gets a runnable command, but log
+        # the dropped re-parse so a genuine post-move failure isn't silent.
+        warn "hive: warning — could not compute next_action for #{new_folder}: #{e.message}"
         { "kind" => kind::RUN, "folder" => new_folder, "command" => "hive run #{new_folder}" }
       end
 

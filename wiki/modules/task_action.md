@@ -61,6 +61,9 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
 | `generic_ready_to_run` | `NEEDS_INPUT` | "Ready to run" | run |
 | `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
+| `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
+| `done` | `ARCHIVED` | "Archived" | nil |
+| `error` | `ERROR` | "Error" | nil |
 
 `generic_ready_to_run` and `generic_needs_input` deliberately collapse onto the
 same `NEEDS_INPUT` key and `run` command, differing only by label. This is a
@@ -72,9 +75,6 @@ daemon routing never relies on the key for this — it discriminates first-run v
 re-run via the state-file mtime baseline (`Hive::Daemon::Policy`), so the merge is
 safe for dispatch. A future stage may split these into distinct keys if a wire
 consumer needs the run-vs-input signal.
-| `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
-| `done` | `ARCHIVED` | "Archived" | nil |
-| `error` | `ERROR` | "Error" | nil |
 
 ## Workflow-aware branch
 

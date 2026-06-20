@@ -3,6 +3,9 @@ require "tmpdir"
 require "hive/task_meta"
 require "hive/daemon/task_id_backfiller"
 require "hive/daemon/status_consumer"
+require "hive/config"
+require "hive/lock"
+require "hive/git_ops"
 
 # Backfiller's job: for tasks whose meta.yml has no id (created outside
 # `hive new`), allocate the next id, write it into the meta, and commit —
@@ -159,6 +162,79 @@ class HiveDaemonTaskIdBackfillerTest < Minitest::Test
     assert_nil Hive::TaskMeta.read(folder)[:id], "a nil allocation must leave the id unset"
     assert_empty @committed
     assert_empty backfill_events
+  end
+
+  def test_id_zero_is_treated_as_present_and_skipped
+    folder = make_task_folder(id: 0)
+    alloc = FakeAllocator.new(start: 100)
+
+    backfiller(allocate: alloc).backfill([ make_row(folder) ])
+
+    assert_equal 0, Hive::TaskMeta.read(folder)[:id], "id 0 is a real id and must not be overwritten"
+    assert_equal 0, alloc.calls, "no allocation for a task whose id is 0"
+    assert_empty @committed
+    assert_empty backfill_events
+  end
+
+  def test_logs_fatal_and_continues_when_a_row_folder_raises
+    good = make_task_folder(id: nil, slug: "good")
+    bad = Object.new
+    def bad.folder; raise "boom folder"; end
+    alloc = FakeAllocator.new(start: 100)
+
+    backfiller(allocate: alloc).backfill([ bad, make_row(good, slug: "good") ])
+
+    assert_equal 100, Hive::TaskMeta.read(good)[:id], "a raising row must not block the rest of the set"
+    assert(fatal_events.any? { |_, a| a[:message].to_s.include?("row raised") },
+           "a row whose folder accessor raises must be logged as :fatal")
+  end
+
+  def test_unreadable_meta_is_treated_as_not_missing
+    folder = make_task_folder(id: nil)
+    alloc = FakeAllocator.new(start: 100)
+
+    with_replaced_singleton_method(Hive::TaskMeta, :read, ->(_f) { raise "boom read" }) do
+      backfiller(allocate: alloc).backfill([ make_row(folder) ])
+    end
+
+    assert_equal 0, alloc.calls, "an unreadable meta must not trigger allocation (no commit storm)"
+    assert_empty @committed
+    assert_empty backfill_events
+    assert_empty fatal_events, "a swallowed read error must not surface as :fatal"
+  end
+
+  # Exercises the REAL commit_id (not the injected fake): an unknown project
+  # can't commit, so the id is still written to disk but the success event is
+  # flagged committed:false rather than masquerading as durable.
+  def test_real_commit_path_unknown_project_marks_uncommitted
+    folder = make_task_folder(id: nil, slug: "s1")
+    bf = Hive::Daemon::TaskIdBackfiller.new(logger: @logger, dry_run: false, allocate: -> { 100 })
+
+    bf.backfill([ make_row(folder, project: "definitely-not-a-registered-project", slug: "s1") ])
+
+    assert_equal 100, Hive::TaskMeta.read(folder)[:id], "id is written even when commit can't run"
+    assert_equal false, backfill_events.first[1][:committed],
+                 "unknown project → the success event must carry committed:false"
+  end
+
+  # The real commit_id rescue: a commit failure under the lock is swallowed,
+  # logged as task_id_backfill_commit_skipped, and flagged committed:false —
+  # never raised out of the tick.
+  def test_real_commit_path_swallows_commit_error
+    folder = make_task_folder(id: nil, slug: "s1")
+    bf = Hive::Daemon::TaskIdBackfiller.new(logger: @logger, dry_run: false, allocate: -> { 100 })
+    fake_project = { "name" => "p", "path" => "/tmp/x", "hive_state_path" => "/tmp/x/.hive-state" }
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_n) { fake_project }) do
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(*, &_b) { raise Hive::GitError, "commit boom" }) do
+        bf.backfill([ make_row(folder, project: "p", slug: "s1") ])
+      end
+    end
+
+    assert_equal 100, Hive::TaskMeta.read(folder)[:id], "id is written even when the commit fails"
+    assert(@logger.events.any? { |n, _| n == :task_id_backfill_commit_skipped },
+           "a failed commit must log task_id_backfill_commit_skipped")
+    assert_equal false, backfill_events.first[1][:committed], "a failed commit → committed:false"
   end
 
   def test_does_not_resurrect_a_vanished_folder

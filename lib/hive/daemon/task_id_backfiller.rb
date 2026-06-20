@@ -2,6 +2,7 @@ require "hive/task_meta"
 require "hive/task_counter"
 require "hive/config"
 require "hive/git_ops"
+require "hive/lock"
 
 module Hive
   module Daemon
@@ -105,29 +106,43 @@ module Hive
         return false if id.nil?
 
         Hive::TaskMeta.update_id(folder, id)
-        @commit.call(row)
+        # `committed: false` flags the durability gap (id on disk, not yet on
+        # hive/state) so the success event isn't read as fully durable. With
+        # the commit lock below a skip is rare, but when it happens the id is
+        # swept into the next operation that commits this folder.
+        committed = @commit.call(row) != false
         @logger.event(:task_id_backfill,
-                      project: row.project, slug: row.slug, folder: folder, id: id)
+                      project: row.project, slug: row.slug, folder: folder,
+                      id: id, committed: committed)
         true
       end
 
-      # Commit the meta on hive/state with the same per-task pathspec the
-      # name generator uses, so the assigned id is durable rather than a
-      # dangling uncommitted edit in the worktree. A git/config failure is
-      # swallowed: the id is still written to disk and will be picked up by
-      # the next operation that commits this task's folder.
+      # Commit the meta on hive/state under the per-project commit lock —
+      # every durable `hive_commit` caller (`new`, `run`, `approve`,
+      # `markers`, the name generator) takes it to serialise hive/state
+      # writes against concurrent committers; skipping it would let this
+      # `git add`/`commit` interleave with a dispatched child's and cross-
+      # contaminate the audit history (or collide on `index.lock`). Uses the
+      # same per-task `hive_commit(stage_name:, slug:)` the name generator
+      # does. Returns true on commit, false on skip. A lock-timeout
+      # (`ConcurrentRunError`) or git/config failure is swallowed and logged:
+      # the id is still on disk and will be picked up by the next operation
+      # that commits this task's folder.
       def commit_id(row)
         project = Hive::Config.find_project(row.project)
-        return unless project && project["path"]
+        return false unless project && project["path"]
 
-        Hive::GitOps.new(project["path"]).hive_commit(
-          stage_name: row.stage, slug: row.slug, action: "id-assigned"
-        )
-      rescue Hive::GitError, Hive::ConfigError, SystemCallError, IOError => e
+        Hive::Lock.with_commit_lock(project["hive_state_path"]) do
+          Hive::GitOps.new(project["path"]).hive_commit(
+            stage_name: row.stage, slug: row.slug, action: "id-assigned"
+          )
+        end
+        true
+      rescue Hive::ConcurrentRunError, Hive::GitError, Hive::ConfigError, SystemCallError, IOError => e
         @logger.event(:task_id_backfill_commit_skipped,
                       project: row.project, slug: row.slug,
                       reason: "#{e.class}: #{e.message}")
-        nil
+        false
       end
 
       def row_folder(row)

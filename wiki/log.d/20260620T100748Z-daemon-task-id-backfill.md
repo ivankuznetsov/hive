@@ -11,10 +11,14 @@ On each tick the dispatcher now runs the new backfiller right after the
 display-name backfiller: for any status row whose `Hive::TaskMeta` `id` is nil
 it allocates `TaskCounter.next!`, writes it via the new
 `Hive::TaskMeta.update_id` (preserving slug / display_name / depends_on), and
-commits the meta on `hive/state` with the per-task
-`hive_commit(action: "id-assigned")` pathspec. It is synchronous (id assignment
-is instant, so no spawn/inflight tracking), bounded by `max_per_tick` (default
-5), and an assigned id is a natural fixed point — no churn once set.
+commits the meta on `hive/state` **under the per-project commit lock**
+(`Hive::Lock.with_commit_lock`, as every durable `hive_commit` caller does, so
+the commit can't interleave with a dispatched child's and cross-contaminate the
+audit history or collide on `index.lock`). It is synchronous (id assignment is
+instant, so no spawn/inflight tracking), bounded by `max_per_tick` (default 5),
+and an assigned id is a natural fixed point — no churn once set. The
+`task_id_backfill` event carries `committed:` so a swallowed commit (lock
+timeout / git error) is visible rather than masquerading as fully durable.
 
 Critical guard: `id_missing?` returns false unless `File.directory?(folder)`.
 A status row can outlive its folder (`hive drop` between snapshot and tick);

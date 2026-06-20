@@ -7,6 +7,12 @@ module Hive
     module Agent
       module_function
 
+      # Fallback timeout for a generic :agent stage whose descriptor omits
+      # `timeout_sec` and whose cfg carries no per-stage override. Without it,
+      # `Hive::Agent#run` would do `Time.now + nil` and crash at spawn — the
+      # budget path is nil-guarded downstream, the timeout path is not.
+      DEFAULT_TIMEOUT_SEC = 1800
+
       def run!(task, cfg)
         cfg ||= {}
         stage = task.workflow.stage_named(task.stage_name)
@@ -21,10 +27,12 @@ module Hive
           add_dirs: [ task.folder ],
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", task.stage_name) || stage.budget_usd,
-          timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec,
+          timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
           log_label: task.stage_name,
           profile: profile,
-          status_mode: :state_file_marker,
+          # Honor the descriptor's declared status_mode; fall back to the
+          # marker-file convention only when the stage leaves it unset.
+          status_mode: stage.status_mode || :state_file_marker,
           cfg: cfg
         )
 
@@ -52,7 +60,14 @@ module Hive
         Dir.glob(File.join(task.folder, "*.md")).sort.filter_map do |path|
           next if File.basename(path) == output_file
 
-          "## #{File.basename(path)}\n#{File.read(path)}"
+          begin
+            "## #{File.basename(path)}\n#{File.read(path)}"
+          rescue SystemCallError => e
+            # TOCTOU: a sibling artifact can be deleted or become unreadable
+            # between the glob and the read. Degrade that one file to a
+            # placeholder so it can't abort the whole generic stage run.
+            "## #{File.basename(path)}\n(unreadable: #{e.class})"
+          end
         end.join("\n\n")[0, 8000]
       end
 

@@ -11,7 +11,8 @@ module Hive
         cfg ||= {}
         # U3 seam (remaining gap): as of U3 `pick_runner` (commands/run.rb) passes
         # `descriptor: task.workflow` into `Resolver.resolve`, so runner SELECTION is now
-        # per-task and the resolver's `descriptor:` param is production-used. What is NOT yet
+        # per-task and the resolver's `descriptor:` param is now passed in production (though
+        # inert until a 2nd workflow registers). What is NOT yet
         # threaded is the descriptor *into* the runner: this lookup still re-resolves the stage
         # from `Registry.default` rather than from the dispatched `task.workflow`. It is dormant
         # today because the registry holds only `:coding` (so `Registry.default` is the only

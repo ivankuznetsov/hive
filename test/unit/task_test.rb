@@ -358,11 +358,15 @@ class TaskTest < Minitest::Test
       assert_equal "add-foo", task.display_label
 
       File.write(File.join(folder, "meta.yml"), ":\n:not yaml")
-      task = Hive::Task.new(folder)
+      # The U3 ctor reads meta eagerly, so the malformed-YAML warn fires here —
+      # wrap in capture_io and assert it (matching the sibling tests above and
+      # task_meta_test.rb) so it isn't leaked to stderr.
+      _out, err = capture_io { task = Hive::Task.new(folder) }
       assert_nil task.id
       assert_nil task.display_name
       assert_nil task.depends_on
       assert_equal "add-foo", task.display_label
+      assert_match(/depends_on, workflow dropped/, err)
     end
   end
 

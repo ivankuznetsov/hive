@@ -31,7 +31,7 @@ module Hive
       @stage_name = m[:stage_name]
       @slug = m[:slug]
       @workflow = resolve_workflow
-      validate_workflow_stage!(m[:stage_dir])
+      validate_workflow_stage!(m[:stage_dir], @workflow)
     end
 
     def project_name
@@ -148,7 +148,10 @@ module Hive
            "every field-less task in this project will fail to load until it is fixed"
     end
 
-    def validate_workflow_stage!(stage_dir)
+    # Takes the resolved workflow explicitly (rather than reading @workflow) so
+    # the dependency on resolve_workflow having run first is visible at the call
+    # site, not an implicit ctor-ordering invariant.
+    def validate_workflow_stage!(stage_dir, workflow)
       stage = workflow.stage_named(@stage_name)
       unless stage
         raise InvalidTaskPath,

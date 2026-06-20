@@ -28,7 +28,10 @@ module Hive
     end
 
     def stage_names
-      stages.map(&:name)
+      # Frozen to match the parallel frozen Task::STAGE_NAMES constant — a
+      # uniform immutability contract across both sources of truth. A fresh
+      # array is built each call, so freezing it is safe (callers don't mutate).
+      stages.map(&:name).freeze
     end
 
     Stage = Data.define(

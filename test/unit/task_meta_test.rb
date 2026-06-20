@@ -50,7 +50,12 @@ class TaskMetaTest < Minitest::Test
       assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
 
       File.write(File.join(dir, "meta.yml"), ":\n:not yaml")
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      # Malformed YAML hits the warn arm of read; capture so it isn't leaked to
+      # stderr (the warn itself is asserted in
+      # test_malformed_yaml_warns_that_depends_on_and_workflow_were_dropped).
+      result = nil
+      capture_io { result = Hive::TaskMeta.read(dir) }
+      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, result)
 
       File.write(File.join(dir, "meta.yml"), "- not\n- a hash\n")
       assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))

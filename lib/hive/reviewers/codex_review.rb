@@ -116,6 +116,21 @@ module Hive
         |this\s+(?:is|introduces|causes)\s+a\s+(?:bug|regression))\b
       /xi.freeze
 
+      # codex-cli's native `codex review` output — emitted when it ignores the
+      # custom prompt's GFM coercion, notably on the "No plan was found" patrol
+      # path — lists findings as priority-tagged bullets instead of the
+      # `## High/Medium/Nit` checkboxes the prompt asks for, e.g.
+      #   - [P1] <title> — <path>:<line>
+      #       <indented justification…>
+      # A line is a native finding when it is (optionally bulleted) `[Pn]` text.
+      # We normalize these into the canonical checkbox block so a real codex
+      # finding feeds triage instead of failing the whole pass as `all_failed`.
+      NATIVE_FINDING = /\A\s*[-*]?\s*\[P(\d)\]\s*(.+?)\s*\z/.freeze
+
+      # codex priority → Hive severity. P1 (and a defensive P0) is High, P2 is
+      # Medium, everything lower (P3+) is Nit.
+      NATIVE_SEVERITY = { 0 => "High", 1 => "High", 2 => "Medium" }.freeze
+
       def initialize(spec, ctx, cfg: nil)
         super(spec, ctx)
         @cfg = cfg
@@ -177,7 +192,7 @@ module Hive
       def finalize(run, attempts, max_attempts)
         case review_status(run)
         when :findings
-          File.write(output_path, format_body(review_body(run.stdout)))
+          File.write(output_path, format_body(findings_markdown(review_body(run.stdout))))
           Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
         when :clean
           File.write(output_path, clean_findings(review_body(run.stdout)))
@@ -213,6 +228,7 @@ module Hive
         body = review_body(run.stdout)
         return :template_echo if template_echo?(body)
         return :findings if valid_findings?(body)
+        return :findings if native_findings?(body)
         return :clean if clean_verdict?(body)
 
         :error
@@ -270,6 +286,64 @@ module Hive
 
       def valid_findings?(stdout)
         stdout.to_s.match?(SEVERITY_HEADER)
+      end
+
+      # The findings markdown to publish: codex's own GFM block when it already
+      # carries `## High/Medium/Nit` headers, else its native `[Pn]` bullets
+      # normalized into that format so triage's `- [ ]` parser can consume them.
+      def findings_markdown(body)
+        return body if body.to_s.match?(SEVERITY_HEADER)
+
+        normalize_native_findings(body)
+      end
+
+      # True when codex's real answer carries at least one native priority
+      # finding (`- [P1] …`) and no `## High/Medium/Nit` header — the format we
+      # normalize rather than reject as a missing-header failure.
+      def native_findings?(body)
+        text = body.to_s
+        return false if text.match?(SEVERITY_HEADER)
+
+        text.each_line.any? { |line| NATIVE_FINDING.match?(line) }
+      end
+
+      # Fold codex's native `[Pn]` bullets into the canonical
+      # `## High/Medium/Nit` checkbox block. Each finding's indented
+      # justification lines are joined onto its single checkbox line; identical
+      # findings (codex sometimes echoes the same one twice) are de-duplicated;
+      # a severity with no findings still prints its header + `No findings.` so
+      # the published file matches the prompt's three-header contract.
+      def normalize_native_findings(body)
+        buckets = { "High" => [], "Medium" => [], "Nit" => [] }
+        current = nil
+        body.to_s.each_line do |line|
+          if (m = NATIVE_FINDING.match(line))
+            current = [ m[2].strip ]
+            buckets[NATIVE_SEVERITY.fetch(m[1].to_i, "Nit")] << current
+          elsif current && line.match?(/\A\s+\S/)
+            current << line.strip
+          else
+            current = nil
+          end
+        end
+        render_native_findings(buckets)
+      end
+
+      def render_native_findings(buckets)
+        seen = {}
+        sections = buckets.map do |severity, findings|
+          lines = findings.filter_map do |parts|
+            text = parts.join(" ").gsub(/\s+/, " ").strip
+            next if text.empty? || seen[text]
+
+            seen[text] = true
+            text = "#{text[0, 500].rstrip}…" if text.length > 500
+            "- [ ] #{text}"
+          end
+          lines << "No findings." if lines.empty?
+          "## #{severity}\n#{lines.join("\n")}"
+        end
+        "#{sections.join("\n\n")}\n"
       end
 
       def template_echo?(stdout)

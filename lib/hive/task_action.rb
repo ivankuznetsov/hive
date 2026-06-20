@@ -151,6 +151,14 @@ module Hive
         label: "Ready to advance",
         command: "approve"
       },
+      # `generic_ready_to_run` and `generic_needs_input` deliberately collapse
+      # onto the same NEEDS_INPUT key + `run` command, differing only in label.
+      # This is a lossy merge on the JSON wire: a bot/SDK consumer reading
+      # `key` alone can't tell "stage hasn't produced a WAITING marker yet"
+      # (ready to run) from "agent ran and is now waiting on the user"
+      # (needs input). Sound for daemon routing — it discriminates first-run
+      # vs re-run by the mtime baseline, not by this key — and intended per
+      # plan R3/Q2; see wiki/modules/task_action.md for the wire-format note.
       generic_ready_to_run: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Ready to run",
@@ -330,11 +338,21 @@ module Hive
         ACTIONS.fetch(:generic_needs_input)
       when :none
         # Auto-advance a markerless entry stage only when it is inert (no
-        # agent to run) AND not also terminal: a `kind: :agent` entry must
-        # run its agent rather than be approved past it, and a degenerate
-        # single-stage workflow (entry == terminal) has nowhere to advance,
-        # so both fall through to ready-to-run.
-        entry && !terminal && stage.kind == :inert ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+        # agent to run) AND not also terminal. Any non-inert entry kind
+        # (`:agent`, `:marker`, or `nil` — the gate is `stage.kind == :inert`,
+        # which excludes all three) must run rather than be approved past it,
+        # and a degenerate single-stage workflow (entry == terminal) has
+        # nowhere to advance — so both fall through to ready-to-run.
+        inert_advanceable_entry = entry && !terminal && stage.kind == :inert
+
+        # U5-DEFERRED (plan R3/Q2): the ready-to-run fall-through classifies a
+        # markerless generic stage as `generic_ready_to_run` -> `needs_input`,
+        # which `Hive::Daemon::Policy` routes through EDIT_RESUME_ACTIONS to a
+        # first-sight `:record_baseline`. So a never-run generic stage is NOT
+        # daemon-auto-dispatched until a human edits the state file (unlike
+        # coding's `ready_to_*` auto-dispatch). This is intended, not a bug:
+        # U5 owns wiring up generic auto-dispatch.
+        inert_advanceable_entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end

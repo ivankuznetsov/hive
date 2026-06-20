@@ -61,6 +61,17 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
 | `generic_ready_to_run` | `NEEDS_INPUT` | "Ready to run" | run |
 | `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
+
+`generic_ready_to_run` and `generic_needs_input` deliberately collapse onto the
+same `NEEDS_INPUT` key and `run` command, differing only by label. This is a
+**lossy merge on the JSON wire**: a bot/SDK consumer reading `key` alone cannot
+distinguish "stage hasn't produced a `WAITING` marker yet" (ready to run, never
+executed) from "the agent ran and is now waiting on the user" (needs input). The
+distinction survives only in the human `label`. This is intentional (plan R3/Q2):
+daemon routing never relies on the key for this — it discriminates first-run vs
+re-run via the state-file mtime baseline (`Hive::Daemon::Policy`), so the merge is
+safe for dispatch. A future stage may split these into distinct keys if a wire
+consumer needs the run-vs-input signal.
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
@@ -79,8 +90,9 @@ generic classifier instead:
 - `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
 - `WAITING` -> `needs_input`.
 - markerless inert entry stage (non-terminal) -> `ready_to_advance`. A markerless
-  entry stage with an agent (`kind: :agent`) or a degenerate single-stage
-  workflow (entry == terminal) falls through to the next case instead.
+  entry stage of any non-inert kind (`:agent`, `:marker`, or `nil` — the gate is
+  `stage.kind == :inert`) or a degenerate single-stage workflow (entry ==
+  terminal) falls through to the next case instead.
 - markerless non-entry stage -> `needs_input` with label "Ready to run".
 
 This keeps coding behavior byte-stable while letting registered non-coding

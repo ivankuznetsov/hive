@@ -170,6 +170,34 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_generic_forward_approve_json_envelope_resolves_descriptor_stage
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          gather, _slug = seed_research_task(dir)
+
+          out, _err = capture_io do
+            Hive::Commands::Approve.new(gather, from: "2-gather", json: true).call
+          end
+
+          payload = JSON.parse(out)
+          assert payload["ok"]
+          # Destination resolved through the research descriptor, not the
+          # coding stage table — pins the approve-side JSON envelope end-to-end
+          # for a generic task (the helper units only exercise the lines).
+          assert_equal "report", payload["to_stage"]
+          assert_equal 3, payload["to_stage_index"]
+          assert_equal "3-report", payload["to_stage_dir"]
+          assert_includes payload["commit_action"], "approve 2-gather -> 3-report"
+          # report is the descriptor's terminal stage → next_action terminates
+          # the agent retry loop instead of emitting a runnable verb.
+          assert_equal Hive::Schemas::NextActionKind::NO_OP, payload["next_action"]["kind"]
+          assert_equal "final_stage", payload["next_action"]["reason"]
+        end
+      end
+    end
+  end
+
   def test_collision_workflow_approve_moves_and_re_resolves_descriptor_runner
     with_registered_workflow(collision_workflow) do
       with_tmp_global_config do
@@ -184,6 +212,13 @@ class RunApproveTest < Minitest::Test
 
           assert File.directory?(report), "collision workflow must advance to descriptor 3-report"
           refute File.exist?(coding_plan), "global coding 3-plan must not receive the task"
+
+          # Pin the descriptor-derived commit provenance: a regression that
+          # moved to the right dir but logged the wrong stage would land in the
+          # correct folder yet leave a misleading audit trail.
+          log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
+          assert_match(%r{approve 2-brainstorm -> 3-report}, log,
+                       "commit message must record the descriptor-derived stage provenance")
 
           moved = Hive::Task.new(report)
           runner = Hive::Stages::Resolver.resolve(moved, descriptor: moved.workflow)

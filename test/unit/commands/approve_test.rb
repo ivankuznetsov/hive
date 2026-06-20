@@ -225,15 +225,41 @@ class HiveCommandsApproveTest < Minitest::Test
   end
 
   def test_json_next_action_falls_back_when_new_folder_is_not_a_task
-    action = command.send(
-      :json_next_action,
-      "/tmp/not-a-hive-task",
-      Hive::Workflows::Registry.default,
-      "2-brainstorm"
-    )
+    action = nil
+    _out, err = capture_io do
+      action = command.send(
+        :json_next_action,
+        "/tmp/not-a-hive-task",
+        Hive::Workflows::Registry.default,
+        "2-brainstorm"
+      )
+    end
 
     assert_equal Hive::Schemas::NextActionKind::RUN, action.fetch("kind")
     assert_equal "hive run /tmp/not-a-hive-task", action.fetch("command")
+    # The dropped re-parse must reach stderr — the code comment promises a
+    # "genuine post-move failure isn't silent".
+    assert_includes err, "could not compute next_action"
+  end
+
+  def test_stage_for_dest_raises_on_unresolved_dir
+    # Failure arm of the defensive guard: a dir the descriptor can't resolve
+    # surfaces a typed InvalidTaskPath, not a NoMethodError on nil. Unreachable
+    # on live paths (callers pass resolve_destination output) but pinned so the
+    # guard is covered regardless of the coverage gate's branch awareness.
+    error = assert_raises(Hive::InvalidTaskPath) do
+      command.send(:stage_for_dest!, task, "99-bogus")
+    end
+
+    assert_includes error.message, "unknown destination stage '99-bogus'"
+  end
+
+  def test_same_stage_is_falsy_on_unresolved_dir
+    # The nil-tolerant sibling of stage_for_dest!: an unresolved dir is treated
+    # as "not the same stage" (falsy) rather than raising, so the pipeline falls
+    # through to validate_move!'s loud backstop. Pin the nil-guard arm directly.
+    refute command.send(:same_stage?, task, "99-bogus"),
+           "an unresolved dir must read as not-same-stage without raising"
   end
 
   def test_json_next_action_uses_descriptor_terminal_stage

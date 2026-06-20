@@ -136,6 +136,8 @@ evidence closing the following June 16 gaps.
 
 ## Open enhancements
 
+- **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today (the registry holds only `:coding`); U5 should wire a generic error/stale surface alongside the rest of the descriptor-aware work. See [[modules/task_action]].
+
 - **Parse provider reset-time hints for `limits_reached` cooldown** — the healer currently uses a fixed `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` cooldown (default 1h) to self-heal limit-parked tasks (see [[daemon]]). Providers sometimes print a concrete reset hint (e.g. codex's "try again at 4:42 PM"); parsing that wall-clock time could retry sooner/later than the fixed window. Deferred because wall-clock parsing across providers/timezones is brittle and the fixed cooldown is the robust default.
 
 - **Daemon quarantine is invisible to operators** — after the transient

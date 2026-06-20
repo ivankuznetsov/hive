@@ -47,11 +47,12 @@ module Hive
         # `ready_to_run` forever (NO-SILENT-CAPS). Write an attributed `:error`
         # marker — but never clobber a marker the agent already wrote.
         if result.is_a?(Hash) && result[:status] == :error && marker.name == :none
-          marker = Hive::Markers.set(
+          Hive::Markers.set(
             output_path, :error,
             reason: "agent_preflight_failed",
             message: result[:error_message].to_s[0, 200]
           )
+          marker = Hive::Markers.current(output_path)
         end
         { commit: action_for(marker.name), status: marker.name }
       end

@@ -46,7 +46,10 @@ module Hive
         raw/notes
       ].freeze
 
-      WorkflowChoice = Struct.new(:descriptor, :source, keyword_init: true)
+      # Immutable value object (Data.define, matching the Workflow/Stage/
+      # AdvanceVerb convention) carrying the resolved descriptor and the
+      # provenance of the choice (:flag | :prompt | :implicit).
+      WorkflowChoice = Data.define(:descriptor, :source)
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, workflow_input: $stdin, workflow_output: $stderr)

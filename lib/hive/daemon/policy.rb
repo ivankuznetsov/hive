@@ -222,7 +222,7 @@ module Hive
       end
 
       # Literal `"3-plan"` equality matches every other stage-identity # coding-scoped: plan auto-approval is a coding workflow rule
-      # check in the codebase (e.g., `bubble_model.rb:1738 when "3-plan"` # coding-scoped: historical coding TUI reference
+      # check in the codebase (e.g., `BubbleModel#stage_extra_for`'s `when "3-plan"` # coding-scoped: historical coding TUI reference
       # and `Hive::Stages::DIRS` membership). Earlier drafts used
       # `/\A\d+-plan\z/` but the regex matched any digit-prefixed plan
       # stage; today's `Hive::Stages::DIRS` is a closed 9-entry enum

@@ -424,6 +424,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # the file-writing `--output` long form must still skip — narrowing the guard must not
       # re-allow the write form.
       assert_stubbed env, "git", "ls-files", "--output", "/tmp/hive-lsfiles-output-pwn"
+      # `--pretty`/`--format` resolve a bare value as a repo-local `pretty.<name>` alias that the
+      # argv layer can't see — it may expand to a `%G*` placeholder that runs gpg.program. Any
+      # opaque (non-builtin, no `%`) alias name is default-denied; an inline `%G` is rejected too.
+      assert_stubbed env, "git", "log", "--pretty=evilalias", "-1"
+      assert_stubbed env, "git", "show", "--format=evilalias", "--no-patch", "HEAD"
+      assert_stubbed env, "git", "rev-list", "--format=%G?", "-1", "HEAD"
       # The env-var config path bypasses every argv guard above: GIT_EXEC_PATH redirects git to
       # attacker-controlled helper binaries, GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND name a command
       # git execs directly, and GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject the
@@ -495,6 +501,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # must not over-block it.
       assert_passes env, "git", "ls-files", "-o"
       assert_passes env, "git", "ls-files", "--others"
+      # Default-deny on pretty/format must not over-block signature-free reads: builtin format
+      # names, fully visible `%`-placeholder inline formats, and `format:` templates carry no
+      # `%G*` placeholder and stay readable. A bare `--pretty`/`--format` (no glued value)
+      # selects the default builtin, and a following word is a revision, not the format.
+      assert_passes env, "git", "log", "--pretty=oneline"
+      assert_passes env, "git", "log", "--format=%H"
+      assert_passes env, "git", "log", "--pretty=format:%h"
       # On diff/log/show, `-O<orderfile>` is `--output-ordering` (reads an orderfile), not the
       # grep pager flag — a cross-subcommand read that must pass through (glued and separate).
       assert_passes env, "git", "diff", "-O/tmp/hive-orderfile"
@@ -975,6 +988,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       FileUtils.chmod("+x", gpg)
       run!("git", "-C", dir, "config", "gpg.program", gpg)
       run!("git", "-C", dir, "config", "user.signingkey", "test-key")
+      # Repo-local pretty aliases whose expansion embeds a `%G*` placeholder. The literal-value
+      # scan never sees the placeholder (the argv carries only the opaque alias name), so these
+      # are the bypass the default-deny guard must close — git would otherwise expand them and
+      # invoke the repo-local gpg.program.
+      run!("git", "-C", dir, "config", "pretty.sigfmt", "%GK")
+      run!("git", "-C", dir, "config", "pretty.sigq", "%G?")
       File.write(File.join(dir, "README.md"), "signed\n")
       run!("git", "-C", dir, "add", "README.md")
       run!("git", "-C", dir, "commit", "-S", "-m", "signed", "--quiet")
@@ -983,7 +1002,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
         [ "log", "--show-signature", "-1" ],
         [ "show", "--format=%G?", "--no-patch", "HEAD" ],
         [ "rev-list", "--pretty=format:%GS", "-1", "HEAD" ],
-        [ "log", "--format", "%GK", "-1" ]
+        [ "log", "--format", "%GK", "-1" ],
+        # Pretty-alias indirection: the placeholder lives in `.git/config`, not the argv.
+        [ "log", "--pretty=sigfmt", "-1" ],
+        [ "show", "--format=sigfmt", "--no-patch", "HEAD" ],
+        [ "rev-list", "--pretty=sigq", "-1", "HEAD" ]
       ].each do |args|
         FileUtils.rm_f(marker_path)
 

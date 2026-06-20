@@ -172,7 +172,39 @@ def signature_verification_option?(subcommand, arg, next_arg)
   return true if name.length >= "--show-s".length && "--show-signature".start_with?(name)
   return false unless signature_format_option?(name)
 
-  (value || next_arg).to_s.include?("%G")
+  if value.nil?
+    # git only reads the pretty/format value from a glued `=<value>`; a separate following
+    # word is a revision/pathspec, never the format (`git log --pretty oneline` treats
+    # `oneline` as a bad revision, not the format). So a bare `--pretty`/`--format` selects
+    # the default builtin, which is signature-free. Still flag a following word that literally
+    # embeds a `%G*` placeholder — git won't read it as the format, but this preserves the
+    # reject-on-detection posture without over-blocking ordinary `--pretty <rev>` reads.
+    next_arg.to_s.include?("%G")
+  else
+    signature_capable_format_value?(value)
+  end
+end
+
+# Builtin pretty formats that never emit a `%G*` signature placeholder, so they cannot trigger
+# signature verification (and thus the repo-local `gpg.program`).
+SIGNATURE_FREE_BUILTIN_FORMATS = %w[oneline short medium full fuller reference email raw mboxrd].freeze
+
+def signature_capable_format_value?(value)
+  # `--pretty=<value>` / `--format=<value>`. git resolves <value> as a builtin format, a
+  # `format:`/`tformat:` template, an inline `%`-placeholder string, or a repo-local
+  # `pretty.<name>` alias read from `.git/config`. An alias name is opaque at the argv layer:
+  # it can expand to a `%G*` placeholder that invokes the repo-local `gpg.program`, so scanning
+  # only the literal value (the prior behavior) let `--pretty=<alias>` slip past this guard.
+  # Default-deny: treat the value as signature-capable unless it is provably signature-free.
+  # A git config key cannot contain `%`, so any value carrying `%` is a visible inline format,
+  # never an alias — which makes the `%`-bearing branches safe to allow once `%G` is ruled out.
+  return false if value.empty?                              # empty format prints nothing; no gpg
+  return true if value.include?("%G")                       # visible signature placeholder
+  return false if SIGNATURE_FREE_BUILTIN_FORMATS.include?(value)
+  return false if value.start_with?("format:", "tformat:")  # visible template, %G ruled out above
+  return false if value.include?("%")                       # visible inline format, %G ruled out
+
+  true                                                      # bare name => repo-local alias: deny
 end
 
 def signature_format_option?(name)

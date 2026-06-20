@@ -55,20 +55,40 @@ class SchemaFilesTest < Minitest::Test
                     "v1 enum must NOT include the v2-introduced 6-review stage"
   end
 
-  def test_hive_approve_v2_includes_current_stage_dirs
+  # U6: the stage-dir / stage-name / stage-index fields were relaxed from the
+  # closed coding enums to patterns so generic (runtime-registered) workflow
+  # stages validate, mirroring the hive-status.v4 precedent. The contract is
+  # now "well-formed N-name dir / bare name", not a fixed coding whitelist.
+  def test_hive_approve_v2_relaxes_stage_fields_to_patterns_for_generic_workflows
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
-    v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
-    assert_includes v2_dirs, "5-open-pr"
-    assert_includes v2_dirs, "6-review"
-    assert_includes v2_dirs, "7-artifacts",
-                    "v2 widens the enum to include 7-artifacts (plan U1; ADR-029)"
-    assert_includes v2_dirs, "8-finalize"
-    assert_includes v2_dirs, "9-done"
-    refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
-    refute_includes v2_dirs, "7-finalize",
-                    "v2 retires the pre-renumber 7-finalize enum value"
-    refute_includes v2_dirs, "8-done",
-                    "v2 retires the pre-renumber 8-done enum value"
+    props = doc.dig("$defs", "SuccessPayload", "properties")
+
+    %w[from_stage_dir to_stage_dir].each do |field|
+      assert_nil props.dig(field, "enum"),
+                 "#{field} must not be a closed coding enum — generic dirs are runtime-registered"
+      dir_re = Regexp.new(props.fetch(field).fetch("pattern"))
+      # Coding dirs still validate (no regression for pinned consumers)…
+      assert_match dir_re, "7-artifacts", "#{field} pattern must still accept coding dirs"
+      assert_match dir_re, "9-done"
+      # …and the generic descriptor dirs the producer now emits validate too.
+      assert_match dir_re, "3-report", "#{field} pattern must accept generic descriptor dirs"
+      assert_match dir_re, "2-gather"
+      refute_match dir_re, "plan", "#{field} pattern still requires the N- index prefix"
+    end
+
+    %w[from_stage to_stage].each do |field|
+      assert_nil props.dig(field, "enum"),
+                 "#{field} must not be a closed coding enum"
+      name_re = Regexp.new(props.fetch(field).fetch("pattern"))
+      assert_match name_re, "open-pr", "#{field} pattern must accept hyphenated coding names"
+      assert_match name_re, "report", "#{field} pattern must accept generic stage names"
+    end
+
+    %w[from_stage_index to_stage_index].each do |field|
+      assert_nil props.dig(field, "maximum"),
+                 "#{field} must drop the maximum:9 cap so generic descriptors past 9 stages validate"
+      assert_equal 1, props.dig(field, "minimum")
+    end
   end
 
   def test_hive_approve_success_required_keys_match_producer_emission

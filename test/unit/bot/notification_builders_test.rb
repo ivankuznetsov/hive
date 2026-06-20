@@ -233,6 +233,30 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ "Show details" ], labels
   end
 
+  # Characterization (A7): a coding `waiting` marker only ever appears at
+  # 2-brainstorm / 3-plan in practice (supervisor.rb / notification_dispatcher),
+  # so the U6 routing migration is inert for coding. Pin that a coding `waiting`
+  # at ANY other stage (e.g. 5-open-pr, 8-finalize) falls through to the neutral
+  # "Needs input" / "Show details" default rather than the brainstorm "Answer in
+  # chat" affordance — preserving the byte-identical-coding mandate. Restoring
+  # the old unconditional brainstorm routing would be wrong: it would mislabel a
+  # generic row as "Brainstorm questions".
+  def test_coding_waiting_outside_brainstorm_and_plan_uses_neutral_default
+    %w[5-open-pr 8-finalize].each do |stage|
+      notification = Hive::Bot::NotificationBuilders.build(
+        row(action: "needs_input", marker: "waiting", stage: stage, workflow: "coding")
+      )
+
+      assert_match(/Needs input: waiting/, notification.text,
+                   "coding waiting at #{stage} must use the neutral default, not brainstorm copy")
+      refute_match(/Brainstorm questions/, notification.text)
+      refute_match(/Answer in chat/, notification.text,
+                   "coding waiting at #{stage} must not offer the brainstorm /answer affordance")
+      labels = notification.keyboard.flatten.map { |button| button[:text] }
+      assert_equal [ "Show details" ], labels
+    end
+  end
+
   def test_generic_needs_input_marker_builds_show_details_only_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" })

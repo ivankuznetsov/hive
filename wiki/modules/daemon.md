@@ -98,8 +98,9 @@ each expose a thin enough seam that mock collaborators (see
 without spinning up the whole stack.
 
 Policy's advance-action set includes the descriptor-generic
-`ready_to_advance` action. `Hive::TaskAction` emits it for non-coding workflow
-`COMPLETE` rows that are not at the terminal descriptor stage, and Policy treats
+`ready_to_advance` action. `Hive::TaskAction` emits it on two paths: non-coding
+workflow `COMPLETE` rows that are not at the terminal descriptor stage, and a
+markerless (`:none`) **inert** entry stage that is not also terminal. Policy treats
 it like the existing `ready_to_*` actions: non-empty command plus no dependency
 block returns `:dispatch`; `blocked: true` returns `:blocked_on_dependency`; nil
 or empty command returns `:skip`. The emitted command is currently

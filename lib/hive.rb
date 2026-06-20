@@ -149,6 +149,7 @@ module Hive
       READY_TO_ARTIFACTS  = "ready_to_artifacts".freeze
       READY_TO_FINALIZE   = "ready_to_finalize".freeze
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
+      READY_TO_ADVANCE    = "ready_to_advance".freeze
       NEEDS_INPUT         = "needs_input".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze

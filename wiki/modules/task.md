@@ -61,8 +61,9 @@ For stages 4 and later:
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
 - `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:, workflow:}` and is total over missing, malformed, or non-Hash YAML.
-- `write(task_folder, id:, slug:, display_name:, depends_on: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes `depends_on` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
-- `update_display_name(task_folder, name)` preserves the existing id, slug, and `depends_on`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
+- `write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes optional `depends_on` / `workflow` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
+- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`; this keeps daemon id backfill from dropping a task-level workflow selector.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
@@ -74,7 +75,7 @@ For stages 4 and later:
 ## Tests
 
 - `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
-- `test/unit/task_meta_test.rb` — sidecar read/write, workflow selector reads, malformed YAML tolerance, and display-name updates.
+- `test/unit/task_meta_test.rb` — sidecar read/write, workflow selector reads/preservation, malformed YAML tolerance, display-name updates, and id backfill.
 - `test/unit/task_counter_test.rb` — first id, sequential ids, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 
 ## Backlinks

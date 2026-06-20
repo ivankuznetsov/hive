@@ -59,6 +59,8 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
               supervisor.now = now
               dispatcher.tick(now: now)
             end
+
+            @spawned_commands = supervisor.spawned.map { |s| s[:command] }
           end
 
           final = task_folder(project_root, "4-done", slug)
@@ -67,6 +69,14 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
           %w[idea.md research.md draft.md done.md].each do |artifact|
             assert File.file?(File.join(final, artifact)), "#{artifact} should be carried into the final task folder"
           end
+
+          # Defense-in-depth parity with the generic sibling: assert the daemon —
+          # not a direct CLI call — drove both the run and the advancing approve
+          # through the supervisor's spawn.
+          assert(@spawned_commands.any? { |c| c.start_with?("hive run") },
+                 "daemon must have dispatched at least one `hive run` through the supervisor")
+          assert(@spawned_commands.any? { |c| c.start_with?("hive approve") },
+                 "daemon must have dispatched the advancing `hive approve` through the supervisor")
 
           log_subjects = run!("git", "-C", File.join(project_root, ".hive-state"), "log", "--format=%s")
           approve_commits = log_subjects.lines.grep(/ approve /)
@@ -99,10 +109,12 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
   class InlineSupervisor
     ChildExit = Hive::Daemon::ChildSupervisor::ChildExit
 
+    attr_reader :spawned
     attr_accessor :now
 
     def initialize(run:)
       @run = run
+      @spawned = []
       @pending = []
       @next_pid = 6000
       @now = Time.now
@@ -111,6 +123,7 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
     def spawn(command_string:, project:, slug:, stage:,
               hive_state_path: nil, state_file_path: nil, dry_run: nil, request_id: nil)
       pid = (@next_pid += 1)
+      @spawned << { command: command_string, project: project, slug: slug, stage: stage }
       exit_code = @run.call(command_string)
       @pending << ChildExit.new(
         pid: pid,

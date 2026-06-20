@@ -432,6 +432,82 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
+  # The real patrol all_failed regression: codex-cli ignores the prompt's GFM
+  # coercion and emits its NATIVE `codex review` format — a "No plan was found"
+  # preamble and `[P1]/[P2]` priority bullets instead of `## High/Medium/Nit`
+  # checkboxes. That real finding must be normalized and published, not rejected
+  # as "missing headers" (which deterministically fails every retry).
+  def test_native_priority_findings_are_normalized_to_gfm
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.141.0
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff main...HEAD" in /worktree
+         succeeded in 12ms:
+        some diff output
+        codex
+        No plan was found; the diff still leaves a config-driven signature-verification path.
+
+        Review comment:
+
+        - [P1] Block config-driven signature checks — bin/hive-babysitter-stub-git:169-169
+          When local git config enables signature verification the passthrough honors repo-local gpg.program.
+        - [P2] Tighten the read-only allowlist — bin/hive-babysitter-stub-git:200
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "codex's native [Pn] findings must be normalized, not failed, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert body.start_with?("## High"), "normalized output must lead with the High header"
+      assert_includes body, "- [ ] Block config-driven signature checks — bin/hive-babysitter-stub-git:169-169",
+                      "the P1 finding must become a High checkbox"
+      assert_includes body, "honors repo-local gpg.program",
+                      "the finding's indented justification must fold onto its line"
+      assert_includes body, "## Medium\n- [ ] Tighten the read-only allowlist",
+                      "the P2 finding must become a Medium checkbox"
+      assert_includes body, "## Nit\nNo findings.", "an empty severity still prints its header"
+      refute_includes body, "[P1]", "the native priority tag must be stripped"
+      refute_includes body, "No plan was found", "the codex preamble must not leak into findings"
+      refute_includes body, "<finding>", "the echoed prompt placeholder must not reach the file"
+      refute_includes body, "succeeded in", "the tool transcript must be dropped"
+    end
+  end
+
+  # codex sometimes echoes the same native finding twice; the normalized output
+  # must carry it once so triage doesn't see a phantom duplicate.
+  def test_native_findings_are_deduplicated
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        codex
+        - [P1] Duplicate finding — a.rb:1
+        - [P1] Duplicate finding — a.rb:1
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?, "expected :ok, got #{result.status} (#{result.error_message})"
+      body = File.read(reviewer.output_path)
+      assert_equal 1, body.scan("- [ ] Duplicate finding").size,
+                   "a repeated native finding must be published once"
+    end
+  end
+
   # A finding codex describes in PROSE (no checkbox) must NOT be laundered into a
   # clean pass — the :clean branch requires an affirmative no-findings verdict.
   def test_prose_finding_without_checkbox_is_not_a_clean_pass

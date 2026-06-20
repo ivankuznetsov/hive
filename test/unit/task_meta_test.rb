@@ -79,14 +79,15 @@ class TaskMetaTest < Minitest::Test
   # a regression re-broadening to a silent `rescue StandardError; empty`
   # — which passes test_missing_or_malformed_file_returns_nil_fields (return
   # value only) — is caught.
-  def test_malformed_yaml_warns_that_depends_on_was_dropped
+  def test_malformed_yaml_warns_that_depends_on_and_workflow_were_dropped
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "depends_on: [unterminated\n")
       result = nil
       _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
       assert_equal Hive::TaskMeta.empty, result
-      assert_match(/depends_on dropped/, err,
-                   "a YAML parse failure must warn that depends_on was dropped")
+      assert_match(/depends_on, workflow dropped/, err,
+                   "a YAML parse failure must warn that depends_on (and the " \
+                   "workflow selector) were dropped")
     end
   end
 

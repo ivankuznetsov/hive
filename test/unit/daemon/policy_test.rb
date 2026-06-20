@@ -66,17 +66,18 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    last_dispatched_state_file_mtime: nil)
   end
 
-  def test_ready_to_run_markerless_rerun_is_braked_to_skip
+  def test_ready_to_run_markerless_rerun_is_braked_to_markerless_stalled
     # A generic agent exited 0 without writing a WAITING/COMPLETE marker, so
     # the stage re-classifies as ready_to_run. The post-completion mtime
     # refresh makes the snapshot mtime equal the recorded last-dispatch mtime,
-    # so the brake skips instead of re-dispatching `hive run` every tick (the
-    # bug that would drain the per-project daily cap and then halt dispatch).
+    # so the brake surfaces an explicit :markerless_stalled (not a silent skip)
+    # instead of re-dispatching `hive run` every tick (the bug that would drain
+    # the per-project daily cap and then halt dispatch).
     same_mtime = T0 - 100
-    assert_equal :skip, decide(action: "ready_to_run",
-                               command: "hive run slug-a",
-                               state_file_mtime: same_mtime,
-                               last_dispatched_state_file_mtime: same_mtime)
+    assert_equal :markerless_stalled, decide(action: "ready_to_run",
+                                             command: "hive run slug-a",
+                                             state_file_mtime: same_mtime,
+                                             last_dispatched_state_file_mtime: same_mtime)
   end
 
   def test_ready_to_run_redispatches_on_new_input_past_debounce
@@ -95,13 +96,14 @@ class HiveDaemonPolicyTest < Minitest::Test
                                             last_dispatched_state_file_mtime: T0 - 600)
   end
 
-  def test_ready_to_run_with_nil_mtime_after_prior_dispatch_skips
+  def test_ready_to_run_with_nil_mtime_after_prior_dispatch_is_markerless_stalled
     # Defensive: prior dispatch recorded, but the snapshot has no mtime → can't
-    # prove new input, so don't re-dispatch.
-    assert_equal :skip, decide(action: "ready_to_run",
-                               command: "hive run slug-a",
-                               state_file_mtime: nil,
-                               last_dispatched_state_file_mtime: T0 - 600)
+    # prove new input, so don't re-dispatch. The agent left no state file at all,
+    # which is the markerless-stall case, surfaced explicitly.
+    assert_equal :markerless_stalled, decide(action: "ready_to_run",
+                                             command: "hive run slug-a",
+                                             state_file_mtime: nil,
+                                             last_dispatched_state_file_mtime: T0 - 600)
   end
 
   def test_ready_to_run_with_nil_command_skips

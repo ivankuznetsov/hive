@@ -814,6 +814,15 @@ module Hive
                                   dependency_stage: row.dependency_stage)
         when :poll_for_merge
           enqueue_merge_watch(row)
+        when :markerless_stalled
+          # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
+          # marker and its state file shows no progress, so it re-classifies to
+          # ready_to_run indefinitely. Log it explicitly (not a bare :skipped)
+          # so the stall is observable rather than silent. The per-project daily
+          # dispatch cap bounds re-dispatch if the file does keep changing.
+          @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
+                                              stage: row.stage, action: row.action,
+                                              reason: "agent_exited_without_marker")
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)

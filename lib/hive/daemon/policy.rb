@@ -158,14 +158,26 @@ module Hive
         elsif run?(action)
           # Debounced generic-run dispatch (see RUN_ACTION). First sight
           # dispatches; a markerless re-classification (mtime unchanged
-          # since last dispatch) is braked to `:skip` so the daemon does
-          # not re-spawn `hive run` every tick. The dependency gate still
-          # wins over a would-be dispatch.
+          # since last dispatch) is braked so the daemon does not re-spawn
+          # `hive run` every tick. The dependency gate still wins over a
+          # would-be dispatch.
           outcome = decide_run(state_file_mtime: state_file_mtime,
                                last_dispatched: last_dispatched_state_file_mtime,
                                now: now,
                                debounce_sec: edit_debounce_sec)
-          (outcome == :dispatch && blocked) ? :blocked_on_dependency : outcome
+          if outcome == :dispatch && blocked
+            :blocked_on_dependency
+          elsif outcome == :skip
+            # The stage was already dispatched but its state file shows no
+            # progress — the agent exited without stamping a WAITING/COMPLETE
+            # marker, so the row would re-classify to ready_to_run forever.
+            # Surface it as an explicit `:markerless_stalled` instead of a
+            # silent skip (NO-SILENT-CAPS); the per-project daily cap remains
+            # the backstop against re-dispatch storms when the file DOES change.
+            :markerless_stalled
+          else
+            outcome
+          end
         elsif edit_resume?(action)
           outcome = decide_edit(state_file_mtime: state_file_mtime,
                                 last_dispatched: last_dispatched_state_file_mtime,

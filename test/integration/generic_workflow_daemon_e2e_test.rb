@@ -12,6 +12,12 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
 
   SLUG = "generic-daemon-260620-abcd"
 
+  # A generic workflow only ever uses the universal `hive run` / `hive approve`
+  # verbs and the generic action set. Any coding-only verb or action appearing
+  # on a generic row means a coding-only branch leaked into the generic path.
+  GENERIC_ACTIONS = %w[ready_to_run ready_to_advance needs_input done error].freeze
+  CODING_ONLY_VERBS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
+
   def test_generic_task_advances_two_stages_through_status_policy_and_cli
     descriptor = dispatch_workflow
 
@@ -29,7 +35,11 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
           assert_equal "ready_to_run", first.fetch("action")
           assert_equal "hive run #{SLUG}", first.fetch("suggested_command")
           assert_equal :dispatch, policy_decision(first)
+          refute_coding_only_branch(first)
 
+          # The coding parity row, by contrast, DOES take a coding-only branch
+          # (ready_to_brainstorm / `hive brainstorm`) — proving the routing
+          # actually discriminates on workflow rather than treating all rows alike.
           coding = status_row(coding_slug)
           assert_equal "coding", coding.fetch("workflow")
           assert_equal "ready_to_brainstorm", coding.fetch("action")
@@ -43,6 +53,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
             assert_equal "ready_to_advance", after_intake_run.fetch("action")
             assert_equal "hive approve #{SLUG} --from 1-intake", after_intake_run.fetch("suggested_command")
             assert_equal :dispatch, policy_decision(after_intake_run)
+            refute_coding_only_branch(after_intake_run)
 
             capture_io { Hive::CLI.start([ "approve", SLUG, "--project", project, "--from", "1-intake" ]) }
             assert File.directory?(stage_folder(project_root, "2-gather"))
@@ -52,11 +63,13 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
             assert_equal "2-gather", gather.fetch("stage")
             assert_equal "ready_to_run", gather.fetch("action")
             assert_equal :dispatch, policy_decision(gather)
+            refute_coding_only_branch(gather)
 
             capture_io { Hive::CLI.start([ "run", SLUG, "--project", project ]) }
             after_gather_run = status_row(SLUG)
             assert_equal "ready_to_advance", after_gather_run.fetch("action")
             assert_equal "hive approve #{SLUG} --from 2-gather", after_gather_run.fetch("suggested_command")
+            refute_coding_only_branch(after_gather_run)
 
             capture_io { Hive::CLI.start([ "approve", SLUG, "--project", project, "--from", "2-gather" ]) }
           end
@@ -93,6 +106,18 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     payload = JSON.parse(out)
     payload.fetch("projects").flat_map { |project| project.fetch("tasks") }.find { |task| task.fetch("slug") == slug } ||
       flunk("missing status row for #{slug}")
+  end
+
+  # Negative assertion (U6.6): a generic row must never emit a coding-only verb
+  # or action — neither the status classifier nor the CLI dispatch routed it
+  # through a bespoke coding branch.
+  def refute_coding_only_branch(row)
+    action = row.fetch("action")
+    assert_includes GENERIC_ACTIONS, action,
+                    "generic row emitted non-generic action #{action.inspect} (a coding-only branch fired)"
+    verb = row.fetch("suggested_command").to_s.split(/\s+/)[1]
+    refute_includes CODING_ONLY_VERBS, verb,
+                    "generic row suggested coding-only verb #{verb.inspect} instead of hive run/approve"
   end
 
   def policy_decision(row)

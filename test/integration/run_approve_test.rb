@@ -3,6 +3,7 @@ require "json"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/approve"
+require "hive/stages/resolver"
 
 class RunApproveTest < Minitest::Test
   include HiveTestHelper
@@ -22,12 +23,35 @@ class RunApproveTest < Minitest::Test
   end
 
   def seed_research_task(dir, stage_dir: "2-gather", slug: "research-task-260620-abcd", marker: :complete)
+    state_file = stage_dir.end_with?("gather") ? "notes.md" : "report.md"
+    seed_descriptor_task(
+      dir,
+      descriptor: research_workflow,
+      stage_dir: stage_dir,
+      state_file: state_file,
+      slug: slug,
+      marker: marker
+    )
+  end
+
+  def seed_collision_task(dir, stage_dir: "2-brainstorm", slug: "collision-task-260620-abcd", marker: :complete)
+    state_file = stage_dir.end_with?("brainstorm") ? "brainstorm.md" : "report.md"
+    seed_descriptor_task(
+      dir,
+      descriptor: collision_workflow,
+      stage_dir: stage_dir,
+      state_file: state_file,
+      slug: slug,
+      marker: marker
+    )
+  end
+
+  def seed_descriptor_task(dir, descriptor:, stage_dir:, state_file:, slug:, marker:)
     capture_io { Hive::Commands::Init.new(dir).call }
-    File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: research\n")
+    File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: #{descriptor.id}\n")
     folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
     FileUtils.mkdir_p(folder)
-    File.write(File.join(folder, "meta.yml"), "workflow: research\n")
-    state_file = stage_dir.end_with?("gather") ? "notes.md" : "report.md"
+    File.write(File.join(folder, "meta.yml"), "workflow: #{descriptor.id}\n")
     File.write(File.join(folder, state_file), "# #{slug}\n")
     write_marker(folder, marker)
     [ folder, slug ]
@@ -141,6 +165,32 @@ class RunApproveTest < Minitest::Test
           assert File.directory?(report), "task must move into the research descriptor's report stage"
           refute File.exist?(gather), "old gather folder must be gone"
           assert_includes err, "next: hive run #{slug}"
+        end
+      end
+    end
+  end
+
+  def test_collision_workflow_approve_moves_and_re_resolves_descriptor_runner
+    with_registered_workflow(collision_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          brainstorm, slug = seed_collision_task(dir)
+          report = File.join(dir, ".hive-state", "stages", "3-report", slug)
+          coding_plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+
+          capture_io do
+            Hive::Commands::Approve.new(brainstorm, from: "2-brainstorm").call
+          end
+
+          assert File.directory?(report), "collision workflow must advance to descriptor 3-report"
+          refute File.exist?(coding_plan), "global coding 3-plan must not receive the task"
+
+          moved = Hive::Task.new(report)
+          runner = Hive::Stages::Resolver.resolve(moved, descriptor: moved.workflow)
+
+          assert_equal :collision, moved.workflow.id
+          assert_equal "report", moved.stage_name
+          assert_equal Hive::Stages::Agent.method(:run!), runner
         end
       end
     end

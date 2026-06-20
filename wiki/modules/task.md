@@ -61,7 +61,7 @@ For stages 4 and later:
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
 - `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:, workflow:}` and is total over missing, malformed, or non-Hash YAML.
-- `write(task_folder, id:, slug:, display_name:, depends_on: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes `depends_on` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes `depends_on` and `workflow` each only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
 - `update_display_name(task_folder, name)` preserves the existing id, slug, and `depends_on`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:

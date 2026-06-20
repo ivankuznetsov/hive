@@ -3,17 +3,18 @@ title: Generic Agent Stage Runner
 type: stage
 source: lib/hive/stages/agent.rb, templates/agent_prompt.md.erb
 created: 2026-06-19
-updated: 2026-06-19
+updated: 2026-06-20
 tags: [stage, agent, workflow]
 ---
 
 **TLDR**: `Hive::Stages::Agent` is the shared headless runner for descriptor
 stages whose `kind` is `:agent` and whose name does not already have a bespoke
 coding runner. `Hive::Stages::Resolver` reaches it as the fallback after the
-coding-name runner table. The runner reads the active stage from
-`Hive::Workflows::Registry.default`, renders `templates/agent_prompt.md.erb`,
-spawns one folder-isolated agent, and maps the resulting state-file marker to the
-same commit actions as [[stages/brainstorm]].
+coding-name runner table. The runner resolves the active stage per-task via
+`task.workflow.stage_named(task.stage_name)` (the core U6 generic behavior — NOT
+the coding-pinned `Hive::Workflows::Registry.default`), renders
+`templates/agent_prompt.md.erb`, spawns one folder-isolated agent, and maps the
+resulting state-file marker to the same commit actions as [[stages/brainstorm]].
 
 ## Runtime Contract
 

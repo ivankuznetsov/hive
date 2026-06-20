@@ -193,13 +193,15 @@ module Hive
         end
       end
 
-      # Scan `<hive_state>/stages/` for directories that are NOT in
-      # `Hive::Stages::DIRS` and contain at least one task-slug-shaped
+      # Scan `<hive_state>/stages/` for directories that are NOT in the
+      # runtime union `Hive::Workflows.all_stage_dirs` (every registered
+      # workflow's stage dirs) and contain at least one task-slug-shaped
       # subfolder. Returns `[{"stage_dir" => name, "task_count" => N},
-      # ...]` sorted by name. `collect_rows` walks only canonical DIRS, so
-      # any stage rename in `lib/hive/stages.rb` leaves pre-rename tasks
-      # unreachable from every operator surface — this is the detector
-      # that turns that silent gap into a visible warning instead. Only
+      # ...]` sorted by name. `collect_rows` walks only `all_stage_dirs`, so
+      # any stage rename (or a dropped workflow registration) leaves
+      # pre-rename tasks unreachable from every operator surface — this is
+      # the detector that turns that silent gap into a visible warning
+      # instead. Only
       # `Hive::Stages.task_slug?` children count toward `task_count` so
       # stray `logs/`, `.DS_Store`, or `.gitkeep` siblings don't inflate
       # the number — the same predicate `Hive::Commands::Migrate` uses to

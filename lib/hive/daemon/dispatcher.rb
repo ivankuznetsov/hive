@@ -3,6 +3,7 @@ require "fileutils"
 require "shellwords"
 require "hive/config"
 require "hive/stages"
+require "hive/workflows"
 require "hive/task_action"
 require "hive/brainstorm_parser"
 require "hive/daemon/policy"
@@ -700,9 +701,14 @@ module Hive
       def find_post_advance_state_file(hive_state_path, slug)
         return nil unless hive_state_path && Dir.exist?(hive_state_path)
 
-        # Stage names from the SSOT — covers all seven directories,
-        # so adding a new stage in modules/stages.rb auto-extends.
-        Hive::Stages::DIRS.each do |stage_dir|
+        # Scan the runtime union of every registered workflow's stage dirs
+        # (Hive::Workflows.all_stage_dirs), not just the coding descriptor's:
+        # a generic `hive approve` advances a task into a non-coding dir
+        # (e.g. `2-gather`), and a coding-only scan would miss it — leaving
+        # the moved task's mtime baseline stale so its fresh `ready_to_run`
+        # stage mis-debounces or stalls. Mirrors the sibling-gate migration
+        # in task_resolver/status (U6.4).
+        Hive::Workflows.all_stage_dirs.each do |stage_dir|
           slug_dir = File.join(hive_state_path, "stages", stage_dir, slug)
           next unless Dir.exist?(slug_dir)
 
@@ -974,8 +980,11 @@ module Hive
 
       # Pipeline position of a stage dir (higher = closer to done); -1 for
       # an unrecognized stage so it deprioritizes behind every known stage.
+      # Indexes the runtime union of all registered workflows' stage dirs so
+      # a generic stage gets a real rank instead of sorting behind every
+      # coding row under slot scarcity (consistent with the sibling gates).
       def stage_rank(stage)
-        Hive::Stages::DIRS.index(stage.to_s) || -1
+        Hive::Workflows.all_stage_dirs.index(stage.to_s) || -1
       end
 
       def observe_external_running_rows(rows)

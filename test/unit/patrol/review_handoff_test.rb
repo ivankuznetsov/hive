@@ -95,6 +95,8 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       end
 
       assert_equal 123, Hive::TaskMeta.read(folder)[:id]
+      assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow],
+                   "the coding 6-review handoff must pin workflow: coding, not inherit the project default"
     end
 
     with_tmp_dir do |dir|

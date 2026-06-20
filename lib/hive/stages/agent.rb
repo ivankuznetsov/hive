@@ -93,6 +93,11 @@ module Hive
         when :waiting then "round_waiting"
         when :complete then "complete"
         when :error then "error"
+        # A markerless (:none) run has nothing to commit; return nil so
+        # commit_after's `return unless result[:commit]` guard skips the commit
+        # outright, instead of relying on hive_commit's empty-diff no-op to
+        # swallow a bogus "none" action.
+        when :none then nil
         else marker_name.to_s
         end
       end

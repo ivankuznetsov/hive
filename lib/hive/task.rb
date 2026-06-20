@@ -123,11 +123,29 @@ module Hive
 
     def project_default_workflow
       configured = Hive::Config.load(@project_root)["default_workflow"].to_s.strip
-      configured.empty? ? Hive::Config::DEFAULTS["default_workflow"] : configured
+      return Hive::Config::DEFAULTS["default_workflow"] if configured.empty?
+
+      warn_if_unregistered_project_default(configured)
+      configured
     rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
       warn "hive: task: failed to read default_workflow from #{File.join(@hive_state_path, "config.yml")} " \
            "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"
       Hive::Config::DEFAULTS["default_workflow"]
+    end
+
+    # D1 still fails loud — resolve_workflow re-raises UnknownWorkflow as
+    # InvalidTaskPath — so this returns the configured value verbatim. But unlike
+    # a per-task `workflow:` selector, whose typo skips just that one task out of
+    # `hive status` (and is rescued by Status#collect_rows), a typo'd PROJECT
+    # default skips EVERY field-less task and silently empties the whole project
+    # (the daemon then sees nothing to dispatch). Warn so that whole-project blast
+    # radius is observable; resolution still raises afterwards.
+    def warn_if_unregistered_project_default(name)
+      Hive::Workflows::Registry.fetch(name.to_sym)
+    rescue Hive::Workflows::UnknownWorkflow
+      warn "hive: task: project default_workflow #{name.inspect} in " \
+           "#{File.join(@hive_state_path, "config.yml")} is not a registered workflow; " \
+           "every field-less task in this project will fail to load until it is fixed"
     end
 
     def validate_workflow_stage!(stage_dir)

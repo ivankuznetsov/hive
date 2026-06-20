@@ -50,7 +50,11 @@ class TaskTest < Minitest::Test
         stage_name = stage_dir.split("-", 2).last
 
         assert_equal :coding, task.workflow.id
-        assert_equal Hive::Task::STAGE_NAMES, task.stage_names
+        # Anchor against an independent literal — comparing task.stage_names to
+        # Hive::Task::STAGE_NAMES would be self-referential (both derive from
+        # Registry.default).
+        assert_equal %w[inbox brainstorm plan execute open-pr review artifacts finalize done],
+                     task.stage_names
         assert_equal File.join(folder, Hive::Task::STATE_FILES.fetch(stage_name)), task.state_file
         assert_equal state_file, File.basename(task.state_file)
       end
@@ -98,6 +102,43 @@ class TaskTest < Minitest::Test
 
       assert_match(/unknown stage name: 4-nonsense/, error.message)
       assert_match(/workflow :coding/, error.message)
+    end
+  end
+
+  def test_unknown_stage_name_validates_against_resolved_non_coding_workflow
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        # research has no `execute` stage; the raise must name the RESOLVED
+        # workflow (:research), not Registry.default (:coding).
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: research\n")
+        folder = File.join(dir, ".hive-state", "stages", "4-execute", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+
+        error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+        assert_match(/unknown stage name: 4-execute/, error.message)
+        assert_match(/workflow :research/, error.message)
+      end
+    end
+  end
+
+  def test_stage_index_mismatch_validates_against_resolved_non_coding_workflow
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        # `gather` is index 2 in research; a 1-gather dir is an index mismatch
+        # that must be measured against the resolved workflow, not coding.
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: research\n")
+        folder = File.join(dir, ".hive-state", "stages", "1-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+
+        error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+        assert_match(/stage directory 1-gather/, error.message)
+        assert_match(/expected 2-gather/, error.message)
+        assert_match(/workflow :research/, error.message)
+      end
     end
   end
 
@@ -150,6 +191,24 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_task_selector_wins_over_project_default_workflow
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        # Both selectors name a *different* known workflow: the per-task
+        # meta.workflow must win over the project default (selector ||= default).
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: coding\n")
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "meta.yml"), "workflow: research\n")
+
+        task = Hive::Task.new(folder)
+
+        assert_equal :research, task.workflow.id
+      end
+    end
+  end
+
   def test_blank_project_default_workflow_resolves_to_coding
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -176,17 +235,24 @@ class TaskTest < Minitest::Test
     end
   end
 
-  def test_unknown_project_default_workflow_raises_invalid_task_path
+  def test_unknown_project_default_workflow_warns_and_raises_invalid_task_path
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: nope\n")
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
       FileUtils.mkdir_p(folder)
 
-      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+      error = nil
+      _out, err = capture_io do
+        error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+      end
 
+      # D1 fail-loud is preserved (the typo'd default still raises)...
       assert_equal Hive::ExitCodes::USAGE, error.exit_code
       assert_match(/unknown workflow :nope/, error.message)
+      # ...but the whole-project blast radius is now observable via a warn.
+      assert_match(/project default_workflow "nope"/, err)
+      assert_match(/not a registered workflow/, err)
     end
   end
 
@@ -208,6 +274,25 @@ class TaskTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), "dependency_gate_stage: 7-artifacts\n")
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+
+      task = nil
+      _out, err = capture_io { task = Hive::Task.new(folder) }
+
+      assert_equal :coding, task.workflow.id
+      assert_match(/failed to read default_workflow/, err)
+      assert_match(/falling back to coding/, err)
+    end
+  end
+
+  def test_malformed_project_config_yaml_falls_back_to_coding
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      # Unparseable YAML (unterminated flow sequence) exercises the
+      # Psych::Exception arm of project_default_workflow's rescue, distinct from
+      # the ConfigError arm covered above.
+      File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: [unterminated\n")
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
       FileUtils.mkdir_p(folder)
 

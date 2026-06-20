@@ -128,7 +128,9 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `:review_error` | `next: investigate <reason>, then `hive markers clear FOLDER --name REVIEW_ERROR`, then re-run`. JSON: `next_action.kind = "review_error"` with `phase`, `reason`, and the full marker `attrs` surfaced so polling agents can branch without re-parsing the marker. Raises `Hive::TaskInErrorState` → exit 3 (`TASK_IN_ERROR`) after the JSON payload is emitted. |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. **Reason-gated branch:** `reason=ensure_clean_on_exit_failed` emits `next_action.kind="edit"` with `target=worktree_path` (falls back to `task.folder`), `residue_paths` parsed from the comma string into an array, `instructions` carrying the `hive markers clear … --match-attr reason=ensure_clean_on_exit_failed` recovery one-liner, `markers_to_clear=["error"]`, and `rerun_with` set to the stage's friendly command. `Hive::TaskAction#suggested_next_action_payload` returns `{kind: "manual_fix", command: nil}` for this reason, mirroring the bot's manual-only routing (no auto-retry verb dispatched). Other `:error` reasons keep the generic NO_OP shape with `error: marker.attrs`. |
 
-`next_stage_dir` increments `task.stage_index`; `9-done` has no `next:`.
+`next_stage_dir` resolves the descriptor's successor via
+`task.workflow.next_stage_after(task.stage_name)`, not index arithmetic; the
+terminal stage (`9-done` for coding) has no `next:`.
 
 ## Stage routing
 

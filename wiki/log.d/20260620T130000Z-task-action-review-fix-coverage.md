@@ -21,7 +21,7 @@ the descriptor-generic classifier; no production behavior changed:
 - Fixed the `[[modules/task_action]]` action-map table: the `generic_ready_to_run`
   wire-format prose had been inserted mid-table, breaking the `agent_running` /
   `done` / `error` rows; moved it below the `error` row so the whole table renders.
-- Flagged a forward-looking U5 gap in `wiki/gaps.md`: generic workflows have no
+- Flagged a forward-looking U5 gap in [[gaps]]: generic workflows have no
   dedicated stale/error resting-marker surface (the `generic_action` `else` arm
   classifies any unknown resting marker as "Ready to run" with no diagnostic).
 

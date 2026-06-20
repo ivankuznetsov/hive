@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb
 created: 2026-04-26
-updated: 2026-06-19
+updated: 2026-06-20
 tags: [module, workflow, verbs]
 ---
 
@@ -11,7 +11,14 @@ tags: [module, workflow, verbs]
 
 ## Descriptor and registry
 
-- `Hive::Workflow` — frozen `Data` value object with `id` and ordered `stages`; `#stage_named(name)`, `#state_file_for(name)`, and `#stage_names` are read-only lookup helpers used by `Hive::Task`.
+- `Hive::Workflow` — frozen `Data` value object with `id` and ordered `stages`. Read-only lookup helpers:
+  - `#stage_named(name)` — soft lookup, returns the `Stage` or nil.
+  - `#state_file_for(name)` — hard lookup, raises `KeyError` on an unknown name.
+  - `#stage_names` / `#stage_dirs` — frozen lists of the descriptor's stage names / `index-name` dirs.
+  - `#next_stage_after(name)` — the next `Stage` in descriptor order, or nil for BOTH the terminal stage and an unknown name (consumed by `Approve#resolve_destination` and `Run`'s advance path).
+  - `#advance_verb_for(name)` — the incoming advance verb name for a stage, or nil when the stage advances by bare mv (no descriptor verb) OR the name is unknown.
+  - `#stage_for_dir(dir)` — soft lookup by `index-name` dir, returns the `Stage` or nil.
+  - `#resolve_stage_ref(ref)` — accepts a full dir (`3-plan`) or short name (`plan`) and returns the canonical `Stage#dir` (or nil); used by `Approve` to canonicalize `--to`/`--from`.
 - `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `status_mode`, `budget_usd`, `timeout_sec`, and `capability` is carried for runner selection and prompt rendering. As of U3, the generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:21`), `skill`, `budget_usd`, and `timeout_sec`. `status_mode` is **not** read from the descriptor — the runner hardcodes `:state_file_marker` (`agent.rb:34`) — and the remaining metadata (`capability`) stays descriptive.
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
 - `Hive::Workflows::Coding::DESCRIPTOR` — the only built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.

@@ -18,7 +18,6 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.status_mode
     assert_nil stage.budget_usd
     assert_nil stage.timeout_sec
-    assert_nil stage.capability
   end
 
   def test_advance_verb_defaults_flags_to_false

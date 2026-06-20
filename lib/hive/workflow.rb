@@ -95,10 +95,9 @@ module Hive
       :skill,
       :status_mode,
       :budget_usd,
-      :timeout_sec,
-      :capability
+      :timeout_sec
     ) do
-      def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil, skill: nil, status_mode: nil, budget_usd: nil, timeout_sec: nil, capability: nil)
+      def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil, skill: nil, status_mode: nil, budget_usd: nil, timeout_sec: nil)
         super
       end
 

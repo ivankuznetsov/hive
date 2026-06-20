@@ -843,7 +843,7 @@ module Hive
         # `2-brainstorm` stage drives the `### Q{n}.` answer flow. A generic
         # workflow that reuses the `2-brainstorm` dir must take the debounced
         # generic path, not be held as `answers_pending`.
-        return false unless Policy.coding_workflow?(row.workflow)
+        return false unless Policy.coding_workflow_id?(row.workflow)
         return false unless row.stage == BRAINSTORM_STAGE_DIR
 
         path = row.state_file

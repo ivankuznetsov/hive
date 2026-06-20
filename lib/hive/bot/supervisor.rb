@@ -1451,7 +1451,7 @@ module Hive
         title = nb.display_title(row)
         action = row.action.to_s
 
-        if action == "needs_input" && coding_workflow?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting" # coding-scoped: Telegram answer flow edits coding brainstorm.md
+        if action == "needs_input" && Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting" # coding-scoped: Telegram answer flow edits coding brainstorm.md
           nb.button("✏️ #{title}", "answer:#{row.project}:#{row.slug}")
         elsif action.start_with?("ready_to_")
           verb = nb.verb_for_action(row.action)
@@ -1463,10 +1463,6 @@ module Hive
             nb.button("🔍 #{title}", nb.details_callback(row))
           end
         end
-      end
-
-      def coding_workflow?(row)
-        Hive::Workflows.coding_row?(row)
       end
 
       def render_details(rows, project, slug)

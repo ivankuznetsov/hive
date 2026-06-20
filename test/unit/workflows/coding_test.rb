@@ -47,19 +47,16 @@ class WorkflowsCodingTest < Minitest::Test
     assert_nil inbox.status_mode
     assert_nil inbox.budget_usd
     assert_nil inbox.timeout_sec
-    assert_nil inbox.capability
 
     review = stages_by_name.fetch("review")
     assert_nil review.skill
     assert_nil review.budget_usd
     assert_nil review.timeout_sec
-    assert_nil review.capability
 
     done = stages_by_name.fetch("done")
     assert_nil done.skill
     assert_nil done.status_mode
     assert_nil done.budget_usd
     assert_nil done.timeout_sec
-    assert_nil done.capability
   end
 end

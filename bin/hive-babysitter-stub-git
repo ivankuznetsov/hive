@@ -354,6 +354,14 @@ ENV["GIT_CONFIG_SYSTEM"] = File::NULL
 # the optional index/refs locks and rewrite `.git/index` to refresh stat data. Disable optional
 # locks so a dry-run read cannot mutate the repo on disk.
 ENV["GIT_OPTIONAL_LOCKS"] = "0"
+# The `-c gpg.program=false` (and gpg.<format>.program=false) no-ops above pin signature
+# verification to `false`, but git resolves that bare name through PATH — and the inherited
+# PATH is agent-controlled. Without this, an agent could prepend a directory holding its own
+# `false` and turn the supposed no-op back into an exec seam (likewise any other helper git
+# resolves via PATH). Pin PATH to root-owned system dirs so every PATH lookup git makes
+# resolves from a location an unprivileged agent cannot write. `/usr/local/bin` is omitted on
+# purpose: it is user-writable under Homebrew, which would reopen the same poisoning vector.
+ENV["PATH"] = "/usr/bin:/bin"
 
 begin
   # Array-form exec (no shell) hands argv straight to the real git binary.

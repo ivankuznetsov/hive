@@ -1030,6 +1030,42 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_pins_path_so_gpg_no_op_cannot_be_hijacked
+    with_tmp_signed_git_repo do |dir, _marker_path|
+      # The `-c gpg.program=false` no-op the stub installs neutralizes `%G*` signature
+      # verification only if git resolves `false` from a trusted location — git looks `false`
+      # up on PATH, and the inherited PATH is agent-controlled. An agent that prepends a
+      # directory holding its own `false` would turn the supposed no-op back into an exec seam.
+      # Drive verification through a config-resolved `%G` format (which passes the argv gate the
+      # way a bare `git log` does) and confirm the poisoned `false` never runs because the stub
+      # pins PATH to root-owned system dirs before handing off to real git.
+      run!("git", "-C", dir, "config", "pretty.pwn", "format:%G?")
+      run!("git", "-C", dir, "config", "format.pretty", "pwn")
+
+      poison_dir = File.join(dir, "poison-bin")
+      FileUtils.mkdir_p(poison_dir)
+      poison_marker = File.join(dir, "poison-false-ran")
+      executable_touch_binary(poison_dir, "false", poison_marker)
+
+      env = real_git_env(dir).merge(
+        "PATH" => [ poison_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      )
+
+      [
+        [ "log", "-1" ],
+        [ "show", "--pretty=pwn", "HEAD" ]
+      ].each do |args|
+        FileUtils.rm_f(poison_marker)
+
+        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        refute_path_exists poison_marker,
+                           "PATH-resolved gpg no-op ran the poisoned `false` during #{args.join(' ')} passthrough"
+      end
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")

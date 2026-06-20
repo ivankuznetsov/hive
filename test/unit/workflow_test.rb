@@ -202,6 +202,23 @@ class WorkflowTest < Minitest::Test
     assert_match(/duplicate stage names/, error.message)
   end
 
+  def test_workflow_rejects_duplicate_stage_dirs
+    stage = Struct.new(:name, :index, :state_file, :kind, :advance_verb) do
+      def dir = "same-dir"
+    end
+
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :dupedirs,
+        stages: [
+          stage.new("draft", 1, "draft.md", :inert, nil),
+          stage.new("review", 2, "review.md", :agent, nil)
+        ]
+      )
+    end
+    assert_match(/duplicate stage dirs/, error.message)
+  end
+
   def test_workflow_rejects_unknown_stage_kind
     error = assert_raises(ArgumentError) do
       Hive::Workflow.new(

@@ -139,6 +139,15 @@ class HiveCommandsInitTest < Minitest::Test
     $stdout = old_stdout
   end
 
+  def test_existing_json_summary_swallows_epipe
+    cmd = command("/tmp/project")
+    ops = Struct.new(:hive_state_path).new("/tmp/project/.hive-state")
+    choice = Hive::Commands::Init::WorkflowChoice.new(descriptor: content_workflow, source: :flag)
+    cmd.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "closed pipe" }
+
+    assert_nil cmd.send(:emit_existing_json_summary, ops, workflow_choice: choice)
+  end
+
   def test_current_default_workflow_falls_back_to_coding_on_unreadable_config
     Dir.mktmpdir("hive-init-unit") do |dir|
       state = File.join(dir, ".hive-state")
@@ -203,6 +212,35 @@ class HiveCommandsInitTest < Minitest::Test
 
       command.send(:write_default_workflow!, cfg, "coding")
       refute_includes File.read(cfg), "default_workflow:"
+    end
+  end
+
+  def test_restore_config_snapshot_removes_config_when_original_was_absent
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "default_workflow: content_fixture\n")
+
+      command.send(:restore_config_snapshot, cfg, :absent)
+
+      refute File.exist?(cfg)
+    end
+  end
+
+  def test_restore_config_snapshot_warns_without_masking_restore_failure
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      warnings = []
+      original = FileUtils.singleton_class.instance_method(:rm_f)
+      FileUtils.define_singleton_method(:rm_f) { |_path| raise Errno::EACCES, "blocked" }
+      cmd = command
+      cmd.define_singleton_method(:write_warn) { |line| warnings << line }
+
+      cmd.send(:restore_config_snapshot, cfg, :absent)
+
+      assert_match(/could not restore config\.yml/, warnings.first)
+      assert_match(/Errno::EACCES/, warnings.first)
+    ensure
+      FileUtils.singleton_class.define_method(:rm_f, original) if original
     end
   end
 

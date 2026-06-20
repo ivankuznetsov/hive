@@ -1078,6 +1078,121 @@ class TaskActionTest < Minitest::Test
                  "tasks at those stages will fall through to ACTIONS[:error]"
   end
 
+  CODING_ACTION_GOLDEN = {
+    "inbox" => {
+      none: "ready_to_brainstorm",
+      waiting: "ready_to_brainstorm",
+      terminal: "ready_to_brainstorm"
+    },
+    "brainstorm" => {
+      none: "needs_input",
+      waiting: "needs_input",
+      terminal: "ready_to_plan"
+    },
+    "plan" => {
+      none: "needs_input",
+      waiting: "needs_input",
+      terminal: "ready_to_develop"
+    },
+    "execute" => {
+      none: "needs_input",
+      waiting: "needs_input",
+      terminal: "ready_to_open_pr"
+    },
+    "open-pr" => {
+      none: "ready_to_open_pr",
+      waiting: "ready_to_open_pr",
+      terminal: "ready_for_review"
+    },
+    "review" => {
+      none: "ready_for_review",
+      waiting: "needs_input",
+      terminal: "ready_to_artifacts"
+    },
+    "artifacts" => {
+      none: "ready_to_artifacts",
+      waiting: "ready_to_artifacts",
+      terminal: "ready_to_finalize"
+    },
+    "finalize" => {
+      none: "error",
+      waiting: "needs_input",
+      terminal: "ready_to_archive"
+    },
+    "done" => {
+      none: "archived",
+      waiting: "archived",
+      terminal: "archived"
+    }
+  }.freeze
+
+  def test_coding_action_matrix_is_byte_stable_across_common_markers
+    with_tmp_dir do |root|
+      CODING_ACTION_GOLDEN.each do |stage_name, expected_by_marker|
+        stage_index = Hive::Stages::NAMES.index(stage_name) + 1
+        task = coding_task(root, stage_name, stage_index)
+
+        assert_equal expected_by_marker.fetch(:none), Hive::TaskAction.for(task, marker(:none)).key,
+                     "stage=#{stage_name} marker=none"
+
+        waiting_marker = coding_waiting_marker(stage_name)
+        prepare_coding_fixture(task, stage_name, waiting_marker)
+        assert_equal expected_by_marker.fetch(:waiting), Hive::TaskAction.for(task, waiting_marker).key,
+                     "stage=#{stage_name} marker=#{waiting_marker.name}"
+
+        terminal_marker = coding_terminal_marker(stage_name)
+        prepare_coding_fixture(task, stage_name, terminal_marker)
+        assert_equal expected_by_marker.fetch(:terminal), Hive::TaskAction.for(task, terminal_marker).key,
+                     "stage=#{stage_name} marker=#{terminal_marker.name}"
+
+        running = Hive::TaskAction.for(task, marker(:agent_working, "pid" => "12345"), pid_alive: true)
+        assert_equal "agent_running", running.key, "stage=#{stage_name} marker=agent_working"
+
+        errored = Hive::TaskAction.for(task, marker(:error))
+        assert_equal "error", errored.key, "stage=#{stage_name} marker=error"
+      end
+    end
+  end
+
+  def coding_task(root, stage_name, stage_index)
+    folder = File.join(root, ".hive-state", "stages", "#{stage_index}-#{stage_name}", "demo-260426-aaaa")
+    FileUtils.mkdir_p(folder)
+    Hive::Task.new(folder)
+  end
+
+  def coding_waiting_marker(stage_name)
+    case stage_name
+    when "execute" then marker(:execute_waiting)
+    when "review" then marker(:review_waiting)
+    else marker(:waiting)
+    end
+  end
+
+  def coding_terminal_marker(stage_name)
+    case stage_name
+    when "execute" then marker(:execute_complete)
+    when "review" then marker(:review_complete)
+    when "finalize" then marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false")
+    else marker(:complete)
+    end
+  end
+
+  def prepare_coding_fixture(task, stage_name, marker_state)
+    return unless stage_name == "finalize"
+
+    if marker_state.name == :complete
+      File.write(task.state_file, <<~MD)
+        ---
+        pr_url: https://example.com/pr/9
+        ---
+
+        <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+      MD
+    else
+      File.write(task.state_file, "---\npr_url: https://example.com/pr/9\n---\n")
+    end
+  end
+
   # ── additional helper edge coverage ───────────────────────────────────
 
   def test_unknown_stage_classifies_as_error

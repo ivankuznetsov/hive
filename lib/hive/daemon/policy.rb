@@ -66,6 +66,7 @@ module Hive
         ready_for_review
         ready_to_artifacts
         ready_to_finalize
+        ready_to_advance
       ].freeze
 
       # Action that means "task is at the finalize stage, waiting for the human

@@ -97,12 +97,18 @@ generic classifier instead:
 
 This keeps coding behavior byte-stable while letting registered non-coding
 workflows surface non-error status rows once a task has resolved to its
-descriptor. Post-U5, `hive approve` and `hive run --json` resolve generic
-advance destinations through the task's descriptor, so a generic
-`ready_to_advance` row moves to its own next stage rather than a coding stage.
-The remaining gap is first-run generic auto-dispatch: markerless non-inert
-generic stages still collapse to `NEEDS_INPUT` on the JSON wire and are routed
-through the daemon edit-baseline path until U6 splits that signal.
+descriptor. Post-U5, the `Commands::Approve` and `Commands::Run` command methods
+resolve generic advance destinations through the task's descriptor, so when one
+is driven directly with a folder path a generic `ready_to_advance` row moves to
+its own next stage rather than a coding stage. The **end-to-end daemon/agent
+advance path is also U6-gated**, not just the first-run gap: the Thor
+`APPROVE_TO_ENUM` (`cli.rb`) rejects a generic `--from <dir>`,
+`Status#collect_rows` (`status.rb`) scans only the coding `Hive::Stages::DIRS`
+so generic rows never reach the daemon, and `TaskResolver` can't find a
+generic-only-dir task by bare slug. The separate first-run gap is generic
+auto-dispatch: markerless non-inert generic stages still collapse to
+`NEEDS_INPUT` on the JSON wire and are routed through the daemon edit-baseline
+path until U6 splits that signal. Both gaps are tracked in [[gaps]].
 
 ## Marker carve-outs
 

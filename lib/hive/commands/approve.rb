@@ -97,17 +97,24 @@ module Hive
       # contract (a ref that's valid but not the current stage still reaches
       # validate_from!'s WRONG_STAGE path).
       def validate_stage_refs!
-        { "--from" => @from, "--to" => @to }.each do |flag, ref|
-          next if ref.nil? || known_stage_ref?(ref)
-
-          raise Hive::InvalidTaskPath,
-                "unknown #{flag} stage '#{ref}'; valid: #{Hive::Workflows.all_stage_dirs.join(', ')} " \
-                "or short names #{Hive::Workflows.all_stage_names.join(', ')}"
+        # Mirror each downstream handler's own wording so the early check is a
+        # pure relocation, not a message change: --from matches validate_from!
+        # ("unknown --from stage"), --to matches resolve_explicit_to
+        # ("unknown stage"). Both append the same valid-stage list.
+        if @from && !known_stage_ref?(@from)
+          raise Hive::InvalidTaskPath, "unknown --from stage '#{@from}'; valid: #{known_stage_list}"
+        end
+        if @to && !known_stage_ref?(@to)
+          raise Hive::InvalidTaskPath, "unknown stage '#{@to}'; valid: #{known_stage_list}"
         end
       end
 
       def known_stage_ref?(ref)
         Hive::Workflows.all_stage_dirs.include?(ref) || Hive::Workflows.all_stage_names.include?(ref)
+      end
+
+      def known_stage_list
+        "#{Hive::Workflows.all_stage_dirs.join(', ')} or short names #{Hive::Workflows.all_stage_names.join(', ')}"
       end
 
       # ── Destination resolution ──────────────────────────────────────────

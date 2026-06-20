@@ -164,6 +164,27 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
                  "daemon must have dispatched at least one `hive run`")
           assert(@spawned_commands.any? { |c| c.start_with?("hive approve") },
                  "daemon must have dispatched the advancing `hive approve`")
+
+          # Per-stage artifacts: each agent stage wrote its descriptor state_file
+          # and the approve carried them forward into the terminal folder.
+          # (report.md is absent — the terminal report stage is reached by the
+          # advancing approve, not by running its agent.)
+          final = stage_folder(project_root, "3-report")
+          %w[intake.md gather.md].each do |artifact|
+            assert File.file?(File.join(final, artifact)),
+                   "#{artifact} should be carried into the terminal stage folder"
+          end
+          refute File.exist?(File.join(final, "report.md")),
+                 "the terminal report agent never ran, so report.md must not exist"
+
+          # Commit-per-advance trail: one approve commit per stage transition,
+          # each naming the descriptor's own stage dirs.
+          log_subjects = run!("git", "-C", File.join(project_root, ".hive-state"), "log", "--format=%s")
+          approve_commits = log_subjects.lines.grep(/ approve /)
+          assert_equal 2, approve_commits.size,
+                       "one approve commit per stage transition to reach 3-report"
+          assert_includes log_subjects, "hive: 1-intake/#{SLUG} approve 1-intake -> 2-gather"
+          assert_includes log_subjects, "hive: 2-gather/#{SLUG} approve 2-gather -> 3-report"
         end
       end
     end

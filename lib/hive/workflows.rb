@@ -1,16 +1,18 @@
 require "hive/workflows/registry"
 
 module Hive
-  # Public source of truth for the workflow verbs (brainstorm, plan,
+  # Public source of truth for the CODING workflow verbs (brainstorm, plan,
   # develop, open-pr, review, artifacts, finalize, archive), derived from
-  # the default workflow descriptor. Each verb advances a task from one
-  # stage to the next; consumers all read from the derived `VERBS` map:
-  # `Hive::Commands::StageAction` consumes it to dispatch the move,
-  # `Hive::TaskAction` uses it to label the "ready to <verb>" status
-  # bucket per stage, and `Hive::Commands::Approve` uses it to derive
-  # the next-action command after a successful move.
+  # the default (coding) workflow descriptor. Each verb advances a task from
+  # one stage to the next; the derived `VERBS` map drives the coding paths:
+  # `Hive::Commands::StageAction` consumes it to dispatch the move and
+  # `Hive::TaskAction` uses it to label the "ready to <verb>" status bucket
+  # per coding stage. The generic `Hive::Commands::Approve` next-action path
+  # no longer reads `VERBS` — it derives the verb per-task via
+  # `task.workflow.advance_verb_for` (U6) so non-coding descriptors resolve
+  # their own verbs.
   #
-  # Adding or removing a verb follows the default workflow descriptor.
+  # Adding or removing a coding verb follows the default workflow descriptor.
   module Workflows
     # Descriptor id of the built-in coding workflow. The "nil/blank/coding
     # ⟹ coding" defaulting rule gates every coding-only daemon/bot branch,
@@ -133,6 +135,29 @@ module Hive
 
     def all_stage_names
       Registry.all.flat_map(&:stage_names).uniq.freeze
+    end
+
+    # Resolve a user-provided stage ref (a full N-name dir or a bare short
+    # name) against EVERY registered workflow (not just coding) and return the
+    # single canonical `N-name` dir it maps to. Returns nil for a blank ref; raises
+    # `Hive::InvalidTaskPath` on an ambiguous ref (matches >1 workflow) or an
+    # unknown one. Shared by `Hive::TaskResolver` and `Hive::Commands::Drop`
+    # so a generic `--from`/`--stage <stage>` is accepted identically and the
+    # two error strings stay in lockstep instead of drifting apart.
+    def resolve_stage_ref_across_workflows(stage_ref)
+      return nil if stage_ref.nil? || stage_ref.to_s.strip.empty?
+
+      raw = stage_ref.to_s.strip
+      matches = Registry.all.filter_map { |workflow| workflow.resolve_stage_ref(raw) }.uniq
+      return matches.first if matches.one?
+
+      if matches.size > 1
+        raise Hive::InvalidTaskPath, "ambiguous stage '#{stage_ref}'; matches: #{matches.join(', ')}"
+      end
+
+      raise Hive::InvalidTaskPath,
+            "unknown stage '#{stage_ref}'; valid: #{all_stage_dirs.join(', ')} " \
+            "or short names #{all_stage_names.join(', ')}"
     end
   end
 end

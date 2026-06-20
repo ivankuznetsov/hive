@@ -241,8 +241,7 @@ module Hive
       verb = action[:command]
       return nil unless verb
 
-      parts = [ "hive", verb, task.slug ]
-      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts = command_prefix(verb)
       parts.concat([ from_or_stage_option(verb), stage_dir ]) if include_stage_filter?(verb)
       parts.shelljoin
     end
@@ -350,8 +349,7 @@ module Hive
       return nil unless verb
 
       stage = workflow_stage
-      parts = [ "hive", verb, task.slug ]
-      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts = command_prefix(verb)
       parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
       parts.concat([ "--from", stage.dir ]) if verb == "approve"
       parts.shelljoin
@@ -978,10 +976,19 @@ module Hive
     end
 
     def workflow_command(verb)
-      parts = [ "hive", verb, task.slug ]
-      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts = command_prefix(verb)
       parts.concat([ "--from", stage_dir ])
       parts.shelljoin
+    end
+
+    # Shared prefix for every `hive <verb> <slug>` builder: the verb, the
+    # slug, and the `--project` qualifier added only when more than one
+    # project is in view (a single-project status never needs it). Callers
+    # append their own `--from`/`--stage` suffix and `shelljoin`.
+    def command_prefix(verb)
+      parts = [ "hive", verb, task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts
     end
 
     def safe_mtime(path)

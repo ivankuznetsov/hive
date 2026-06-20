@@ -21,7 +21,7 @@ module Hive
     def initialize(target, project_filter: nil, stage_filter: nil)
       @target = target
       @project_filter = project_filter
-      @stage_filter = resolve_stage_filter(stage_filter)
+      @stage_filter = Hive::Workflows.resolve_stage_ref_across_workflows(stage_filter)
     end
 
     def resolve
@@ -160,23 +160,6 @@ module Hive
 
       raise Hive::InvalidTaskPath,
             "TARGET is at #{actual} but --stage/--from says #{@stage_filter}"
-    end
-
-    def resolve_stage_filter(stage_filter)
-      return nil if stage_filter.nil? || stage_filter.to_s.strip.empty?
-
-      raw = stage_filter.to_s.strip
-      matches = Hive::Workflows::Registry.all.filter_map { |workflow| workflow.resolve_stage_ref(raw) }.uniq
-      return matches.first if matches.one?
-
-      if matches.size > 1
-        raise Hive::InvalidTaskPath,
-              "ambiguous stage '#{stage_filter}'; matches: #{matches.join(', ')}"
-      end
-
-      raise Hive::InvalidTaskPath,
-            "unknown stage '#{stage_filter}'; valid: #{Hive::Workflows.all_stage_dirs.join(', ')} " \
-            "or short names #{Hive::Workflows.all_stage_names.join(', ')}"
     end
   end
 end

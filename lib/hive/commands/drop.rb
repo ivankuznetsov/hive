@@ -39,7 +39,7 @@ module Hive
         @target = target
         @project_filter = project
         @from = from
-        @stage_filter = resolve_stage_filter(from)
+        @stage_filter = Hive::Workflows.resolve_stage_ref_across_workflows(from)
         @json = json
       end
 
@@ -204,26 +204,6 @@ module Hive
         hints << "project '#{@project_filter}'" if @project_filter
         hints << "stage '#{@stage_filter}'" if @stage_filter
         hints.empty? ? "" : " in #{hints.join(' and ')}"
-      end
-
-      def resolve_stage_filter(stage)
-        return nil if stage.nil? || stage.to_s.strip.empty?
-
-        # Resolve a `--from` value against EVERY registered workflow (not
-        # just coding) so a generic `--from <stage>` is accepted, matching
-        # Hive::TaskResolver#resolve_stage_filter. The CLI already accepts
-        # generic stages; rejecting them here made generic tasks undroppable.
-        raw = stage.to_s.strip
-        matches = Hive::Workflows::Registry.all.filter_map { |workflow| workflow.resolve_stage_ref(raw) }.uniq
-        return matches.first if matches.one?
-
-        if matches.size > 1
-          raise Hive::InvalidTaskPath, "ambiguous stage '#{stage}'; matches: #{matches.join(', ')}"
-        end
-
-        raise Hive::InvalidTaskPath,
-              "unknown stage '#{stage}'; valid: #{Hive::Workflows.all_stage_dirs.join(', ')} " \
-              "or short names #{Hive::Workflows.all_stage_names.join(', ')}"
       end
 
       def guard_archived!(context)

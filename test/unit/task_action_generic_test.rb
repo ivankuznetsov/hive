@@ -82,10 +82,43 @@ class TaskActionGenericTest < Minitest::Test
     assert_nil errored.command
   end
 
+  # Generic stale-agent "orphaned placeholder" branch: a no-pid AGENT_WORKING
+  # marker (`pid_alive: nil`, no `pid` attr) whose state-file mtime is older
+  # than the grace window classifies as :agent_orphaned -> error, mirroring the
+  # daemon's StaleAgentHealer before it ticks. The matrix test only covers the
+  # pid_alive:false (agent_died) half of plan IU-4's "stale ⇒ error"
+  # requirement; this pins the past-grace placeholder half for the generic route.
+  def test_generic_stale_agent_orphaned_placeholder_classifies_as_error
+    orphaned = action_for(
+      "gather", :agent_working, {},
+      pid_alive: nil,
+      state_file_mtime: Time.now - 600,
+      agent_marker_grace_sec: 300
+    )
+
+    assert_equal "error", orphaned.key
+    assert_nil orphaned.command
+  end
+
   def test_generic_complete_dispatches_at_policy_decision_level
     action = action_for("gather", :complete)
 
     assert_equal "ready_to_advance", action.key
+    assert_equal :dispatch, policy_decision(action)
+  end
+
+  # The ONLY generic path that auto-advances a stage with ZERO prior execution:
+  # a markerless inert entry classifies as ready_to_advance and the daemon
+  # dispatches `hive approve --from 1-intake`. The matrix test pins the
+  # classification key but never runs a policy_decision on this row, so a
+  # regression dropping ready_to_advance from ADVANCE_ACTIONS or widening the
+  # `:none` advance guard to non-entry stages would change auto-advance behavior
+  # with the suite still green. This pins the daemon-decision outcome.
+  def test_generic_inert_entry_none_dispatches_at_policy_decision_level
+    action = action_for("intake", :none)
+
+    assert_equal "ready_to_advance", action.key
+    assert_equal "hive approve #{SLUG} --from 1-intake", action.command
     assert_equal :dispatch, policy_decision(action)
   end
 

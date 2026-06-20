@@ -150,6 +150,19 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_blank_project_default_workflow_resolves_to_coding
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: \"  \"\n")
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+
+      task = Hive::Task.new(folder)
+
+      assert_equal :coding, task.workflow.id
+    end
+  end
+
   def test_unknown_workflow_selector_raises_invalid_task_path
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
@@ -163,7 +176,21 @@ class TaskTest < Minitest::Test
     end
   end
 
-  def test_malformed_meta_selector_falls_back_to_coding
+  def test_unknown_project_default_workflow_raises_invalid_task_path
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: nope\n")
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      assert_match(/unknown workflow :nope/, error.message)
+    end
+  end
+
+  def test_malformed_meta_yaml_falls_back_to_coding
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
       FileUtils.mkdir_p(folder)

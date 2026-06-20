@@ -3,7 +3,7 @@ project_name: <%= project_name %>
 default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
-<% unless Hive::WorkflowSelection.coding?(default_workflow) -%>
+<% unless Hive::Workflows.coding_id?(default_workflow) -%>
 default_workflow: <%= default_workflow %>
 <% end -%>
 

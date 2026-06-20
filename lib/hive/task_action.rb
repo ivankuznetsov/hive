@@ -348,7 +348,12 @@ module Hive
       verb = action[:command]
       return nil unless verb
 
+      # `validate_workflow_stage!` guarantees a stage for a real Hive::Task;
+      # mirror generic_action's guard so a test double whose stage doesn't
+      # resolve returns nil instead of a NoMethodError on stage.dir.
       stage = workflow_stage
+      return nil unless stage
+
       parts = command_prefix(verb)
       parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
       parts.concat([ "--from", stage.dir ]) if verb == "approve"

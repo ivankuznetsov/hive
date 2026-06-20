@@ -46,6 +46,12 @@ module Hive
       # callers can distinguish "rephrase the title" feedback from
       # "attachment routing bug" feedback in their rescue lists.
       class InvalidAttachmentError < TypedValueError; end
+      # Raised when a project's configured default_workflow is not a registered
+      # workflow (a hand-edit, or a workflow removed after the project was set
+      # up). Distinct from the user-supplied `--workflow` UnknownWorkflow so the
+      # message can name config.yml and the `call` rescue can report it cleanly
+      # instead of letting a bare UnknownWorkflow block ALL task creation.
+      class UnregisteredProjectWorkflow < TypedValueError; end
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil,
                      workflow: nil)
@@ -80,7 +86,8 @@ module Hive
       def call
         call!
       rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidAttachmentError,
-             SlugCollisionError, SystemCallError, IOError => e
+             SlugCollisionError, UnregisteredProjectWorkflow, Hive::Workflows::UnknownWorkflow,
+             SystemCallError, IOError => e
         warn "hive: #{e.message}"
         exit 1
       end
@@ -150,14 +157,35 @@ module Hive
       def resolve_workflow(project)
         override = normalize_workflow(@workflow_name)
         cfg_default = project_default_workflow(project.fetch("path"))
-        selected = override || cfg_default
-        descriptor = Hive::WorkflowSelection.fetch!(selected)
+        descriptor =
+          if override
+            Hive::WorkflowSelection.fetch!(override)
+          else
+            fetch_project_default_workflow!(cfg_default, project)
+          end
         { descriptor: descriptor, pin: !override.nil? || !Hive::Workflows.coding_id?(cfg_default) }
+      end
+
+      # A typo'd or later-removed PROJECT default_workflow would otherwise raise
+      # a bare UnknownWorkflow that names no file and was absent from #call's
+      # rescue list — blocking ALL task creation for the project with an opaque
+      # error. Re-raise a typed error naming config.yml, mirroring
+      # Task#warn_if_unregistered_project_default. The user-supplied `--workflow`
+      # path keeps WorkflowSelection.fetch!'s own valid-names message.
+      def fetch_project_default_workflow!(cfg_default, project)
+        Hive::WorkflowSelection.fetch!(cfg_default)
+      rescue Hive::Workflows::UnknownWorkflow
+        cfg_path = File.join(project["hive_state_path"].to_s, "config.yml")
+        raise UnregisteredProjectWorkflow.new(
+          "project default_workflow #{cfg_default.inspect} in #{cfg_path} is not a registered " \
+          "workflow (valid: #{Hive::WorkflowSelection.valid_names.join(', ')}); fix config.yml or pass --workflow",
+          value: cfg_default
+        )
       end
 
       def project_default_workflow(project_root)
         configured = Hive::Config.load(project_root)["default_workflow"].to_s.strip
-        configured.empty? ? Hive::Workflows::CODING_ID.to_s : configured
+        configured.empty? ? Hive::Config::DEFAULTS["default_workflow"] : configured
       end
 
       def normalize_workflow(value)

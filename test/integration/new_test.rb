@@ -172,6 +172,33 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_new_unregistered_project_default_names_config_without_seeding
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        # A hand-edit (or a later-removed workflow) leaves the project default
+        # pointing at an unregistered workflow. Without an override, `hive new`
+        # must fail with a typed error that names config.yml — not a bare
+        # UnknownWorkflow that escapes the rescue and blocks all task creation.
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        config = YAML.safe_load(File.read(cfg_path))
+        config["default_workflow"] = "ghost"
+        File.write(cfg_path, config.to_yaml)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "orphaned default").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "config.yml"
+        assert_includes err, "not a registered workflow"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "orphaned-default-*")]
+      end
+    end
+  end
+
   def test_creates_idea_with_dependency
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -337,6 +364,22 @@ class NewTest < Minitest::Test
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "!!! ???").call }
+        glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
+        assert_equal 1, glob.size
+        assert_match(/\Atask-\d{6}-[0-9a-f]{4}\z/, File.basename(glob.first))
+      end
+    end
+  end
+
+  def test_digit_leading_text_falls_back_to_task_slug
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        # The derived prefix "404-page-broken" leaves a digit as the leading
+        # char, which fails SLUG_RE's leading-letter rule — derive_slug swaps
+        # in the `task-` prefix rather than emit an invalid slug.
+        capture_io { Hive::Commands::New.new(project, "404 page broken").call }
         glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
         assert_equal 1, glob.size
         assert_match(/\Atask-\d{6}-[0-9a-f]{4}\z/, File.basename(glob.first))

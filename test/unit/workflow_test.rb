@@ -74,7 +74,10 @@ class WorkflowTest < Minitest::Test
   def test_stage_names_returns_descriptor_stage_names
     workflow = Hive::Workflows::Registry.default
 
-    assert_equal workflow.stages.map(&:name), workflow.stage_names
+    # Anchor to an independent literal — comparing against workflow.stages.map(&:name)
+    # would be tautological since stage_names IS that expression.
+    assert_equal %w[inbox brainstorm plan execute open-pr review artifacts finalize done],
+                 workflow.stage_names
   end
 
   def test_value_objects_are_immutable_and_copyable

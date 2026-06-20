@@ -102,19 +102,24 @@ module Hive
         # ("unknown --from stage"), --to matches resolve_explicit_to
         # ("unknown stage"). Both append the same valid-stage list.
         if @from && !known_stage_ref?(@from)
-          raise Hive::InvalidTaskPath, "unknown --from stage '#{@from}'; valid: #{known_stage_list}"
+          raise Hive::InvalidTaskPath, "unknown --from stage '#{@from}'; valid: #{Hive::Workflows.stage_ref_hint}"
         end
         if @to && !known_stage_ref?(@to)
-          raise Hive::InvalidTaskPath, "unknown stage '#{@to}'; valid: #{known_stage_list}"
+          raise Hive::InvalidTaskPath, "unknown stage '#{@to}'; valid: #{Hive::Workflows.stage_ref_hint}"
         end
       end
 
+      # Route the membership test through the canonical cross-workflow resolver
+      # instead of re-implementing its dir/short-name union scan. A ref that
+      # resolves in exactly one workflow is known; an AMBIGUOUS ref (valid in
+      # >1 workflow) is also "known" here and deliberately deferred to the
+      # per-task check (validate_from! / resolve_explicit_to), which
+      # disambiguates against the task's own descriptor — only a ref valid in NO
+      # workflow is rejected at this early gate (see validate_stage_refs!).
       def known_stage_ref?(ref)
-        Hive::Workflows.all_stage_dirs.include?(ref) || Hive::Workflows.all_stage_names.include?(ref)
-      end
-
-      def known_stage_list
-        "#{Hive::Workflows.all_stage_dirs.join(', ')} or short names #{Hive::Workflows.all_stage_names.join(', ')}"
+        !Hive::Workflows.resolve_stage_ref_across_workflows(ref).nil?
+      rescue Hive::InvalidTaskPath => e
+        e.message.start_with?("ambiguous stage")
       end
 
       # ── Destination resolution ──────────────────────────────────────────

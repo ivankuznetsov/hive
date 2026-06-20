@@ -9,9 +9,14 @@ module Hive
   # scan the runtime union via `Hive::Workflows.all_stage_dirs` (U6) so a
   # non-coding workflow's stages resolve correctly.
   module Stages
+    # Read the canonical short name/dir straight from the descriptor's
+    # structured `Stage#name`/`Stage#dir` rather than re-deriving the short name
+    # by string-splitting the formatted dir — the descriptor already exposes
+    # both, so a split-round-trip would just risk drifting from the source.
     DIRS = Hive::Workflows::Registry.default.stages.map(&:dir).freeze
-    NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
-    SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze
+    NAMES = Hive::Workflows::Registry.default.stages.map(&:name).freeze
+    SHORT_TO_FULL = Hive::Workflows::Registry.default.stages
+                                             .each_with_object({}) { |stage, h| h[stage.name] = stage.dir }.freeze
 
     # Slug shape for task-folder names (see Task::PATH_RE / Migrate::SLUG_RE).
     # Single source of truth so the legacy-stage detector in

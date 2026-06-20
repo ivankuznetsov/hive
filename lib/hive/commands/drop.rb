@@ -437,10 +437,11 @@ module Hive
       # coding's 9-done. A completed generic-workflow task sits at its own
       # terminal dir, so `guard_archived!` must recognize the whole union or it
       # would hard-delete a finished generic task that `AlreadyArchived` should
-      # refuse. Derived the same way `init.rb` pins its archive set, and kept in
-      # lockstep with `active_stage_dirs` (the workflow union minus this set).
+      # refuse. Shares `Hive::Workflows.all_terminal_stage_dirs` with init's
+      # fieldless-task scan, and stays in lockstep with `active_stage_dirs` (the
+      # workflow union minus this set).
       def archive_stage_dirs
-        Hive::Workflows::Registry.all.map { |workflow| workflow.stages.last.dir }.uniq
+        Hive::Workflows.all_terminal_stage_dirs
       end
 
       def record_drop_commit!(context)

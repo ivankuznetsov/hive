@@ -132,6 +132,25 @@ class WorkflowsTest < Minitest::Test
     end
   end
 
+  def test_all_terminal_stage_dirs_defaults_to_coding_terminal
+    assert_equal [ "9-done" ], Hive::Workflows.all_terminal_stage_dirs
+  end
+
+  def test_all_terminal_stage_dirs_includes_registered_workflow_terminal
+    with_registered_workflow(research_workflow) do
+      assert_includes Hive::Workflows.all_terminal_stage_dirs, "3-report"
+      assert_includes Hive::Workflows.all_terminal_stage_dirs, "9-done"
+    end
+  end
+
+  def test_stage_ref_hint_lists_dirs_then_short_names
+    hint = Hive::Workflows.stage_ref_hint
+
+    assert_includes hint, "1-inbox"
+    assert_includes hint, "or short names"
+    assert_includes hint, "inbox"
+  end
+
   def test_resolve_stage_ref_across_workflows_rejects_ambiguous_refs
     descriptor = Hive::Workflow.new(
       id: :alternate_plan,

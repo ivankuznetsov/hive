@@ -182,5 +182,6 @@ module HiveWorkflowTestHelper
   def reset_workflow_union_cache!
     Hive::Workflows.instance_variable_set(:@all_stage_dirs, nil)
     Hive::Workflows.instance_variable_set(:@all_stage_names, nil)
+    Hive::Workflows.instance_variable_set(:@all_terminal_stage_dirs, nil)
   end
 end

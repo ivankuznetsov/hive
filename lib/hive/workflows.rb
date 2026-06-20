@@ -149,6 +149,23 @@ module Hive
       @all_stage_names ||= Registry.all.flat_map(&:stage_names).uniq.freeze
     end
 
+    # Memoized (same rationale as all_stage_dirs): the terminal ("archived")
+    # stage dir of EVERY registered workflow. Single source for drop's
+    # hard-delete archive guard and init's fieldless-task scan, which both
+    # computed `Registry.all.map { |w| w.stages.last.dir }.uniq` inline — a
+    # drift on the drop side re-opens an archived-task delete bug.
+    def all_terminal_stage_dirs
+      @all_terminal_stage_dirs ||= Registry.all.map { |workflow| workflow.stages.last.dir }.uniq.freeze
+    end
+
+    # The shared "valid stage refs" hint tail — "<full dirs> or short names
+    # <short names>" — appended to every union-scope unknown-stage error so the
+    # two emit sites (resolve_stage_ref_across_workflows below and Approve's
+    # early --from/--to check) can't drift apart.
+    def stage_ref_hint
+      "#{all_stage_dirs.join(', ')} or short names #{all_stage_names.join(', ')}"
+    end
+
     # Resolve a user-provided stage ref (a full N-name dir or a bare short
     # name) against EVERY registered workflow (not just coding) and return the
     # single canonical `N-name` dir it maps to. Returns nil for a blank ref; raises
@@ -168,8 +185,7 @@ module Hive
       end
 
       raise Hive::InvalidTaskPath,
-            "unknown stage '#{stage_ref}'; valid: #{all_stage_dirs.join(', ')} " \
-            "or short names #{all_stage_names.join(', ')}"
+            "unknown stage '#{stage_ref}'; valid: #{stage_ref_hint}"
     end
   end
 end

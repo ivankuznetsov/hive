@@ -67,12 +67,17 @@ class WorkflowTest < Minitest::Test
     assert_equal "3-report", research.next_stage_after("gather").dir
   end
 
-  def test_next_stage_after_returns_nil_for_terminal_or_unknown_stage
+  def test_next_stage_after_returns_nil_for_terminal_stage
     coding = Hive::Workflows::Registry.default
     research = research_workflow
 
     assert_nil coding.next_stage_after("done")
     assert_nil research.next_stage_after("report")
+  end
+
+  def test_next_stage_after_returns_nil_for_unknown_stage
+    coding = Hive::Workflows::Registry.default
+
     assert_nil coding.next_stage_after("nope")
   end
 
@@ -143,7 +148,11 @@ class WorkflowTest < Minitest::Test
     workflow = Hive::Workflows::Registry.default
     dirs = workflow.stage_dirs
 
-    assert_equal workflow.stages.map(&:dir), dirs
+    # Anchor to an independent literal — comparing against workflow.stages.map(&:dir)
+    # would be tautological since stage_dirs IS that expression. A reorder or
+    # rename in the descriptor must break this.
+    assert_equal %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done],
+                 dirs
     assert dirs.frozen?
   end
 

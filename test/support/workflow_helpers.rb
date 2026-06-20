@@ -1,5 +1,6 @@
 require "hive/workflow"
 require "hive/workflows/registry"
+require "hive/stages/base"
 
 module HiveWorkflowTestHelper
   # Resolution-only fixture: stages carry just name/index/state_file/kind so
@@ -98,6 +99,57 @@ module HiveWorkflowTestHelper
         )
       ]
     )
+  end
+
+  def content_workflow
+    Hive::Workflow.new(
+      id: :content_fixture,
+      stages: [
+        Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+        Hive::Workflow::Stage.new(
+          name: "research",
+          index: 2,
+          state_file: "research.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "research"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "draft",
+          index: 3,
+          state_file: "draft.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "draft"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done",
+          index: 4,
+          state_file: "done.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "done"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        )
+      ]
+    )
+  end
+
+  def with_deterministic_content_agent(record: nil)
+    original = Hive::Stages::Base.method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **_kwargs|
+      record << task.stage_name if record
+      File.write(task.state_file, "# #{task.stage_name}\nartifact: #{task.stage_name}\n<!-- COMPLETE -->\n")
+      { status: :complete }
+    end
+    yield
+  ensure
+    Hive::Stages::Base.define_singleton_method(:spawn_agent, original) if original
   end
 
   def with_registered_workflow(descriptor)

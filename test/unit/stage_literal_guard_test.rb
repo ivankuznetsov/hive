@@ -1,7 +1,14 @@
 require "test_helper"
+require "hive/stages"
+require "tmpdir"
+require "fileutils"
 
 class StageLiteralGuardTest < Minitest::Test
-  STAGE_NAME = /(?:inbox|brainstorm|plan|execute|open-pr|review|artifacts|finalize|done)/
+  # Derived from the coding descriptor (Hive::Stages::NAMES) rather than
+  # hardcoded, so a coding-stage rename can't silently shrink the guard's net
+  # without this alternation following along. `Regexp.union` builds the
+  # `(?:inbox|brainstorm|…)` alternation from the live stage names.
+  STAGE_NAME = Regexp.union(Hive::Stages::NAMES).freeze
 
   # The durable net catches a stage literal in any of the forms code actually
   # uses to spell one. Each alternative requires a real delimiter so prose
@@ -81,23 +88,56 @@ class StageLiteralGuardTest < Minitest::Test
     MSG
   end
 
+  # Positive control (U6.2 "Guard fails on an un-annotated literal"): the
+  # lib-wide sweep above passes vacuously if a regression breaks the glob root
+  # (zero files scanned ⇒ zero offenders ⇒ green) or shrinks STAGE_LITERAL. Two
+  # guards against that:
+  #   1. The real sweep over `lib/` must find SOME literals (the codebase has
+  #      annotated ones), proving the glob root is live.
+  #   2. Pointed at a synthetic tree, the same machinery must FLAG an
+  #      unannotated planted literal and SPARE a correctly-annotated one.
+  def test_sweep_is_not_vacuous_and_flags_a_planted_unannotated_literal
+    refute_empty stage_literal_hits,
+                 "the lib/ sweep found zero stage literals — the glob root is " \
+                 "likely broken, which would let the routing guard pass vacuously"
+
+    Dir.mktmpdir("hive-guard-positive-control") do |dir|
+      lib = File.join(dir, "lib", "hive")
+      FileUtils.mkdir_p(lib)
+      # An unrouted, unannotated stage literal — exactly what the guard exists
+      # to catch.
+      File.write(File.join(lib, "planted.rb"), %(STAGE = "3-plan"\n))
+      # A correctly-annotated literal in the same tree must NOT be flagged.
+      File.write(File.join(lib, "annotated.rb"),
+                 %(STAGE = "6-review" # coding-scoped: legit\n))
+
+      hits = stage_literal_hits(lib_root: File.join(dir, "lib"))
+      offenders = hits.reject { |hit| annotated?(hit.fetch(:line)) || hit.fetch(:block_covered) }
+
+      assert_equal 1, offenders.size,
+                   "exactly the unannotated planted literal must be flagged as an offender"
+      assert_includes offenders.first.fetch(:line), "3-plan"
+    end
+  end
+
   private
 
   def annotated?(line)
     line.match?(ANNOTATION)
   end
 
-  def stage_literal_hits
-    root = File.expand_path("../..", __dir__)
-    lib_root = File.join(root, "lib")
+  def default_lib_root
+    File.join(File.expand_path("../..", __dir__), "lib")
+  end
 
+  def stage_literal_hits(lib_root: default_lib_root)
     Dir.glob(File.join(lib_root, "**", "*.rb")).sort.flat_map do |path|
       lines = File.readlines(path, chomp: true)
       covered = block_covered_lines(lines)
       lines.filter_map.with_index(1) do |line, line_no|
         next unless line.match?(STAGE_LITERAL)
 
-        { path: path.delete_prefix("#{root}/"), line_no: line_no, line: line,
+        { path: path.delete_prefix("#{lib_root}/"), line_no: line_no, line: line,
           block_covered: covered.include?(line_no) }
       end
     end

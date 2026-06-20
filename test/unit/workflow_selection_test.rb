@@ -22,6 +22,8 @@ class WorkflowSelectionTest < Minitest::Test
       assert_includes error.message, "unknown workflow \"bogus\""
       assert_includes error.message, "coding"
       assert_includes error.message, "content_fixture"
+      assert_equal "bogus", error.value, "the user-supplied name must travel as a structured field"
+      assert_includes error.valid, "content_fixture", "the valid-names list must travel as a structured field"
     end
   end
 

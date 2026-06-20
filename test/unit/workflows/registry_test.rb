@@ -15,6 +15,8 @@ class WorkflowsRegistryTest < Minitest::Test
 
     assert_includes error.message, ":nope"
     assert_includes error.message, ":coding"
+    assert_equal :nope, error.value, "the offending id must travel as a structured field, not only in the message"
+    assert_includes error.valid, "coding", "the registered-workflow list must travel as a structured field"
   end
 
   def test_all_and_ids_expose_registered_workflows

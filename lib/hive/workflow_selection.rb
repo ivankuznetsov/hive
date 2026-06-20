@@ -9,8 +9,11 @@ module Hive
       id = raw.empty? ? Hive::Workflows::CODING_ID : raw.to_sym
       Hive::Workflows::Registry.fetch(id)
     rescue Hive::Workflows::UnknownWorkflow
-      raise Hive::Workflows::UnknownWorkflow,
-            "unknown workflow #{name.inspect}; valid workflows: #{valid_names.join(', ')}"
+      raise Hive::Workflows::UnknownWorkflow.new(
+        "unknown workflow #{name.inspect}; valid workflows: #{valid_names.join(', ')}",
+        value: name,
+        valid: valid_names
+      )
     end
 
     def valid_names

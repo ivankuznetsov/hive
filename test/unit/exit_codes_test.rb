@@ -39,6 +39,7 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE,               Hive::DaemonInstallDriftError.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::DaemonInstallFailed.new("x").exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::RollbackFailed.new("x").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::Workflows::UnknownWorkflow.new("x").exit_code
   end
 
   # The `schema_version` emit sites in run.rb / status.rb / approve.rb call

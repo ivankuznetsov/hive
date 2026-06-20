@@ -18,10 +18,10 @@ the safety-relevant decisions are unit-testable without forking.
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, mtime debounce, and `answers_pending` → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:wait_for_answers` / `:record_baseline` / `:skip`. Source of truth for "should this row fire a child?". |
+| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage/workflow context, mtime debounce, and `answers_pending` → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:wait_for_answers` / `:record_baseline` / `:skip`. Source of truth for "should this row fire a child?". |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates the envelope SHAPE (missing/wrong `schema`, `ok=false`) as a hard `Result(ok: false)`, but tolerates schema-VERSION skew (see "Forward-tolerant schema-version skew" below) so a binary/process version mismatch never crashes a tick. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached, and carries marker attrs so recovery code can preserve `REVIEW_WORKING phase/pass` when rewriting markers. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records including `workflow`. Validates the envelope SHAPE (missing/wrong `schema`, `ok=false`) as a hard `Result(ok: false)`, but tolerates schema-VERSION skew (see "Forward-tolerant schema-version skew" below) so a binary/process version mismatch never crashes a tick. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached, and carries marker attrs so recovery code can preserve `REVIEW_WORKING phase/pass` when rewriting markers. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; reaps via `Process.wait(-1, WNOHANG)`; parses JSON envelopes from child stdout; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
@@ -98,15 +98,16 @@ each expose a thin enough seam that mock collaborators (see
 without spinning up the whole stack.
 
 Policy's advance-action set includes the descriptor-generic
-`ready_to_advance` action. `Hive::TaskAction` emits it on two paths: non-coding
-workflow `COMPLETE` rows that are not at the terminal descriptor stage, and a
-markerless (`:none`) **inert** entry stage that is not also terminal. Policy treats
-it like the existing `ready_to_*` actions: non-empty command plus no dependency
-block returns `:dispatch`; `blocked: true` returns `:blocked_on_dependency`; nil
-or empty command returns `:skip`. The emitted command is currently
-`hive approve <slug> --from <descriptor-stage-dir>`, so U4 proves the daemon
-decision path without claiming the later descriptor-aware physical move work is
-complete.
+`ready_to_advance` and `ready_to_run` actions. `ready_to_advance` emits
+`hive approve <slug> --from <descriptor-stage-dir>` for non-terminal generic
+`COMPLETE` rows and inert markerless entry stages; `ready_to_run` emits
+`hive run <slug>` for markerless generic agent-style rows. Policy treats both
+like the existing coding `ready_to_*` actions: non-empty command plus no
+dependency block returns `:dispatch`; `blocked: true` returns
+`:blocked_on_dependency`; nil or empty command returns `:skip`. The coding
+`3-plan` `needs_input` auto-approval shortcut is now gated on
+`workflow == "coding"` (nil workflow remains coding for old test doubles), so a
+generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
 
 ## Trust boundary
 

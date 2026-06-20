@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-06-19
+updated: 2026-06-20
 tags: [gap, todo]
 ---
 
@@ -136,9 +136,7 @@ evidence closing the following June 16 gaps.
 
 ## Open enhancements
 
-- **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today (the registry holds only `:coding`); a future descriptor-workflow follow-up should wire a generic error/stale surface without changing coding's bespoke action map. See [[modules/task_action]].
-
-- **Generic workflow advance-dispatch is U6-gated end-to-end** — U5 taught the `Commands::Approve` / `Commands::Run` command methods to resolve a generic (non-`:coding`) move through the task's descriptor, but the daemon/agent path that would *drive* that resolution is not wired for generic workflows: the Thor `APPROVE_TO_ENUM` (`cli.rb`) constrains `--to`/`--from` to the nine coding dirs (a generic `hive approve <slug> --from 2-gather` exits 1 at parse time), `Hive::Commands::Status#collect_rows` (`status.rb`) walks only `Hive::Stages::DIRS` so a `2-gather`/`3-report` task never surfaces to the daemon (and would be mis-flagged a legacy dir), and `TaskResolver#find_slug_across_projects` can't locate a generic-only-dir task by bare slug. So the documented daemon `ready_to_advance` → ADVANCE path only works for `:coding` today; the consumer migration (enum + status scan + resolver) is deferred to U6 (plan Scope Boundaries: "routed consumers + daemon advance" = U6). The U5 e2e proves the command-method resolution by driving `Commands::Approve` directly with a folder path, bypassing all three gates. See [[modules/task_action]].
+- **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` / `ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today for production workflows; a future descriptor-workflow follow-up should wire a generic error/stale surface without changing coding's bespoke action map. See [[modules/task_action]].
 
 - **Parse provider reset-time hints for `limits_reached` cooldown** — the healer currently uses a fixed `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` cooldown (default 1h) to self-heal limit-parked tasks (see [[daemon]]). Providers sometimes print a concrete reset hint (e.g. codex's "try again at 4:42 PM"); parsing that wall-clock time could retry sooner/later than the fixed window. Deferred because wall-clock parsing across providers/timezones is brittle and the fixed cooldown is the robust default.
 

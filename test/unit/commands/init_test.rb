@@ -146,7 +146,50 @@ class HiveCommandsInitTest < Minitest::Test
       File.write(File.join(state, "config.yml"), "default_workflow: [\n")
       ops = Struct.new(:hive_state_path).new(state)
 
-      assert_equal "coding", command.send(:current_default_workflow, ops)
+      _out, err = capture_io { assert_equal "coding", command.send(:current_default_workflow, ops) }
+      # A corrupt config warns (not silently assumes coding) so the rebind
+      # warning can't under-report on an unparseable file.
+      assert_includes err, "could not read default_workflow"
+    end
+  end
+
+  def test_write_default_workflow_creates_fresh_file_when_absent
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, ".hive-state", "config.yml")
+      refute File.exist?(cfg)
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+
+      body = File.read(cfg)
+      assert_match(/\A---\n/, body)
+      assert_includes body, "default_workflow: content_fixture"
+    end
+  end
+
+  def test_write_default_workflow_inserts_at_top_without_hive_state_path_line
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "---\nproject_name: demo\n")
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+
+      lines = File.read(cfg).lines
+      assert_equal "---\n", lines.first
+      # Inserted right after the leading marker, not mid-document or appended.
+      assert_equal "default_workflow: content_fixture\n", lines[1]
+      assert_includes lines, "project_name: demo\n"
+    end
+  end
+
+  def test_write_default_workflow_leaves_no_tmp_file_behind
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "---\nhive_state_path: .hive-state\n")
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+
+      leftovers = Dir[File.join(dir, ".config.yml.tmp.*")]
+      assert_empty leftovers, "atomic write must clean up its tmp file"
     end
   end
 

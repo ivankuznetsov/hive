@@ -2,9 +2,56 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v1.json",
   "title": "hive init output (v1)",
-  "description": "Stable success contract emitted by `hive init --json`. Init precondition failures keep the legacy stderr + exit-code contract because several checks run before project state exists.",
-  "$ref": "#/$defs/SuccessPayload",
+  "description": "Stable success contract emitted by `hive init --json`. A fresh init emits SuccessPayload; re-running on an already-initialized project (with --workflow, to re-bind the default) emits the minimal AlreadyInitializedPayload. Init precondition failures keep the legacy stderr + exit-code contract because several checks run before project state exists.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/AlreadyInitializedPayload"
+    }
+  ],
   "$defs": {
+    "AlreadyInitializedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "already_initialized",
+        "project",
+        "path",
+        "hive_state_path",
+        "workflow"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-init"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "already_initialized": {
+          "const": true
+        },
+        "project": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "hive_state_path": {
+          "type": "string"
+        },
+        "workflow": {
+          "type": "string"
+        }
+      }
+    },
     "LimitMap": {
       "type": "object",
       "additionalProperties": false,

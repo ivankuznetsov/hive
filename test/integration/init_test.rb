@@ -143,7 +143,10 @@ class InitTest < Minitest::Test
             Hive::Commands::Init.new(dir, workflow: "bogus").call
           end
 
-          assert_equal 1, status
+          # USAGE (64), not GENERIC (1): a bad --workflow is a do-not-retry
+          # usage error, so UnknownWorkflow overrides exit_code like
+          # InvalidTaskPath/WrongStage/AlreadyInitialized.
+          assert_equal Hive::ExitCodes::USAGE, status
           assert_includes err, "unknown workflow \"bogus\""
           assert_includes err, "coding"
           assert_includes err, "content_fixture"
@@ -184,10 +187,121 @@ class InitTest < Minitest::Test
 
           _out, err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
 
-          refute_includes err, "will re-resolve"
+          refute_includes err, "re-binds"
           config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
           assert_equal "content_fixture", config.fetch("default_workflow")
         end
+      end
+    end
+  end
+
+  def test_rerun_init_warns_and_truncates_beyond_five_fieldless_tasks
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          slugs = (1..6).map { |n| "fieldless-#{n}-260620-aaaa" }
+          slugs.each do |slug|
+            task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", slug)
+            FileUtils.mkdir_p(task_dir)
+            File.write(File.join(task_dir, "idea.md"), "x\n")
+          end
+
+          _out, err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+
+          assert_includes err, "... and 1 more"
+          listed = slugs.count { |slug| err.include?(slug) }
+          assert_equal 5, listed, "only the first 5 field-less tasks are listed; the rest collapse into '... and N more'"
+        end
+      end
+    end
+  end
+
+  def test_rerun_init_same_workflow_is_a_silent_no_op
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          # A field-less task that WOULD warn on a real rebind — proves the
+          # no-op skips the warning, not just that there were no tasks.
+          task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", "fieldless-task-260620-abcd")
+          FileUtils.mkdir_p(task_dir)
+          File.write(File.join(task_dir, "idea.md"), "x\n")
+
+          _out, err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+
+          refute_includes err, "re-binds"
+          refute_includes err, "changing default_workflow"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow")
+        end
+      end
+    end
+  end
+
+  def test_rerun_init_workflow_json_emits_already_initialized_payload
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+
+          out, _err = capture_io do
+            Hive::Commands::Init.new(dir, workflow: "content_fixture", json: true).call
+          end
+          payload = JSON.parse(out)
+
+          assert_equal "hive-init", payload.fetch("schema")
+          assert_equal true, payload.fetch("ok")
+          assert_equal true, payload.fetch("already_initialized")
+          assert_equal "content_fixture", payload.fetch("workflow")
+          assert_equal File.basename(dir), payload.fetch("project")
+
+          schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+          errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
+          assert_empty errors, "already-initialized hive-init payload must validate: #{errors.inspect}"
+        end
+      end
+    end
+  end
+
+  def test_rerun_init_prompt_empty_keeps_current_non_coding_default
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+
+          workflow_input = StringIO.new("\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+
+          out, _err = capture_io do
+            Hive::Commands::Init.new(dir, workflow_input: workflow_input, workflow_output: workflow_output).call
+          end
+
+          assert_includes workflow_output.string, "Default workflow [content_fixture]:"
+          assert_includes out, "workflow: content_fixture"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow"),
+                       "a bare Enter at re-init must keep the current default, not reset it to coding"
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_aborts_on_closed_stdin_with_usage_and_zero_state
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        workflow_input = StringIO.new("") # gets returns nil immediately (EOF)
+        workflow_input.define_singleton_method(:tty?) { true }
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Init.new(dir, workflow_input: workflow_input, workflow_output: StringIO.new).call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "aborted"
+        refute File.exist?(File.join(dir, ".hive-state")),
+               "an aborted workflow prompt must leave zero disk state (prompt runs before any writes)"
       end
     end
   end

@@ -1,9 +1,22 @@
 require "test_helper"
 
 class StageLiteralGuardTest < Minitest::Test
+  STAGE_NAME = /(?:inbox|brainstorm|plan|execute|open-pr|review|artifacts|finalize|done)/
+
+  # The durable net catches a stage literal in any of the forms code actually
+  # uses to spell one. Each alternative requires a real delimiter so prose
+  # mentions ("the 3-plan stage") don't trip it:
+  #   - quoted (single OR double), interpolation prefix allowed:
+  #       "3-plan"   '3-plan'   "#{n}-plan"
+  #   - %w / %i word-array element:  %w[4-execute 6-review 8-finalize]
   # `\d+-` (not `\d-`) so a future renumber past single digits (e.g.
-  # "10-review") cannot smuggle an unguarded stage literal past the net.
-  STAGE_LITERAL = /"\d+-(?:inbox|brainstorm|plan|execute|open-pr|review|artifacts|finalize|done)"/
+  # "10-review") cannot smuggle an unguarded literal past the net. The earlier
+  # double-quote-only regex silently passed single-quote, %w, and interpolated
+  # vectors (e.g. the live `WORKTREE_OWNING_STAGES = %w[...]` constant).
+  STAGE_LITERAL = Regexp.union(
+    /(["'])(?:\d+|#\{[^}]*\})-#{STAGE_NAME}\1/,
+    /%[wi][\[({<][^\n]*?(?<![\w-])(?:\d+|#\{[^}]*\})-#{STAGE_NAME}(?![\w-])/
+  )
   ANNOTATION = /#\s*(?:coding-scoped|not-a-stage-ref):\s*\S+/
 
   def test_regex_matches_stage_literals_and_rejects_near_misses
@@ -13,8 +26,15 @@ class StageLiteralGuardTest < Minitest::Test
     # while the prefix was `\d-`).
     assert_match STAGE_LITERAL, 'stage = "10-review"'
     assert_match STAGE_LITERAL, 'stage = "23-plan"'
+    # Evasion vectors the double-quote-only net used to miss:
+    assert_match STAGE_LITERAL, "stage = '3-plan'"
+    assert_match STAGE_LITERAL, "WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]"
+    assert_match STAGE_LITERAL, "markers = %i[3-plan]"
+    assert_match STAGE_LITERAL, 'stage = "#{n}-plan"'
     refute_match STAGE_LITERAL, 'stage = "3-planning"'
     refute_match STAGE_LITERAL, 'stage = "plan"'
+    # A bare prose mention (no quote, no %w delimiter) must NOT trip the net.
+    refute_match STAGE_LITERAL, "# the 3-plan stage runs the planner"
   end
 
   def test_annotation_requires_a_non_empty_reason

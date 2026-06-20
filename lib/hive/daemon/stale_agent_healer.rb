@@ -96,7 +96,7 @@ module Hive
       # re-entry is provably idempotent — far lower than the agent-loss budget
       # because a timeout means "I ran and didn't finish", not "I was interrupted".
       TIMEOUT_RECOVERY_LIMIT = 1
-      TIMEOUT_RECOVERABLE_STAGES = %w[5-open-pr 7-artifacts].freeze
+      TIMEOUT_RECOVERABLE_STAGES = %w[5-open-pr 7-artifacts].freeze # coding-scoped: coding stages whose timeout re-entry is idempotent
 
       # Review fix-phase auto-commit failures that a bounded rerun can clear:
       # the fix agent left residue the scope check rejected, or a transient
@@ -234,7 +234,7 @@ module Hive
         # Every 3-plan heal needs the explicit requeue — limits_reached
         # cooldown heals leave the same markerless empty plan.md as agent
         # loss does (PR review P2 #7).
-        requeue_plan_rerun(row) if coding_workflow?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
+        requeue_plan_rerun(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -286,7 +286,7 @@ module Hive
 
       def auto_recoverable_error?(row, now:)
         reason = marker_reason(row)
-        return true if coding_workflow?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: unpushed commits are finalize/PR recovery
+        return true if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: unpushed commits are finalize/PR recovery
 
         # A usage/credit limit can hit any stage (brainstorm/plan/execute/…),
         # so the cooldown retry is not stage-gated. Recoverable only once the
@@ -329,13 +329,13 @@ module Hive
         # review tree has its own specialized heal paths (REVIEW_ERROR /
         # review_error_signature) and generic clearing would double-handle.
         # The retry budget (default 3) still bounds every stage.
-        return false if coding_workflow?(row) && row.stage.to_s == "6-review" # coding-scoped: coding review has specialized heal paths
+        return false if Hive::Workflows.coding_row?(row) && row.stage.to_s == "6-review" # coding-scoped: coding review has specialized heal paths
 
         %w[tmux_session_terminated agent_orphaned].include?(reason)
       end
 
       def error_heal_label(row, reason)
-        return "finalize_unpushed_commits" if coding_workflow?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
+        return "finalize_unpushed_commits" if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
         return "limits_reached" if reason == "limits_reached"
         return "stage_timeout" if reason == "timeout"
         return "clean_exit_residue" if reason == "ensure_clean_on_exit_failed"
@@ -349,14 +349,10 @@ module Hive
         reason == "timeout" ? TIMEOUT_RECOVERY_LIMIT : @error_auto_recovery_limit
       end
 
-      def coding_workflow?(row)
-        Hive::Workflows.coding_row?(row)
-      end
-
       def error_recovery_remediation(row, reason)
         command = "hive run #{row.slug} --project #{row.project} --stage #{row.stage}"
 
-        if coding_workflow?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
+        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
           return "rerun finalize (`#{command}`) or push the branch manually"
         end
 

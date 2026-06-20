@@ -90,7 +90,7 @@ module Hive
         entry = initialize_project_state(ops, content: project_config_content)
 
         if @json
-          emit_json_summary(entry: entry, ops: ops, answers: answers)
+          emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         else
           print_summary(entry: entry, ops: ops, answers: answers)
         end
@@ -152,11 +152,15 @@ module Hive
 
       def update_existing_default_workflow!(ops, workflow_id)
         cfg_path = File.join(ops.hive_state_path, "config.yml")
-        current = current_default_workflow(ops)
+        current, corrupt = current_default_workflow_with_status(ops)
         next_value = workflow_id.to_s
         # Idempotent confirm (A8): re-running with the SAME default is a clean
-        # no-op — no warning, no rewrite, no commit.
-        return if current == next_value
+        # no-op — no warning, no rewrite, no commit. EXCEPT when `current` came
+        # from the corrupt-config rescue (Config.load masks an unparseable file
+        # as coding): there the operator's explicit `hive init --workflow X` is
+        # a repair gesture, so force the rewrite even when X equals the masked
+        # fallback, instead of leaving the broken file untouched.
+        return if current == next_value && !corrupt
 
         warn_on_fieldless_tasks_rebinding(ops, from: current, to: next_value)
         # Mutate config.yml atomically and COMMIT it under the per-project
@@ -165,31 +169,62 @@ module Hive
         # silently reverted the default) and an interrupted write could truncate
         # config.yml — masked by Config.load's Psych-rescue → coding fallback.
         Hive::Lock.with_commit_lock(ops.hive_state_path) do
+          # Snapshot the pre-write content so a commit failure AFTER atomic_write
+          # has landed the rename can restore it — otherwise the move stays in
+          # the worktree (dirty) and a later git reset/clean silently reverts the
+          # default. Restore makes the mutation all-or-nothing.
+          before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
           write_default_workflow!(cfg_path, next_value)
-          ops.hive_commit(
-            stage_name: "config",
-            slug: "default_workflow",
-            action: "set to #{next_value}",
-            pathspecs: [ "config.yml" ]
-          )
+          begin
+            ops.hive_commit(
+              stage_name: "config",
+              slug: "default_workflow",
+              action: "set to #{next_value}",
+              pathspecs: [ "config.yml" ]
+            )
+          rescue StandardError
+            restore_config_snapshot(cfg_path, before)
+            raise
+          end
         end
       end
 
+      def restore_config_snapshot(cfg_path, before)
+        if before == :absent
+          FileUtils.rm_f(cfg_path)
+        else
+          File.binwrite(cfg_path, before)
+        end
+      rescue StandardError => e
+        # A failed restore must not mask the original commit error; surface it
+        # and let the original (re-raised by the caller) propagate.
+        write_warn("hive: could not restore config.yml after a failed default_workflow commit " \
+                   "(#{e.class}: #{e.message}); re-run `hive init --workflow` to retry")
+      end
+
       def current_default_workflow(ops)
+        current_default_workflow_with_status(ops).first
+      end
+
+      # Returns [value, corrupt?]: the resolved default_workflow plus whether the
+      # read fell through the corrupt-config rescue (so update_existing_default_workflow!
+      # can override its idempotency short-circuit and repair an unparseable file).
+      def current_default_workflow_with_status(ops)
         cfg_path = File.join(ops.hive_state_path, "config.yml")
-        return Hive::Config::DEFAULTS["default_workflow"] unless File.exist?(cfg_path)
+        return [ Hive::Config::DEFAULTS["default_workflow"], false ] unless File.exist?(cfg_path)
 
         raw = YAML.safe_load(File.read(cfg_path)) || {}
         value = raw.is_a?(Hash) ? raw["default_workflow"].to_s.strip : ""
-        value.empty? ? Hive::Config::DEFAULTS["default_workflow"] : value
+        [ value.empty? ? Hive::Config::DEFAULTS["default_workflow"] : value, false ]
       rescue Psych::Exception, SystemCallError => e
         # Don't silently assume coding on a corrupt config (unlike a clean
         # absent/blank value): the rebind warning would under-report and the
         # line-edit proceeds on an unparseable file. Surface it, mirroring
-        # Task#load_project_default_workflow.
+        # Task#load_project_default_workflow, and flag it corrupt so the caller
+        # forces the repair rewrite.
         write_warn("hive: could not read default_workflow from #{cfg_path} " \
                    "(#{e.class}: #{e.message}); assuming #{Hive::Config::DEFAULTS['default_workflow']}")
-        Hive::Config::DEFAULTS["default_workflow"]
+        [ Hive::Config::DEFAULTS["default_workflow"], true ]
       end
 
       def write_default_workflow!(cfg_path, workflow_id)
@@ -559,13 +594,13 @@ module Hive
         Hive::InvokedBinary.path
       end
 
-      def emit_json_summary(entry:, ops:, answers:)
-        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers))
+      def emit_json_summary(entry:, ops:, answers:, workflow:)
+        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers, workflow: workflow))
       rescue Errno::EPIPE
         nil
       end
 
-      def success_payload(entry:, ops:, answers:)
+      def success_payload(entry:, ops:, answers:, workflow:)
         {
           "schema" => "hive-init",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init"),
@@ -574,6 +609,11 @@ module Hive
           "path" => entry.fetch("path"),
           "default_branch" => ops.default_branch,
           "hive_state_path" => entry.fetch("hive_state_path"),
+          # The bound default workflow, mirroring AlreadyInitializedPayload's
+          # `workflow` field — so an agent running `hive init --workflow X --json`
+          # on a fresh project can confirm the binding from JSON instead of
+          # reading config.yml out of band.
+          "workflow" => workflow.to_s,
           "worktree_root" => worktree_root,
           "answers" => answers,
           "planning_agent" => answers.fetch("planning_agent"),
@@ -685,7 +725,11 @@ module Hive
           )
         end
 
-        if @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
+        # Only prompt when there's a real choice to make. With a single
+        # registered workflow the numbered prompt offers no alternative yet still
+        # blocks on stdin, which can hang a PTY-allocating wrapper (tmux /
+        # `script` / expect). Treat size==1 as :implicit (coding default).
+        if Hive::Workflows::Registry.ids.size > 1 && @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
           # On a re-init the prompt defaults to (and a bare Enter keeps) the
           # project's CURRENT default rather than coding — pressing Enter must
           # never silently reset a non-coding default back to coding and rebind

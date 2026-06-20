@@ -225,6 +225,7 @@
         "path",
         "default_branch",
         "hive_state_path",
+        "workflow",
         "worktree_root",
         "answers",
         "planning_agent",
@@ -260,6 +261,9 @@
           "type": "string"
         },
         "hive_state_path": {
+          "type": "string"
+        },
+        "workflow": {
           "type": "string"
         },
         "worktree_root": {

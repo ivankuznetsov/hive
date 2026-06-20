@@ -1029,7 +1029,7 @@ class SchemaFilesTest < Minitest::Test
     expected = %w[
       answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
       default_branch development_agent enabled_reviewers hive_state_path ok path patrol_mode patrol_reviewers planning_agent
-      project schema schema_version timeouts triage_bias worktree_root
+      project schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
                  "schema/producer required-key drift in hive-init.v1.json"
@@ -1038,7 +1038,7 @@ class SchemaFilesTest < Minitest::Test
     entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
     answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
     producer = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers
+      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
     )
     assert_equal schema_required, producer.keys.sort,
                  "Init#success_payload must emit exactly the schema's required keys"
@@ -1050,7 +1050,7 @@ class SchemaFilesTest < Minitest::Test
     entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
     answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
     payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers
+      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
     )
 
     errors = schemer.validate(payload).map { |e| e["error"] }

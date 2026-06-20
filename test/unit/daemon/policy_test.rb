@@ -46,6 +46,11 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive finalize slug-a --from 7-artifacts")
   end
 
+  def test_ready_to_advance_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_advance",
+                                   command: "hive approve slug-a --from 2-gather")
+  end
+
   # ── merge wait: hand off to PrMergeWatcher ─────────────────────────────
 
   def test_ready_to_archive_polls_for_merge
@@ -62,6 +67,13 @@ class HiveDaemonPolicyTest < Minitest::Test
     assert_equal :blocked_on_dependency,
                  decide(action: "ready_to_develop",
                         command: "hive develop slug-a --from 3-plan",
+                        blocked: true)
+  end
+
+  def test_blocked_ready_to_advance_does_not_dispatch
+    assert_equal :blocked_on_dependency,
+                 decide(action: "ready_to_advance",
+                        command: "hive approve slug-a --from 2-gather",
                         blocked: true)
   end
 
@@ -302,6 +314,10 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   def test_advance_action_with_empty_command_skips
     assert_equal :skip, decide(action: "ready_to_plan", command: "")
+  end
+
+  def test_ready_to_advance_with_nil_command_skips
+    assert_equal :skip, decide(action: "ready_to_advance", command: nil)
   end
 
   def test_plan_approval_matches_only_literal_3_plan_stage

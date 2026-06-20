@@ -146,6 +146,21 @@ module Hive
         label: "Ready to archive",
         command: "archive"
       },
+      ready_to_advance: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_ADVANCE,
+        label: "Ready to advance",
+        command: "approve"
+      },
+      generic_ready_to_run: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Ready to run",
+        command: "run"
+      },
+      generic_needs_input: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Needs your input",
+        command: "run"
+      },
       done: {
         key: Hive::Schemas::TaskActionKind::ARCHIVED,
         label: "Archived",
@@ -217,6 +232,8 @@ module Hive
     # (findings/accept-finding/reject-finding) only include `--stage`
     # when slug-stage ambiguity actually exists.
     def command
+      return generic_command unless coding_workflow?
+
       verb = action[:command]
       return nil unless verb
 
@@ -257,6 +274,8 @@ module Hive
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
 
+      return generic_action unless coding_workflow?
+
       case task.stage_name
       when "inbox"
         ACTIONS.fetch(:inbox)
@@ -279,6 +298,46 @@ module Hive
       else
         ACTIONS.fetch(:error)
       end
+    end
+
+    def coding_workflow?
+      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow.nil? || workflow.id == :coding
+    end
+
+    def generic_action
+      stage = workflow_stage
+      return ACTIONS.fetch(:error) unless stage
+
+      terminal = stage == task.workflow.stages.last
+      entry = stage == task.workflow.stages.first
+
+      case marker.name
+      when :complete
+        terminal ? ACTIONS.fetch(:done) : ACTIONS.fetch(:ready_to_advance)
+      when :waiting
+        ACTIONS.fetch(:generic_needs_input)
+      when :none
+        entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+      else
+        ACTIONS.fetch(:generic_ready_to_run)
+      end
+    end
+
+    def generic_command
+      selected_action = action
+      verb = selected_action[:command]
+      return nil unless verb
+
+      parts = [ "hive", generic_command_verb(verb), task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts.concat([ "--stage", workflow_stage.dir ]) if verb == "run" && @stage_collision
+      parts.concat([ "--from", workflow_stage.dir ]) if verb == "approve"
+      parts.shelljoin
+    end
+
+    def generic_command_verb(verb)
+      verb == "approve" ? "approve" : "run"
     end
 
     def review_action
@@ -1092,6 +1151,10 @@ module Hive
 
     def stage_dir
       "#{task.stage_index}-#{task.stage_name}"
+    end
+
+    def workflow_stage
+      task.workflow.stage_named(task.stage_name)
     end
   end
 end

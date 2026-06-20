@@ -570,7 +570,10 @@ module Hive
       nullable `diagnostic` field — null for green rows, populated with
       a bounded summary + artifact tail + marker signature for red
       recovery/error rows, plus a nullable `pr_url` field — null until a
-      PR exists, then the pull-request URL once one is opened.
+      PR exists, then the pull-request URL once one is opened. Each row also
+      carries an optional `workflow` field — the descriptor id that resolved
+      the task (e.g. "coding"); omitted on older/synthetic producers, where
+      consumers should default to "coding".
 
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v1) and emit the diagnostic for a single task. Useful

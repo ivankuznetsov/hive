@@ -94,6 +94,44 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_surfaces_error_row_for_unloadable_task_and_stays_silent_on_non_slug
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "broken-wf-260620-abcd"
+      folder = File.join(hive_state, "stages", "4-execute", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      # Unregistered workflow selector → Task.new raises InvalidTaskPath, which
+      # previously vanished the task (and a typo'd project default emptied the
+      # whole project to zero rows).
+      Hive::TaskMeta.write(folder, id: 5, slug: slug, display_name: nil, workflow: "ghost-workflow")
+      # A non-slug sibling dir must stay silent — no row, no warn.
+      FileUtils.mkdir_p(File.join(hive_state, "stages", "4-execute", "NotASlug"))
+
+      payload = nil
+      _out, err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+      end
+
+      tasks = payload.fetch("projects").first.fetch("tasks")
+      row = tasks.find { |candidate| candidate.fetch("slug") == slug }
+
+      refute_nil row, "an unloadable task must surface as an Error row, not vanish from status"
+      assert_equal "error", row.fetch("action")
+      assert_equal "error", row.fetch("marker")
+      assert_equal "invalid_task", row.fetch("attrs").fetch("reason")
+      assert_includes row.fetch("attrs").fetch("message"), "ghost-workflow"
+      refute row.key?("workflow"), "an unresolved workflow is omitted, not emitted as null"
+      assert_match(/failed to load/, err)
+
+      refute(tasks.any? { |candidate| candidate.fetch("slug") == "NotASlug" },
+             "a non-slug dir must not surface as a row")
+      refute_match(/NotASlug/, err, "a non-slug dir must not warn")
+    end
+  end
+
   def test_json_payload_scans_registered_generic_stage_dirs
     descriptor = dispatch_workflow
 

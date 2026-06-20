@@ -530,14 +530,17 @@ module Hive
                 task = Hive::Task.new(entry)
               rescue Hive::InvalidTaskPath => e
                 # U6 widened this rescue's blast radius: a typo'd
-                # `meta.yml workflow:` or a stage-dir/workflow mismatch now
-                # raises in Task.new, which would silently vanish a real
-                # task from `hive status` (and from the daemon) with zero
-                # diagnostic. Warn on genuine task folders (stray non-slug
-                # dirs stay silent) so a misconfigured workflow is
-                # observable, matching the diff's own warn-then-continue
-                # convention (task_meta.rb, task.rb).
-                warn "hive: status: skipping #{entry}: #{e.message}" if Hive::Stages.task_slug?(slug)
+                # `meta.yml workflow:` / `config.yml default_workflow:` or a
+                # stage-dir/workflow mismatch now raises in Task.new. Silently
+                # skipping it once vanished a real task from `hive status` (and
+                # the daemon) — and a typo'd PROJECT default emptied the WHOLE
+                # project to zero rows. Surface a synthetic Error row in the
+                # payload so the breakage is observable to the daemon/UI, not
+                # just on stderr. Stray non-slug dirs stay silent (skipped).
+                next unless Hive::Stages.task_slug?(slug)
+
+                warn "hive: status: #{entry} failed to load (#{e.message}); surfaced as an Error row"
+                rows << invalid_task_row(stage: stage, slug: slug, folder: entry, message: e.message)
                 next
               end
               marker = Hive::Markers.current(task.state_file)
@@ -696,6 +699,12 @@ module Hive
       end
 
       def pr_url_for(task)
+        # PR metadata (pr.md) is a coding-workflow artifact, written only from
+        # the coding open-pr stage onward. Gate on the workflow so a generic
+        # task reusing a >= 5 stage index isn't probed for a pr.md it never
+        # writes — inert today (generic tasks have no pr.md → nil) but keeps the
+        # coding PR gate from leaking onto generic rows.
+        return nil unless Hive::Workflows.coding_id?(task.workflow.id) # coding-scoped: PR metadata exists only in the coding workflow
         return nil if task.stage_index < OPEN_PR_STAGE_INDEX
 
         value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
@@ -788,10 +797,73 @@ module Hive
         "Error"
       ].freeze
 
+      # Synthetic Error row for a task folder that exists but won't load — e.g.
+      # a typo'd `meta.yml workflow:` / project `default_workflow:` that resolves
+      # to no registered descriptor. It carries no real Task object (`task: nil`,
+      # `invalid: true`); annotate_actions stamps a fixed Error annotation and
+      # annotate_dependencies treats it as unblocked, so the broken task shows
+      # in the snapshot instead of being silently dropped. The load error lands
+      # in `marker_attrs[:message]` (surfaced in the JSON row's `attrs`).
+      def invalid_task_row(stage:, slug:, folder:, message:)
+        folder_mtime =
+          begin
+            File.mtime(folder)
+          rescue SystemCallError
+            Time.now
+          end
+        marker = Hive::Markers::State.new(
+          name: :error,
+          attrs: { "reason" => "invalid_task", "message" => message.to_s[0, 200] },
+          raw: nil
+        )
+        icon, state_label = decorate(nil, marker)
+        {
+          invalid: true,
+          stage: stage,
+          slug: slug,
+          id: nil,
+          display_name: nil,
+          workflow: nil,
+          depends_on: nil,
+          folder: folder,
+          # Schema requires a non-null string; the workflow never resolved, so
+          # there's no real state file — point at the folder as a best-effort,
+          # non-misleading placeholder for this un-actionable error row.
+          state_file: folder,
+          worktree_path: nil,
+          pr_url: nil,
+          task: nil,
+          marker_name: marker.name,
+          marker_attrs: marker.attrs,
+          icon: icon,
+          state_label: state_label,
+          mtime: folder_mtime,
+          folder_mtime: folder_mtime,
+          age: humanise_age(folder_mtime),
+          claude_pid: nil,
+          claude_pid_alive: nil,
+          live_task_lock: false
+        }
+      end
+
+      # An invalid (un-loadable) row has no Task to feed Hive::TaskAction.for and
+      # its action is unambiguously error — stamp a fixed Error annotation.
+      def invalid_action_annotation(row)
+        row.merge(
+          action_key: Hive::Schemas::TaskActionKind::ERROR,
+          action_label: "Error",
+          suggested_command: nil,
+          next_action: nil,
+          diagnostic: nil
+        )
+      end
+
       def annotate_actions(rows, project, project_count, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
         grace_sec = agent_marker_grace_sec_from_config
         rows.map do |row|
+          next invalid_action_annotation(row) if row[:invalid]
+
           action = Hive::TaskAction.for(
             row[:task],
             marker_from_row(row),

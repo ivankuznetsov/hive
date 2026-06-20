@@ -21,11 +21,18 @@ module Hive
     # Descriptor-scoped sequence lookup. Verb/sequence resolution is
     # data-driven from the workflow descriptor; the coding-only TaskAction
     # action map remains a separate bespoke gate.
+    #
+    # Soft lookup: returns nil for BOTH the terminal stage (no successor) and an
+    # unknown name. Callers can't distinguish the two from the return value — a
+    # typo'd `name` collapses into the same "no next stage" signal as the real
+    # final stage (e.g. resolve_destination attributes it to FinalStageReached).
     def next_stage_after(name)
       index = stages.index { |stage| stage.name == name }
       index && stages[index + 1]
     end
 
+    # Soft lookup: nil means EITHER the stage advances by bare mv (no incoming
+    # verb in the descriptor) OR the name is unknown — both fold into one nil.
     def advance_verb_for(name)
       stage_named(name)&.advance_verb&.name
     end
@@ -34,10 +41,13 @@ module Hive
       stages.find { |stage| stage.dir == dir }
     end
 
+    # Accepts a full dir (`3-plan`) or a short name (`plan`) and returns the
+    # canonical `Stage#dir` (or nil if neither matches). Deriving the return from
+    # the matched Stage on both arms keeps the provenance workflow-canonical —
+    # callers (File.rename targets, commit messages) get the descriptor's dir,
+    # not the caller's raw string.
     def resolve_stage_ref(ref)
-      return ref if stages.any? { |stage| stage.dir == ref }
-
-      stage_named(ref)&.dir
+      (stage_for_dir(ref) || stage_named(ref))&.dir
     end
 
     # Hard resolve: raises KeyError on an unknown name — used where a missing
@@ -57,6 +67,9 @@ module Hive
     end
 
     def stage_dirs
+      # Frozen for the same reason as stage_names: a uniform immutability
+      # contract across descriptor-derived lists. A fresh array is built each
+      # call, so freezing it is safe (callers don't mutate).
       stages.map(&:dir).freeze
     end
 

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-06-20
 tags: [test, minitest, fixtures]
 ---
 
@@ -60,6 +60,7 @@ task default: :test
 | File | Covers |
 |------|--------|
 | `config_test.rb` | `Hive::Config` — defaults, `default_workflow`, deep-merge, register/find, malformed YAML rejection, normal and patrol reviewer validation, and global Screenote config URL/token type validation. |
+| `workflow_selection_test.rb`, `content_workflow_fixture_test.rb` | Workflow selection and test-only fixture support — CLI selector validation, valid-name listing, scoped fixture registration, deterministic content-agent artifact writes, and registry leak guards. |
 | `task_test.rb` | `Hive::Task` — path regex, descriptor-driven stage/index validation, workflow selector/default fallback, derived paths, slug edge cases. |
 | `markers_test.rb` | `Hive::Markers` — set/get round-trip, attribute quoting, last-marker semantics. |
 | `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, commit lock parallelism. |
@@ -114,8 +115,8 @@ task default: :test
 
 | File | Covers |
 |------|--------|
-| `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
-| `new_test.rb` | `hive new` — slug derivation, reserved rejection, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
+| `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `--workflow` project defaults, TTY workflow prompt/default behavior, unknown-workflow fail-fast, in-flight field-less task warnings on default changes, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
+| `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
@@ -125,6 +126,7 @@ task default: :test
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |
 | `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration, and stage-move race behavior through the command surface. |
+| `content_workflow_daemon_e2e_test.rb` | Test-only content workflow proof — real init/new/status/daemon/policy/approve loop advances `1-inbox -> 4-done`, carries every per-stage artifact, and records one approve commit per transition. |
 | `daemon_stale_agent_healing_test.rb` | Status-to-healer integration — real `hive status --json` rows feed `Hive::Daemon::StaleAgentHealer`, pinning stale `AGENT_WORKING` classification, on-disk healing, closed logger events (`marker_healed`, `heal_requeued`, `marker_heal_failed`), `daemon.agent_marker_grace_sec` threading, and the `3-plan` terminal-loss healer writing a real allowlisted dispatch request. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
 | `cli_version_test.rb`, `cli_usage_error_json_test.rb` | `bin/hive` wrapper contract — top-level `--version`, command-local help after option-bearing invocations (`hive approve --from 2-brainstorm --help`), leading `--json=true`, malformed `--json=1` / `--json=yes` assignment rejection before command text/targets, `hive new PROJECT` preserving post-project `--help` and `--json=yes` as literal task text, and pre-dispatch JSON usage-error envelopes for missing required arguments on representative command schemas (`hive-run`, `hive-approve`, `hive-markers-clear`, `hive-drop`, `hive-findings`, `hive-rebase-status`, `hive-stage-action`, and the patrol-specific `hive-patrol` / `error_kind: "error"` case). |

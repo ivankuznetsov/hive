@@ -9,6 +9,7 @@ require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
 require "hive/workflows"
+require "hive/workflow_selection"
 require "hive/tui/text"
 
 module Hive
@@ -46,13 +47,15 @@ module Hive
       # "attachment routing bug" feedback in their rescue lists.
       class InvalidAttachmentError < TypedValueError; end
 
-      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil)
+      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil,
+                     workflow: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
         @body_override = body_override
         @attachments = attachments
         @depends_on = depends_on
+        @workflow_name = workflow
       end
 
       class << self
@@ -95,9 +98,12 @@ module Hive
         validate_slug!(slug)
         depends_on = normalize_dependency(@depends_on)
         validate_dependency!(depends_on) if depends_on
+        workflow_info = resolve_workflow(project)
+        workflow = workflow_info.fetch(:descriptor)
+        entry_stage = workflow.stages.first
 
         hive_state = project["hive_state_path"]
-        task_dir = File.join(hive_state, "stages", "1-inbox", slug) # coding-scoped: hive new seeds the coding inbox
+        task_dir = File.join(hive_state, "stages", entry_stage.dir, slug)
         if File.exist?(task_dir)
           raise SlugCollisionError.new(
             "slug collision at #{task_dir} (rare; retry the command)",
@@ -106,19 +112,15 @@ module Hive
         end
         FileUtils.mkdir_p(task_dir)
 
-        idea_path = File.join(task_dir, "idea.md")
+        idea_path = File.join(task_dir, entry_stage.state_file)
         id = nil
         begin
-          File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
+          File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
           copy_attachments!(task_dir)
           id = allocate_task_id
-          # Pin workflow: coding so the new 1-inbox task resolves against the
-          # coding descriptor regardless of the project's default_workflow — a
-          # non-coding default would otherwise make this field-less folder
-          # resolve to that descriptor and vanish from status as an invalid task.
           Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil,
                                depends_on: depends_on,
-                               workflow: Hive::Workflows::CODING_ID.to_s) # coding-scoped: hive new seeds the coding inbox
+                               workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as
@@ -131,13 +133,36 @@ module Hive
 
         ops = Hive::GitOps.new(project["path"])
         Hive::Lock.with_commit_lock(hive_state) do
-          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured") # coding-scoped: hive new seeds the coding inbox
+          ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
         end
         spawn_name_generator(task_dir)
 
         puts "hive: captured #{idea_path}"
         target_hint = id ? id.to_s : slug
-        puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', '2-brainstorm/')} && hive run #{target_hint}"
+        next_stage = workflow.next_stage_after(entry_stage.name)
+        if next_stage
+          puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', "#{next_stage.dir}/")} && hive run #{target_hint}"
+        else
+          puts "next: hive run #{target_hint}"
+        end
+      end
+
+      def resolve_workflow(project)
+        override = normalize_workflow(@workflow_name)
+        cfg_default = project_default_workflow(project.fetch("path"))
+        selected = override || cfg_default
+        descriptor = Hive::WorkflowSelection.fetch!(selected)
+        { descriptor: descriptor, pin: !override.nil? || !Hive::WorkflowSelection.coding?(cfg_default) }
+      end
+
+      def project_default_workflow(project_root)
+        configured = Hive::Config.load(project_root)["default_workflow"].to_s.strip
+        configured.empty? ? Hive::Workflows::CODING_ID.to_s : configured
+      end
+
+      def normalize_workflow(value)
+        string = value.to_s.strip
+        string.empty? ? nil : string
       end
 
       def derive_slug(text)
@@ -200,6 +225,14 @@ module Hive
           created_at: Time.now.utc.iso8601
         )
         ERB.new(template, trim_mode: "-").result(bindings.binding_for_erb)
+      end
+
+      def render_initial_state(slug, text, body_override:, workflow:)
+        content = render_idea(slug, text, body_override: body_override)
+        return content if Hive::WorkflowSelection.coding?(workflow.id)
+
+        replacement = workflow.stages.first&.kind == :inert ? "\n<!-- COMPLETE -->\n" : "\n"
+        content.sub(/\n?<!-- WAITING -->\n?\z/, replacement)
       end
 
       # Copy each `[src, dest_name]` tuple into `<task_dir>/assets/`.

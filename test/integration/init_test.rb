@@ -5,6 +5,7 @@ require "json_schemer"
 require "hive/commands/init"
 require "hive/llm_wiki_bootstrap"
 require "hive/reviewers/agent"
+require "hive/task_meta"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
@@ -44,6 +45,7 @@ class InitTest < Minitest::Test
 
         assert File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox"))
         assert File.exist?(File.join(dir, ".hive-state", "config.yml"))
+        refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:"
 
         log = `git -C #{dir} log --format=%s hive/state`.strip
         assert_includes log, "hive: bootstrap"
@@ -63,6 +65,129 @@ class InitTest < Minitest::Test
         global = YAML.safe_load(File.read(File.join(home, "config.yml")))
         assert_equal false, global.dig("daemon", "autostart"),
                      "init registers the daemon service unit but leaves autostart off unless requested"
+      end
+    end
+  end
+
+  def test_init_workflow_flag_writes_non_coding_project_default
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow")
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_persists_selected_default
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("2\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+          prompts = Hive::Commands::Init::Prompts.new(
+            input: StringIO.new,
+            output: StringIO.new,
+            summary_io: StringIO.new
+          )
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              prompts: prompts,
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          assert_includes workflow_output.string, "1) coding"
+          assert_includes workflow_output.string, "2) content_fixture"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow")
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_default_keeps_coding_config_fieldless
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          prompts = Hive::Commands::Init::Prompts.new(
+            input: StringIO.new,
+            output: StringIO.new,
+            summary_io: StringIO.new
+          )
+
+          capture_io do
+            Hive::Commands::Init.new(dir, prompts: prompts, workflow_input: workflow_input).call
+          end
+
+          refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:"
+        end
+      end
+    end
+  end
+
+  def test_init_unknown_workflow_fails_before_writing_state
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          _out, err, status = with_captured_exit do
+            Hive::Commands::Init.new(dir, workflow: "bogus").call
+          end
+
+          assert_equal 1, status
+          assert_includes err, "unknown workflow \"bogus\""
+          assert_includes err, "coding"
+          assert_includes err, "content_fixture"
+          refute File.exist?(File.join(dir, ".hive-state"))
+        end
+      end
+    end
+  end
+
+  def test_rerun_init_with_workflow_warns_about_fieldless_in_flight_tasks
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", "fieldless-task-260620-abcd")
+          FileUtils.mkdir_p(task_dir)
+          File.write(File.join(task_dir, "idea.md"), "fieldless\n")
+
+          _out, err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+
+          assert_includes err, "changing default_workflow from coding to content_fixture"
+          assert_includes err, "1-inbox/fieldless-task-260620-abcd"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow")
+        end
+      end
+    end
+  end
+
+  def test_rerun_init_with_workflow_skips_warning_when_tasks_are_pinned
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", "pinned-task-260620-abcd")
+          Hive::TaskMeta.write(task_dir, id: 1, slug: File.basename(task_dir), display_name: nil, workflow: "coding")
+          File.write(File.join(task_dir, "idea.md"), "pinned\n")
+
+          _out, err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+
+          refute_includes err, "will re-resolve"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow")
+        end
       end
     end
   end

@@ -3,6 +3,9 @@ project_name: <%= project_name %>
 default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
+<% unless Hive::WorkflowSelection.coding?(default_workflow) -%>
+default_workflow: <%= default_workflow %>
+<% end -%>
 
 claude:
   # tmux uses your logged-in Claude session in an attachable pane.

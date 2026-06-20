@@ -15,6 +15,7 @@ JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
+NEW_VALUE_OPTIONS = %w[--depends-on --workflow].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
@@ -62,14 +63,28 @@ def new_text_start_index(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
 
-  project_idx = argv.each_index.find do |idx|
-    next false if idx <= cmd_idx
-
+  idx = cmd_idx + 1
+  project_idx = nil
+  while idx < argv.length
     arg = argv[idx]
-    next false if JSON_BOOLEAN_OPTIONS.include?(arg)
-    next false if arg.start_with?("-")
+    if JSON_BOOLEAN_OPTIONS.include?(arg)
+      idx += 1
+      next
+    end
+    if NEW_VALUE_OPTIONS.include?(arg)
+      idx += 2
+      next
+    end
+    if NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+      idx += 1
+      next
+    end
+    unless arg.start_with?("-")
+      project_idx = idx
+      break
+    end
 
-    true
+    idx += 1
   end
   return nil unless project_idx
 

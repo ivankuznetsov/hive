@@ -127,6 +127,53 @@ class HiveCommandsInitTest < Minitest::Test
     assert_nil cmd.send(:write_warn, "hive: warning")
   end
 
+  def test_existing_summary_swallows_epipe
+    cmd = command("/tmp/project")
+    old_stdout = $stdout
+    $stdout = StringIO.new
+    $stdout.define_singleton_method(:puts) { |_line| raise Errno::EPIPE, "closed pipe" }
+    choice = Hive::Commands::Init::WorkflowChoice.new(descriptor: content_workflow, source: :flag)
+
+    assert_nil cmd.send(:write_existing_summary, nil, workflow_choice: choice)
+  ensure
+    $stdout = old_stdout
+  end
+
+  def test_current_default_workflow_falls_back_to_coding_on_unreadable_config
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), "default_workflow: [\n")
+      ops = Struct.new(:hive_state_path).new(state)
+
+      assert_equal "coding", command.send(:current_default_workflow, ops)
+    end
+  end
+
+  def test_write_default_workflow_replaces_and_removes_existing_key
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "---\nproject_name: demo\ndefault_workflow: old\n")
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+      assert_includes File.read(cfg), "default_workflow: content_fixture"
+
+      command.send(:write_default_workflow!, cfg, "coding")
+      refute_includes File.read(cfg), "default_workflow:"
+    end
+  end
+
+  def test_prompt_workflow_reprompts_invalid_index_and_accepts_case_insensitive_name
+    with_registered_workflow(content_workflow) do
+      input = StringIO.new("99\nCONTENT_FIXTURE\n")
+      output = StringIO.new
+      cmd = Hive::Commands::Init.new("/tmp/project", workflow_input: input, workflow_output: output)
+
+      assert_equal :content_fixture, cmd.send(:prompt_workflow).id
+      assert_includes output.string, "unknown workflow \"99\""
+    end
+  end
+
   def test_register_daemon_service_warns_when_installer_reports_failure
     cmd = command
     warnings = []

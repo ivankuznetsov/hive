@@ -21,6 +21,18 @@ class RunApproveTest < Minitest::Test
     Hive::Markers.set(state, marker_name, attrs)
   end
 
+  def seed_research_task(dir, stage_dir: "2-gather", slug: "research-task-260620-abcd", marker: :complete)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: research\n")
+    folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "meta.yml"), "workflow: research\n")
+    state_file = stage_dir.end_with?("gather") ? "notes.md" : "report.md"
+    File.write(File.join(folder, state_file), "# #{slug}\n")
+    write_marker(folder, marker)
+    [ folder, slug ]
+  end
+
   # ── Happy paths ─────────────────────────────────────────────────────────
 
   def test_advances_brainstorm_complete_to_plan
@@ -115,6 +127,41 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_generic_forward_approve_moves_to_descriptor_next_stage
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          gather, slug = seed_research_task(dir)
+          report = File.join(dir, ".hive-state", "stages", "3-report", slug)
+
+          _out, err = capture_io do
+            Hive::Commands::Approve.new(gather, from: "2-gather").call
+          end
+
+          assert File.directory?(report), "task must move into the research descriptor's report stage"
+          refute File.exist?(gather), "old gather folder must be gone"
+          assert_includes err, "next: hive run #{slug}"
+        end
+      end
+    end
+  end
+
+  def test_generic_terminal_approve_raises_final_stage
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          report, = seed_research_task(dir, stage_dir: "3-report")
+
+          _, err, status = with_captured_exit do
+            Hive::Commands::Approve.new(report).call
+          end
+
+          assert_equal Hive::ExitCodes::WRONG_STAGE, status
+          assert_includes err, "task is already at the final stage (3-report)"
+        end
+      end
+    end
+  end
 
   def test_folder_path_target_works_directly
     with_tmp_global_config do

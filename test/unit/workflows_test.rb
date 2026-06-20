@@ -119,8 +119,22 @@ class WorkflowsTest < Minitest::Test
   end
 
   def test_all_stage_dirs_and_names_default_to_registered_descriptors
-    expected_dirs = Hive::Workflows::Registry.all.flat_map(&:stage_dirs).uniq
-    expected_names = Hive::Workflows::Registry.all.flat_map(&:stage_names).uniq
+    # Pinned against literals (not re-derived from the same
+    # Registry.all.flat_map expression the production code uses) so a
+    # co-regression in that derivation can't pass this guard — mirrors how
+    # test_all_terminal_stage_dirs_defaults_to_registered_terminals hardcodes
+    # its expected terminals. The trailing content-workflow run is the portion
+    # most at risk of silent drift.
+    expected_dirs = [
+      "1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr",
+      "6-review", "7-artifacts", "8-finalize", "9-done",
+      "2-research", "3-outline", "4-draft", "5-critique", "6-done"
+    ]
+    expected_names = [
+      "inbox", "brainstorm", "plan", "execute", "open-pr",
+      "review", "artifacts", "finalize", "done",
+      "research", "outline", "draft", "critique"
+    ]
 
     assert_equal expected_dirs, Hive::Workflows.all_stage_dirs
     assert_equal expected_names, Hive::Workflows.all_stage_names

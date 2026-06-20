@@ -112,6 +112,15 @@ module Hive
     # True when a status *row* resolves to the coding workflow. A row that
     # does not respond to `#workflow` (older payloads / test doubles)
     # defaults to coding so legacy consumers keep the coding behavior.
+    #
+    # The workflow selector travels in three row shapes across the codebase,
+    # and new reads should route through these two predicates rather than
+    # reaching for one accessor and risking a silent nil:
+    #   - status builder Hash  → `row[:workflow]`  (use coding_id?)
+    #   - status JSON payload  → `task["workflow"]` (use coding_id?)
+    #   - StatusWatcher::Row   → `row.workflow`    (use coding_row?)
+    # coding_row? is the row-shaped front door (it `respond_to?`-guards the
+    # accessor); coding_id? is the value-shaped one for the Hash/JSON forms.
     def coding_row?(row)
       return true unless row.respond_to?(:workflow)
 

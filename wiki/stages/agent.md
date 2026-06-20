@@ -20,13 +20,18 @@ same commit actions as [[stages/brainstorm]].
 1. Resolve the stage descriptor by `task.stage_name`.
 2. Use `stage.state_file` as the output and marker file.
 3. Build prior context from sorted `*.md` files in the task folder, excluding the
-   stage's own output file. The context is capped at 8000 characters.
+   stage's own output file. The context is capped at 8000 characters. Each file
+   read is rescued individually, so one unreadable/race-deleted artifact degrades
+   to a placeholder rather than aborting the run.
 4. Wrap prior context in a fresh `Hive::Stages::Base.user_supplied_tag` nonce so
    prior artifacts are treated as untrusted input.
 5. Use `stage.skill` through `profile.format_skill_invocation` when present;
    otherwise use the generic "produce the best stage output" instruction.
 6. Spawn via `Hive::Stages::Base.spawn_agent` with `add_dirs: [task.folder]`,
-   `cwd: task.folder`, `status_mode: :state_file_marker`, and the stage profile.
+   `cwd: task.folder`, the descriptor's `status_mode` (falling back to
+   `:state_file_marker` only when unset), a `timeout_sec` defaulting to
+   `DEFAULT_TIMEOUT_SEC` when neither cfg nor descriptor provides one, and the
+   stage profile.
 7. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, otherwise `marker.name.to_s`.
 

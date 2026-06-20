@@ -257,6 +257,12 @@ module Hive
       # RAISES: reject runs forced, so "guess 1-inbox" would silently drag
       # a late-stage task back to the idea pile on a caller bug — the one
       # place a sane-fallback is less safe than failing.
+      #
+      # coding-scoped: web reject/backstage is a coding-only action today.
+      # `Hive::Stages.parse`/`prev_dir`/`DIRS` all read the coding descriptor,
+      # so a generic task's `from` raises "unknown stage" here rather than
+      # being silently mis-routed to a coding gate. Descriptor-driven generic
+      # reject is deferred to U7/U9 alongside the Rails reject button.
       def prior_gate(from)
         return Hive::Stages::DIRS.first if from.nil? || from.to_s.empty?
 

@@ -2393,12 +2393,15 @@ module Hive
         return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
 
+        # coding-scoped (block): the TUI's per-stage outcome panes are coding
+        # presentation work; a generic workflow renders no bespoke pane and
+        # falls through to :silent.
         case row.stage.to_s
-        when "2-brainstorm" # coding-scoped: TUI extra panes are coding presentation work
+        when "2-brainstorm"
           brainstorm_outcome(row, path, changed)
-        when "3-plan" # coding-scoped: TUI extra panes are coding presentation work
+        when "3-plan"
           plan_outcome(row, path, exit_code, changed, content_changed)
-        when "6-review" # coding-scoped: TUI extra panes are coding presentation work
+        when "6-review"
           review_outcome(row, path, checkboxes_changed, content_changed)
         else
           :silent

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hive:schema:status:v4",
   "title": "hive status output (v4)",
-  "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`. v4 includes task PR URLs and adds task dependency fields so daemon consumers can honor blocked rows without re-deriving dependency state.",
+  "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`. v4 includes task PR URLs and adds task dependency fields so daemon consumers can honor blocked rows without re-deriving dependency state. CONSUMER AUDIT (U6): `stage`/`dependency_stage` were relaxed from the closed 9-value coding enum to the `^[0-9]+-...$` pattern so runtime-registered (generic) workflow dirs validate — any consumer that previously relied on the closed enum to whitelist-validate stage dirs now accepts arbitrary `N-name` shapes and must close-default on an unknown dir (see those fields' descriptions).",
   "oneOf": [
     {
       "$ref": "#/$defs/SuccessPayload"

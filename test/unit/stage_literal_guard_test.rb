@@ -1,14 +1,20 @@
 require "test_helper"
 
 class StageLiteralGuardTest < Minitest::Test
-  STAGE_LITERAL = /"\d-(?:inbox|brainstorm|plan|execute|open-pr|review|artifacts|finalize|done)"/
+  # `\d+-` (not `\d-`) so a future renumber past single digits (e.g.
+  # "10-review") cannot smuggle an unguarded stage literal past the net.
+  STAGE_LITERAL = /"\d+-(?:inbox|brainstorm|plan|execute|open-pr|review|artifacts|finalize|done)"/
   ANNOTATION = /#\s*(?:coding-scoped|not-a-stage-ref):\s*\S+/
 
   def test_regex_matches_stage_literals_and_rejects_near_misses
     assert_match STAGE_LITERAL, 'stage = "3-plan"'
     assert_match STAGE_LITERAL, 'stage = "8-finalize"'
+    # Two-digit stage prefixes must be caught too (was silently unguarded
+    # while the prefix was `\d-`).
+    assert_match STAGE_LITERAL, 'stage = "10-review"'
+    assert_match STAGE_LITERAL, 'stage = "23-plan"'
     refute_match STAGE_LITERAL, 'stage = "3-planning"'
-    refute_match STAGE_LITERAL, 'stage = "23-plan"'
+    refute_match STAGE_LITERAL, 'stage = "plan"'
   end
 
   def test_annotation_requires_a_non_empty_reason

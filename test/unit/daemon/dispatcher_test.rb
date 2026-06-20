@@ -247,10 +247,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false)
+          blocked: false, workflow: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
-      project: project, slug: slug, stage: stage, marker: marker,
+      project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
       folder: folder,
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
@@ -3004,6 +3004,13 @@ end
     # Not a brainstorm stage → no Q&A, never pending.
     refute dispatcher.send(:brainstorm_answers_pending?,
                            row(action: "needs_input", stage: "6-review",
+                               state_file: pending, folder: folder))
+    # A NON-coding workflow that reuses the 2-brainstorm dir has no coding
+    # Q&A answer flow → never pending (it must take the generic path, not be
+    # held as answers_pending).
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               workflow: "research",
                                state_file: pending, folder: folder))
     # Not a needs_input row.
     refute dispatcher.send(:brainstorm_answers_pending?,

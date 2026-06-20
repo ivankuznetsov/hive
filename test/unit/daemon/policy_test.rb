@@ -56,6 +56,58 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive run slug-a")
   end
 
+  # ── ready_to_run brake: markerless generic re-dispatch ─────────────────
+
+  def test_ready_to_run_first_sight_dispatches
+    # No prior dispatch (last_dispatched nil): run the generic stage once.
+    assert_equal :dispatch, decide(action: "ready_to_run",
+                                   command: "hive run slug-a",
+                                   state_file_mtime: T0 - 5,
+                                   last_dispatched_state_file_mtime: nil)
+  end
+
+  def test_ready_to_run_markerless_rerun_is_braked_to_skip
+    # A generic agent exited 0 without writing a WAITING/COMPLETE marker, so
+    # the stage re-classifies as ready_to_run. The post-completion mtime
+    # refresh makes the snapshot mtime equal the recorded last-dispatch mtime,
+    # so the brake skips instead of re-dispatching `hive run` every tick (the
+    # bug that would drain the per-project daily cap and then halt dispatch).
+    same_mtime = T0 - 100
+    assert_equal :skip, decide(action: "ready_to_run",
+                               command: "hive run slug-a",
+                               state_file_mtime: same_mtime,
+                               last_dispatched_state_file_mtime: same_mtime)
+  end
+
+  def test_ready_to_run_redispatches_on_new_input_past_debounce
+    # Operator touched the state file after the last dispatch and it settled
+    # past the debounce window → re-run with the fresh input.
+    assert_equal :dispatch, decide(action: "ready_to_run",
+                                   command: "hive run slug-a",
+                                   state_file_mtime: T0 - 60,
+                                   last_dispatched_state_file_mtime: T0 - 600)
+  end
+
+  def test_ready_to_run_new_input_within_debounce_waits
+    assert_equal :wait_for_debounce, decide(action: "ready_to_run",
+                                            command: "hive run slug-a",
+                                            state_file_mtime: T0 - 5,
+                                            last_dispatched_state_file_mtime: T0 - 600)
+  end
+
+  def test_ready_to_run_with_nil_mtime_after_prior_dispatch_skips
+    # Defensive: prior dispatch recorded, but the snapshot has no mtime → can't
+    # prove new input, so don't re-dispatch.
+    assert_equal :skip, decide(action: "ready_to_run",
+                               command: "hive run slug-a",
+                               state_file_mtime: nil,
+                               last_dispatched_state_file_mtime: T0 - 600)
+  end
+
+  def test_ready_to_run_with_nil_command_skips
+    assert_equal :skip, decide(action: "ready_to_run", command: nil)
+  end
+
   def test_coding_policy_decision_matrix_is_characterized
     # U6 characterization: adding generic workflow dispatch keys must leave
     # the existing coding daemon policy outcomes byte-for-byte equivalent.

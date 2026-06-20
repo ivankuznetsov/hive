@@ -389,6 +389,36 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  # The id-backfill path re-writes meta.yml; dropping the workflow arg there
+  # would silently revert a non-coding task to the project default workflow
+  # during migrate (the exact sibling of the depends_on strip above). Seed a
+  # populated workflow selector and assert it survives a full migrate run.
+  def test_migrate_fills_null_id_and_preserves_workflow
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        folder = write_task_folder(stages, "4-execute", "generic-task-260603-aaaa")
+        Hive::TaskMeta.write(
+          folder,
+          id: nil,
+          slug: "generic-task-260603-aaaa",
+          display_name: "Generic Task",
+          workflow: "research"
+        )
+
+        capture_io { migrate_command(dir).call }
+
+        assert_equal(
+          { id: 1, slug: "generic-task-260603-aaaa",
+            display_name: "Generic Task", depends_on: nil, workflow: "research" },
+          Hive::TaskMeta.read(folder),
+          "migrate's id-backfill must preserve the workflow selector, not strip it"
+        )
+      end
+    end
+  end
+
   def test_migrate_backfills_missing_display_names_without_renaming_existing_names
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

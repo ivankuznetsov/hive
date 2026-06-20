@@ -211,6 +211,53 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  def seed_generic_task(dir, ops, stage_dir, slug)
+    folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "meta.yml"), { "slug" => slug, "workflow" => "research" }.to_yaml)
+    File.write(File.join(folder, "notes.md"), "# #{slug}\n<!-- WAITING -->\n")
+    commit_hive_state(ops, stage_dir, slug)
+    folder
+  end
+
+  # U6.4: a generic-workflow task folder lives in a stage dir outside the
+  # coding Hive::Stages::DIRS, so a slug-only `hive drop` that scans only the
+  # coding dirs can't find it. Scanning Workflows.all_stage_dirs makes it
+  # droppable by slug.
+  def test_drop_finds_and_removes_generic_workflow_task_by_slug
+    with_drop_project do |dir, ops, project|
+      with_registered_workflow(research_workflow) do
+        slug = "generic-drop-260620-aaaa"
+        folder = seed_generic_task(dir, ops, "2-gather", slug)
+
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal [ "2-gather" ], payload["from_stages"]
+        refute File.directory?(folder), "generic task folder must be removed by `hive drop <slug>`"
+      end
+    end
+  end
+
+  # U6.4: a generic `--from <stage>` must resolve (the CLI accepts it), not be
+  # rejected as an unknown stage by the coding-only Stages.resolve.
+  def test_drop_accepts_generic_from_stage
+    with_drop_project do |dir, ops, project|
+      with_registered_workflow(research_workflow) do
+        slug = "generic-from-260620-aaaa"
+        folder = seed_generic_task(dir, ops, "2-gather", slug)
+
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, from: "2-gather", json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal [ "2-gather" ], payload["from_stages"]
+        refute File.directory?(folder), "generic --from must resolve and drop the generic task folder"
+      end
+    end
+  end
+
   def test_drop_pid_reuse_guard_refuses_to_signal_recorded_pid
     with_drop_project do |dir, _ops, project|
       slug = "pid-guard-260522-aaaa"

@@ -105,7 +105,8 @@ class TasksController < ApplicationController
     # the page rendered makes the clear a no-op and the retry never fires.
     row = task_row!
     dispatcher.recover(slug: params[:slug], project: @project["name"],
-                       stage: row["stage"], marker: row["marker"], attrs: row["attrs"])
+                       stage: row["stage"], marker: row["marker"], attrs: row["attrs"],
+                       workflow: row["workflow"])
     redirect_to task_path(@project["name"], params[:slug]),
                 notice: "Recovery queued — clearing the error and re-running the stage"
   end

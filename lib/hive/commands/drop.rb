@@ -10,6 +10,7 @@ require "hive/gh"
 require "hive/lock"
 require "hive/process_kill"
 require "hive/stages"
+require "hive/workflows"
 require "hive/worktree"
 
 module Hive
@@ -97,7 +98,7 @@ module Hive
           stage_filter: @stage_filter
         ).resolve
         project_name = project_name_for(task)
-        folders = collect_stage_folders(task.hive_state_path, task.slug, ACTIVE_STAGE_DIRS)
+        folders = collect_stage_folders(task.hive_state_path, task.slug, active_stage_dirs)
         # Mirror resolve_slug_context: if the path target landed on the
         # archive stage (no active folders, but the archive folder exists)
         # surface the archive match so guard_archived! refuses cleanly
@@ -120,7 +121,10 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         matches_by_project = projects.filter_map do |project|
-          stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+          # Scan the union of every registered workflow's stage dirs (not
+          # just the coding `Hive::Stages::DIRS`) so a generic task folder is
+          # findable by slug. Mirrors Hive::TaskResolver#find_slug_across_projects.
+          stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
           folders = collect_stage_folders(project["hive_state_path"], @target, stages)
           next if folders.empty?
 
@@ -179,7 +183,7 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         all_matches = projects.flat_map do |project|
-          collect_stage_folders(project["hive_state_path"], @target, Hive::Stages::DIRS).map do |folder|
+          collect_stage_folders(project["hive_state_path"], @target, Hive::Workflows.all_stage_dirs).map do |folder|
             [ project, folder ]
           end
         end
@@ -208,10 +212,21 @@ module Hive
       def resolve_stage_filter(stage)
         return nil if stage.nil? || stage.to_s.strip.empty?
 
-        Hive::Stages.resolve(stage) ||
-          raise(Hive::InvalidTaskPath,
-                "unknown stage '#{stage}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
-                "or short names #{Hive::Stages::NAMES.join(', ')}")
+        # Resolve a `--from` value against EVERY registered workflow (not
+        # just coding) so a generic `--from <stage>` is accepted, matching
+        # Hive::TaskResolver#resolve_stage_filter. The CLI already accepts
+        # generic stages; rejecting them here made generic tasks undroppable.
+        raw = stage.to_s.strip
+        matches = Hive::Workflows::Registry.all.filter_map { |workflow| workflow.resolve_stage_ref(raw) }.uniq
+        return matches.first if matches.one?
+
+        if matches.size > 1
+          raise Hive::InvalidTaskPath, "ambiguous stage '#{stage}'; matches: #{matches.join(', ')}"
+        end
+
+        raise Hive::InvalidTaskPath,
+              "unknown stage '#{stage}'; valid: #{Hive::Workflows.all_stage_dirs.join(', ')} " \
+              "or short names #{Hive::Workflows.all_stage_names.join(', ')}"
       end
 
       def guard_archived!(context)
@@ -429,9 +444,21 @@ module Hive
       end
 
       def remove_task_folders(context)
-        ACTIVE_STAGE_DIRS.each do |stage|
+        # Remove exactly the stages the task was found in (`from_stages`), not
+        # a fixed coding-only ACTIVE_STAGE_DIRS sweep — otherwise a generic
+        # task whose stage dir isn't in the coding set would be reported
+        # dropped while its folder survived on disk. `from_stages` is the
+        # authoritative found-set (archive copies are already excluded by the
+        # resolver), so this is a no-op for the same coding rows as before.
+        context.from_stages.each do |stage|
           FileUtils.rm_rf(File.join(context.hive_state_path, "stages", stage, context.slug))
         end
+      end
+
+      # Active stage dirs across EVERY registered workflow (coding + generic),
+      # minus the archive stage — the set `hive drop` may hard-delete from.
+      def active_stage_dirs
+        Hive::Workflows.all_stage_dirs.reject { |stage| stage == ARCHIVE_STAGE }
       end
 
       def record_drop_commit!(context)

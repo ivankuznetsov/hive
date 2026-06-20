@@ -205,6 +205,35 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # A non-coding workflow that reuses the `2-brainstorm` dir has no coding
+  # Q&A answer flow, so unanswered_questions must report 0 even if a stray
+  # `### Q{n}.` file is present — the gate keys on the coding workflow, not
+  # just the dir name.
+  def test_json_payload_unanswered_questions_zero_for_generic_brainstorm_dir
+    descriptor = collision_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        slug = "generic-bs-260620-eeee"
+        folder = File.join(hive_state, "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 88, slug: slug, display_name: "Generic BS", workflow: descriptor.id.to_s)
+        File.write(File.join(folder, "brainstorm.md"),
+                   "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+
+        task = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ]).fetch("projects").first.fetch("tasks").find { |t| t.fetch("slug") == slug }
+
+        assert_equal "collision", task.fetch("workflow"), "precondition: generic workflow row"
+        assert_equal "needs_input", task.fetch("action"), "precondition: a WAITING generic stage is needs_input"
+        assert_equal 0, task.fetch("unanswered_questions"),
+                     "a generic 2-brainstorm row must not be counted for coding Q&A"
+      end
+    end
+  end
+
   def test_json_payload_emits_resolved_dependency_state
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

@@ -3,6 +3,7 @@ require "hive/config"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
 require "hive/bot/title_formatter"
+require "hive/workflows"
 
 module Hive
   module Bot
@@ -111,10 +112,7 @@ module Hive
       end
 
       def coding_workflow?(row)
-        return true unless row.respond_to?(:workflow)
-
-        workflow = row.workflow.to_s
-        workflow.empty? || workflow == "coding"
+        Hive::Workflows.coding_row?(row)
       end
 
       def immediate_on_fresh_install?(row)

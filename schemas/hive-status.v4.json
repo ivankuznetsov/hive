@@ -200,6 +200,7 @@
       ],
       "properties": {
         "stage": {
+          "description": "Task stage dir as `N-name`. The pattern is intentionally relaxed from the closed coding enum so runtime-registered (generic) workflow dirs validate; it admits any `N-name` shape, but the producer only emits dirs that pass `validate_workflow_stage!`. The real valid set is the runtime union `Hive::Workflows.all_stage_dirs` — downstream readers must close-default on an unknown stage dir (e.g. `Stages::DIRS.index(stage) || -1`) rather than assume any `N-name` is meaningful input.",
           "type": "string",
           "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
         },
@@ -219,8 +220,11 @@
           ]
         },
         "workflow": {
-          "description": "Workflow descriptor id that resolved this task. Present on rows emitted by status scans; older/synthetic producers may omit it.",
-          "type": "string"
+          "description": "Workflow descriptor id that resolved this task. Present on rows emitted by status scans; older/synthetic producers may omit it. Typed `[string, null]` to match the sibling optional Task strings — the scan producer omits the key when absent rather than emitting null, but a future producer mirroring the sibling idiom may emit null.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "depends_on": {
           "description": "Raw dependency id or slug from task meta.yml, or null when the task has no dependency.",
@@ -237,7 +241,7 @@
           ]
         },
         "dependency_stage": {
-          "description": "Current stage of the resolved prerequisite; null when absent or unresolved.",
+          "description": "Current stage of the resolved prerequisite; null when absent or unresolved. Same relaxed `N-name` pattern as `stage`: it admits any well-formed dir, but the real valid set is the runtime union `Hive::Workflows.all_stage_dirs`, so readers must close-default on an unknown stage dir. (`pattern` is ignored for the null branch.)",
           "type": [
             "string",
             "null"

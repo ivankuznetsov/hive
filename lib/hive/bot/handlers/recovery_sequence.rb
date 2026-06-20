@@ -26,7 +26,7 @@ module Hive
         # refuses with the "open it on a laptop" reply instead of dispatching
         # a retry against a tampered fix.
         def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:,
-                       attrs: nil)
+                       attrs: nil, workflow: nil)
           # `match_attr` is a single `key=value` pair the inline-button
           # path encoded into callback_data because the full row.attrs
           # hash doesn't survive a Telegram callback. Synthesise a
@@ -41,7 +41,7 @@ module Hive
                                     text: manual_only_text(marker, resolved_attrs))
           end
 
-          verb = retry_verb_for_stage(stage)
+          verb = retry_verb_for_stage(stage, workflow: workflow)
           unless verb
             stage_label = stage.to_s.empty? ? "(empty)" : stage
             return result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
@@ -52,7 +52,7 @@ module Hive
             project: project,
             slug: slug,
             commands: retry_commands(project: project, slug: slug, stage: stage,
-                                     marker: marker, match_attr: match_attr),
+                                     marker: marker, match_attr: match_attr, workflow: workflow),
             alert_reset: alert_reset(project, slug, stage, marker, match_attr),
             clear_keyboard: clear_keyboard
           )
@@ -88,12 +88,21 @@ module Hive
           attrs.empty? ? nil : attrs
         end
 
-        def self.retry_verb_for_stage(stage)
-          return nil if stage.to_s == "9-done" # coding-scoped: coding retry verbs have no terminal retry
+        def self.retry_verb_for_stage(stage, workflow: nil)
+          stage = stage.to_s
+          # A non-coding workflow has one universal re-run verb: `hive run`
+          # (the generic stage runner). Routes here when the caller carries
+          # the row's workflow (slash /autofix, web recover). When the
+          # workflow is nil/coding — including the inline-button path, whose
+          # callback_data carries no workflow token — the coding verb table
+          # applies unchanged (an unknown/empty stage still yields nil →
+          # "No retry verb").
+          return "run" unless Hive::Workflows.coding_id?(workflow)
+          return nil if stage == "9-done" # coding-scoped: coding retry verbs have no terminal retry
 
           Hive::Workflows.verb_arriving_at(stage) || {
-            "4-execute" => "develop", # not-a-stage-ref: legacy pre-open-pr retry mapping
-            "5-review" => "review", # not-a-stage-ref: legacy pre-open-pr retry mapping
+            "4-execute" => "develop", # not-a-stage-ref: fallback retry table for legacy/renamed stage dirs
+            "5-review" => "review", # not-a-stage-ref: fallback retry table for legacy/renamed stage dirs
             "6-pr" => "pr"
           }[stage]
         end
@@ -103,8 +112,8 @@ module Hive
         # is outside the clear allowlist (markers.rb#ALLOWED_NAMES) and
         # would exit 4. Both branches intentionally diverge from the
         # pre-U7 clear_and_retry path.
-        def self.retry_commands(project:, slug:, stage:, marker:, match_attr: nil)
-          verb = retry_verb_for_stage(stage)
+        def self.retry_commands(project:, slug:, stage:, marker:, match_attr: nil, workflow: nil)
+          verb = retry_verb_for_stage(stage, workflow: workflow)
           return [] unless verb
 
           commands = []
@@ -116,7 +125,11 @@ module Hive
             clear_argv << "--json"
             commands << clear_argv
           end
-          commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ]
+          # `hive run` (the generic stage runner) scopes by --stage and has no
+          # --from; the coding advance/recovery verbs assert the source stage
+          # with --from.
+          stage_flag = verb == "run" ? "--stage" : "--from"
+          commands << [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
           commands
         end
 

@@ -82,6 +82,31 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  notification.keyboard.first.first[:callback_data])
   end
 
+  def test_generic_ready_to_advance_builds_approve_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_advance", marker: "complete", stage: "2-gather", workflow: "research")
+    )
+
+    refute_nil notification, "a generic ready_to_advance row must produce a Telegram notification"
+    assert_equal "approve:approve:hive:slug-260514-abcd:2-gather",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_generic_ready_to_run_builds_run_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_run", marker: "none", stage: "1-intake", workflow: "research")
+    )
+
+    refute_nil notification, "a generic ready_to_run row must produce a Telegram notification"
+    assert_equal "approve:run:hive:slug-260514-abcd:1-intake",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_verb_for_action_maps_generic_ready_actions
+    assert_equal "approve", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_advance")
+    assert_equal "run", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_run")
+  end
+
   def test_display_title_handles_name_without_id_and_slug_fallback
     named = row(action: "needs_input", marker: "waiting", display_name: "Named Only")
     legacy = row(action: "needs_input", marker: "waiting", slug: "task-260514-abcd")

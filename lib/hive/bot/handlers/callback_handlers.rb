@@ -58,11 +58,15 @@ module Hive
 
         def approve(data)
           _prefix, verb, project, slug, stage = split_callback(data, 5)
+          # `hive run` (the generic-stage agent, from a `ready_to_run` row)
+          # scopes the slug lookup with --stage and has no --from; every
+          # other advance/approve verb asserts the source stage with --from.
+          stage_flag = verb == "run" ? "--stage" : "--from"
           @result_class.new(
             action: :dispatch_then_reply,
             project: project,
             slug: slug,
-            command_argv: [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ]
+            command_argv: [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
           )
         end
 

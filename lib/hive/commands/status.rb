@@ -282,6 +282,9 @@ module Hive
       # bot answer-writer use, so the three never disagree.
       def unanswered_question_count(row)
         return 0 unless row[:action_key] == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        # Only the coding `2-brainstorm` stage drives the `### Q{n}.` answer
+        # flow; a generic workflow reusing the dir has no Q&A to count.
+        return 0 unless Hive::Workflows.coding_id?(row[:workflow])
         return 0 unless row[:stage] == BRAINSTORM_STAGE_DIR
 
         path = row[:state_file]
@@ -525,7 +528,16 @@ module Hive
             begin
               begin
                 task = Hive::Task.new(entry)
-              rescue Hive::InvalidTaskPath
+              rescue Hive::InvalidTaskPath => e
+                # U6 widened this rescue's blast radius: a typo'd
+                # `meta.yml workflow:` or a stage-dir/workflow mismatch now
+                # raises in Task.new, which would silently vanish a real
+                # task from `hive status` (and from the daemon) with zero
+                # diagnostic. Warn on genuine task folders (stray non-slug
+                # dirs stay silent) so a misconfigured workflow is
+                # observable, matching the diff's own warn-then-continue
+                # convention (task_meta.rb, task.rb).
+                warn "hive: status: skipping #{entry}: #{e.message}" if Hive::Stages.task_slug?(slug)
                 next
               end
               marker = Hive::Markers.current(task.state_file)

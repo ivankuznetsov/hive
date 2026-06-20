@@ -19,7 +19,16 @@ module Hive
         "ready_for_review" => "review",
         "ready_to_artifacts" => "artifacts",
         "ready_to_finalize" => "finalize",
-        "ready_to_archive" => "archive"
+        "ready_to_archive" => "archive",
+        # Generic-workflow first-run rows dispatch the generic stage agent
+        # via `hive run`; without this the web dispatcher rejected the new
+        # `ready_to_run` action as unknown (422). `ready_to_advance` is
+        # deliberately NOT mapped here: its verb is `hive approve`, which the
+        # daemon dispatch-request queue's allowlist excludes (approve is
+        # spawned in-process, not queued — see DispatchRequestQueue and the
+        # bot supervisor). Generic advance is driven by the in-process
+        # `#approve` method (the "Approve" button), not this queue path.
+        "ready_to_run" => "run"
       }.freeze
 
       def approve(slug:, project:, from: nil, to: nil, force: false)
@@ -72,7 +81,7 @@ module Hive
       # for the argvs and the manual-only guard, so web and bot recover
       # byte-identically; the TUI has its own subprocess-based clear +
       # `hive run` path with separate gates.
-      def recover(slug:, project:, stage:, marker:, attrs: nil)
+      def recover(slug:, project:, stage:, marker:, attrs: nil, workflow: nil)
         attrs = (attrs || {}).to_h.transform_keys(&:to_s)
         # No failure marker = nothing to recover. RecoverySequence would
         # skip the clear and queue a bare, UNGUARDED stage rerun behind a
@@ -89,7 +98,8 @@ module Hive
 
         match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(RecoveryRow.new(marker, attrs))
         commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-          project: project, slug: slug, stage: stage, marker: marker, match_attr: match_attr
+          project: project, slug: slug, stage: stage, marker: marker, match_attr: match_attr,
+          workflow: workflow
         )
         raise Hive::Error, "no retry verb for stage #{stage.inspect}" if commands.empty?
 
@@ -139,7 +149,10 @@ module Hive
           raise Hive::Error, "unknown dispatch action: #{action.inspect}"
         end
         argv = [ "hive", verb, slug, "--project", project ]
-        argv += [ "--from", stage ] if stage
+        # `hive run` (generic-stage agent, from a `ready_to_run` row) scopes
+        # the slug lookup with --stage and has no --from; every other
+        # advance/approve verb asserts the source stage with --from.
+        argv += [ verb == "run" ? "--stage" : "--from", stage ] if stage
         begin
           request_id = Hive::Bot::DispatchRequestWriter.write!(
             project: project,

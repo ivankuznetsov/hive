@@ -310,7 +310,7 @@ module Hive
     # generic one.
     def coding_workflow?
       workflow = task.respond_to?(:workflow) ? task.workflow : nil
-      workflow.nil? || workflow.id == :coding
+      workflow.nil? || Hive::Workflows.coding_id?(workflow.id)
     end
 
     def generic_action
@@ -321,7 +321,6 @@ module Hive
       return ACTIONS.fetch(:error) unless stage
 
       terminal = stage == task.workflow.stages.last
-      entry = stage == task.workflow.stages.first
 
       case marker.name
       when :complete
@@ -329,15 +328,18 @@ module Hive
       when :waiting
         ACTIONS.fetch(:generic_needs_input)
       when :none
-        # Auto-advance a markerless entry stage only when it is inert (no
-        # agent to run) AND not also terminal. Any non-inert entry kind
-        # (`:agent`, `:marker`, or `nil` — the gate is `stage.kind == :inert`,
-        # which excludes all three) must run rather than be approved past it,
-        # and a degenerate single-stage workflow (entry == terminal) has
-        # nowhere to advance — so both fall through to ready-to-run.
-        inert_advanceable_entry = entry && !terminal && stage.kind == :inert
+        # Auto-advance a markerless inert stage (no agent to run) whenever it
+        # is not also terminal. Any non-inert kind (`:agent`, `:marker`, or
+        # `nil` — the gate is `stage.kind == :inert`, which excludes all
+        # three) must run rather than be approved past it. The entry-only
+        # restriction is intentionally dropped: an inert NON-entry middle
+        # stage would otherwise strand — `Resolver.resolve` raises
+        # `StageError` for `kind: :inert`, so it can neither run nor advance.
+        # A terminal inert stage has nowhere to advance, so it falls through
+        # to ready-to-run (degenerate single-stage / terminal case).
+        inert_advanceable = !terminal && stage.kind == :inert
 
-        inert_advanceable_entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+        inert_advanceable ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end

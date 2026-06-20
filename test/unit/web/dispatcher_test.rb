@@ -323,4 +323,31 @@ Already answered
       assert_equal "develop", develop[:argv][1], "ready_to_develop must map to `develop`"
     end
   end
+
+  def test_dispatch_rejects_ready_to_advance_because_approve_is_not_queue_routable
+    with_tmp_global_config do
+      # `ready_to_advance`'s verb is `hive approve`, which the daemon queue
+      # allowlist excludes (approve is spawned in-process). The web drives
+      # generic advance through the in-process `#approve` method, so the
+      # queue `dispatch` must NOT silently accept it.
+      assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.dispatch(
+          slug: "generic-task", project: "demo", action: "ready_to_advance", stage: "2-gather"
+        )
+      end
+    end
+  end
+
+  def test_dispatch_maps_generic_ready_to_run_to_run_with_stage
+    with_tmp_global_config do
+      # `hive run` has no --from — the web dispatcher must scope it with
+      # --stage, not build an invalid `hive run --from`.
+      result = Hive::Web::Dispatcher.new.dispatch(
+        slug: "generic-task", project: "demo", action: "ready_to_run", stage: "1-intake"
+      )
+
+      assert_equal [ "hive", "run", "generic-task", "--project", "demo", "--stage", "1-intake" ],
+                   result[:argv]
+    end
+  end
 end

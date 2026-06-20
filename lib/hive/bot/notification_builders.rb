@@ -5,6 +5,7 @@ require "hive"
 require "hive/bot/format"
 require "hive/bot/title_formatter"
 require "hive/markers"
+require "hive/workflows"
 
 module Hive
   module Bot
@@ -20,6 +21,8 @@ module Hive
         ready_to_artifacts
         ready_to_finalize
         ready_to_archive
+        ready_to_advance
+        ready_to_run
       ].freeze
 
       INPUT_ACTIONS = %w[
@@ -371,10 +374,7 @@ module Hive
       end
 
       def coding_workflow?(row)
-        return true unless row.respond_to?(:workflow)
-
-        workflow = row.workflow.to_s
-        workflow.empty? || workflow == "coding"
+        Hive::Workflows.coding_row?(row)
       end
 
       def details_callback(row)
@@ -397,7 +397,13 @@ module Hive
           "ready_for_review" => "review",
           "ready_to_artifacts" => "artifacts",
           "ready_to_finalize" => "finalize",
-          "ready_to_archive" => "archive"
+          "ready_to_archive" => "archive",
+          # Generic-workflow ready rows: advance promotes the task to the
+          # next stage (`hive approve`), run dispatches the generic stage
+          # agent (`hive run`). Without these a generic row gets no Telegram
+          # button and a daemon-disabled project can't drive it from chat.
+          "ready_to_advance" => "approve",
+          "ready_to_run" => "run"
         }[action]
       end
 

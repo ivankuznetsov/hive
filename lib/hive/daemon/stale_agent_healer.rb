@@ -4,6 +4,7 @@ require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
+require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 
 module Hive
@@ -349,10 +350,7 @@ module Hive
       end
 
       def coding_workflow?(row)
-        return true unless row.respond_to?(:workflow)
-
-        workflow = row.workflow.to_s
-        workflow.empty? || workflow == "coding"
+        Hive::Workflows.coding_row?(row)
       end
 
       def error_recovery_remediation(row, reason)

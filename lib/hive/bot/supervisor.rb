@@ -1466,10 +1466,7 @@ module Hive
       end
 
       def coding_workflow?(row)
-        return true unless row.respond_to?(:workflow)
-
-        workflow = row.workflow.to_s
-        workflow.empty? || workflow == "coding"
+        Hive::Workflows.coding_row?(row)
       end
 
       def render_details(rows, project, slug)

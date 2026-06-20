@@ -218,12 +218,14 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal "hive run #{SLUG}", middle.command
   end
 
-  # Discriminating coverage for the two non-`entry`-position conjuncts of the
-  # `:none` advance guard `entry && !terminal && stage.kind == :inert`. In
-  # research_workflow the only inert stage is also the entry, so both conjuncts
-  # move together and dropping either keeps the suite green. agent_entry_workflow
-  # separates them: a non-inert (`:agent`) ENTRY and an inert NON-entry middle.
-  def test_generic_markerless_non_inert_entry_and_inert_middle_run_not_advance
+  # Discriminating coverage for the `:none` advance guard
+  # `!terminal && stage.kind == :inert`. U6.6 dropped the earlier `entry &&`
+  # conjunct: an inert NON-entry middle stage must advance, because
+  # `Resolver.resolve` raises `StageError` for `kind: :inert`, so routing it
+  # to `hive run` would strand the task (neither runnable nor advanceable).
+  # agent_entry_workflow separates kind from position: a non-inert (`:agent`)
+  # ENTRY runs; an inert NON-entry middle advances.
+  def test_generic_markerless_non_inert_runs_and_inert_middle_advances
     # `stage.kind == :inert` conjunct: a markerless `:agent` ENTRY must run its
     # agent, not be approved past it. Dropping the kind check would advance here.
     agent_entry = action_for("draft", :none, descriptor: agent_entry_workflow)
@@ -232,13 +234,16 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal "hive run #{SLUG}", agent_entry.command,
                  "a markerless :agent entry must run, not advance"
 
-    # `entry` conjunct: an inert but NON-entry, non-terminal stage must still
-    # run. Dropping the entry check would wrongly advance this inert middle.
+    # An inert, non-entry, non-terminal stage advances rather than stranding:
+    # the resolver has no runner for `kind: :inert`, so `hive run` would leave
+    # the task unable to either run or advance. Routing it to ready_to_advance
+    # (the dropped entry-only restriction) keeps it moving.
     inert_middle = action_for("hold", :none, descriptor: agent_entry_workflow)
-    assert_equal "ready_to_run", inert_middle.key
-    assert_equal "Ready to run", inert_middle.label
-    assert_equal "hive run #{SLUG}", inert_middle.command,
-                 "an inert non-entry stage must run, not advance"
+    assert_equal "ready_to_advance", inert_middle.key
+    assert_equal "Ready to advance", inert_middle.label
+    assert_equal "hive approve #{SLUG} --from 2-hold", inert_middle.command,
+                 "an inert non-entry middle stage must advance, not strand on hive run"
+    assert_equal :dispatch, policy_decision(inert_middle)
   end
 
   def test_generic_entry_stage_waiting_surfaces_run_command

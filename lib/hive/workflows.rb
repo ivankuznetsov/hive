@@ -12,6 +12,11 @@ module Hive
   #
   # Adding or removing a verb follows the default workflow descriptor.
   module Workflows
+    # Descriptor id of the built-in coding workflow. The "nil/blank/coding
+    # ⟹ coding" defaulting rule gates every coding-only daemon/bot branch,
+    # so it lives here once instead of being re-spelled at each consumer.
+    CODING_ID = :coding
+
     # Optional `interactive: true` flag marks verbs that need the user's
     # tty during execution (stdin prompts, interactive `gh pr create`,
     # claude tool-permission asks). The TUI's `BubbleModel#dispatch_command`
@@ -91,6 +96,26 @@ module Hive
 
     def workflow_verb?(verb)
       VERBS.key?(verb)
+    end
+
+    # True when a workflow *value* (a descriptor id as Symbol or String, or
+    # nil/blank from older status payloads / test doubles) denotes the
+    # coding workflow. Single source of truth for the "nil/blank/coding ⟹
+    # coding" rule that several daemon/bot consumers used to re-spell.
+    def coding_id?(value)
+      return true if value.nil?
+
+      string = value.to_s
+      string.empty? || string == CODING_ID.to_s
+    end
+
+    # True when a status *row* resolves to the coding workflow. A row that
+    # does not respond to `#workflow` (older payloads / test doubles)
+    # defaults to coding so legacy consumers keep the coding behavior.
+    def coding_row?(row)
+      return true unless row.respond_to?(:workflow)
+
+      coding_id?(row.workflow)
     end
 
     def all_stage_dirs

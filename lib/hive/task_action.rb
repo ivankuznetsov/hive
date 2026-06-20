@@ -345,13 +345,12 @@ module Hive
         # nowhere to advance — so both fall through to ready-to-run.
         inert_advanceable_entry = entry && !terminal && stage.kind == :inert
 
-        # U5-DEFERRED (plan R3/Q2): the ready-to-run fall-through classifies a
-        # markerless generic stage as `generic_ready_to_run` -> `needs_input`,
+        # U6-DEFERRED (plan R3/Q2): U5 wired generic advance resolution through
+        # descriptor-aware Approve/Run paths. This ready-to-run fall-through is
+        # the separate first-run gap: `generic_ready_to_run` -> `needs_input`,
         # which `Hive::Daemon::Policy` routes through EDIT_RESUME_ACTIONS to a
         # first-sight `:record_baseline`. So a never-run generic stage is NOT
-        # daemon-auto-dispatched until a human edits the state file (unlike
-        # coding's `ready_to_*` auto-dispatch). This is intended, not a bug:
-        # U5 owns wiring up generic auto-dispatch.
+        # daemon-auto-dispatched until a human edits the state file.
         inert_advanceable_entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:generic_ready_to_run)

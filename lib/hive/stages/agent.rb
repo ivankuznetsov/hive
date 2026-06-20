@@ -21,7 +21,7 @@ module Hive
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
         prompt = render_prompt(task, cfg, stage, profile: profile)
 
-        Hive::Stages::Base.spawn_agent(
+        result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
           add_dirs: [ task.folder ],
@@ -37,6 +37,22 @@ module Hive
         )
 
         marker = Hive::Markers.current(output_path)
+        # `spawn_agent` returns a `{status: :error}` envelope WITHOUT writing
+        # a marker on a preflight/version failure (base.rb) — unlike the
+        # coding claude path, which routes through
+        # `spawn_claude_with_tmux_marker!` and stamps an attributed marker.
+        # The generic runner uses bare `spawn_agent` for every profile, so we
+        # must consume that envelope here: otherwise the reread yields `:none`,
+        # `hive run` exits 0, and the row silently re-classifies as
+        # `ready_to_run` forever (NO-SILENT-CAPS). Write an attributed `:error`
+        # marker — but never clobber a marker the agent already wrote.
+        if result.is_a?(Hash) && result[:status] == :error && marker.name == :none
+          marker = Hive::Markers.set(
+            output_path, :error,
+            reason: "agent_preflight_failed",
+            message: result[:error_message].to_s[0, 200]
+          )
+        end
         { commit: action_for(marker.name), status: marker.name }
       end
 

@@ -97,9 +97,12 @@ generic classifier instead:
 
 This keeps coding behavior byte-stable while letting registered non-coding
 workflows surface non-error status rows once a task has resolved to its
-descriptor. The physical folder move for generic stages still depends on the
-later descriptor-aware `approve`/verb work; this branch proves classification
-and daemon decision shape.
+descriptor. Post-U5, `hive approve` and `hive run --json` resolve generic
+advance destinations through the task's descriptor, so a generic
+`ready_to_advance` row moves to its own next stage rather than a coding stage.
+The remaining gap is first-run generic auto-dispatch: markerless non-inert
+generic stages still collapse to `NEEDS_INPUT` on the JSON wire and are routed
+through the daemon edit-baseline path until U6 splits that signal.
 
 ## Marker carve-outs
 

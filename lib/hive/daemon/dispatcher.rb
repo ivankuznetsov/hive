@@ -12,6 +12,7 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/display_name_backfiller"
+require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
@@ -105,6 +106,13 @@ module Hive
         # `hive generate-name <folder>` on later ticks; never touches
         # markers or dispatch.
         @display_name_backfiller = DisplayNameBackfiller.new(
+          logger: @logger,
+          dry_run: @dry_run
+        )
+        # Additive self-heal for tasks created outside `hive new` (hand-made
+        # folder, `mv`-ed in) whose meta.yml has no id. Assigns the next
+        # counter id and commits it; never touches markers or dispatch.
+        @task_id_backfiller = TaskIdBackfiller.new(
           logger: @logger,
           dry_run: @dry_run
         )
@@ -269,6 +277,17 @@ module Hive
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "display_name_backfiller raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
+        # Self-heal tasks created outside `hive new` that never got an id.
+        # Same additive, marker-free, defensively-rescued contract as the
+        # name backfiller above.
+        begin
+          @task_id_backfiller.backfill(result.rows, now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -1726,6 +1745,10 @@ module Hive
         # operator-tunable knob (e.g. max_per_tick) would take effect
         # within one tick; today it carries only the dry_run flag.
         @display_name_backfiller = DisplayNameBackfiller.new(
+          logger: @logger,
+          dry_run: @dry_run
+        )
+        @task_id_backfiller = TaskIdBackfiller.new(
           logger: @logger,
           dry_run: @dry_run
         )

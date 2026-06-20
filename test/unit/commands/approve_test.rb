@@ -3,15 +3,15 @@ require "hive/commands/approve"
 require "fileutils"
 
 class HiveCommandsApproveTest < Minitest::Test
-  FakeTask = Struct.new(:slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root)
+  FakeTask = Struct.new(:slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow)
 
   def command(**kwargs)
     Hive::Commands::Approve.new("slug", **kwargs)
   end
 
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
-           stage_index: 2, stage_name: "brainstorm")
-    FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root)
+           stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
+    FakeTask.new("slug-260522-abcd", stage_index, stage_name, folder, hive_state_path, project_root, workflow)
   end
 
   def failing_status
@@ -58,6 +58,54 @@ class HiveCommandsApproveTest < Minitest::Test
     current = task(stage_index: 3, stage_name: "plan")
 
     assert_equal "same", command.send(:direction_of, current, "3-plan")
+  end
+
+  def test_resolve_destination_uses_task_workflow_sequence
+    current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
+
+    assert_equal "3-report", command.send(:resolve_destination, current)
+  end
+
+  def test_resolve_destination_raises_at_descriptor_terminal_stage
+    current = task(stage_index: 3, stage_name: "report", workflow: research_workflow)
+
+    error = assert_raises(Hive::FinalStageReached) { command.send(:resolve_destination, current) }
+
+    assert_equal "3-report", error.stage
+  end
+
+  def test_resolve_explicit_to_uses_task_workflow_refs
+    current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
+
+    assert_equal "3-report", command(to: "report").send(:resolve_destination, current)
+  end
+
+  def test_resolve_explicit_to_lists_descriptor_stages
+    current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
+
+    error = assert_raises(Hive::InvalidTaskPath) do
+      command(to: "plan").send(:resolve_destination, current)
+    end
+
+    assert_includes error.message, "1-intake, 2-gather, 3-report"
+    assert_includes error.message, "intake, gather, report"
+  end
+
+  def test_validate_from_uses_task_workflow_refs
+    current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
+
+    command(from: "gather").send(:validate_from!, current)
+  end
+
+  def test_validate_from_unknown_stage_lists_descriptor_dirs
+    current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
+
+    error = assert_raises(Hive::InvalidTaskPath) do
+      command(from: "brainstorm").send(:validate_from!, current)
+    end
+
+    assert_includes error.message, "unknown --from stage 'brainstorm'"
+    assert_includes error.message, "1-intake, 2-gather, 3-report"
   end
 
   def test_move_task_uses_cross_device_fallback_on_exdev
@@ -177,17 +225,44 @@ class HiveCommandsApproveTest < Minitest::Test
   end
 
   def test_json_next_action_falls_back_when_new_folder_is_not_a_task
-    action = command.send(:json_next_action, "/tmp/not-a-hive-task", 2)
+    action = command.send(
+      :json_next_action,
+      "/tmp/not-a-hive-task",
+      Hive::Workflows::Registry.default,
+      "2-brainstorm"
+    )
 
     assert_equal Hive::Schemas::NextActionKind::RUN, action.fetch("kind")
     assert_equal "hive run /tmp/not-a-hive-task", action.fetch("command")
   end
 
+  def test_json_next_action_uses_descriptor_terminal_stage
+    action = command.send(:json_next_action, "/tmp/not-used", research_workflow, "3-report")
+
+    assert_equal Hive::Schemas::NextActionKind::NO_OP, action.fetch("kind")
+    assert_equal "final_stage", action.fetch("reason")
+  end
+
   def test_workflow_command_for_falls_back_without_stage_or_arriving_verb
     cmd = command
+    approve_task = task
 
-    assert_equal "hive run slug", cmd.send(:workflow_command_for, "slug", 99)
-    assert_equal "hive run slug", cmd.send(:workflow_command_for, "slug", 1)
+    assert_equal "hive run slug-260522-abcd", cmd.send(:workflow_command_for, approve_task, "99-missing")
+    assert_equal "hive run slug-260522-abcd", cmd.send(:workflow_command_for, approve_task, "1-inbox")
+  end
+
+  def test_workflow_command_for_uses_descriptor_advance_verb
+    current = task(stage_index: 2, stage_name: "brainstorm")
+
+    assert_equal "hive plan slug-260522-abcd --from 3-plan",
+                 command.send(:workflow_command_for, current, "3-plan")
+  end
+
+  def test_workflow_command_for_mv_only_stage_falls_back_to_run
+    current = task(stage_index: 2, stage_name: "gather", workflow: research_workflow)
+
+    assert_equal "hive run slug-260522-abcd",
+                 command.send(:workflow_command_for, current, "3-report")
   end
 
   def test_error_envelope_and_classifier_cover_remaining_error_kinds

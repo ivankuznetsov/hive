@@ -94,7 +94,7 @@ module Hive
         Hive::TaskResolver.new(
           @target,
           project_filter: @project_filter,
-          stage_filter: @from
+          stage_filter: Hive::Stages.resolve(@from)
         ).resolve
       rescue Hive::InvalidTaskPath
         # Preserve --from's idempotency contract: if a retry runs after the
@@ -104,28 +104,28 @@ module Hive
       end
 
       def resolve_destination(task)
-        return resolve_explicit_to(@to) if @to
+        return resolve_explicit_to(task, @to) if @to
 
-        Hive::Stages.next_dir(task.stage_index) ||
+        task.workflow.next_stage_after(task.stage_name)&.dir ||
           raise(Hive::FinalStageReached.new(
                   "task is already at the final stage (#{task.stage_index}-#{task.stage_name})",
                   stage: "#{task.stage_index}-#{task.stage_name}"
                 ))
       end
 
-      def resolve_explicit_to(to)
-        Hive::Stages.resolve(to) ||
+      def resolve_explicit_to(task, to)
+        task.workflow.resolve_stage_ref(to) ||
           raise(Hive::InvalidTaskPath,
-                "unknown stage '#{to}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
-                "or short names #{Hive::Stages::NAMES.join(', ')}")
+                "unknown stage '#{to}'; valid: #{task.workflow.stage_dirs.join(', ')} " \
+                "or short names #{task.workflow.stage_names.join(', ')}")
       end
 
       # ── Validation ──────────────────────────────────────────────────────
 
       def validate_from!(task)
-        expected = Hive::Stages.resolve(@from) ||
+        expected = task.workflow.resolve_stage_ref(@from) ||
                    raise(Hive::InvalidTaskPath,
-                         "unknown --from stage '#{@from}'; valid: #{Hive::Stages::DIRS.join(', ')}")
+                         "unknown --from stage '#{@from}'; valid: #{task.workflow.stage_dirs.join(', ')}")
         actual = "#{task.stage_index}-#{task.stage_name}"
         return if expected == actual
 
@@ -135,8 +135,10 @@ module Hive
       end
 
       def validate_move!(task, dest_stage, marker)
-        dest_idx, = Hive::Stages.parse(dest_stage)
-        return if dest_idx <= task.stage_index || @force
+        dest = task.workflow.stage_for_dir(dest_stage) ||
+               raise(Hive::InvalidTaskPath,
+                     "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
+        return if dest.index <= task.stage_index || @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
         valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")
@@ -146,14 +148,16 @@ module Hive
       end
 
       def same_stage?(task, dest_stage)
-        dest_idx, dest_name = Hive::Stages.parse(dest_stage)
-        dest_idx == task.stage_index && dest_name == task.stage_name
+        dest = task.workflow.stage_for_dir(dest_stage)
+        dest && dest.index == task.stage_index && dest.name == task.stage_name
       end
 
       def direction_of(task, dest_stage)
-        dest_idx, = Hive::Stages.parse(dest_stage)
-        return "forward" if dest_idx > task.stage_index
-        return "backward" if dest_idx < task.stage_index
+        dest = task.workflow.stage_for_dir(dest_stage) ||
+               raise(Hive::InvalidTaskPath,
+                     "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
+        return "forward" if dest.index > task.stage_index
+        return "backward" if dest.index < task.stage_index
 
         "same"
       end
@@ -334,7 +338,6 @@ module Hive
       def emit_success(task, dest_stage, new_folder, marker, commit_action, direction)
         return if @quiet
 
-        dest_idx, = Hive::Stages.parse(dest_stage)
         if @json
           puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
         else
@@ -343,12 +346,14 @@ module Hive
           puts "  to:   #{new_folder}"
           # Hint goes to stderr so a `| jq` consumer doesn't get prose mixed
           # with data when the user forgot --json.
-          warn "next: #{workflow_command_for(task.slug, dest_idx)}"
+          warn "next: #{workflow_command_for(task, dest_stage)}"
         end
       end
 
       def success_payload(task, dest_stage, new_folder, marker, commit_action, direction, noop: false)
-        dest_idx, dest_name = Hive::Stages.parse(dest_stage)
+        dest = task.workflow.stage_for_dir(dest_stage) ||
+               raise(Hive::InvalidTaskPath,
+                     "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
         payload = {
           "schema" => "hive-approve",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-approve"),
@@ -358,8 +363,8 @@ module Hive
           "from_stage" => task.stage_name,
           "from_stage_index" => task.stage_index,
           "from_stage_dir" => "#{task.stage_index}-#{task.stage_name}",
-          "to_stage" => dest_name,
-          "to_stage_index" => dest_idx,
+          "to_stage" => dest.name,
+          "to_stage_index" => dest.index,
           "to_stage_dir" => dest_stage,
           "direction" => direction,
           "forced" => @force,
@@ -367,17 +372,18 @@ module Hive
           "to_folder" => new_folder,
           "from_marker" => marker ? marker.name.to_s : nil,
           "commit_action" => commit_action,
-          "next_action" => json_next_action(new_folder, dest_idx)
+          "next_action" => json_next_action(new_folder, task.workflow, dest_stage)
         }
         payload
       end
 
-      def json_next_action(new_folder, dest_idx)
+      def json_next_action(new_folder, workflow, dest_stage)
         kind = Hive::Schemas::NextActionKind
         # No verb advances out of the final stage; signal completion to
         # the agent so a retry-loop terminates instead of running
         # `hive archive` (which would no-op anyway after this round).
-        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless Hive::Stages.next_dir(dest_idx)
+        dest = workflow.stage_for_dir(dest_stage)
+        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless dest && workflow.next_stage_after(dest.name)
 
         task = Hive::Task.new(new_folder)
         marker = Hive::Markers.current(task.state_file)
@@ -387,18 +393,15 @@ module Hive
         { "kind" => kind::RUN, "folder" => new_folder, "command" => "hive run #{new_folder}" }
       end
 
-      def workflow_command_for(slug, stage_index)
-        # After advancing INTO `stage_index`, the next user-facing
-        # command is "run the stage's agent" — i.e. the verb whose
-        # target is this stage. `hive plan <slug> --from 3-plan` after
-        # arriving at 3-plan hits StageAction's at-target branch and
-        # runs the plan agent (rather than emitting a verb that would
-        # try to advance OUT and refuse on a non-terminal marker).
-        stage_dir = Hive::Stages::DIRS[stage_index - 1]
-        return "hive run #{slug}" unless stage_dir
+      def workflow_command_for(task, stage_dir)
+        # After advancing INTO `stage_dir`, the next command is "run that
+        # stage" using the descriptor's incoming verb when it has one. A nil
+        # advance_verb is mv-only, so fall back to `hive run`.
+        stage = task.workflow.stage_for_dir(stage_dir)
+        return "hive run #{task.slug}" unless stage
 
-        verb = Hive::Workflows.verb_arriving_at(stage_dir)
-        verb ? "hive #{verb} #{slug} --from #{stage_dir}" : "hive run #{slug}"
+        verb = task.workflow.advance_verb_for(stage.name)
+        verb ? "hive #{verb} #{task.slug} --from #{stage.dir}" : "hive run #{task.slug}"
       end
 
       def emit_error_envelope(error)

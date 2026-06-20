@@ -39,19 +39,21 @@ module Hive
       empty
     end
 
-    def write(task_folder, id:, slug:, display_name:, depends_on: nil)
+    def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
+      normalized_workflow = normalize_string(workflow)
       data = {
         "id" => normalize_id(id),
         "slug" => normalize_string(slug),
         "display_name" => normalize_string(display_name)
       }
       data["depends_on"] = normalized_depends_on if normalized_depends_on
+      data["workflow"] = normalized_workflow if normalized_workflow
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
-      data.transform_keys(&:to_sym).merge(depends_on: normalized_depends_on)
+      data.transform_keys(&:to_sym).merge(depends_on: normalized_depends_on, workflow: normalized_workflow)
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
@@ -64,7 +66,8 @@ module Hive
         id: current[:id],
         slug: slug,
         display_name: name,
-        depends_on: current[:depends_on]
+        depends_on: current[:depends_on],
+        workflow: current[:workflow]
       )
     end
 

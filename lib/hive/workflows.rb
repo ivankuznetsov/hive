@@ -92,5 +92,13 @@ module Hive
     def workflow_verb?(verb)
       VERBS.key?(verb)
     end
+
+    def all_stage_dirs
+      Registry.all.flat_map(&:stage_dirs).uniq.freeze
+    end
+
+    def all_stage_names
+      Registry.all.flat_map(&:stage_names).uniq.freeze
+    end
   end
 end

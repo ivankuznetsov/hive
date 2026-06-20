@@ -23,6 +23,14 @@ module Hive
       def default
         fetch(:coding)
       end
+
+      def all
+        WORKFLOWS.values
+      end
+
+      def ids
+        WORKFLOWS.keys
+      end
     end
   end
 end

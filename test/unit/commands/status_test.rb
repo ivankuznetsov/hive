@@ -78,6 +78,22 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_emits_workflow_id_for_scanned_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "4-execute", "coding-task-260618-abcd", marker: "EXECUTE_COMPLETE", age_days: 0)
+
+      payload = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ])
+      task = payload.fetch("projects").first.fetch("tasks").find do |candidate|
+        candidate.fetch("slug") == "coding-task-260618-abcd"
+      end
+
+      assert_equal "coding", task.fetch("workflow")
+    end
+  end
+
   def test_json_payload_populates_pr_url_from_pr_md_frontmatter_in_review_stage
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

@@ -227,7 +227,7 @@ module Hive
       end
 
       def task_payload(row)
-        {
+        payload = {
           "stage" => row[:stage],
           "slug" => row[:slug],
           "id" => row[:id],
@@ -268,6 +268,8 @@ module Hive
           "next_action" => row[:next_action],
           "diagnostic" => row[:diagnostic]
         }
+        payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        payload
       end
 
       # Number of unanswered `### Q{n}.` slots in a brainstorm task's
@@ -547,6 +549,7 @@ module Hive
                 slug: slug,
                 id: task.id,
                 display_name: task.display_name,
+                workflow: task.workflow.id,
                 depends_on: task.depends_on,
                 folder: entry,
                 state_file: task.state_file,

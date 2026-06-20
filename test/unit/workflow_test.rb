@@ -119,6 +119,18 @@ class WorkflowTest < Minitest::Test
     assert_nil coding.resolve_stage_ref("nope")
   end
 
+  def test_has_stage_accepts_full_dir_and_short_name
+    coding = Hive::Workflows::Registry.default
+    research = research_workflow
+
+    assert coding.has_stage?("3-plan")
+    assert coding.has_stage?("plan")
+    assert research.has_stage?("2-gather")
+    assert research.has_stage?("gather")
+    refute coding.has_stage?("2-gather")
+    refute research.has_stage?("3-plan")
+  end
+
   def test_state_file_for_returns_stage_state_file
     workflow = Hive::Workflows::Registry.default
 

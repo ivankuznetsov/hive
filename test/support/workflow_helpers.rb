@@ -59,13 +59,60 @@ module HiveWorkflowTestHelper
     )
   end
 
+  def dispatch_workflow
+    Hive::Workflow.new(
+      id: :dispatch,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "intake",
+          index: 1,
+          state_file: "intake.md",
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "gather",
+          index: 2,
+          state_file: "gather.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "gather"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "report",
+          index: 3,
+          state_file: "report.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "report"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        )
+      ]
+    )
+  end
+
   def with_registered_workflow(descriptor)
     original_fetch = Hive::Workflows::Registry.method(:fetch)
+    original_all = Hive::Workflows::Registry.method(:all)
+    original_ids = Hive::Workflows::Registry.method(:ids)
     Hive::Workflows::Registry.define_singleton_method(:fetch) do |id|
       id == descriptor.id ? descriptor : original_fetch.call(id)
+    end
+    Hive::Workflows::Registry.define_singleton_method(:all) do
+      (original_all.call + [ descriptor ]).uniq(&:id)
+    end
+    Hive::Workflows::Registry.define_singleton_method(:ids) do
+      (original_ids.call + [ descriptor.id ]).uniq
     end
     yield
   ensure
     Hive::Workflows::Registry.define_singleton_method(:fetch, original_fetch) if original_fetch
+    Hive::Workflows::Registry.define_singleton_method(:all, original_all) if original_all
+    Hive::Workflows::Registry.define_singleton_method(:ids, original_ids) if original_ids
   end
 end

@@ -16,4 +16,21 @@ class WorkflowsRegistryTest < Minitest::Test
     assert_includes error.message, ":nope"
     assert_includes error.message, ":coding"
   end
+
+  def test_all_and_ids_expose_registered_workflows
+    assert_equal [ Hive::Workflows::Registry.default ], Hive::Workflows::Registry.all
+    assert_equal [ :coding ], Hive::Workflows::Registry.ids
+  end
+
+  def test_registered_test_workflow_is_visible_to_enumeration
+    descriptor = research_workflow
+
+    with_registered_workflow(descriptor) do
+      assert_same descriptor, Hive::Workflows::Registry.fetch(:research)
+      assert_includes Hive::Workflows::Registry.all, descriptor
+      assert_includes Hive::Workflows::Registry.ids, :research
+    end
+
+    refute_includes Hive::Workflows::Registry.ids, :research
+  end
 end

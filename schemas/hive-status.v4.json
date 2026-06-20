@@ -228,6 +228,10 @@
             "null"
           ]
         },
+        "workflow": {
+          "description": "Workflow descriptor id that resolved this task. Present on rows emitted by status scans; older/synthetic producers may omit it.",
+          "type": "string"
+        },
         "depends_on": {
           "description": "Raw dependency id or slug from task meta.yml, or null when the task has no dependency.",
           "type": [

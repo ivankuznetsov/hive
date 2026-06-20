@@ -27,6 +27,18 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_write_and_read_round_trip_with_workflow
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", workflow: "research")
+
+      assert_equal(
+        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: "research" },
+        Hive::TaskMeta.read(dir)
+      )
+      assert_includes File.read(File.join(dir, "meta.yml")), "workflow: research"
+    end
+  end
+
   def test_read_surfaces_workflow_selector
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "workflow: research\n")
@@ -108,12 +120,25 @@ class TaskMetaTest < Minitest::Test
 
   def test_update_display_name_preserves_id_slug_and_dependency
     with_tmp_dir do |dir|
-      Hive::TaskMeta.write(dir, id: 7, slug: "keep-slug", display_name: nil, depends_on: "base-task")
+      Hive::TaskMeta.write(
+        dir,
+        id: 7,
+        slug: "keep-slug",
+        display_name: nil,
+        depends_on: "base-task",
+        workflow: "research"
+      )
 
       Hive::TaskMeta.update_display_name(dir, "Readable Name")
 
       assert_equal(
-        { id: 7, slug: "keep-slug", display_name: "Readable Name", depends_on: "base-task", workflow: nil },
+        {
+          id: 7,
+          slug: "keep-slug",
+          display_name: "Readable Name",
+          depends_on: "base-task",
+          workflow: "research"
+        },
         Hive::TaskMeta.read(dir)
       )
     end

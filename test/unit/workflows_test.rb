@@ -117,4 +117,18 @@ class WorkflowsTest < Minitest::Test
     assert_equal "5-open-pr", cfg[:source]
     assert_equal "6-review", cfg[:target]
   end
+
+  def test_all_stage_dirs_and_names_default_to_coding_descriptor
+    assert_equal Hive::Workflows::Registry.default.stage_dirs, Hive::Workflows.all_stage_dirs
+    assert_equal Hive::Workflows::Registry.default.stage_names, Hive::Workflows.all_stage_names
+  end
+
+  def test_all_stage_dirs_and_names_include_registered_workflows
+    with_registered_workflow(research_workflow) do
+      assert_includes Hive::Workflows.all_stage_dirs, "2-gather"
+      assert_includes Hive::Workflows.all_stage_names, "gather"
+      assert_includes Hive::Workflows.all_stage_dirs, "3-plan"
+      assert_includes Hive::Workflows.all_stage_names, "plan"
+    end
+  end
 end

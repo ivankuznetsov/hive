@@ -59,6 +59,10 @@ module Hive
       (stage_for_dir(ref) || stage_named(ref))&.dir
     end
 
+    def has_stage?(ref)
+      !resolve_stage_ref(ref).nil?
+    end
+
     # Hard resolve: raises KeyError on an unknown name — used where a missing
     # stage is a programmer error, not a recoverable condition.
     def state_file_for(name)

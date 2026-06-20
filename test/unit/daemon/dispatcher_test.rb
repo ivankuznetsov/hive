@@ -3209,6 +3209,57 @@ end
     assert_includes fatal[1][:message], "backfiller boom"
   end
 
+  # Wiring check: a tick must drive the task-id backfiller over the status
+  # rows. We swap in a backfiller with a fake allocate/commit so no real
+  # counter or git commit happens, and assert the missing-id row gets an id
+  # and a task_id_backfill event without disturbing the rest of the tick.
+  def test_tick_invokes_task_id_backfiller
+    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
+    Hive::TaskMeta.write(folder, id: nil, slug: "s1", display_name: "Name")
+    rows = [ row(action: "working", marker: "agent_working", command: nil,
+                 folder: folder, claude_pid_alive: true) ]
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
+
+    backfiller = Hive::Daemon::TaskIdBackfiller.new(
+      logger: dispatcher.instance_variable_get(:@logger),
+      dry_run: false,
+      allocate: -> { 999 },
+      commit: ->(_row) { true }
+    )
+    dispatcher.instance_variable_set(:@task_id_backfiller, backfiller)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 999, Hive::TaskMeta.read(folder)[:id],
+                 "tick must drive the backfiller to assign an id to the id-less task"
+    assert events_include?(logger, :task_id_backfill),
+           "tick must emit a task_id_backfill event"
+    refute events_include?(logger, :fatal),
+           "backfiller wiring must not crash the tick"
+  end
+
+  # A task-id backfiller that raises must be caught by the tick's defensive
+  # rescue so a backfiller bug can't crash the tick (and trip the unit's
+  # restart-loop cap). The error is surfaced as :fatal.
+  def test_tick_survives_task_id_backfiller_raising
+    folder = make_existing_row_folder(project: "p1", stage: "4-execute", slug: "s1")
+    rows = [ row(action: "working", marker: "agent_working", command: nil,
+                 folder: folder, claude_pid_alive: true) ]
+    dispatcher, _sup, _ctrl, logger = make_dispatcher(rows: rows)
+
+    exploding = Object.new
+    def exploding.backfill(*); raise "id backfiller boom"; end
+    dispatcher.instance_variable_set(:@task_id_backfiller, exploding)
+
+    dispatcher.tick(now: T0)
+
+    fatal = logger.events.find do |(n, a)|
+      n == :fatal && a[:message].to_s.include?("task_id_backfiller raised")
+    end
+    refute_nil fatal, "a raising id backfiller must be caught and logged as :fatal"
+    assert_includes fatal[1][:message], "id backfiller boom"
+  end
+
   private
 
   def events_include?(logger, name)

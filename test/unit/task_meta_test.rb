@@ -143,4 +143,34 @@ class TaskMetaTest < Minitest::Test
       )
     end
   end
+
+  def test_update_id_preserves_slug_display_name_and_dependency
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(dir, id: nil, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task")
+
+      Hive::TaskMeta.update_id(dir, 42)
+
+      assert_equal(
+        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task" },
+        Hive::TaskMeta.read(dir)
+      )
+    end
+  end
+
+  # update_id manufactures a slug from the folder basename when the meta has
+  # none — pin that surprising side effect so a refactor can't drop it silently.
+  def test_update_id_falls_back_to_basename_slug_when_meta_has_no_slug
+    with_tmp_dir do |parent|
+      dir = File.join(parent, "derived-slug-folder")
+      FileUtils.mkdir_p(dir)
+      Hive::TaskMeta.write(dir, id: nil, slug: nil, display_name: nil)
+
+      Hive::TaskMeta.update_id(dir, 5)
+
+      meta = Hive::TaskMeta.read(dir)
+      assert_equal 5, meta[:id]
+      assert_equal "derived-slug-folder", meta[:slug],
+                   "a missing slug must fall back to the folder basename"
+    end
+  end
 end

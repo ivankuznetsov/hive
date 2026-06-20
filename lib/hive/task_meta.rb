@@ -71,6 +71,21 @@ module Hive
       )
     end
 
+    # Set the task id while preserving every other meta field. Used by the
+    # daemon's id backfiller to assign an id to a task created outside
+    # `hive new` (hand-made folder, `mv`-ed in) whose meta has none.
+    def update_id(task_folder, id)
+      current = read(task_folder)
+      slug = current[:slug] || File.basename(task_folder)
+      write(
+        task_folder,
+        id: id,
+        slug: slug,
+        display_name: current[:display_name],
+        depends_on: current[:depends_on]
+      )
+    end
+
     def empty
       { id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }
     end

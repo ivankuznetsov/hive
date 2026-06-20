@@ -35,13 +35,20 @@ module Hive
     # opt in with one line — without re-introducing foreground
     # takeover for everything.
     stages = Hive::Workflows::Registry.default.stages
-    VERBS = stages.each_with_index.each_with_object({}) do |(stage, index), verbs|
-      advance_verb = stage.advance_verb
+    # each_cons(2) walks adjacent [source, target] pairs so a verb's `source`
+    # is always the stage that PRECEDES its target — expressed directly instead
+    # of via `fetch(index - 1)`, whose negative index at index 0 would wrap a
+    # first-stage advance_verb to the terminal stage. The descriptor's first
+    # stage never carries an advance_verb (enforced by Workflow's
+    # construction-time validation), so starting the pairing at the second
+    # stage drops no verb.
+    VERBS = stages.each_cons(2).each_with_object({}) do |(source, target), verbs|
+      advance_verb = target.advance_verb
       next unless advance_verb
 
       entry = {
-        source: stages.fetch(index - 1).dir,
-        target: stage.dir
+        source: source.dir,
+        target: target.dir
       }
       entry[:force_source] = true if advance_verb.force_source
       entry[:interactive] = true if advance_verb.interactive

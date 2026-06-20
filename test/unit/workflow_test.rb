@@ -171,6 +171,64 @@ class WorkflowTest < Minitest::Test
     assert_nil single_stage_workflow.next_stage_after("only")
   end
 
+  def test_workflow_rejects_empty_stage_list
+    error = assert_raises(ArgumentError) { Hive::Workflow.new(id: :empty, stages: []) }
+    assert_match(/at least one stage/, error.message)
+  end
+
+  def test_workflow_rejects_gapped_or_unordered_indices
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :gapped,
+        stages: [
+          Hive::Workflow::Stage.new(name: "a", index: 1, state_file: "a.md", kind: :inert),
+          Hive::Workflow::Stage.new(name: "b", index: 3, state_file: "b.md", kind: :agent)
+        ]
+      )
+    end
+    assert_match(/stage indices must be \[1, 2\]/, error.message)
+  end
+
+  def test_workflow_rejects_duplicate_stage_names
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :dupes,
+        stages: [
+          Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "a.md", kind: :inert),
+          Hive::Workflow::Stage.new(name: "draft", index: 2, state_file: "b.md", kind: :agent)
+        ]
+      )
+    end
+    assert_match(/duplicate stage names/, error.message)
+  end
+
+  def test_workflow_rejects_unknown_stage_kind
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :badkind,
+        stages: [
+          Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "a.md", kind: :agnet)
+        ]
+      )
+    end
+    assert_match(/unknown kind :agnet/, error.message)
+  end
+
+  def test_workflow_rejects_first_stage_advance_verb
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(
+        id: :badfirst,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "draft", index: 1, state_file: "a.md", kind: :agent,
+            advance_verb: Hive::Workflow::AdvanceVerb.new(name: "draft")
+          )
+        ]
+      )
+    end
+    assert_match(/first stage "draft" must not declare an advance_verb/, error.message)
+  end
+
   def test_value_objects_are_immutable_and_copyable
     stage = Hive::Workflow::Stage.new(
       name: "brainstorm",

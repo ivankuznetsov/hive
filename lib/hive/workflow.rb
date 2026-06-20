@@ -5,6 +5,7 @@ module Hive
       # caller, safe only because Stage is itself frozen. Don't add a mutable
       # field to Stage on the assumption this dup deep-copies — it does not.
       super(id: id, stages: stages.dup.freeze)
+      validate_structure!
     end
   end
 
@@ -12,6 +13,59 @@ module Hive
   # class body so they resolve as Workflow::Stage — they can't be declared inside
   # the Data.define block above.
   class Workflow
+    # Behaviorally significant stage kinds: `:agent` selects the agent runner,
+    # `:inert` auto-advances with no runner, `:marker` is a coding marker-gated
+    # stage, and `nil` is the unspecified default. A typo'd kind
+    # (`Stage.new(kind: :agnet)`) would otherwise construct cleanly and only
+    # strand the task at run time (Resolver raises StageError); the
+    # construction-time check below turns it into a load-time error.
+    KNOWN_KINDS = [ nil, :agent, :inert, :marker ].freeze
+
+    # Structural invariants every "ordered, unique pipeline" consumer
+    # (next_stage_after, the VERBS derivation, validate_workflow_stage!)
+    # silently assumes but never enforces on its own. Checking them once at
+    # construction converts five runtime-stranding modes — empty stage list,
+    # gapped/unordered indices, duplicate names or dirs, an unknown kind, and a
+    # first stage that carries an advance_verb — into a single load-time
+    # ArgumentError at the descriptor that introduced the typo, instead of a
+    # mis-route far from the cause. Valid descriptors (coding + every test
+    # fixture) satisfy it with no behavior change.
+    def validate_structure!
+      raise ArgumentError, "workflow #{id.inspect} must declare at least one stage" if stages.empty?
+
+      indices = stages.map(&:index)
+      expected = (1..stages.length).to_a
+      unless indices == expected
+        raise ArgumentError,
+              "workflow #{id.inspect} stage indices must be #{expected.inspect} in order, got #{indices.inspect}"
+      end
+
+      names = stages.map(&:name)
+      unless names.uniq.length == names.length
+        raise ArgumentError, "workflow #{id.inspect} has duplicate stage names: #{names.inspect}"
+      end
+
+      dirs = stages.map(&:dir)
+      unless dirs.uniq.length == dirs.length
+        raise ArgumentError, "workflow #{id.inspect} has duplicate stage dirs: #{dirs.inspect}"
+      end
+
+      stages.each do |stage|
+        next if KNOWN_KINDS.include?(stage.kind)
+
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} has unknown kind #{stage.kind.inspect} " \
+              "(known: #{KNOWN_KINDS.map(&:inspect).join(', ')})"
+      end
+
+      return if stages.first.advance_verb.nil?
+
+      raise ArgumentError,
+            "workflow #{id.inspect} first stage #{stages.first.name.inspect} must not declare an advance_verb " \
+            "(no stage precedes it to advance from)"
+    end
+    private :validate_structure!
+
     # Soft lookup: returns the Stage or nil so callers can decide how to handle
     # an unknown name (Task#validate_workflow_stage! raises its own message).
     def stage_named(name)
@@ -25,12 +79,15 @@ module Hive
     # Soft lookup: returns nil for BOTH the terminal stage (no successor) and an
     # unknown name. Callers can't distinguish the two from the return value — a
     # typo'd `name` collapses into the same "no next stage" signal as the real
-    # final stage (e.g. resolve_destination attributes it to FinalStageReached).
-    # The only current caller (Approve#resolve_destination) passes a
-    # `Task#validate_workflow_stage!`-validated `task.stage_name`, so the
-    # unknown-name arm is unreachable on every live path today — the
-    # mis-reported FinalStageReached can only surface if a future caller feeds
-    # an unvalidated name.
+    # final stage. The terminal-nil is handled differently per caller:
+    # Approve#resolve_destination raises FinalStageReached, while Run#next_stage_dir
+    # and New#call fall back to a `hive run` hint, and Approve#json_next_action
+    # emits a NO_OP/final_stage signal. All four callers (approve.rb
+    # resolve_destination + json_next_action, run.rb next_stage_dir, new.rb call)
+    # pass a `Task#validate_workflow_stage!`-validated `task.stage_name` or the
+    # descriptor's own `entry_stage.name`, so the unknown-name arm is unreachable
+    # on every live path today — it can only surface if a future caller feeds an
+    # unvalidated name.
     def next_stage_after(name)
       index = stages.index { |stage| stage.name == name }
       index && stages[index + 1]

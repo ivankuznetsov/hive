@@ -228,6 +228,26 @@ def env_set?(name)
   !ENV.fetch(name, "").empty?
 end
 
+def resolve_real_git(real, search_path)
+  # A path-qualified value (absolute or relative) is execed verbatim; only a bare command
+  # name needs resolving. Resolve it here, against the *inherited* PATH, so the absolute
+  # path can be execed after the PATH pin below — otherwise `exec "git"` would resolve only
+  # against /usr/bin:/bin and fail on Nix/custom installs where git lives elsewhere. This
+  # adds no attack surface: the real-git binary is selected by the trusted env var, not by
+  # PATH, and the pin still guards git's own internal PATH-based helper resolution.
+  return real if real.include?("/")
+
+  search_path.split(File::PATH_SEPARATOR).each do |dir|
+    next if dir.empty?
+
+    candidate = File.join(dir, real)
+    return candidate if File.file?(candidate) && File.executable?(candidate)
+  end
+  # Unresolved: fall through with the bare name so the exec-failure handler emits a clear
+  # exit-127 diagnostic instead of us guessing a path.
+  real
+end
+
 def read_only_remote?(rest)
   args = rest[1..] || []
   args.shift while [ "-v", "--verbose" ].include?(args.first)
@@ -361,6 +381,11 @@ ENV["GIT_OPTIONAL_LOCKS"] = "0"
 # resolves via PATH). Pin PATH to root-owned system dirs so every PATH lookup git makes
 # resolves from a location an unprivileged agent cannot write. `/usr/local/bin` is omitted on
 # purpose: it is user-writable under Homebrew, which would reopen the same poisoning vector.
+#
+# Resolve a bare `real` against the inherited PATH *before* the pin, so a command-name override
+# (e.g. the test helper's "git") still execs the parent-resolved binary instead of being forced
+# through /usr/bin:/bin.
+real = resolve_real_git(real, ENV["PATH"].to_s)
 ENV["PATH"] = "/usr/bin:/bin"
 
 begin

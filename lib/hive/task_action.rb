@@ -354,7 +354,7 @@ module Hive
         # scans only the coding `Hive::Stages::DIRS` so generic rows never reach
         # the daemon, and `TaskResolver` can't find a generic-only-dir task by
         # bare slug. See wiki/gaps.md ("Generic workflow advance-dispatch is
-        # U6-gated"). The separate first-run gap here is `generic_ready_to_run`
+        # U6-gated end-to-end"). The separate first-run gap here is `generic_ready_to_run`
         # -> `needs_input`, which `Hive::Daemon::Policy` routes through
         # EDIT_RESUME_ACTIONS to a first-sight `:record_baseline`, so a never-run
         # generic stage is NOT daemon-auto-dispatched until a human edits the

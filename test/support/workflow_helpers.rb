@@ -2,6 +2,10 @@ require "hive/workflow"
 require "hive/workflows/registry"
 
 module HiveWorkflowTestHelper
+  # Resolution-only fixture: stages carry just name/index/state_file/kind so
+  # tests can exercise descriptor resolution and stage-state lookup. Dispatch-time
+  # fields (advance_verb, status_mode, budget_usd, timeout_sec) are intentionally
+  # nil — do not reuse this for dispatch/budget/timeout behavior without filling them.
   def research_workflow
     Hive::Workflow.new(
       id: :research,

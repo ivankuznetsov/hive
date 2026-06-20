@@ -18,6 +18,28 @@ module Hive
       stages.find { |stage| stage.name == name }
     end
 
+    # Descriptor-scoped sequence lookup. Verb/sequence resolution is
+    # data-driven from the workflow descriptor; the coding-only TaskAction
+    # action map remains a separate bespoke gate.
+    def next_stage_after(name)
+      index = stages.index { |stage| stage.name == name }
+      index && stages[index + 1]
+    end
+
+    def advance_verb_for(name)
+      stage_named(name)&.advance_verb&.name
+    end
+
+    def stage_for_dir(dir)
+      stages.find { |stage| stage.dir == dir }
+    end
+
+    def resolve_stage_ref(ref)
+      return ref if stages.any? { |stage| stage.dir == ref }
+
+      stage_named(ref)&.dir
+    end
+
     # Hard resolve: raises KeyError on an unknown name — used where a missing
     # stage is a programmer error, not a recoverable condition.
     def state_file_for(name)
@@ -32,6 +54,10 @@ module Hive
       # uniform immutability contract across both sources of truth. A fresh
       # array is built each call, so freezing it is safe (callers don't mutate).
       stages.map(&:name).freeze
+    end
+
+    def stage_dirs
+      stages.map(&:dir).freeze
     end
 
     Stage = Data.define(

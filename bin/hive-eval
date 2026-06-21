@@ -25,6 +25,33 @@ parser = OptionParser.new do |opts|
   end
 end
 
+def selected_report_path(root, argv, default_report)
+  report = default_report
+  index = 0
+
+  while index < argv.length
+    arg = argv[index]
+    break if arg == "--"
+
+    if arg == "--report"
+      value = argv[index + 1]
+      if value && !value.start_with?("-")
+        report = value
+        index += 1
+      end
+    elsif arg.start_with?("--report=")
+      report = arg.split("=", 2).fetch(1)
+    end
+
+    index += 1
+  end
+
+  File.expand_path(report, root)
+end
+
+report_path = selected_report_path(root, ARGV, options.fetch(:report))
+FileUtils.rm_f(report_path)
+
 begin
   remaining = parser.parse!
 rescue OptionParser::ParseError => e
@@ -32,6 +59,9 @@ rescue OptionParser::ParseError => e
   warn parser
   exit 64
 end
+
+report_path = File.expand_path(options.fetch(:report), root)
+FileUtils.rm_f(report_path)
 
 unless remaining.empty?
   unexpected = remaining.join(" ")
@@ -58,7 +88,7 @@ scenario_root = File.expand_path(
 )
 
 env = {
-  "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
+  "HIVE_EVAL_REPORT" => report_path,
   "HIVE_EVAL_SCENARIOS_ONLY" => "1",
   "HIVE_EVAL_NO_JUDGE" => (options[:no_judge] ? "1" : nil),
   "TEST" => nil

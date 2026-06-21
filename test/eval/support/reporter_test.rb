@@ -295,6 +295,23 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_usage_error_removes_existing_selected_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--report", report, "--scenario", "definitely_missing", "--no-judge"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario not found/, err)
+      refute File.exist?(report), "usage errors must not leave stale eval reports behind"
+    end
+  end
+
   def test_cli_rejects_stray_positional_scenario_names
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "positional.json")

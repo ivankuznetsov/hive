@@ -135,19 +135,24 @@ module Hive
       # `state_file` is joined onto `task.folder` at run time
       # (`File.join(task.folder, stage.state_file)` in Hive::Stages::Agent, and
       # the same value flows into Markers.set → ensure_dir/mkdir_p + write_atomic).
-      # Unlike `id`/`name` it was previously only `required_string`-guarded, so a
-      # descriptor with `state_file: ../../escape.md` — an authoring typo as much
-      # as malice — would make hive mkdir/write marker files OUTSIDE the task
-      # folder. Built-in descriptors all use bare basenames; reject any value
-      # that could escape: no leading "/" (absolute) and no ".." path segment.
+      # Unlike `id`/`name` it was previously only `required_string`-guarded.
+      # Restrict it to a BARE BASENAME (no "/" path separator, not "." or ".."):
+      # a leading "/" or a ".." segment escapes the task folder, but even a
+      # benign-looking subdirectory like `sub/idea.md` is unwritable — `hive new`
+      # only `mkdir_p`s the task folder before `File.write(File.join(task_dir,
+      # state_file))`, so a nested path raises Errno::ENOENT and a descriptor that
+      # PASSED validation could never capture its first task. Built-in descriptors
+      # all use bare basenames (idea.md, work.md, …), so this matches the contract
+      # the rest of the runner assumes and removes the nested-dir fragility in the
+      # agent runner's output path.
       def parse_state_file(value, path:, label:)
         file = required_string(value, path: path, label: "#{label} state_file")
-        return file unless file.start_with?("/") || file.split("/").include?("..")
+        return file if file == File.basename(file) && ![ ".", ".." ].include?(file)
 
         raise descriptor_error(
           path,
-          "#{label} state_file #{file.inspect} must stay inside the task folder " \
-          "(no leading '/', no '..' path segment)"
+          "#{label} state_file #{file.inspect} must be a bare filename inside the task folder " \
+          "(no '/' path separator, not '.' or '..'); built-in stages use basenames like 'idea.md'"
         )
       end
 

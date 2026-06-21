@@ -181,16 +181,18 @@ class WorkflowsDescriptorParserTest < Minitest::Test
   end
 
   # state_file is joined onto task.folder at run time and flows into
-  # Markers.set → mkdir_p/write_atomic, so a value escaping the task folder
-  # (absolute, or with a `..` segment) would make hive write marker files out
-  # of the task tree. Reject both — an authoring typo as much as malice.
+  # Markers.set → mkdir_p/write_atomic. It must be a BARE BASENAME: an
+  # absolute path or a `..` segment escapes the task tree, and even a benign
+  # subdirectory (`sub/idea.md`) is unwritable — `hive new` only mkdir_p's the
+  # task folder, so a nested path raises Errno::ENOENT and a descriptor that
+  # passed validation could never capture its first task.
   def test_state_file_rejects_path_traversal
     %w[../escape.md ../../etc/passwd nested/../../escape.md].each do |bad|
       error = assert_config_error(
         { "id" => "bad", "stages" => [ { "name" => "inbox", "kind" => "terminal", "state_file" => bad } ] },
         path: "/tmp/bad.yml"
       )
-      assert_includes error.message, "must stay inside the task folder", "#{bad} must be rejected"
+      assert_includes error.message, "must be a bare filename inside the task folder", "#{bad} must be rejected"
     end
   end
 
@@ -200,21 +202,21 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, "must stay inside the task folder"
+    assert_includes error.message, "must be a bare filename inside the task folder"
   end
 
-  def test_state_file_allows_nested_basename_inside_task_folder
-    workflow = Hive::Workflows::DescriptorParser.parse_hash(
-      {
-        "id" => "nested",
-        "stages" => [
-          { "name" => "inbox", "kind" => "terminal", "state_file" => "sub/idea.md" }
-        ]
-      },
-      path: "/tmp/nested.yml"
-    )
-
-    assert_equal "sub/idea.md", workflow.stages.first.state_file
+  # A nested-but-non-escaping path (`sub/idea.md`) must ALSO be rejected: it
+  # passes the old leading-'/' + '..' guard but is unwritable because `hive new`
+  # only creates the task folder, not its subdirectories — so the write raises
+  # Errno::ENOENT after validation already accepted the descriptor.
+  def test_state_file_rejects_nested_subdirectory
+    [ "sub/idea.md", ".", ".." ].each do |bad|
+      error = assert_config_error(
+        { "id" => "bad", "stages" => [ { "name" => "inbox", "kind" => "terminal", "state_file" => bad } ] },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, "must be a bare filename inside the task folder", "#{bad} must be rejected"
+    end
   end
 
   def test_council_kind_is_reserved
@@ -305,6 +307,31 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       path: "/tmp/bad.yml"
     )
     assert_includes unknown.message, 'unknown preset "reckless"'
+  end
+
+  # The parser's fail-fast promise extends to `dirs:` resolution: a scoped
+  # permission whose `dirs:` can never resolve (an unknown `~user`) must surface
+  # at LOAD time, not blow up into an attributed :error marker on every run.
+  def test_permissions_with_unresolvable_dirs_rejected_at_parse_time
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "permissions" => { "preset" => "scoped", "tools" => %w[Read], "dirs" => [ "~hive_no_such_user_42/x" ] }
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "could not be resolved"
   end
 
   def test_optional_strings_must_be_non_empty_when_present

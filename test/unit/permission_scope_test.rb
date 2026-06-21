@@ -186,6 +186,32 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
+  # validate! pushes the parse-time check TOWARD resolve: an unknown `~user`
+  # in `dirs:` can never resolve (resolve_dirs raises ArgumentError), so it must
+  # be rejected at LOAD time — when the descriptor parser calls validate! —
+  # rather than deferred to a run-time attributed :error marker. A `~user` does
+  # not depend on the task folder, so the placeholder root validate! uses
+  # surfaces it.
+  def test_validate_rejects_unresolvable_tilde_user_dir_at_parse_time
+    error = assert_raises(Hive::ConfigError) do
+      Hive::PermissionScope.validate!(
+        { "preset" => "scoped", "tools" => %w[Read], "dirs" => [ "~hive_no_such_user_42/x" ] },
+        stage: "execute"
+      )
+    end
+
+    assert_match(/could not be resolved/, error.message)
+  end
+
+  # A relative or absolute dir resolves fine at validate! time (no task folder
+  # needed to know it CAN resolve), so a normal scoped block still validates.
+  def test_validate_accepts_resolvable_relative_and_absolute_dirs
+    assert Hive::PermissionScope.validate!(
+      { "preset" => "scoped", "tools" => %w[Read], "dirs" => [ "./drafts", "/tmp/extra" ] },
+      stage: "execute"
+    )
+  end
+
   def test_bash_with_tools_is_rejected
     error = assert_raises(Hive::ConfigError) do
       Hive::PermissionScope.validate!(

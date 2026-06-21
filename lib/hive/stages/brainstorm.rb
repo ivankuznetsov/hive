@@ -50,17 +50,20 @@ module Hive
       def run_headless!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "brainstorm", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
-        # add_dirs is intentionally limited to the task folder. Brainstorm
-        # operates on user-supplied idea text and must not have write access
-        # to the project source code: widening add-dir would let a
-        # prompt-injected idea reach project files. (Claude-on-tmux is now
-        # routed through `run_claude!`; this method only covers codex / pi
-        # — both run with their own profile permissions, not Claude's
-        # `--dangerously-skip-permissions`.)
+        # By default add_dirs is limited to the task folder. Brainstorm
+        # operates on user-supplied idea text and should not have write
+        # access to the project source code: a wide add-dir would let a
+        # prompt-injected idea reach project files. A `scoped` brainstorm
+        # with `dirs:` deliberately opts into a wider add-dir set
+        # (scope.fetch(:add_dirs) appends those extras) — that is an
+        # operator's explicit, config-level choice, not the default.
+        # (Claude-on-tmux is now routed through `run_claude!`; this method
+        # only covers codex / pi — both run with their own profile
+        # permissions, not Claude's `--dangerously-skip-permissions`.)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -87,7 +90,7 @@ module Hive
       def run_claude!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "brainstorm", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )

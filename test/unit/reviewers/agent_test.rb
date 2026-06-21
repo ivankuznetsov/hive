@@ -277,6 +277,42 @@ class ReviewersAgentTest < Minitest::Test
     { status: :error, error_message: message }
   end
 
+  # A per-reviewer `permissions:` spec must be resolved through the
+  # reviewer runner into the actual spawn scope — not merely validated at
+  # config load. Captures the spawn_agent kwargs and asserts the scoped
+  # tool lists and the extra add-dir reached the spawn.
+  def test_reviewer_permissions_spec_resolves_into_spawn_scope
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer, = with_stubbed_adapter(
+        dir,
+        "permissions" => { "preset" => "scoped", "tools" => %w[Read Grep], "dirs" => [ "notes" ] }
+      )
+
+      captured = nil
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+      begin
+        reviewer.run!
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+
+      refute_nil captured, "spawn_agent must have been called"
+      assert_equal "default", captured[:permission_mode]
+      assert_equal %w[Read Grep], captured[:allowed_tools]
+      # Read/Grep are not in the read-only deny set, so the deny list is
+      # unchanged — and it never overlaps the granted tools.
+      assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], captured[:disallowed_tools]
+      assert_empty captured[:allowed_tools] & captured[:disallowed_tools]
+      assert_includes captured[:add_dirs], File.join(ctx.task_folder, "notes")
+    end
+  end
+
   def test_run_does_not_retry_when_first_attempt_succeeds
     with_tmp_dir do |dir|
       reviewer, sleeps = with_stubbed_adapter(dir)

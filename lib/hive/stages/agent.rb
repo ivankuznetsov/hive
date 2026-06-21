@@ -20,7 +20,7 @@ module Hive
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
         prompt = render_prompt(task, cfg, stage, profile: profile)
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, task.stage_name, task, profile
         )
 

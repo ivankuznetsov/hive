@@ -152,6 +152,35 @@ module Hive
         }
       end
 
+      # Single-agent stage variant of stage_permission_scope that attributes
+      # the A8 runner-gate failure to the stage's own task marker.
+      #
+      # PermissionScope.resolve raises Hive::ConfigError when a non-yolo
+      # scope lands on a runner that can't enforce tool scoping (codex / pi)
+      # — or on any malformed spec that slips past load-time validation.
+      # That raise is the FIRST line of every single-agent spawn helper
+      # (plan / execute / open_pr / finalize / artifacts / brainstorm /
+      # generic agent), none of which rescue it, so it would otherwise
+      # propagate through with_stage_events uncaught and leave the stage's
+      # prior marker (e.g. AGENT_WORKING) stale. The plan's U10-4 contract
+      # requires an attributed :error marker, not a bare crash. Mirror
+      # Review.run!'s ConfigError rescue: stamp an attributed :error on the
+      # real task, then re-raise so the failure still surfaces loudly
+      # (fail-closed) to the runner and test suite.
+      #
+      # Review sub-stages deliberately do NOT use this helper: their
+      # synthetic-task spawns share state with the main review task and the
+      # outer Review.run! rescue maps the same ConfigError to :review_error
+      # against the real task (see review.rb).
+      def stage_permission_scope_or_mark!(cfg, stage_name, task, profile, **kwargs)
+        stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+      rescue Hive::ConfigError => e
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "permission_config_error",
+                          message: e.message.to_s[0, 200])
+        raise
+      end
+
       def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
         return nil unless default_allowed_tools
         return nil unless profile.name == :claude

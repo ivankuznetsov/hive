@@ -219,7 +219,7 @@ module Hive
           )
         )
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )

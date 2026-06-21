@@ -18,7 +18,7 @@ module Hive
       def run!(task, cfg)
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
         prompt = Hive::Stages::Brainstorm.render_prompt(task, cfg, profile: profile)
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "brainstorm", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
@@ -64,21 +64,6 @@ module Hive
 
       def tmux_bin
         Hive::ClaudeLauncher.tmux_bin
-      end
-
-      def wrapper_command(task, profile, cfg)
-        scope = Hive::Stages::Base.stage_permission_scope(
-          cfg, "brainstorm", task, profile,
-          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
-        )
-        Hive::ClaudeLauncher.wrapper_command(
-          cwd: task.folder,
-          add_dirs: scope.fetch(:add_dirs),
-          profile: profile,
-          permission_mode: scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(cfg),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools)
-        )
       end
 
       def wait_until_session_exists!(runner)

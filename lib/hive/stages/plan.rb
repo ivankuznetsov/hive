@@ -29,7 +29,7 @@ module Hive
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile)
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "plan", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )

@@ -44,7 +44,7 @@ module Hive
 
       def spawn_artifacts_agent(task, cfg, prompt, profile)
         cwd = File.directory?(task.worktree_path.to_s) ? task.worktree_path : task.folder
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "artifacts", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )

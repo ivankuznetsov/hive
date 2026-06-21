@@ -102,7 +102,7 @@ module Hive
       end
 
       def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
-        scope = Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "finalize", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )

@@ -530,6 +530,69 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  # A7 golden: pin the actual emitted argv for the absent-permissions
+  # (yolo) plan stage in BOTH modes, threading stage_permission_scope's
+  # output through the real argv builders. The scope-dict tests above
+  # prove the dict; this proves the dict reaches the command line
+  # byte-for-byte — so a stage that dropped the tmux builtin allowlist or
+  # leaked a tool-scope flag into the headless yolo path would fail here.
+  def test_yolo_plan_argv_is_byte_identical_to_legacy_in_both_modes
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      profile = Hive::AgentProfiles.lookup(:claude)
+
+      headless_cfg = {
+        "permissions" => "yolo",
+        "claude" => { "mode" => "headless", "permission_mode" => "bypassPermissions" }
+      }
+      headless_scope = Hive::Stages::Base.stage_permission_scope(
+        headless_cfg, "plan", task, profile,
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+      agent = Hive::Agent.new(
+        task: task, prompt: "PROMPT", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile,
+        add_dirs: headless_scope.fetch(:add_dirs),
+        permission_mode: headless_scope.fetch(:permission_mode),
+        allowed_tools: headless_scope.fetch(:allowed_tools),
+        disallowed_tools: headless_scope.fetch(:disallowed_tools)
+      )
+      expected_headless = [
+        profile.bin, "-p", "--dangerously-skip-permissions",
+        "--add-dir", task.folder,
+        "--max-budget-usd", "1",
+        "--output-format", "stream-json", "--include-partial-messages",
+        "--verbose", "--no-session-persistence",
+        "PROMPT"
+      ]
+      assert_equal expected_headless, agent.send(:build_cmd),
+                   "yolo headless argv must carry no tool-scope flags"
+
+      tmux_cfg = {
+        "permissions" => "yolo",
+        "claude" => { "mode" => "tmux", "permission_mode" => "bypassPermissions" }
+      }
+      tmux_scope = Hive::Stages::Base.stage_permission_scope(
+        tmux_cfg, "plan", task, profile,
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+      wrapper = Hive::ClaudeLauncher.wrapper_command(
+        cwd: task.folder,
+        add_dirs: tmux_scope.fetch(:add_dirs),
+        profile: profile,
+        permission_mode: tmux_scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(tmux_cfg),
+        allowed_tools: tmux_scope.fetch(:allowed_tools),
+        disallowed_tools: tmux_scope.fetch(:disallowed_tools)
+      )
+      # tmux yolo keeps the builtin allowlist threaded and emits NO deny
+      # list — the exact "forgot to thread default_allowed_tools" regression.
+      assert_equal [ "--allowedTools", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS ],
+                   wrapper.each_cons(2).find { |a, _| a == "--allowedTools" }
+      assert_includes wrapper, "--dangerously-skip-permissions"
+      refute_includes wrapper, "--disallowedTools"
+    end
+  end
+
   def test_stage_permission_scope_rejects_non_claude_non_yolo
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
@@ -546,6 +609,38 @@ class SpawnAgentTest < Minitest::Test
 
       assert_match(/stage execute requests permissions/, error.message)
       assert_match(/runner :codex/, error.message)
+    end
+  end
+
+  # The A8 runner-gate raise must land an attributed :error marker on the
+  # stage's own task before it propagates — not escape uncaught and leave
+  # the prior marker (e.g. AGENT_WORKING) stale (plan U10-4). Every
+  # single-agent stage routes its scope resolution through this helper, so
+  # one test pins the whole class across codex and pi.
+  def test_stage_permission_scope_or_mark_attributes_error_marker_for_non_claude
+    %i[codex pi].each do |runner|
+      with_tmp_dir do |dir|
+        task = make_task(dir, "4-execute")
+        # Simulate the stale in-progress marker the runner leaves before
+        # the spawn helper resolves the scope.
+        Hive::Markers.set(task.state_file, :agent_working)
+        cfg = {
+          "permissions" => "yolo",
+          "execute" => { "permissions" => "read-only" }
+        }
+
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Stages::Base.stage_permission_scope_or_mark!(
+            cfg, "execute", task, Hive::AgentProfiles.lookup(runner)
+          )
+        end
+        assert_match(/runner #{runner.inspect}/, error.message)
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal :error, marker.name, "#{runner} must leave an attributed :error marker"
+        assert_equal "permission_config_error", marker.attrs["reason"]
+        assert_match(/claude only/, marker.attrs["message"].to_s)
+      end
     end
   end
 end

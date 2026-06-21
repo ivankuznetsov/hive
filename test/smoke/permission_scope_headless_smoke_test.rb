@@ -63,6 +63,27 @@ class PermissionScopeHeadlessSmokeTest < Minitest::Test
     end
   end
 
+  def test_scoped_headless_allows_granted_write
+    with_tmp_dir do |dir|
+      task = make_task(dir, "scoped-smoke-260621-aaaa")
+      target = File.join(task.folder, "scoped-write.txt")
+      # `scoped` with Write in `tools:` must actually permit the write:
+      # the granted tool is subtracted from the deny list, so Claude does
+      # NOT deny what the scope explicitly grants. This is the end-to-end
+      # proof that the scoped allow/deny lists never contradict.
+      result = run_scoped_write(
+        task, target,
+        permissions: { "preset" => "scoped", "tools" => %w[Read Write LS Grep Glob] }
+      )
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal 0, result.fetch(:exit_code)
+      refute result.fetch(:timed_out), "scoped write attempt must finish without timeout"
+      assert_path_exists target, "scoped grant of Write must create #{target}"
+      assert_equal smoke_content, File.read(target)
+    end
+  end
+
   private
 
   def real_claude_bin

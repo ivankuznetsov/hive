@@ -74,8 +74,43 @@ class PermissionScopeTest < Minitest::Test
       assert_equal "scoped", scope.preset
       assert_equal "default", scope.permission_mode
       assert_equal %w[Read Write Edit], scope.allowed_tools
-      assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], scope.disallowed_tools
+      # The granted tools (Write, Edit) are subtracted from the read-only
+      # deny list — otherwise Claude's deny rules would override the grant
+      # and the scope could never actually use Write/Edit.
+      assert_equal %w[MultiEdit NotebookEdit Bash], scope.disallowed_tools
+      refute_includes scope.disallowed_tools, "Write"
+      refute_includes scope.disallowed_tools, "Edit"
+      assert_empty scope.allowed_tools & scope.disallowed_tools,
+                   "scoped allow and deny lists must never overlap"
       assert_equal [ File.join(dir, "drafts"), absolute ], scope.add_dirs_extra
+    end
+  end
+
+  def test_scoped_never_denies_a_tool_it_grants
+    with_tmp_dir do |dir|
+      # Every combination of granted tools must leave the deny list
+      # disjoint from the allow list, so a granted tool is always usable.
+      [
+        %w[Read Write Edit],
+        %w[Read Write Edit MultiEdit NotebookEdit Bash],
+        %w[Bash],
+        %w[Read]
+      ].each do |tools|
+        scope = Hive::PermissionScope.resolve(
+          { "preset" => "scoped", "tools" => tools },
+          task_folder: dir,
+          profile: claude_profile,
+          stage: "execute"
+        )
+
+        assert_equal tools, scope.allowed_tools
+        assert_empty scope.allowed_tools & scope.disallowed_tools,
+                     "granted tools #{tools.inspect} must not appear in the deny list"
+        tools.each do |granted|
+          refute_includes scope.disallowed_tools, granted,
+                          "granted tool #{granted.inspect} must not be denied"
+        end
+      end
     end
   end
 
@@ -96,6 +131,14 @@ class PermissionScopeTest < Minitest::Test
 
       assert_equal %w[Read LS Grep Glob Bash], bash_on.allowed_tools
       assert_equal %w[Read LS Grep Glob], bash_off.allowed_tools
+
+      # `bash: true` grants Bash, so Bash must be subtracted from the deny
+      # list; `bash: false` keeps the read-only deny list (Bash denied).
+      assert_equal %w[Write Edit MultiEdit NotebookEdit], bash_on.disallowed_tools
+      refute_includes bash_on.disallowed_tools, "Bash"
+      assert_empty bash_on.allowed_tools & bash_on.disallowed_tools
+      assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], bash_off.disallowed_tools
+      assert_includes bash_off.disallowed_tools, "Bash"
     end
   end
 
@@ -157,5 +200,11 @@ class PermissionScopeTest < Minitest::Test
   def test_tool_csv_omits_blank_values
     assert_equal "Read,Write", Hive::PermissionScope.tool_csv([ "Read", "", nil, :Write ])
     assert_nil Hive::PermissionScope.tool_csv([])
+  end
+
+  def test_tool_csv_dedups_preserving_first_occurrence_order
+    assert_equal "Read,Write,Edit",
+                 Hive::PermissionScope.tool_csv([ "Read", "Write", "Read", :Edit, "Write" ])
+    assert_nil Hive::PermissionScope.tool_csv([ "", nil ])
   end
 end

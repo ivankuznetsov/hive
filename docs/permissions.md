@@ -86,7 +86,11 @@ review:
 ## Scoped Options
 
 `tools:` is authoritative. Hive passes exactly those tools as Claude's
-`--allowedTools` value.
+`--allowedTools` value. Hive also emits a `--disallowedTools` deny list —
+the `read-only` mutating/shell set (`Write`, `Edit`, `MultiEdit`,
+`NotebookEdit`, `Bash`) minus whatever you granted — so a tool you grant
+is never also denied. (Claude's deny rules win over allow rules, so an
+overlap would silently revoke the grant.)
 
 `dirs:` extends the task folder add-dir list. Relative paths are resolved from
 the task folder; absolute paths are honored as written. Hive always keeps the

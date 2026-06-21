@@ -1,13 +1,25 @@
 module Hive
   module PermissionScope
+    # The "no scoping" preset name. Extracted so the comparisons in
+    # `resolve`, `Scope#yolo?`, and `Config::DEFAULTS["permissions"]` all
+    # reference one symbol instead of restating the bare "yolo" literal.
+    YOLO = "yolo".freeze
+
     # read-only is intentionally narrow: local file inspection only.
     # Network and MCP tools are not included in allowed_tools; mutating
     # and shell tools are also denied explicitly for clearer Claude errors.
+    # `scoped` derives its OWN deny list from this set minus whatever it
+    # grants (see scoped_scope): Claude's deny rules win over allow rules,
+    # so a tool may never appear in both lists or it would be denied
+    # despite being granted.
     READ_ONLY_ALLOWED = %w[Read LS Grep Glob].freeze
     READ_ONLY_DISALLOWED = %w[Write Edit MultiEdit NotebookEdit Bash].freeze
 
     # Non-yolo scopes rely on allowedTools/disallowedTools to pre-approve
-    # the intended set. Do not use plan mode here; it changes agent behavior.
+    # the intended set. The disallow list is always READ_ONLY_DISALLOWED
+    # with the granted tools subtracted out, so it never overlaps (and thus
+    # never silently overrides) the allow list. Do not use plan mode here;
+    # it changes agent behavior.
     NON_PROMPTING_PERMISSION_MODE = "default".freeze
 
     PRESETS = {
@@ -32,6 +44,10 @@ module Hive
       "scoped" => %w[preset tools dirs bash]
     }.freeze
 
+    # Nullability is asymmetric by design: under `yolo`, `allowed_tools`
+    # and `disallowed_tools` are both nil (Claude receives no tool lists),
+    # while `add_dirs_extra` is always an Array (empty when no `dirs:` were
+    # requested) so callers can splat it unconditionally.
     Scope = Struct.new(
       :preset,
       :permission_mode,
@@ -41,7 +57,7 @@ module Hive
       keyword_init: true
     ) do
       def yolo?
-        preset == "yolo"
+        preset == YOLO
       end
     end
 
@@ -55,15 +71,15 @@ module Hive
     def resolve(spec, task_folder:, profile:, stage: nil)
       parsed = parse_spec(spec, stage: stage)
       profile_name = profile && profile.name
-      if parsed.fetch("preset") != "yolo" && profile_name != :claude
+      if parsed.fetch("preset") != YOLO && profile_name != :claude
         raise Hive::ConfigError,
               "stage #{stage || '(unknown)'} requests permissions #{parsed.fetch('preset').inspect} " \
               "but runner #{profile_name.inspect} cannot enforce tool scoping (claude only)"
       end
 
       case parsed.fetch("preset")
-      when "yolo"
-        build_scope("yolo")
+      when YOLO
+        build_scope(YOLO)
       when "read-only"
         build_scope("read-only")
       when "scoped"
@@ -71,8 +87,14 @@ module Hive
       end
     end
 
+    # Build the `--allowedTools` / `--disallowedTools` CSV. Blank entries
+    # are dropped and duplicates are collapsed (first occurrence wins) so a
+    # user `tools: [Read, Read]` list — or any other accidental repeat —
+    # can't reach Claude's argv twice. Order is preserved: it is the single
+    # chokepoint for both tool lists, and a stable, deduped order keeps the
+    # emitted argv byte-identical across runs for golden-arg tests.
     def tool_csv(tools)
-      values = Array(tools).compact.map(&:to_s).reject(&:empty?)
+      values = Array(tools).compact.map(&:to_s).reject(&:empty?).uniq
       return nil if values.empty?
 
       values.join(",")
@@ -200,7 +222,12 @@ module Hive
         preset: "scoped",
         permission_mode: NON_PROMPTING_PERMISSION_MODE,
         allowed_tools: allowed,
-        disallowed_tools: READ_ONLY_DISALLOWED.dup,
+        # Subtract the granted tools so the deny list never overlaps the
+        # allow list. Claude's deny rules take precedence over allow rules,
+        # so emitting a granted tool (e.g. Write/Edit/Bash) in BOTH lists
+        # would deny it despite the explicit `tools:`/`bash:` grant —
+        # silently breaking `scoped`'s entire purpose.
+        disallowed_tools: READ_ONLY_DISALLOWED - allowed,
         add_dirs_extra: resolve_dirs(spec["dirs"], task_folder: task_folder, stage: stage)
       )
     end
@@ -210,7 +237,8 @@ module Hive
     end
 
     def resolve_dirs(dirs, task_folder:, stage:)
-      validate_dirs!(dirs, stage: stage, original: { "dirs" => dirs }) if dirs
+      # `dirs` arrived via parse_spec, which already ran validate_scoped! →
+      # validate_dirs! on the resolve path, so no re-validation here.
       Array(dirs).map do |dir|
         raw = dir.to_s
         File.absolute_path?(raw) ? File.expand_path(raw) : File.expand_path(raw, task_folder)

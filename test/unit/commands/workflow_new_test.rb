@@ -96,8 +96,92 @@ class WorkflowNewTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal false, payload.fetch("ok")
       assert_equal "UsageError", payload.fetch("error_class")
+      assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
       assert_includes payload.fetch("message"), "reserved"
+      # The rejected id rides a structured `value` field so an agent recovers it
+      # without regexing the message (UsageError#value surfaced via extras).
+      assert_equal "coding", payload.fetch("value")
+    end
+  end
+
+  def test_json_config_error_payload_rolls_back_and_classifies_config
+    with_initialized_project do |project_root|
+      error = Hive::ConfigError.new("descriptor boom")
+      out, err, status = with_replaced_singleton_method(
+        Hive::Workflows::DescriptorParser, :parse_file, ->(_path) { raise error }
+      ) do
+        with_captured_exit do
+          Hive::Commands::Workflow.new("new", "cfg-flow", project_root: project_root, json: true).call
+        end
+      end
+
+      assert_equal error.exit_code, status
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "config", payload.fetch("error_kind")
+      # validate_descriptor! raised inside the rollback-protected begin, so the
+      # scaffold files must be gone.
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "cfg-flow.yml"))
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "cfg-flow"))
+    end
+  end
+
+  def test_json_git_error_payload_classifies_git
+    with_initialized_project do |project_root|
+      out, err, status = with_replaced_singleton_method(
+        Hive::Lock, :with_commit_lock, ->(_path, &_blk) { raise Hive::GitError, "push failed" }
+      ) do
+        with_captured_exit do
+          Hive::Commands::Workflow.new("new", "git-flow", project_root: project_root, json: true).call
+        end
+      end
+
+      assert_equal Hive::ExitCodes::SOFTWARE, status
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal "git", payload.fetch("error_kind")
+      # commit_scaffold! is inside the rollback-protected begin: the scaffold
+      # files must be removed when the commit fails.
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "git-flow.yml"))
+    end
+  end
+
+  def test_json_concurrent_run_error_payload_classifies_concurrent
+    with_initialized_project do |project_root|
+      out, err, status = with_replaced_singleton_method(
+        Hive::Lock, :with_commit_lock, ->(_path, &_blk) { raise Hive::ConcurrentRunError.new("locked") }
+      ) do
+        with_captured_exit do
+          Hive::Commands::Workflow.new("new", "busy-flow", project_root: project_root, json: true).call
+        end
+      end
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, status
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal "concurrent_run", payload.fetch("error_kind")
+    end
+  end
+
+  def test_json_disk_write_error_rides_the_envelope_as_error_kind
+    with_initialized_project do |project_root|
+      out, err, status = with_replaced_singleton_method(
+        FileUtils, :mkdir_p, ->(*_args) { raise Errno::EACCES, "denied" }
+      ) do
+        with_captured_exit do
+          Hive::Commands::Workflow.new("new", "disk-flow", project_root: project_root, json: true).call
+        end
+      end
+
+      # The disk fault from write_scaffold!'s mkdir_p must ride the JSON envelope
+      # (error_kind=error, no raw backtrace on stderr), not escape to bin/hive.
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "error", payload.fetch("error_kind")
+      assert_equal Hive::ExitCodes::GENERIC, status
     end
   end
 

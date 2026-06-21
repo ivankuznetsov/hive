@@ -46,16 +46,24 @@ module Hive
 
       def call
         call!
-      rescue UsageError, Hive::ConfigError, Hive::GitError, Hive::ConcurrentRunError => e
+      rescue UsageError, Hive::ConfigError, Hive::GitError, Hive::ConcurrentRunError,
+             SystemCallError, IOError => e
         # ConcurrentRunError (commit-lock contention, TEMPFAIL/75) is now caught
         # too: previously it escaped to bin/hive as plain stderr, hiding the
         # retryable-vs-terminal distinction from --json agent callers.
+        # SystemCallError/IOError are caught for the same reason: a disk-write
+        # fault from write_scaffold!'s mkdir_p/File.write would otherwise escape
+        # past `call` to bin/hive (which only handles Errno::EPIPE/Thor::Error/
+        # Hive::Error), yielding a raw backtrace instead of the schema'd --json
+        # envelope. error_kind_for's else→ERROR arm classifies them.
         if @json
           @stdout.puts JSON.generate(error_payload(e))
         else
           warn "hive workflow: #{e.message}"
         end
-        exit(e.exit_code)
+        # SystemCallError/IOError carry no #exit_code; map them to GENERIC the
+        # same way ErrorEnvelope.build does for the --json exit_code field.
+        exit(e.respond_to?(:exit_code) ? e.exit_code : Hive::ExitCodes::GENERIC)
       end
 
       def call!
@@ -173,6 +181,14 @@ module Hive
         @hive_state_path ||= File.expand_path(Hive::Config.load(@project_root).fetch("hive_state_path"), @project_root)
       end
 
+      # Filesystem-only rollback: it unwinds the working-tree files write_scaffold!
+      # created, NOT any git side-effects of a partially-run commit_scaffold!.
+      # That is sufficient because hive_commit stages by explicit pathspec (so a
+      # later retry re-stages exactly these paths) and the retry's
+      # refuse_overwrite! re-checks the same paths — removing them here is all a
+      # retry needs to succeed. rm_f/rm_rf swallow their own errors; a failure to
+      # clean up at worst trips refuse_overwrite! on the next attempt with a clear
+      # "already exists" message.
       def rollback_scaffold(paths)
         FileUtils.rm_f(paths.fetch(:descriptor))
         FileUtils.rm_rf(paths.fetch(:instruction_dir))
@@ -197,8 +213,20 @@ module Hive
         Hive::Schemas::ErrorEnvelope.build(
           schema: SCHEMA,
           error: error,
-          error_kind: error_kind_for(error)
+          error_kind: error_kind_for(error),
+          extras: error_extras(error)
         )
+      end
+
+      # Surface the rejected/colliding id (UsageError#value) into the --json
+      # payload so an agent recovers the bad id from a structured field instead
+      # of regexing `message`. Passed via the local `extras` seam to avoid
+      # changing the gem-wide ErrorEnvelope.build; non-UsageError producers
+      # (ConfigError/GitError/…) carry no `value` and add no key.
+      def error_extras(error)
+        return {} unless error.respond_to?(:value) && !error.value.nil?
+
+        { "value" => error.value }
       end
 
       def error_kind_for(error)

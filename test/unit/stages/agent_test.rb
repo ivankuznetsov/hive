@@ -345,6 +345,34 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_stamps_error_marker_when_descriptor_instruction_unreadable
+    # A descriptor instruction can be renamed/deleted/chmod'd between parse and
+    # run (a normal authoring edit). The stage's OWN instruction going missing is
+    # fatal, so the runner must stamp an attributed :error marker and stop —
+    # never die with a raw Errno or silently re-classify the row as ready_to_run.
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do the work.\n")
+      descriptor = instruction_workflow(instruction_path)
+      task = task_for(project, "work", descriptor: descriptor)
+      original = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |candidate, *args, **kwargs|
+        raise Errno::EACCES, candidate if candidate == instruction_path
+
+        original.call(candidate, *args, **kwargs)
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal :error, marker.name
+        assert_equal "instruction_unreadable", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("message"), "Errno::EACCES"
+      end
+    end
+  end
+
   def test_run_turns_error_envelope_without_marker_into_error_marker
     with_tmp_dir do |project|
       task = task_for(project, "plan")

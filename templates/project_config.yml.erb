@@ -11,7 +11,10 @@ claude:
   # tmux uses your logged-in Claude session in an attachable pane.
   # headless keeps the non-interactive `claude -p` path.
   mode: <%= claude_mode %>
-  # Applies to every Claude-backed stage, in both tmux and headless mode.
+  # Applies to every Claude-backed stage, in both tmux and headless mode,
+  # EXCEPT where a stage sets a non-yolo `permissions:` scope (below): a
+  # read-only/scoped stage runs in "default" permission mode and ignores this
+  # value for that stage.
   # bypassPermissions skips permission prompts (maps to
   # --dangerously-skip-permissions); auto uses Claude Code's auto-mode rules.
   permission_mode: <%= claude_permission_mode %>

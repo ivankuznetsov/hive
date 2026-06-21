@@ -117,7 +117,9 @@ class PermissionScopeHeadlessSmokeTest < Minitest::Test
         cwd: task.folder,
         max_budget_usd: 1,
         timeout_sec: SPAWN_TIMEOUT_SEC,
-        log_label: "permission-scope-smoke-#{permissions}",
+        # Use a stable string token for the label: `permissions` is a Hash for
+        # the scoped case, which would otherwise render the whole hash literal.
+        log_label: "permission-scope-smoke-#{permissions.is_a?(Hash) ? permissions['preset'] : permissions}",
         profile: profile,
         permission_mode: scope.permission_mode,
         allowed_tools: scope.allowed_tools,

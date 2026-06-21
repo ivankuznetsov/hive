@@ -101,7 +101,10 @@ review:
 ## Scoped Options
 
 `tools:` is authoritative. Hive passes those tools as Claude's
-`--allowedTools` value, deduplicated and with blank entries dropped. Hive also
+`--allowedTools` value, deduplicated. Entries are validated at config load:
+a blank, comma-bearing, whitespace-bearing, or null-byte entry is rejected
+with an error (not silently dropped), so each entry must be a single tool
+name. Hive also
 emits a `--disallowedTools` deny list —
 the `read-only` mutating/shell set (`Write`, `Edit`, `MultiEdit`,
 `NotebookEdit`, `Bash`) minus whatever you granted — so a tool you grant

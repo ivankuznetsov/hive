@@ -1721,13 +1721,17 @@ module Hive
     # surviving to a confusing spawn-time error. A well-formed `permissions:` key
     # on a non-stage block passes the shape check and is then simply ignored at
     # runtime (not resolved into a scope); that is the documented stage/reviewer
-    # boundary above, not a bug this scan tries to catch. `review` and
-    # `patrol.review` are skipped in the top-level scan because their own
-    # `permissions` key is NOT a resolved location
-    # (reject_unsupported_review_permissions! rejects both) — only their
-    # per-role sub-blocks and per-reviewer entries, added explicitly below,
-    # are resolved. Patrol tasks dispatch `patrol.review.reviewers` through the
-    # same adapters as `review.reviewers`, so those entries are validated too.
+    # boundary above, not a bug this scan tries to catch. `review` is the one
+    # top-level key the scan explicitly skips (see the `next` below) because
+    # its own `permissions` key is NOT a resolved location
+    # (reject_unsupported_review_permissions! rejects it) — only its per-role
+    # sub-blocks and per-reviewer entries, added explicitly below, are
+    # resolved. `patrol.review` is NOT explicitly skipped; it is simply never
+    # reached, because this scan is shallow (a top-level `patrol` Hash IS
+    # collected and shape-validated, but the scan does not recurse into its
+    # `review` child). Its per-reviewer entries are added explicitly below.
+    # Patrol tasks dispatch `patrol.review.reviewers` through the same adapters
+    # as `review.reviewers`, so those entries are validated too.
     def permission_entries(cfg)
       entries = []
       # One guard shape, several call sites: only collect a `permissions:`

@@ -53,7 +53,8 @@ class WorkflowsDescriptorParserTest < Minitest::Test
         "id" => "skill-flow",
         "stages" => [
           { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
-          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" }
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
         ]
       },
       path: "/tmp/skill-flow.yml"
@@ -287,13 +288,47 @@ class WorkflowsDescriptorParserTest < Minitest::Test
             "state_file" => "work.md",
             "skill" => "/ship",
             "advance_verb" => nil
-          }
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
         ]
       },
       path: "/tmp/bare-mv.yml"
     )
 
     assert_nil workflow.stage_named("work").advance_verb
+  end
+
+  def test_last_stage_must_be_terminal
+    error = assert_config_error(
+      {
+        "id" => "no-terminal",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" }
+        ]
+      },
+      path: "/tmp/no-terminal.yml"
+    )
+
+    assert_includes error.message, "last stage \"work\" must be a terminal stage"
+    assert_includes error.message, "undroppable"
+  end
+
+  def test_terminal_stage_rejects_agent_only_fields
+    %w[skill instruction permissions].each do |field|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md", field => "x" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, field, "#{field} on a terminal stage must be rejected"
+      assert_includes error.message, "only valid on an agent stage"
+    end
   end
 
   def test_workflow_structure_errors_are_wrapped_with_path

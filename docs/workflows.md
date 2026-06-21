@@ -62,8 +62,13 @@ Rules:
 - `kind: agent` spawns the generic stage runner.
 - `kind: council` is reserved and currently rejected.
 - Every agent stage must declare exactly one of `skill:` or `instruction:`.
-- `instruction:` is resolved relative to the descriptor file and must point to a readable `.md` file.
+- `skill:`, `instruction:`, and `permissions:` are only valid on `kind: agent`
+  stages; declaring any of them on a `kind: terminal` stage is rejected at load
+  (they are no-ops there).
+- `instruction:` is resolved relative to the descriptor file and must point to a readable file (any extension; `.md` is conventional but not required).
 - `permissions:` is optional and uses the same syntax as [permissions.md](permissions.md).
+- The last stage must be `kind: terminal`. A task at the final stage cannot
+  advance, so a non-terminal last stage would be undroppable.
 
 Stage indexes and stage directories are derived from array order. The example
 above produces `1-inbox`, `2-work`, and `3-done`. The first stage has no

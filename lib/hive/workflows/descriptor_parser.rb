@@ -34,7 +34,42 @@ module Hive
         id = parse_id(descriptor["id"], path: path)
         validate_filename_id!(id, path)
         stages = parse_stages(descriptor["stages"], id: id, path: path)
+        validate_terminal_last_stage!(stages, path: path)
 
+        build_workflow(id, stages, path: path)
+      end
+
+      # A project workflow's last stage must be terminal (kind: terminal →
+      # :inert). `Hive::Workflows.all_terminal_stage_dirs` treats every workflow's
+      # last stage dir as the archive guard, and a task at the final stage has
+      # nowhere to advance — so a descriptor ending in `kind: agent` yields a task
+      # that can neither advance NOR drop (brainstorm A4). The blank scaffold
+      # (inbox -> work -> done, kind: terminal) already complies. Built-in
+      # workflows are Ruby-constructed and bypass this parser (coding's 9-done is
+      # inert; content's terminal stage is intentionally an agent), so the rule is
+      # scoped to owner-authored YAML descriptors. Skip the empty case — Workflow.new
+      # raises its own "at least one stage" error.
+      def validate_terminal_last_stage!(stages, path:)
+        return if stages.empty?
+
+        last = stages.last
+        return if last.kind == :inert
+
+        raise descriptor_error(
+          path,
+          "last stage #{last.name.inspect} must be a terminal stage (kind: terminal); a task at the " \
+          "final stage cannot advance, so a non-terminal last stage would be undroppable"
+        )
+      end
+
+      # Narrowed to JUST the Workflow.new construction. `validate_structure!`
+      # raises ArgumentError for descriptor-level structural problems (gapped
+      # indices, duplicate stage names/dirs, an unknown kind, a non-terminal
+      # last stage), which we relabel as a user-facing descriptor ConfigError.
+      # Wrapping the whole parse body (as before) would mislabel an unrelated
+      # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
+      # descriptor error, hiding a genuine code bug from the maintainer.
+      def build_workflow(id, stages, path:)
         Hive::Workflow.new(id: id.to_sym, stages: stages)
       rescue ArgumentError => e
         raise descriptor_error(path, e.message)
@@ -70,6 +105,7 @@ module Hive
         reject_unknown_keys!(stage, STAGE_KEYS, path: path, label: label)
         name = parse_stage_name(stage["name"], path: path, label: label)
         kind = parse_kind(stage["kind"], path: path, label: label)
+        reject_agent_only_fields!(stage, kind: kind, path: path, label: label)
         skill = optional_string(stage["skill"], path: path, label: "#{label} skill")
         instruction = parse_instruction(stage["instruction"], path: path, label: label)
         permissions = parse_permissions(stage, id: id, stage_name: name, path: path, label: label)
@@ -138,6 +174,25 @@ module Hive
         return nil if verb_name.nil?
 
         Hive::Workflow::AdvanceVerb.new(name: verb_name)
+      end
+
+      # `skill`, `instruction`, and `permissions` are consumed ONLY by the agent
+      # stage runner (Hive::Stages::Agent). On a terminal (inert) stage they are
+      # validated, deep-frozen, and stored but never read — a silent no-op config
+      # trap. Reject them at parse time (fail-fast, consistent with the parser's
+      # other strict checks) so a typo'd-kind or misplaced field surfaces at load
+      # rather than vanishing at run time.
+      def reject_agent_only_fields!(stage, kind:, path:, label:)
+        return if kind == :agent
+
+        present = %w[skill instruction permissions].select { |key| stage.key?(key) }
+        return if present.empty?
+
+        raise descriptor_error(
+          path,
+          "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} only valid on an agent stage " \
+          "(kind: agent), not a #{stage['kind'].inspect} stage"
+        )
       end
 
       def validate_agent_instruction!(skill:, instruction:, path:, label:)

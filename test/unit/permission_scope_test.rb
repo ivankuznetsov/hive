@@ -42,19 +42,42 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
-  def test_nil_and_yolo_are_noop_scope
+  def test_yolo_is_a_noop_scope
     with_tmp_dir do |dir|
-      nil_scope = Hive::PermissionScope.resolve(nil, task_folder: dir, profile: codex_profile, stage: "execute")
-      yolo_scope = Hive::PermissionScope.resolve("yolo", task_folder: dir, profile: codex_profile, stage: "execute")
+      scope = Hive::PermissionScope.resolve("yolo", task_folder: dir, profile: codex_profile, stage: "execute")
 
-      [ nil_scope, yolo_scope ].each do |scope|
-        assert scope.yolo?
-        assert_equal "bypassPermissions", scope.permission_mode
-        assert_nil scope.allowed_tools
-        assert_nil scope.disallowed_tools
-        assert_empty scope.add_dirs_extra
-      end
+      assert scope.yolo?
+      assert_equal "bypassPermissions", scope.permission_mode
+      assert_nil scope.allowed_tools
+      assert_nil scope.disallowed_tools
+      assert_empty scope.add_dirs_extra
     end
+  end
+
+  # Fail-closed: a present-but-blank `permissions:` (YAML key with no value →
+  # nil) must be a hard error, NOT silently mapped to yolo. A fully-absent key
+  # resolves to yolo via Config.permission_spec and never reaches resolve as
+  # nil, so a nil here can only be an operator who typed `permissions:`
+  # intending to scope — granting full access would be the exact footgun this
+  # feature guards against.
+  def test_blank_nil_permissions_fails_closed
+    with_tmp_dir do |dir|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::PermissionScope.resolve(nil, task_folder: dir, profile: claude_profile, stage: "execute")
+      end
+
+      assert_match(/stage execute permissions/, error.message)
+      assert_match(/present but blank/, error.message)
+      assert_match(/yolo/, error.message)
+    end
+  end
+
+  def test_blank_nil_permissions_fails_closed_via_validate
+    error = assert_raises(Hive::ConfigError) do
+      Hive::PermissionScope.validate!(nil, stage: "review.reviewers[0]")
+    end
+
+    assert_match(/present but blank/, error.message)
   end
 
   def test_scoped_with_tools_and_dirs_resolves_paths

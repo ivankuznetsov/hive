@@ -115,7 +115,20 @@ module Hive
     def normalize_spec(spec, stage:)
       case spec
       when nil
-        { "preset" => "yolo" }
+        # A present-but-blank `permissions:` (YAML key with no value → nil)
+        # reaches here ONLY from a stage- or project-level scope the operator
+        # explicitly declared (Config.permission_spec returns the YOLO default
+        # for a fully-absent key, never nil). Treating it as yolo would
+        # silently grant full permissions to someone who typed `permissions:`
+        # intending to scope — the exact fail-open footgun this feature
+        # guards against. Fail closed instead.
+        raise invalid_spec(
+          stage,
+          spec,
+          "permissions: is present but blank — an empty permissions block is rejected to " \
+          "avoid silently granting full (yolo) access; remove the key to use the default, " \
+          "or set an explicit preset (yolo/read-only/scoped)"
+        )
       when String, Symbol
         name = spec.to_s
         raise invalid_spec(stage, spec, "preset cannot be blank") if name.strip.empty?

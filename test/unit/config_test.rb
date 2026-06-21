@@ -617,6 +617,55 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # Fail-closed: a present-but-blank `permissions:` (YAML key with no value →
+  # nil) must hard-error at load, NOT silently resolve to yolo. permission_at
+  # returns the literal nil (not the MISSING_PERMISSION sentinel), so the
+  # value is the operator's explicit-but-empty scope, which we reject.
+  def test_blank_stage_permissions_fails_closed_at_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          permissions:
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/present but blank/, error.message)
+      assert_match(/yolo/, error.message)
+    end
+  end
+
+  def test_blank_project_level_permissions_fails_closed_at_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions:
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/present but blank/, error.message)
+      assert_match(/yolo/, error.message)
+    end
+  end
+
+  # Guard against over-correcting: a fully-ABSENT permissions key must still
+  # default to yolo with NO error. Only a present-but-blank key fails closed.
+  def test_absent_permissions_still_defaults_to_yolo_without_error
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        max_passes: 4
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "yolo", cfg["permissions"]
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "plan")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "execute")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "review.triage")
+    end
+  end
+
   def test_load_raises_when_claude_permission_mode_is_unknown
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

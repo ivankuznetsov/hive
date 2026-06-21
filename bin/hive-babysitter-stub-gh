@@ -151,6 +151,23 @@ def field_uses_file?(value)
   value.to_s.sub(/\A=/, "").split("=", 2).last.to_s.start_with?("@")
 end
 
+API_VALUE_SHORT_OPTIONS = %w[F H q X p f t].freeze
+
+def api_short_value_option(arg, next_arg)
+  return nil unless arg.start_with?("-") && !arg.start_with?("--") && arg.length > 2
+
+  chars = arg[1..].chars
+  chars.each_with_index do |char, offset|
+    next unless API_VALUE_SHORT_OPTIONS.include?(char)
+
+    return [ char, next_arg, true ] if offset == chars.length - 1
+
+    return [ char, chars[(offset + 1)..].join, false ]
+  end
+
+  nil
+end
+
 def api_read_only?(rest)
   return false unless rest.first == "api"
 
@@ -171,6 +188,22 @@ def api_read_only?(rest)
     when /\A-X=?(.+)\z/
       method = Regexp.last_match(1)
       index += 1
+    when "-H", "--header", "-q", "--jq", "-p", "--preview", "-t", "--template"
+      index += 2
+    when /\A--(?:header|jq|preview|template)=.+\z/
+      index += 1
+    when /\A-[^-].+\z/
+      short, value, consumes_next = api_short_value_option(arg, rest[index + 1])
+      case short
+      when "X"
+        method = value.to_s.sub(/\A=/, "")
+      when "f"
+        payload = true
+      when "F"
+        payload = true
+        unsafe_payload ||= field_uses_file?(value)
+      end
+      index += consumes_next ? 2 : 1
     when "-f", "--raw-field"
       payload = true
       index += 2

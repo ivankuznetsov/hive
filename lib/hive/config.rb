@@ -17,7 +17,7 @@ module Hive
       "project_name" => nil,
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
-      "permissions" => "yolo",
+      "permissions" => Hive::PermissionScope::YOLO,
       "claude" => {
         "mode" => "tmux",
         "permission_mode" => "bypassPermissions",
@@ -637,13 +637,6 @@ module Hive
 
       raise ConfigError,
             "claude.permission_mode must be one of #{CLAUDE_PERMISSION_MODES.inspect}; got #{raw.inspect}"
-    end
-
-    def permission_spec(cfg, stage)
-      stage_value = permission_at(cfg, stage)
-      return stage_value unless stage_value.equal?(MISSING_PERMISSION)
-
-      cfg.fetch("permissions", DEFAULTS.fetch("permissions"))
     end
 
     def nested_key?(hash, *path)
@@ -1351,8 +1344,6 @@ module Hive
       rebase
     ].freeze
 
-    MISSING_PERMISSION = Object.new.freeze
-
     def validate_hash_shaped_keys!(cfg, source_path)
       HASH_SHAPED_KEYS.each do |key|
         next unless cfg.key?(key)
@@ -1705,38 +1696,82 @@ module Hive
 
     def validate_permissions!(cfg, source_path)
       validate_permission_spec!(cfg["permissions"], "project default", source_path)
+      reject_unsupported_review_permissions!(cfg, source_path)
 
       permission_entries(cfg).each do |label, spec|
         validate_permission_spec!(spec, label, source_path)
       end
     end
 
+    # Collect every `permissions:` spec that Config.permission_spec will
+    # actually resolve, paired with a human label for error messages: each
+    # single-agent / generic-agent stage block (a top-level Hash) plus the
+    # dotted review roles and per-reviewer entries. `review` is skipped in
+    # the top-level scan because its own `permissions` key is NOT a resolved
+    # location (reject_unsupported_review_permissions! rejects it) — only its
+    # per-role sub-blocks, added explicitly below, are. Validating exactly
+    # the resolved set keeps a `permissions` key the resolver ignores from
+    # passing load only to be silently dropped at runtime.
     def permission_entries(cfg)
       entries = []
-      cfg.each do |key, value|
-        next unless value.is_a?(Hash) && value.key?("permissions")
+      # One guard shape, three call sites: only collect a `permissions:`
+      # value when the block is a Hash that declares the key.
+      collect = lambda do |label, block|
+        entries << [ label, block["permissions"] ] if block.is_a?(Hash) && block.key?("permissions")
+      end
 
-        entries << [ key.to_s, value["permissions"] ]
+      cfg.each do |key, value|
+        next if key.to_s == "review"
+
+        collect.call(key.to_s, value)
       end
 
       review = cfg["review"]
       if review.is_a?(Hash)
-        %w[ci triage fix browser_test].each do |role|
-          block = review[role]
-          entries << [ "review.#{role}", block["permissions"] ] if block.is_a?(Hash) && block.key?("permissions")
-        end
+        %w[ci triage fix browser_test].each { |role| collect.call("review.#{role}", review[role]) }
         Array(review["reviewers"]).each_with_index do |entry, idx|
-          entries << [ "review.reviewers[#{idx}]", entry["permissions"] ] if entry.is_a?(Hash) && entry.key?("permissions")
+          collect.call("review.reviewers[#{idx}]", entry)
         end
       end
 
       entries
     end
 
+    # A top-level `review: { permissions: ... }` is never resolved —
+    # permission_spec only reads review.{ci,triage,fix,browser_test} and the
+    # per-reviewer entries — so honoring it silently would be a fail-OPEN
+    # downgrade: the operator believes review is scoped while every review
+    # sub-stage still runs the project default (often yolo). Reject it
+    # loudly and point at the supported per-role / per-reviewer locations.
+    def reject_unsupported_review_permissions!(cfg, source_path)
+      review = cfg["review"]
+      return unless review.is_a?(Hash) && review.key?("permissions")
+
+      raise ConfigError,
+            "review.permissions in #{describe_source(source_path)} is not a supported " \
+            "scope location; set permissions per role under " \
+            "review.{ci,triage,fix,browser_test} or per reviewer entry instead."
+    end
+
     def validate_permission_spec!(spec, label, source_path)
       Hive::PermissionScope.validate!(spec, stage: label)
     rescue Hive::ConfigError => e
       raise ConfigError, "#{e.message} in #{describe_source(source_path)}"
+    end
+
+    # Sentinel distinguishing "stage declared no permissions key" from a
+    # stage that explicitly declared `permissions: nil`. permission_spec and
+    # permission_at — its only collaborators — live alongside it here.
+    MISSING_PERMISSION = Object.new.freeze
+
+    # Resolve a stage's effective permission spec: the stage's own
+    # `permissions:` block when declared, otherwise the project default.
+    # Dotted review paths (e.g. "review.triage") are supported.
+    def permission_spec(cfg, stage)
+      stage_value = permission_at(cfg, stage)
+      return stage_value unless stage_value.equal?(MISSING_PERMISSION)
+
+      cfg.fetch("permissions", DEFAULTS.fetch("permissions"))
     end
 
     def permission_at(cfg, stage)

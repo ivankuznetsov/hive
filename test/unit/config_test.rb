@@ -553,12 +553,56 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_review_level_permissions_key_is_rejected_at_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          permissions: read-only
+      YAML
+
+      # A bare `review.permissions` is never resolved (only review.<role>
+      # and per-reviewer entries are), so honoring it silently would be a
+      # fail-open downgrade. Load must reject it loudly.
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.permissions/, error.message)
+      assert_match(/not a supported/, error.message)
+      assert_match(/review\.\{ci,triage,fix,browser_test\}/, error.message)
+    end
+  end
+
+  def test_per_role_review_permissions_still_load_when_review_has_no_bare_key
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            permissions: read-only
+          triage:
+            permissions:
+              preset: scoped
+              tools: [Read, Write, Edit]
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "review.ci")
+      assert_equal({ "preset" => "scoped", "tools" => %w[Read Write Edit] },
+                   Hive::Config.permission_spec(cfg, "review.triage"))
+    end
+  end
+
   def test_permission_config_errors_fail_closed_at_load
     cases = [
       [ "permissions: reckless\n", /unknown preset "reckless"/ ],
       [ "plan:\n  permissions:\n    tools: [Read]\n", /map must include preset/ ],
       [ "execute:\n  permissions:\n    preset: scoped\n    tools: [Read, Bash]\n    bash: true\n", /express Bash via tools/ ],
-      [ "review:\n  triage:\n    permissions:\n      preset: scoped\n", /scoped requires tools: or bash:/ ]
+      [ "review:\n  triage:\n    permissions:\n      preset: scoped\n", /scoped requires tools: or bash:/ ],
+      # Mirror the resolver table's malformed shapes at the operator-facing
+      # load path: an unknown key for the preset, and a non-string/non-map
+      # scalar spec.
+      [ "plan:\n  permissions:\n    preset: read-only\n    dirs: [tmp]\n", /unknown key/ ],
+      [ "permissions: 42\n", /must be a preset string or a map/ ]
     ]
 
     cases.each do |yaml, pattern|

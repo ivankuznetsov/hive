@@ -216,15 +216,50 @@ module Hive
     # resolution rule lives in exactly one place (no byte-for-byte duplicate to
     # drift between the two cross-project resolution paths).
     def stages_for_project(project, stage_filter: nil)
-      Hive::Workflows::Project.load!(project["path"])
-      return all_stage_dirs if stage_filter.nil? || stage_filter.to_s.strip.empty?
+      # Load the overlay and read its stage dirs / resolve the filter under the
+      # SAME lock hold: both `all_stage_dirs` and `resolve_stage_ref_across_workflows`
+      # read the active project overlay, so a concurrent `load!(otherProject)`
+      # between the load and the read would scan THIS project against another
+      # project's stage set. Project::LOCK is reentrant, so the nested load! is fine.
+      Hive::Workflows::Project.synchronize do
+        Hive::Workflows::Project.load!(project["path"])
+        return all_stage_dirs if stage_filter.nil? || stage_filter.to_s.strip.empty?
 
-      resolved = resolve_stage_ref_across_workflows(stage_filter)
-      resolved ? [ resolved ] : []
+        resolved = resolve_stage_ref_across_workflows(stage_filter)
+        resolved ? [ resolved ] : []
+      end
     rescue Hive::InvalidTaskPath => e
       raise if e.message.start_with?("ambiguous stage")
 
       []
+    end
+
+    # Restore the specific "unknown stage" diagnostic for a `--from`/`--stage`
+    # filter that resolves in NO registered project. stages_for_project
+    # deliberately tolerates a filter that's unknown in a GIVEN project (it may
+    # be valid in another — U9-3 cross-project tolerance), swallowing the
+    # unknown-stage error to []. That means a truly bogus stage degrades to a
+    # generic "no task folder for slug" — losing the message the eager
+    # constructor used to emit. Callers (Drop / TaskResolver) invoke this on the
+    # no-match path so a bogus filter still names itself. Per-project resolution
+    # under the overlay lock, mirroring stages_for_project; an AMBIGUOUS ref in
+    # any project propagates as before.
+    def assert_known_stage_filter!(stage_filter, projects)
+      return if stage_filter.nil? || stage_filter.to_s.strip.empty?
+
+      known = Array(projects).any? do |project|
+        Hive::Workflows::Project.synchronize do
+          Hive::Workflows::Project.load!(project["path"])
+          !resolve_stage_ref_across_workflows(stage_filter).nil?
+        rescue Hive::InvalidTaskPath => e
+          raise if e.message.start_with?("ambiguous stage")
+
+          false
+        end
+      end
+      return if known
+
+      raise Hive::InvalidTaskPath, "unknown stage '#{stage_filter}'; valid: #{stage_ref_hint}"
     end
   end
 end

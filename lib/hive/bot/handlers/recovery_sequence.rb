@@ -1,4 +1,6 @@
+require "hive/config"
 require "hive/workflows"
+require "hive/workflows/project"
 require "hive/bot/notification_builders"
 
 module Hive
@@ -41,7 +43,7 @@ module Hive
                                     text: manual_only_text(marker, resolved_attrs))
           end
 
-          verb = retry_verb_for_stage(stage, workflow: workflow)
+          verb = retry_verb_for_stage(stage, workflow: workflow, project: project)
           unless verb
             stage_label = stage.to_s.empty? ? "(empty)" : stage
             return result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
@@ -88,7 +90,7 @@ module Hive
           attrs.empty? ? nil : attrs
         end
 
-        def self.retry_verb_for_stage(stage, workflow: nil)
+        def self.retry_verb_for_stage(stage, workflow: nil, project: nil)
           stage = stage.to_s
           # A non-coding workflow has one universal re-run verb: `hive run`
           # (the generic stage runner). Routes here when the caller carries
@@ -100,13 +102,13 @@ module Hive
             # The terminal stage has no agent to re-run — offering `hive run`
             # there would dispatch `hive run --stage <terminal>` and raise
             # StageError. Guard it the way the coding path guards `9-done` below.
-            return nil if generic_terminal_stage?(stage, workflow)
+            return nil if generic_terminal_stage?(stage, workflow, project: project)
 
             # A non-:agent middle stage (inert/marker) likewise has no agent
             # runner — `Stages::Resolver.resolve` raises StageError for any
             # kind != :agent — so `hive run` there would queue a command that
             # always fails. Only the generic re-run verb's :agent stages can run.
-            return nil if generic_non_agent_stage?(stage, workflow)
+            return nil if generic_non_agent_stage?(stage, workflow, project: project)
 
             return "run"
           end
@@ -120,30 +122,56 @@ module Hive
 
         # True when `stage` is the terminal (last) stage of a registered
         # non-coding workflow — the generic analog of the coding `9-done`
-        # guard. An unregistered workflow id (none ship in production yet)
+        # guard. A custom descriptor is registered only in ITS project's
+        # overlay, so the row's project must be loaded before the lookup (the
+        # bot process never loads project overlays on its own; the web process
+        # may have a different one active). An unregistered/unloadable workflow
         # can't be introspected, so it conservatively reports false and the
         # caller falls back to offering `hive run`.
-        def self.generic_terminal_stage?(stage, workflow)
-          descriptor = Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+        def self.generic_terminal_stage?(stage, workflow, project: nil)
+          descriptor = resolve_descriptor(workflow, project: project)
+          return false unless descriptor
+
           last = descriptor.stages.last
           !last.nil? && last.dir == stage
-        rescue Hive::Workflows::UnknownWorkflow
-          false
         end
 
         # True when `stage` resolves to a NON-:agent stage (inert/marker) of a
         # registered non-coding workflow — the kinds with no agent runner
         # (`Stages::Resolver.resolve` raises StageError for kind != :agent), so
-        # offering `hive run` would queue a command that always fails. An
+        # offering `hive run` would queue a command that always fails. Loads the
+        # row's project overlay first (see generic_terminal_stage?). An
         # unregistered or unresolvable stage returns false so the caller keeps
-        # its conservative "offer hive run" fallback (matching
-        # generic_terminal_stage?).
-        def self.generic_non_agent_stage?(stage, workflow)
-          descriptor = Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+        # its conservative "offer hive run" fallback.
+        def self.generic_non_agent_stage?(stage, workflow, project: nil)
+          descriptor = resolve_descriptor(workflow, project: project)
+          return false unless descriptor
+
           found = descriptor.stage_for_dir(stage)
           !found.nil? && found.kind != :agent
+        end
+
+        # Resolve the row's workflow descriptor, loading the project's overlay
+        # under Project::LOCK first so a project-authored descriptor (registered
+        # only in that overlay) is reachable. The project NAME is mapped to its
+        # root via the registry; a nil/unknown project skips the load and falls
+        # back to whatever is active (the conservative path for callers that
+        # carry no project). Returns nil — not raising — for an unknown workflow
+        # so callers degrade to the "offer hive run" fallback.
+        def self.resolve_descriptor(workflow, project: nil)
+          Hive::Workflows::Project.synchronize do
+            load_project_overlay(project)
+            Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+          end
         rescue Hive::Workflows::UnknownWorkflow
-          false
+          nil
+        end
+
+        def self.load_project_overlay(project_name)
+          return if project_name.nil? || project_name.to_s.empty?
+
+          match = Hive::Config.registered_projects.find { |p| p["name"] == project_name.to_s }
+          Hive::Workflows::Project.load!(match["path"]) if match
         end
 
         # 9-done returns an empty command list (no retry verb), and
@@ -152,7 +180,7 @@ module Hive
         # would exit 4. Both branches intentionally diverge from the
         # pre-U7 clear_and_retry path.
         def self.retry_commands(project:, slug:, stage:, marker:, match_attr: nil, workflow: nil)
-          verb = retry_verb_for_stage(stage, workflow: workflow)
+          verb = retry_verb_for_stage(stage, workflow: workflow, project: project)
           return [] unless verb
 
           commands = []

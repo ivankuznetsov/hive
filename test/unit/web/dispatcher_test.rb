@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/web/dispatcher"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/commands/workflow"
+require "hive/workflows/project"
 require "hive/brainstorm_parser"
 
 # Unit coverage for the web Dispatcher's gate logic: reject must derive the
@@ -141,6 +143,60 @@ class WebDispatcherTest < Minitest::Test
         assert_includes File.read(File.join(inbox.first, "idea.md")), "from the web composer"
       end
     end
+  end
+
+  # Seed a task pinned to a scaffolded CUSTOM workflow (inbox -> work -> done),
+  # returning [project, slug]. The descriptor lives only in the project's
+  # overlay, so the dispatcher must load it before resolving the task.
+  def seed_custom_task(dir, workflow_id)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    project = File.basename(dir)
+    capture_io { Hive::Commands::Workflow.new!(workflow_id, project_root: dir) }
+    capture_io { Hive::Commands::New.new(project, "custom dispatcher probe", workflow: workflow_id).call }
+    inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+    [ project, File.basename(inbox) ]
+  end
+
+  # The in-process drop/approve overlay-registration path must work on a
+  # CUSTOM-workflow stage dir, not just coding stages — a regression in
+  # per-project overlay loading on a generic stage would otherwise slip the
+  # dispatcher unit suite (it's only indirectly covered by the CLI-driven e2e).
+  def test_drop_removes_a_custom_workflow_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug = seed_custom_task(dir, "flow")
+        Hive::Workflows::Project.reset! # fresh process: no overlay pre-loaded
+
+        capture_io do
+          Hive::Web::Dispatcher.new.drop(slug: slug, project: project, from: "1-inbox")
+        end
+
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", slug)],
+                     "drop must remove a custom-workflow task by loading its project overlay"
+      end
+    end
+  ensure
+    Hive::Workflows::Project.reset!
+  end
+
+  def test_approve_advances_a_custom_workflow_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug = seed_custom_task(dir, "flow")
+        Hive::Workflows::Project.reset!
+
+        capture_io do
+          Hive::Web::Dispatcher.new.approve(slug: slug, project: project, from: "1-inbox")
+        end
+
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "2-work", slug)),
+               "approve must advance a custom-workflow task from 1-inbox to its 2-work stage"
+        refute File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox", slug)),
+               "the source stage folder must not survive an advance"
+      end
+    end
+  ensure
+    Hive::Workflows::Project.reset!
   end
 
   def test_drop_hard_deletes_the_task_folder

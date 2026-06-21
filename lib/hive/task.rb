@@ -128,13 +128,31 @@ module Hive
       @meta ||= Hive::TaskMeta.read(@folder)
     end
 
+    # Self-locking: the per-project overlay load and the subsequent registry
+    # fetch are held together under Project::LOCK (a reentrant Monitor), so a
+    # concurrent `load!(otherProject)` on another thread — the web tier runs
+    # this on both a StatusFeed poller and per-request Puma threads — can't
+    # swap the overlay between the load and the fetch and make a custom-workflow
+    # task resolve as UnknownWorkflow / against the wrong descriptor. The lock
+    # being reentrant lets callers that already hold it (Status#json_payload)
+    # re-enter without deadlock, and `Task.new` (a widely-reused constructor)
+    # needs no caller-side lock.
     def resolve_workflow
-      Hive::Workflows::Project.load!(@project_root)
-      selector = meta[:workflow]
-      # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
-      # always nil here (no .empty? branch needed).
-      selector ||= project_default_workflow
-      Hive::Workflows::Registry.fetch(selector.to_sym)
+      Hive::Workflows::Project.synchronize do
+        Hive::Workflows::Project.load!(@project_root)
+        selector = meta[:workflow]
+        # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
+        # always nil here (no .empty? branch needed).
+        selector ||= project_default_workflow
+        # A per-task `workflow:` pin to a descriptor that was SKIPPED at load
+        # (bad YAML, invalid stage, id collision) must surface its REAL
+        # ConfigError instead of a misleading UnknownWorkflow — the same
+        # boundary rule the `--workflow` / `hive init` path uses (U9-3). Scoped
+        # to the explicit pin; a typo'd project default keeps its
+        # warn-and-continue behavior (warn_if_unregistered_project_default).
+        Hive::Workflows::Project.assert_descriptor_loadable!(meta[:workflow]&.to_sym, project_root: @project_root)
+        Hive::Workflows::Registry.fetch(selector.to_sym)
+      end
     rescue Hive::Workflows::UnknownWorkflow => e
       raise InvalidTaskPath, e.message
     end

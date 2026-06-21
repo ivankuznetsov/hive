@@ -1,7 +1,12 @@
 require "test_helper"
 require "hive/bot/handlers/recovery_sequence"
+require "hive/commands/init"
+require "hive/commands/workflow"
+require "hive/workflows/project"
 
 class HiveBotRecoverySequenceTest < Minitest::Test
+  include HiveTestHelper
+
   Result = Struct.new(:action, :text, :command_argv, :commands, :project, :slug,
                       :alert_reset, :clear_keyboard, keyword_init: true)
 
@@ -147,6 +152,38 @@ class HiveBotRecoverySequenceTest < Minitest::Test
                    Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage("1-draft", workflow: "agent_entry"),
                    "the :agent entry stage still re-runs via hive run"
     end
+  end
+
+  # The bot/web process never pre-loads project overlays, and a project-authored
+  # descriptor is registered ONLY in its project's overlay. The classifier must
+  # load the row's project (resolved from its name) before introspecting the
+  # descriptor — otherwise a custom terminal/inert stage falls through to
+  # `hive run` and queues a retry that always fails (StageError). Unlike the
+  # tests above (which register into the test runtime overlay), here the
+  # descriptor is reachable ONLY via the project load.
+  def test_generic_classifier_loads_the_rows_project_overlay
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        project = File.basename(project_root)
+        capture_io { Hive::Commands::Init.new(project_root).call }
+        capture_io { Hive::Commands::Workflow.new!("flow", project_root: project_root) }
+        # Simulate a fresh bot process: nothing pre-loaded, descriptor NOT in
+        # the test runtime overlay.
+        Hive::Workflows::Project.reset!
+
+        assert_nil Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage(
+          "3-done", workflow: "flow", project: project
+        ), "the custom terminal stage must classify as no-retry (the overlay was loaded)"
+        assert_nil Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage(
+          "1-inbox", workflow: "flow", project: project
+        ), "the custom inert entry stage must classify as no-retry"
+        assert_equal "run", Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage(
+          "2-work", workflow: "flow", project: project
+        ), "the custom :agent stage still re-runs via hive run"
+      end
+    end
+  ensure
+    Hive::Workflows::Project.reset!
   end
 
   def test_coding_workflow_retry_unchanged_when_workflow_omitted

@@ -23,10 +23,17 @@ module Hive
 
       def run!(deadline: nil)
         run_with_spawn(deadline: deadline) do |profile, prompt, configured_timeout, spawn_timeout, attempts|
+          scope_kwargs = {
+            base_add_dirs: [ ctx.task_folder ]
+          }
+          scope_kwargs[:explicit_permission_spec] = spec["permissions"] if spec.key?("permissions")
+          scope = Hive::Stages::Base.stage_permission_scope(
+            @cfg || {}, "review.reviewers", synthetic_task, profile, **scope_kwargs
+          )
           Hive::Stages::Base.spawn_agent(
             synthetic_task,
             prompt: prompt,
-            add_dirs: [ ctx.task_folder ],
+            add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
             max_budget_usd: spec["budget_usd"] || 50,
             timeout_sec: spawn_timeout || configured_timeout,
@@ -34,6 +41,9 @@ module Hive
             profile: profile,
             expected_output: output_path,
             cfg: @cfg,
+            permission_mode: scope.fetch(:permission_mode),
+            allowed_tools: scope.fetch(:allowed_tools),
+            disallowed_tools: scope.fetch(:disallowed_tools),
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must
             # persist across each reviewer's spawn.

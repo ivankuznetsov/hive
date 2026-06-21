@@ -4,8 +4,10 @@ require "securerandom"
 require "time"
 require "hive/agent"
 require "hive/agent_profiles"
+require "hive/config"
 require "hive/events"
 require "hive/markers"
+require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
@@ -115,6 +117,50 @@ module Hive
         name = cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
+
+      def stage_permission_scope(cfg, stage_name, task, profile,
+                                 base_add_dirs: [ task.folder ],
+                                 default_allowed_tools: nil,
+                                 explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC)
+        spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
+          Hive::Config.permission_spec(cfg || {}, stage_name)
+        else
+          explicit_permission_spec
+        end
+        scope = Hive::PermissionScope.resolve(
+          spec,
+          task_folder: task.folder,
+          profile: profile,
+          stage: stage_name
+        )
+        base_dirs = Array(base_add_dirs)
+
+        if scope.yolo?
+          return {
+            add_dirs: base_dirs,
+            permission_mode: nil,
+            allowed_tools: default_allowed_tools_for_mode(cfg, profile, default_allowed_tools),
+            disallowed_tools: nil
+          }
+        end
+
+        {
+          add_dirs: base_dirs + scope.add_dirs_extra,
+          permission_mode: scope.permission_mode,
+          allowed_tools: scope.allowed_tools,
+          disallowed_tools: scope.disallowed_tools
+        }
+      end
+
+      def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
+        return nil unless default_allowed_tools
+        return nil unless profile.name == :claude
+        return nil unless cfg && Hive::Config.claude_mode(cfg) == :tmux
+
+        default_allowed_tools
+      end
+
+      MISSING_EXPLICIT_PERMISSION_SPEC = Object.new.freeze
 
       # Stage labels whose runner mutates the worktree directly. Adding a
       # new worktree-touching stage requires a deliberate edit here —
@@ -454,7 +500,8 @@ module Hive
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
                          session_name:, add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
-                         allowed_tools: nil, disallowed_tools: nil)
+                         permission_mode: nil, allowed_tools: nil,
+                         disallowed_tools: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -476,7 +523,8 @@ module Hive
           status_mode: status_mode,
           expected_output: expected_output,
           profile: profile,
-          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS,
+          permission_mode: permission_mode,
+          allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools
         )
       end

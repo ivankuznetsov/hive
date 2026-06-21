@@ -590,7 +590,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   def test_brainstorm_tmux_delegates_remaining_helpers_to_claude_launcher
     task = Struct.new(:folder, :slug).new("/tmp/task", "task-slug")
     runner = Object.new
-    profile = Struct.new(:bin).new("claude")
+    profile = Struct.new(:name, :bin).new(:claude, "claude")
     marker = Object.new
     calls = []
 

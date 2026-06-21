@@ -18,11 +18,15 @@ module Hive
       def run!(task, cfg)
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
         prompt = Hive::Stages::Brainstorm.render_prompt(task, cfg, profile: profile)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, "brainstorm", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
         Hive::ClaudeLauncher.launch!(
           task: task,
           cfg: cfg,
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
@@ -30,7 +34,9 @@ module Hive
           session_name: session_name_for(task),
           status_mode: :state_file_marker,
           profile: profile,
-          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+          permission_mode: scope.fetch(:permission_mode),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools)
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
@@ -61,12 +67,17 @@ module Hive
       end
 
       def wrapper_command(task, profile, cfg)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, "brainstorm", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
         Hive::ClaudeLauncher.wrapper_command(
           cwd: task.folder,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           profile: profile,
-          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
-          permission_mode: Hive::Config.claude_permission_mode(cfg)
+          permission_mode: scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(cfg),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools)
         )
       end
 

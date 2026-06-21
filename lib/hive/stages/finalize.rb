@@ -102,14 +102,21 @@ module Hive
       end
 
       def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, "finalize", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
           max_budget_usd: finalize_budget(cfg),
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          permission_mode: scope.fetch(:permission_mode),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools),
           status_mode: :state_file_marker
         }
         if profile.name == :claude
@@ -117,8 +124,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task), # coding-scoped: coding finalize stage tmux session
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task) # coding-scoped: coding finalize stage tmux session
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

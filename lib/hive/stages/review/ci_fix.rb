@@ -347,14 +347,21 @@ module Hive
           )
 
           task = synthetic_task(ctx)
+          scope = Hive::Stages::Base.stage_permission_scope(
+            cfg, "review.ci", task, profile,
+            default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          )
           kwargs = {
             prompt: prompt,
-            add_dirs: [ ctx.task_folder ],
+            add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
             max_budget_usd: cfg.dig("budget_usd", "review_ci") || 25,
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
+            permission_mode: scope.fetch(:permission_mode),
+            allowed_tools: scope.fetch(:allowed_tools),
+            disallowed_tools: scope.fetch(:disallowed_tools),
             status_mode: :exit_code_only
           }
           if profile.name == :claude
@@ -362,8 +369,7 @@ module Hive
               task,
               cfg,
               **kwargs,
-              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task),
-              allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
             )
           else
             Hive::Stages::Base.spawn_agent(task, **kwargs)

@@ -1148,28 +1148,33 @@ module Hive
           return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
                                          wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
-          Hive::ClaudeLauncher.with_shared_session(
-            task: task,
-            cfg: cfg,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{ctx.pass}", task),
-            cwd: ctx.worktree_path,
-            add_dirs: [ ctx.task_folder ],
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-          ) do |handle|
-            claude_specs.each do |spec|
-              result = run_reviewer_spec(
-                cfg, ctx, spec,
-                reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-                started_at: started_at,
-                max_wall_clock_sec: max_wall_clock_sec,
-                handle: handle
-              )
-              return :wall_clock_exceeded if result == :wall_clock_exceeded
+          shared_reviewer_groups(claude_specs).each_with_index do |group, group_idx|
+            scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
+            Hive::ClaudeLauncher.with_shared_session(
+              task: task,
+              cfg: cfg,
+              session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
+              cwd: ctx.worktree_path,
+              add_dirs: scope.fetch(:add_dirs),
+              allowed_tools: scope.fetch(:allowed_tools),
+              disallowed_tools: scope.fetch(:disallowed_tools),
+              permission_mode: scope.fetch(:permission_mode)
+            ) do |handle|
+              group.each do |spec|
+                result = run_reviewer_spec(
+                  cfg, ctx, spec,
+                  reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+                  started_at: started_at,
+                  max_wall_clock_sec: max_wall_clock_sec,
+                  handle: handle
+                )
+                return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-              statuses << result.status
-              error_messages << result.error_message if result.error?
-              handle_reviewer_result(task, cfg, ctx, spec, result)
-              remaining_specs -= 1
+                statuses << result.status
+                error_messages << result.error_message if result.error?
+                handle_reviewer_result(task, cfg, ctx, spec, result)
+                remaining_specs -= 1
+              end
             end
           end
         else
@@ -1211,6 +1216,27 @@ module Hive
         return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
 
         Array(cfg.dig("review", "reviewers"))
+      end
+
+      def shared_reviewer_groups(specs)
+        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : :stage_default }.values
+      end
+
+      def shared_reviewer_session_name(task, pass, group_idx)
+        suffix = group_idx.zero? ? "" : "-scope#{group_idx + 1}"
+        Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{pass}#{suffix}", task)
+      end
+
+      def shared_reviewer_permission_scope(cfg, ctx, task, spec)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        kwargs = {
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        }
+        kwargs[:explicit_permission_spec] = spec["permissions"] if spec.key?("permissions")
+        Hive::Stages::Base.stage_permission_scope(
+          cfg, "review.reviewers", task, profile, **kwargs
+        )
       end
 
       def patrol_task?(task)
@@ -1593,6 +1619,11 @@ module Hive
       def spawn_fix_agent(task, cfg, ctx, accepted:)
         profile_name = cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, "review.fix", task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         template = cfg.dig("review", "fix", "prompt_template") || "fix_prompt.md.erb"
         template_path = Hive::Stages::Base.resolve_template_path(
           template,
@@ -1616,12 +1647,15 @@ module Hive
 
         kwargs = {
           prompt: prompt,
-          add_dirs: [ ctx.task_folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: ctx.worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "review_fix") || 100,
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          permission_mode: scope.fetch(:permission_mode),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools),
           status_mode: :exit_code_only
         }
         if profile.name == :claude
@@ -1629,8 +1663,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task),
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/task"
 require "hive/agent"
 require "hive/agent_profiles"
+require "hive/claude_launcher"
 require "hive/stages/base"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
@@ -446,6 +447,105 @@ class SpawnAgentTest < Minitest::Test
     cfg = { "brainstorm" => { "agent" => "no_such_agent" } }
     assert_raises(Hive::AgentProfiles::UnknownAgent) do
       Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+    end
+  end
+
+  def test_stage_permission_scope_yolo_preserves_headless_no_tool_lists
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      cfg = { "permissions" => "yolo", "claude" => { "mode" => "headless" } }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "plan", task, Hive::AgentProfiles.lookup(:claude),
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+
+      assert_equal [ task.folder ], scope.fetch(:add_dirs)
+      assert_nil scope.fetch(:permission_mode)
+      assert_nil scope.fetch(:allowed_tools)
+      assert_nil scope.fetch(:disallowed_tools)
+    end
+  end
+
+  def test_stage_permission_scope_yolo_preserves_tmux_builtin_allowlist
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      cfg = { "permissions" => "yolo", "claude" => { "mode" => "tmux" } }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "plan", task, Hive::AgentProfiles.lookup(:claude),
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+
+      assert_equal Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS, scope.fetch(:allowed_tools)
+      assert_nil scope.fetch(:permission_mode)
+      assert_nil scope.fetch(:disallowed_tools)
+    end
+  end
+
+  def test_stage_permission_scope_read_only_overrides_builtin_tools
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      cfg = {
+        "permissions" => "yolo",
+        "claude" => { "mode" => "tmux" },
+        "plan" => { "permissions" => "read-only" }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "plan", task, Hive::AgentProfiles.lookup(:claude),
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+
+      assert_equal "default", scope.fetch(:permission_mode)
+      assert_equal %w[Read LS Grep Glob], scope.fetch(:allowed_tools)
+      assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], scope.fetch(:disallowed_tools)
+    end
+  end
+
+  def test_stage_permission_scope_scoped_appends_extra_dirs
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      absolute = File.join(dir, "abs")
+      cfg = {
+        "permissions" => "yolo",
+        "claude" => { "mode" => "headless" },
+        "execute" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => %w[Read Write Edit],
+            "dirs" => [ "./drafts", absolute ]
+          }
+        }
+      }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, Hive::AgentProfiles.lookup(:claude),
+        base_add_dirs: [ task.folder ],
+        default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+      )
+
+      assert_equal [ task.folder, File.join(task.folder, "drafts"), absolute ], scope.fetch(:add_dirs)
+      assert_equal %w[Read Write Edit], scope.fetch(:allowed_tools)
+    end
+  end
+
+  def test_stage_permission_scope_rejects_non_claude_non_yolo
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      cfg = {
+        "permissions" => "yolo",
+        "execute" => { "permissions" => "read-only" }
+      }
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.stage_permission_scope(
+          cfg, "execute", task, Hive::AgentProfiles.lookup(:codex)
+        )
+      end
+
+      assert_match(/stage execute requests permissions/, error.message)
+      assert_match(/runner :codex/, error.message)
     end
   end
 end

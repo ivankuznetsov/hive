@@ -20,16 +20,22 @@ module Hive
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
         prompt = render_prompt(task, cfg, stage, profile: profile)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, task.stage_name, task, profile
+        )
 
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", task.stage_name) || stage.budget_usd,
           timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
           log_label: task.stage_name,
           profile: profile,
+          permission_mode: scope.fetch(:permission_mode),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools),
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.
           status_mode: stage.status_mode || :state_file_marker,

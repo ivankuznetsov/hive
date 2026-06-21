@@ -626,4 +626,4 @@ module Hive
   end
 end
 
-require "hive/permission_scope"
+require_relative "hive/permission_scope"

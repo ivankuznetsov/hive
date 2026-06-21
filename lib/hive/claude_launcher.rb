@@ -123,14 +123,15 @@ module Hive
     def launch!(task:, cfg:, prompt:, add_dirs:, cwd:, max_budget_usd:,
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
-                allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
+      launch_mode = Hive::Config.claude_mode(cfg)
 
-      if Hive::Config.claude_mode(cfg) == :headless
+      if launch_mode == :headless
         require "hive/stages/base"
         return Hive::Stages::Base.spawn_agent(
           task,
@@ -149,6 +150,7 @@ module Hive
         )
       end
 
+      allowed_tools ||= DEFAULT_ALLOWED_TOOLS
       result = nil
       with_shared_session(
         task: task,

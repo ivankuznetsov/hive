@@ -19,7 +19,20 @@ module Hive
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
-        prompt = render_prompt(task, cfg, stage, profile: profile)
+
+        # Read the descriptor's instruction defensively: it can be renamed,
+        # deleted, or chmod'd between descriptor parse and this run (a normal
+        # authoring edit). Mirror the sibling `prior_artifacts` SystemCallError
+        # rescue, but because the stage's OWN instruction going missing is fatal
+        # (not a degradable sibling artifact), stamp an attributed :error marker
+        # and stop — instead of dying with a raw Errno::ENOENT and no marker,
+        # which would leave the row silently re-classifying as ready_to_run.
+        begin
+          instruction_body = stage.instruction && File.read(stage.instruction)
+        rescue SystemCallError => e
+          return instruction_error_result(output_path, e)
+        end
+        prompt = render_prompt(task, cfg, stage, profile: profile, instruction_body: instruction_body)
         permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, task.stage_name, task, profile, **permission_kwargs
@@ -62,9 +75,8 @@ module Hive
         { commit: action_for(marker.name), status: marker.name }
       end
 
-      def render_prompt(task, _cfg, stage, profile:)
+      def render_prompt(task, _cfg, stage, profile:, instruction_body:)
         skill_invocation = stage.skill && profile.format_skill_invocation(stage.skill)
-        instruction_body = File.read(stage.instruction) if stage.instruction
         Hive::Stages::Base.render(
           "agent_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -76,6 +88,24 @@ module Hive
             instruction_body: instruction_body
           )
         )
+      end
+
+      # Stamp an attributed :error marker for an unreadable instruction file and
+      # return the same result shape as a normal run, so the row classifies as
+      # :error rather than dying with an uncaught SystemCallError. Never clobber
+      # a marker the agent already wrote (defensive: the read happens before any
+      # spawn, so :none is expected here).
+      def instruction_error_result(output_path, error)
+        marker = Hive::Markers.current(output_path)
+        if marker.name == :none
+          Hive::Markers.set(
+            output_path, :error,
+            reason: "instruction_unreadable",
+            message: "#{error.class}: #{error.message}"[0, 200]
+          )
+          marker = Hive::Markers.current(output_path)
+        end
+        { commit: action_for(marker.name), status: marker.name }
       end
 
       def prior_artifacts(task, output_file)

@@ -259,14 +259,16 @@ class TaskActionGenericTest < Minitest::Test
   end
 
   # A degenerate single-stage workflow has its only stage as both entry and
-  # terminal: a markerless inert entry must NOT offer `hive approve` (nowhere to
-  # advance) — it falls through to the run command instead.
-  def test_generic_degenerate_single_stage_markerless_entry_does_not_advance
+  # terminal: a markerless inert terminal stage must NOT offer `hive approve`
+  # (nowhere to advance) NOR `hive run` (a terminal inert stage has no runner —
+  # Resolver raises StageError). A task parked there is finished, so it
+  # classifies as archived with no command.
+  def test_generic_degenerate_single_stage_markerless_terminal_classifies_archived
     action = action_for("only", :none, descriptor: single_stage_workflow)
 
-    assert_equal "ready_to_run", action.key
-    assert_equal "Ready to run", action.label
-    assert_equal "hive run #{SLUG}", action.command
-    assert_equal :dispatch, policy_decision(action)
+    assert_equal "archived", action.key
+    assert_equal "Archived", action.label
+    assert_nil action.command
+    refute_equal :dispatch, policy_decision(action)
   end
 end

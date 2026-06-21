@@ -47,7 +47,7 @@ module Hive
       end
 
       # Uses the bare `:coding` symbol, NOT Hive::Workflows::CODING_ID: this
-      # method is called at load time from stages.rb:12 (DIRS) before
+      # method is called at load time from stages.rb:16 (DIRS) before
       # workflows.rb has defined CODING_ID — registry.rb is required by
       # workflows.rb, so the constant is not yet reachable here. The literal is
       # the deliberate break in the require cycle, equal to CODING_ID by

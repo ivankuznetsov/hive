@@ -15,6 +15,18 @@ class WorkflowsTest < Minitest::Test
     assert_equal 8, Hive::Workflows::VERBS.size
   end
 
+  # Registry.default uses the bare `:coding` literal (a deliberate break in the
+  # workflows.rb ⇆ registry.rb require cycle, before CODING_ID is reachable).
+  # registry.rb#default documents that the literal is "equal to CODING_ID by
+  # construction (workflows_test pins them equal)" — this is that pin, so the
+  # invariant is regression-protected rather than merely asserted in a comment.
+  def test_coding_id_constant_equals_the_default_workflow_literal
+    assert_equal :coding, Hive::Workflows::CODING_ID,
+                 "CODING_ID must be the bare :coding symbol the registry's default literal uses"
+    assert_equal Hive::Workflows::CODING_ID, Hive::Workflows::Registry.default.id,
+                 "Registry.default must resolve to the CODING_ID workflow"
+  end
+
   def test_every_workflow_verb_has_thor_command
     missing = Hive::Workflows::VERBS.keys.reject do |verb|
       Hive::CLI.all_commands.key?(verb) || Hive::CLI.map.key?(verb)

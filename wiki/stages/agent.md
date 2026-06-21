@@ -36,7 +36,9 @@ resulting state-file marker to the same commit actions as [[stages/brainstorm]].
    `DEFAULT_TIMEOUT_SEC` when neither cfg nor descriptor provides one, and the
    stage profile.
 7. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
-   `COMPLETE` → `complete`, `ERROR` → `error`, otherwise `marker.name.to_s`.
+   `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
+   a markerless run has nothing to commit, so `commit_after` skips the commit),
+   otherwise `marker.name.to_s`.
 
 The coding pipeline's `brainstorm` and `plan` names still use their bespoke
 tmux-capable runners even though their descriptor entries are `kind: :agent`;

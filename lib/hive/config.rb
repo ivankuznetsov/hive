@@ -1704,17 +1704,26 @@ module Hive
     end
 
     # Collect `permissions:` specs to shape-validate at load, paired with a
-    # human label for error messages. The top-level `cfg.each` is a deliberate
-    # SUPERSET of the stages Config.permission_spec actually resolves: it
-    # scans every top-level Hash, because generic-workflow stage names aren't
-    # known at load time, so it CANNOT enumerate exactly the resolved set.
-    # Over-collecting is intentional — a malformed `permissions:` under any
-    # block fails the *load* instead of surviving to a confusing spawn-time
-    # error. (A well-formed `permissions:` key the resolver happens to ignore
-    # — e.g. under a non-stage block — passes load and is silently dropped at
-    # runtime; that fail-open is a separate, accepted concern, not what this
-    # scan guards.) `review` and `patrol.review` are skipped in the top-level
-    # scan because their own `permissions` key is NOT a resolved location
+    # human label for error messages. This is ONLY a load-time SHAPE check; it
+    # does NOT mean every collected block is a resolved scope. `permissions:` is
+    # a stage-level control: it is resolved only for pipeline STAGE spawns and
+    # for REVIEW REVIEWERS. The project-level default is the default *for those*,
+    # not a global permission floor. A `permissions:` key on a non-stage block
+    # (daemon, rebase, babysitter, digest, web, patrol, bot, update, …) is NOT a
+    # per-stage scope and never gates those internal agents — they stay
+    # write-capable by design.
+    #
+    # The top-level `cfg.each` is a deliberate SUPERSET of the stages
+    # Config.permission_spec actually resolves: it scans every top-level Hash,
+    # because generic-workflow stage names aren't known at load time, so it
+    # CANNOT enumerate exactly the resolved set. Over-collecting is intentional —
+    # a malformed `permissions:` under any block fails the *load* instead of
+    # surviving to a confusing spawn-time error. A well-formed `permissions:` key
+    # on a non-stage block passes the shape check and is then simply ignored at
+    # runtime (not resolved into a scope); that is the documented stage/reviewer
+    # boundary above, not a bug this scan tries to catch. `review` and
+    # `patrol.review` are skipped in the top-level scan because their own
+    # `permissions` key is NOT a resolved location
     # (reject_unsupported_review_permissions! rejects both) — only their
     # per-role sub-blocks and per-reviewer entries, added explicitly below,
     # are resolved. Patrol tasks dispatch `patrol.review.reviewers` through the

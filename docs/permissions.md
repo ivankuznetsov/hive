@@ -4,6 +4,21 @@ Hive can opt a stage into a Claude tool scope with `permissions:`. The default i
 `yolo`, so existing projects keep the same behavior until a project or stage
 declares a narrower preset.
 
+## Scope
+
+`permissions:` applies to workflow **stage spawns** (`plan`, `execute`, etc.) and
+to **review reviewers**. It is a stage-level control, not a global permission
+floor. The top-level (project) `permissions:` value is the default *for stages
+and reviewers* — it is not a floor that every agent in the system must obey.
+
+A `permissions:` key placed on a non-stage config block — `daemon`, `rebase`,
+`babysitter`, `digest`, `web`, `patrol`, `bot`, `update`, and similar internal
+blocks — is **not** a per-stage scope. It shape-validates at load but is never
+resolved at runtime, so it does **not** gate those internal agents. The rebase
+conflict-resolver and the babysitter PR/CI fixer stay write-capable by design
+(they must edit files and push), and no `permissions:` key changes that. To scope
+an agent, declare `permissions:` on a pipeline stage or a review reviewer.
+
 ## Caveat
 
 Permission scoping is tool/MCP-level, enforced by the agent's allowed tool set.

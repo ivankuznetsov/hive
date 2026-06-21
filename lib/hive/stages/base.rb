@@ -403,7 +403,8 @@ module Hive
       def spawn_agent(task, prompt:, max_budget_usd:, timeout_sec:,
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
-                      cfg: nil, permission_mode: nil)
+                      cfg: nil, permission_mode: nil, allowed_tools: nil,
+                      disallowed_tools: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -442,6 +443,8 @@ module Hive
           expected_output: expected_output,
           status_mode: status_mode,
           permission_mode: permission_mode,
+          allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools,
           cli_flags: cli_flags
         ).run!
         record_usage(task, profile, result, started_at)
@@ -451,7 +454,7 @@ module Hive
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
                          session_name:, add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
-                         allowed_tools: nil)
+                         allowed_tools: nil, disallowed_tools: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -473,7 +476,8 @@ module Hive
           status_mode: status_mode,
           expected_output: expected_output,
           profile: profile,
-          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS
+          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS,
+          disallowed_tools: disallowed_tools
         )
       end
 

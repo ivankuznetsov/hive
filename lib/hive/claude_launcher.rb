@@ -8,6 +8,7 @@ require "hive/agent_limit"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
+require "hive/permission_scope"
 require "hive/stop_hook_installer"
 require "hive/tmux_runner"
 
@@ -123,6 +124,7 @@ module Hive
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
                 allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                disallowed_tools: nil,
                 permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
@@ -141,7 +143,9 @@ module Hive
           profile: profile,
           expected_output: expected_output,
           status_mode: status_mode,
-          permission_mode: permission_mode
+          permission_mode: permission_mode,
+          allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools
         )
       end
 
@@ -154,6 +158,7 @@ module Hive
         add_dirs: add_dirs,
         profile: profile,
         allowed_tools: allowed_tools,
+        disallowed_tools: disallowed_tools,
         permission_mode: permission_mode
       ) do |handle|
         result = handle.send_and_wait!(
@@ -169,6 +174,7 @@ module Hive
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                            disallowed_tools: nil,
                             permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
@@ -201,6 +207,7 @@ module Hive
           add_dirs: add_dirs,
           profile: profile,
           allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools,
           permission_mode: permission_mode,
           cli_flags: cfg ? Hive::Config.claude_cli_flags(cfg) : []
         )
@@ -436,7 +443,8 @@ module Hive
     end
 
     def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
-                        allowed_tools: DEFAULT_ALLOWED_TOOLS, cli_flags: [])
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                        disallowed_tools: nil, cli_flags: [])
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
@@ -448,10 +456,11 @@ module Hive
       # pipeline run inherits the operator's interactive default (often
       # their most expensive model).
       command.concat(Array(cli_flags))
-      command.concat([
-        "--allowedTools", allowed_tools,
-        "--bin", profile.bin
-      ])
+      allowed = Hive::PermissionScope.tool_csv(allowed_tools)
+      disallowed = Hive::PermissionScope.tool_csv(disallowed_tools)
+      command.concat([ "--allowedTools", allowed ]) if allowed
+      command.concat([ "--disallowedTools", disallowed ]) if disallowed
+      command.concat([ "--bin", profile.bin ])
       command
     end
 

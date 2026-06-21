@@ -119,6 +119,31 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_tool_scope_kwargs_reach_headless_claude_spawn
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        allowed_tools: %w[Read LS],
+        disallowed_tools: %w[Write Bash]
+      )
+
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "arg=--allowedTools"
+      assert_includes argv, "arg=Read,LS"
+      assert_includes argv, "arg=--disallowedTools"
+      assert_includes argv, "arg=Write,Bash"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # claude.permission_mode is a Claude-only setting. A non-claude (codex)
   # profile spawn that now receives cfg: (rebase / reviewers all thread it
   # through) must NOT gain a --permission-mode flag;

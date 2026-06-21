@@ -116,13 +116,15 @@ module Hive
         matches_by_project = projects.filter_map do |project|
           # Scan the union of every registered workflow's stage dirs (not just
           # the coding stages) so a generic task folder is findable by slug.
-          # `stages_for_project` delegates to the shared
-          # `Hive::Workflows.stages_for_project`, which loads each project's
-          # overlay in turn — note the active overlay is the LAST project
-          # scanned here, so the matched project's overlay is reloaded below
-          # before any terminal/archive-dir computation. Mirrors
-          # Hive::TaskResolver#find_slug_across_projects.
-          stages = stages_for_project(project)
+          # `Hive::Workflows.stages_for_project` (the shared per-project
+          # resolution rule, also used by Hive::TaskResolver) loads each
+          # project's overlay in turn, then returns the cross-workflow stage-dir
+          # union or the single filtered dir; it tolerates a stage_filter absent
+          # from THIS project so one project's mismatch doesn't abort the slug
+          # scan across healthy projects. Note the active overlay is the LAST
+          # project scanned here, so the matched project's overlay is reloaded
+          # below before any terminal/archive-dir computation.
+          stages = Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
           folders = collect_stage_folders(project["hive_state_path"], @target, stages)
           next if folders.empty?
 
@@ -201,7 +203,8 @@ module Hive
         # MATCHED project's overlay so "expected" resolves against the workflow
         # the slug actually belongs to, not the last one scanned. A filter that
         # doesn't resolve in the matched project degrades to the raw ref rather
-        # than raising mid-message.
+        # than raising mid-message. (No-op when the matched project was scanned
+        # last: load! short-circuits on unchanged @active_root.)
         Hive::Workflows::Project.load!(matched_project["path"])
         expected_stage =
           begin
@@ -226,15 +229,6 @@ module Hive
         hints << "project '#{@project_filter}'" if @project_filter
         hints << "stage '#{@from}'" if @from
         hints.empty? ? "" : " in #{hints.join(' and ')}"
-      end
-
-      def stages_for_project(project)
-        # Shared per-project resolution rule (see Hive::TaskResolver#stages_for_project
-        # for the twin call site). Loads the project overlay, then returns the
-        # cross-workflow stage-dir union or the single filtered dir; tolerates a
-        # stage_filter absent from THIS project so one project's mismatch doesn't
-        # abort the slug scan across healthy projects.
-        Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
       end
 
       def guard_archived!(context)

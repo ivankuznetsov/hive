@@ -112,8 +112,13 @@ module Hive
 
       # Three-tier precedence, last-wins: built-in ◁ runtime(test) ◁ project.
       # See register! for why the two overlay tiers are kept distinct.
+      #
+      # Memoized: a single merged hash is rebuilt only when a registration
+      # changes (reset_union_cache clears @workflows). Each `fetch`/`all`/`ids`
+      # call — and register!'s own `key?` check — used to allocate two fresh
+      # merged hashes, which adds up across a cross-project status scan.
       def workflows
-        WORKFLOWS.merge(registrations).merge(project_registrations)
+        @workflows ||= WORKFLOWS.merge(registrations).merge(project_registrations)
       end
 
       def registrations
@@ -131,6 +136,9 @@ module Hive
       end
 
       def reset_union_cache
+        # Drop the local merged-union memo (registrations changed) alongside the
+        # derived stage-dir caches in Hive::Workflows.
+        @workflows = nil
         Hive::Workflows.reset_union_cache! if Hive::Workflows.respond_to?(:reset_union_cache!)
       end
     end

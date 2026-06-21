@@ -111,7 +111,7 @@ module Hive
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
       projects.flat_map do |project|
-        stages = stages_for_project(project)
+        stages = Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
         stages.filter_map do |stage|
           folder = File.join(project["hive_state_path"], "stages", stage, slug)
           next nil unless File.directory?(folder)
@@ -125,7 +125,7 @@ module Hive
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
       projects.flat_map do |project|
-        stages = stages_for_project(project)
+        stages = Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
         stages.flat_map do |stage|
           stage_dir = File.join(project["hive_state_path"], "stages", stage)
           next [] unless File.directory?(stage_dir)
@@ -139,14 +139,6 @@ module Hive
           end
         end
       end
-    end
-
-    def stages_for_project(project)
-      # Shared per-project resolution rule (loads the project overlay, then
-      # returns the stage-dir union or the filtered dir). Tolerates a
-      # stage_filter that names a stage absent from THIS project but present in
-      # another, so scanning a project that lacks it skips rather than aborts.
-      Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
     end
 
     def validate_project_path_match!(task)

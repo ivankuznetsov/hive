@@ -6,10 +6,6 @@ module Hive
     module Loader
       module_function
 
-      def load(project_root)
-        load_dir(workflow_dir(project_root))
-      end
-
       # Canonical "<hive_state_path>/workflows" resolver. The single spelling of
       # this path — Hive::Workflows::Project#workflow_dir_for wraps it with a
       # config-error fallback, and Hive::Commands::Workflow#workflow_dir

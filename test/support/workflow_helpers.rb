@@ -155,11 +155,13 @@ module HiveWorkflowTestHelper
 
   def with_registered_workflow(descriptor)
     Hive::Workflows::Registry.register!(descriptor)
-    # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union
-    # (the registry is frozen in production, so the cache is permanent there).
-    # This helper is the ONE place the registry mutates, so it must drop the
-    # cache on both enter and exit or the fixture's stage dirs would be missing
-    # inside the block and leak after it.
+    # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union.
+    # The union cache is NOT permanent: production mutates the registry too
+    # (Hive::Workflows::Project.register_descriptor → Registry.register!(project:
+    # true)), and every register!/reset path invalidates the cache. This helper
+    # registers into the TEST overlay, so it must drop the cache on both enter
+    # and exit or the fixture's stage dirs would be missing inside the block and
+    # leak after it.
     reset_workflow_union_cache!
     yield
   ensure

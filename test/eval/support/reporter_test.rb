@@ -312,6 +312,25 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_help_is_read_only_and_preserves_selected_report
+    [ "--help", "-h" ].each do |help_flag|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "report.json")
+        File.write(report, JSON.dump({ "schema" => "hive-eval-report", "preexisting" => true }))
+
+        out, _err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1" },
+          "bin/hive-eval", "--report", report, help_flag
+        )
+
+        assert status.success?, "#{help_flag} must exit successfully"
+        assert_match(%r{Usage: bin/hive-eval}, out, "#{help_flag} must print usage")
+        assert File.exist?(report),
+          "#{help_flag} is read-only and must not delete the selected report"
+      end
+    end
+  end
+
   def test_cli_rejects_stray_positional_scenario_names
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "positional.json")

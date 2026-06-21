@@ -55,6 +55,11 @@ FileUtils.rm_f(report_path)
 begin
   remaining = parser.parse!
 rescue OptionParser::ParseError => e
+  # OptionParser accepts abbreviated long options (e.g. --rep for --report) and
+  # populates options[:report] before raising on a later missing value. The
+  # pre-scan above only recognizes the exact --report/--report= forms, so clear
+  # whatever report path OptionParser captured to avoid leaving a stale report.
+  FileUtils.rm_f(File.expand_path(options.fetch(:report), root))
   warn "hive-eval: #{e.message}"
   warn parser
   exit 64

@@ -8,6 +8,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/workflows/descriptor_parser"
+require "hive/workflows/loader"
 require "hive/workflows/project"
 require "hive/workflows/registry"
 
@@ -16,6 +17,7 @@ module Hive
     class Workflow
       TEMPLATE_ROOT = File.expand_path("../../../templates/workflows/blank", __dir__)
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
+      SCHEMA = "hive-workflow-new".freeze
 
       class UsageError < Hive::Error
         attr_reader :value
@@ -44,7 +46,10 @@ module Hive
 
       def call
         call!
-      rescue UsageError, Hive::ConfigError, Hive::GitError => e
+      rescue UsageError, Hive::ConfigError, Hive::GitError, Hive::ConcurrentRunError => e
+        # ConcurrentRunError (commit-lock contention, TEMPFAIL/75) is now caught
+        # too: previously it escaped to bin/hive as plain stderr, hiding the
+        # retryable-vs-terminal distinction from --json agent callers.
         if @json
           @stdout.puts JSON.generate(error_payload(e))
         else
@@ -65,12 +70,16 @@ module Hive
         begin
           write_scaffold!(id, paths)
           validate_descriptor!(paths.fetch(:descriptor))
+          Hive::Workflows::Project.reset!
+          # commit_scaffold! is INSIDE the rollback protection: a commit failure
+          # (GitError / ConcurrentRunError) would otherwise leave orphan
+          # descriptor + instruction files on disk that make the next retry fail
+          # in refuse_overwrite!, turning a retryable command into a stuck one.
+          commit_scaffold!(id, paths)
         rescue StandardError
           rollback_scaffold(paths)
           raise
         end
-        Hive::Workflows::Project.reset!
-        commit_scaffold!(id, paths)
 
         payload = success_payload(id, paths)
         if @json
@@ -111,8 +120,10 @@ module Hive
       end
 
       def workflow_dir
-        cfg = Hive::Config.load(@project_root)
-        File.join(File.expand_path(cfg.fetch("hive_state_path"), @project_root), "workflows")
+        # Single source of "<hive_state_path>/workflows" — the scaffolder needs
+        # the raw config error to surface (no fallback), which Loader.workflow_dir
+        # provides; Project#workflow_dir_for is the fallback-wrapping variant.
+        Hive::Workflows::Loader.workflow_dir(@project_root)
       end
 
       def refuse_overwrite!(paths)
@@ -169,6 +180,8 @@ module Hive
 
       def success_payload(id, paths)
         {
+          "schema" => SCHEMA,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(SCHEMA),
           "ok" => true,
           "id" => id,
           "descriptor_path" => paths.fetch(:descriptor),
@@ -177,13 +190,26 @@ module Hive
         }
       end
 
+      # Route through the gem-wide ErrorEnvelope so the payload carries the same
+      # schema / schema_version / error_kind keys as every other hive-* command
+      # (agents branch on those uniformly).
       def error_payload(error)
-        {
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "exit_code" => error.exit_code,
-          "message" => error.message
-        }
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: SCHEMA,
+          error: error,
+          error_kind: error_kind_for(error)
+        )
+      end
+
+      def error_kind_for(error)
+        kinds = Hive::Schemas::WorkflowNewErrorKind
+        case error
+        when UsageError                then kinds::USAGE
+        when Hive::ConcurrentRunError  then kinds::CONCURRENT_RUN
+        when Hive::GitError            then kinds::GIT
+        when Hive::ConfigError         then kinds::CONFIG
+        else                                kinds::ERROR
+        end
       end
     end
   end

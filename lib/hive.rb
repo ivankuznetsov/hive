@@ -36,6 +36,11 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 1,
       "hive-patrol-finding" => 1,
+      # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
+      # --json`). Both arms route through Hive::Schemas::ErrorEnvelope so the
+      # output carries the same schema/schema_version/error_kind keys as every
+      # other agent-callable command.
+      "hive-workflow-new" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path
@@ -327,6 +332,20 @@ module Hive
       USAGE    = "usage".freeze
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive workflow new --json`.
+    # `usage` covers a missing/invalid/reserved id and an unknown subcommand
+    # (exit 64). `concurrent_run` is the commit-lock contention case (exit 75,
+    # retryable) — surfaced as JSON now instead of plain stderr. `config`/`git`
+    # are config.yml / commit failures; `error` is the uncategorised fallback.
+    module WorkflowNewErrorKind
+      USAGE          = "usage".freeze
+      CONFIG         = "config".freeze
+      GIT            = "git".freeze
+      CONCURRENT_RUN = "concurrent_run".freeze
+      ERROR          = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
   end

@@ -89,6 +89,29 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # A8 fail-closed, REAL adapter path: a non-yolo permissions scope on a
+  # reviewer whose runner can't enforce tool scoping (codex) must raise
+  # Hive::ConfigError from the ACTUAL Reviewers::Agent#run! →
+  # stage_permission_scope call before any spawn — not from a hand-written
+  # stub that itself raises. A regression making the real adapter swallow or
+  # skip the gate would fail here.
+  def test_run_hard_errors_on_non_yolo_scope_for_codex_runner
+    with_tmp_dir do |dir|
+      ENV["HIVE_CODEX_BIN"] = File.expand_path("../../fixtures/fake-codex", __dir__)
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(
+        make_spec("agent" => "codex", "permissions" => "read-only"), ctx
+      )
+
+      error = assert_raises(Hive::ConfigError) { reviewer.run! }
+      assert_match(/cannot enforce tool scoping/, error.message)
+      assert_match(/runner :codex/, error.message)
+    ensure
+      ENV.delete("HIVE_CODEX_BIN")
+    end
+  end
+
   def test_orchestrator_marker_is_not_clobbered_by_reviewer_spawn
     # Crucial regression: the 6-review runner sets REVIEW_WORKING phase=reviewers
     # before spawning each reviewer. The reviewer's spawn must not overwrite

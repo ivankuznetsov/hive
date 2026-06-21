@@ -26,6 +26,16 @@ claude:
 <% if claude_effort %>  effort: <%= claude_effort %>
 <% else %>  # effort: medium
 <% end %>
+# Optional per-stage agent tool scopes. Default is yolo, which preserves
+# today's stage behavior. Non-yolo scopes are Claude-only and are tool-level
+# controls, not an OS sandbox; see docs/permissions.md.
+# permissions: yolo
+# permissions: read-only
+# permissions:
+#   preset: scoped
+#   tools: [Read, Write, Edit]
+#   dirs: [./drafts]
+
 # Stage-level agent for single-agent stages. (6-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
 # below.) Defaults are claude for planning (deeper reasoning) and codex
@@ -42,13 +52,21 @@ claude:
 brainstorm:
   agent: <%= planning_agent %>
   # skill: /ce-brainstorm
+  # permissions: read-only
   # Legacy configs may still carry brainstorm.runtime; new projects use
   # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
   # skill: /plan
+  # permissions: read-only
 execute:
   agent: <%= development_agent %>
+  # Scoped dirs extend the task folder add-dir list; relative paths are
+  # resolved from the task folder.
+  # permissions:
+  #   preset: scoped
+  #   tools: [Read, Write, Edit]
+  #   dirs: [./drafts]
 open_pr:
   agent: claude
 artifacts:

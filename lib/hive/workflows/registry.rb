@@ -36,12 +36,12 @@ module Hive
       module_function
 
       def fetch(id)
-        WORKFLOWS.fetch(id) do
-          known = WORKFLOWS.keys.map(&:inspect).join(", ")
+        workflows.fetch(id) do
+          known = workflows.keys.map(&:inspect).join(", ")
           raise UnknownWorkflow.new(
             "unknown workflow #{id.inspect}; known workflows: #{known}",
             value: id,
-            valid: WORKFLOWS.keys.map(&:to_s)
+            valid: workflows.keys.map(&:to_s)
           )
         end
       end
@@ -57,11 +57,60 @@ module Hive
       end
 
       def all
-        WORKFLOWS.values
+        workflows.values
       end
 
       def ids
-        WORKFLOWS.keys
+        workflows.keys
+      end
+
+      def register!(descriptor, source_path: nil, project: false)
+        id = descriptor.id.to_sym
+        target = project ? project_registrations : registrations
+        if workflows.key?(id)
+          raise Hive::ConfigError,
+                "#{registration_label(id, source_path)} collides with registered workflow #{id.inspect}"
+        end
+
+        target[id] = descriptor
+        reset_union_cache
+        descriptor
+      end
+
+      def reset_project_registrations!
+        return if project_registrations.empty?
+
+        project_registrations.clear
+        reset_union_cache
+      end
+
+      def reset_runtime_registrations!
+        return if registrations.empty?
+
+        registrations.clear
+        reset_union_cache
+      end
+
+      def workflows
+        WORKFLOWS.merge(registrations).merge(project_registrations)
+      end
+
+      def registrations
+        @registrations ||= {}
+      end
+
+      def project_registrations
+        @project_registrations ||= {}
+      end
+
+      def registration_label(id, source_path)
+        return "workflow descriptor #{source_path}" if source_path
+
+        "workflow #{id.inspect}"
+      end
+
+      def reset_union_cache
+        Hive::Workflows.reset_union_cache! if Hive::Workflows.respond_to?(:reset_union_cache!)
       end
     end
   end

@@ -2,6 +2,7 @@ require "yaml"
 require "hive/config"
 require "hive/stages"
 require "hive/task_meta"
+require "hive/workflows/project"
 require "hive/workflows/registry"
 require "hive/worktree"
 
@@ -128,6 +129,7 @@ module Hive
     end
 
     def resolve_workflow
+      Hive::Workflows::Project.load!(@project_root)
       selector = meta[:workflow]
       # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
       # always nil here (no .empty? branch needed).

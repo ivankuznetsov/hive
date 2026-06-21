@@ -173,7 +173,7 @@ module Hive
         # With an explicit --workflow the project default is irrelevant (an
         # override always pins), so don't read config.yml at all — an
         # unreadable/corrupt config must not block a fully-specified `hive new`.
-        return { descriptor: Hive::WorkflowSelection.fetch!(override), pin: true } if override
+        return { descriptor: Hive::WorkflowSelection.fetch!(override, project_root: project.fetch("path")), pin: true } if override
 
         cfg_default = project_default_workflow(project.fetch("path"))
         {
@@ -189,12 +189,13 @@ module Hive
       # Task#warn_if_unregistered_project_default. The user-supplied `--workflow`
       # path keeps WorkflowSelection.fetch!'s own valid-names message.
       def fetch_project_default_workflow!(cfg_default, project)
-        Hive::WorkflowSelection.fetch!(cfg_default)
+        Hive::WorkflowSelection.fetch!(cfg_default, project_root: project.fetch("path"))
       rescue Hive::Workflows::UnknownWorkflow
         cfg_path = File.join(project["hive_state_path"].to_s, "config.yml")
         raise UnregisteredProjectWorkflow.new(
           "project default_workflow #{cfg_default.inspect} in #{cfg_path} is not a registered " \
-          "workflow (valid: #{Hive::WorkflowSelection.valid_names.join(', ')}); fix config.yml or pass --workflow",
+          "workflow (valid: #{Hive::WorkflowSelection.valid_names(project_root: project.fetch('path')).join(', ')}); " \
+          "fix config.yml or pass --workflow",
           value: cfg_default
         )
       end

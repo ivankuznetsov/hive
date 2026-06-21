@@ -723,7 +723,7 @@ module Hive
       def resolve_workflow_choice(ops)
         if @workflow_name
           return WorkflowChoice.new(
-            descriptor: Hive::WorkflowSelection.fetch!(@workflow_name),
+            descriptor: Hive::WorkflowSelection.fetch!(@workflow_name, project_root: @project_path),
             source: :flag
           )
         end
@@ -732,7 +732,8 @@ module Hive
         # registered workflow the numbered prompt offers no alternative yet still
         # blocks on stdin, which can hang a PTY-allocating wrapper (tmux /
         # `script` / expect). Treat size==1 as :implicit (coding default).
-        if Hive::Workflows::Registry.ids.size > 1 && @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
+        workflow_names = Hive::WorkflowSelection.valid_names(project_root: @project_path)
+        if workflow_names.size > 1 && @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
           # On a re-init the prompt defaults to (and a bare Enter keeps) the
           # project's CURRENT default rather than coding — pressing Enter must
           # never silently reset a non-coding default back to coding and rebind
@@ -745,7 +746,7 @@ module Hive
       end
 
       def prompt_workflow(current_default = Hive::Workflows::CODING_ID.to_s)
-        ids = Hive::WorkflowSelection.valid_names
+        ids = Hive::WorkflowSelection.valid_names(project_root: @project_path)
         @workflow_output.puts "Workflows: #{ids.each_with_index.map { |name, index| "#{index + 1}) #{name}" }.join('  ')}"
         loop do
           @workflow_output.print "Default workflow [#{current_default}]: "
@@ -754,7 +755,7 @@ module Hive
           raise Hive::Commands::Init::Prompts::Aborted, "input closed" if answer.nil?
 
           value = answer.strip
-          return Hive::WorkflowSelection.fetch!(current_default) if value.empty?
+          return Hive::WorkflowSelection.fetch!(current_default, project_root: @project_path) if value.empty?
 
           resolved = resolve_workflow_answer(value, ids)
           return resolved if resolved
@@ -766,13 +767,13 @@ module Hive
       def resolve_workflow_answer(value, ids)
         if value.match?(/\A\d+\z/)
           index = value.to_i
-          return Hive::WorkflowSelection.fetch!(ids[index - 1]) if index.between?(1, ids.size)
+          return Hive::WorkflowSelection.fetch!(ids[index - 1], project_root: @project_path) if index.between?(1, ids.size)
 
           return nil
         end
 
         match = ids.find { |id| id.casecmp(value).zero? }
-        match && Hive::WorkflowSelection.fetch!(match)
+        match && Hive::WorkflowSelection.fetch!(match, project_root: @project_path)
       end
 
       # Minimal ANSI palette for one-shot CLI summaries. Honors

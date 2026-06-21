@@ -3,6 +3,7 @@ require "hive/task"
 require "hive/task_meta"
 require "hive/stages"
 require "hive/workflows"
+require "hive/workflows/project"
 
 module Hive
   # Resolve a CLI TARGET (folder path or bare slug) to a `Hive::Task`.
@@ -21,7 +22,7 @@ module Hive
     def initialize(target, project_filter: nil, stage_filter: nil)
       @target = target
       @project_filter = project_filter
-      @stage_filter = Hive::Workflows.resolve_stage_ref_across_workflows(stage_filter)
+      @stage_filter = stage_filter
     end
 
     def resolve
@@ -109,8 +110,8 @@ module Hive
     def find_slug_across_projects(slug)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-      stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
       projects.flat_map do |project|
+        stages = stages_for_project(project)
         stages.filter_map do |stage|
           folder = File.join(project["hive_state_path"], "stages", stage, slug)
           next nil unless File.directory?(folder)
@@ -123,8 +124,8 @@ module Hive
     def find_id_across_projects(id)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-      stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
       projects.flat_map do |project|
+        stages = stages_for_project(project)
         stages.flat_map do |stage|
           stage_dir = File.join(project["hive_state_path"], "stages", stage)
           next [] unless File.directory?(stage_dir)
@@ -138,6 +139,13 @@ module Hive
           end
         end
       end
+    end
+
+    def stages_for_project(project)
+      Hive::Workflows::Project.load!(project["path"])
+      return Hive::Workflows.all_stage_dirs unless @stage_filter
+
+      [ Hive::Workflows.resolve_stage_ref_across_workflows(@stage_filter) ]
     end
 
     def validate_project_path_match!(task)

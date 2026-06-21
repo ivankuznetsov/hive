@@ -7,9 +7,13 @@ module Hive
       module_function
 
       def load(project_root)
+        load_dir(workflow_dir(project_root))
+      end
+
+      def workflow_dir(project_root)
         project_root = File.expand_path(project_root)
         cfg = Hive::Config.load(project_root)
-        load_dir(File.join(project_root, cfg.fetch("hive_state_path"), "workflows"))
+        File.join(project_root, cfg.fetch("hive_state_path"), "workflows")
       end
 
       def load_dir(workflows_dir)

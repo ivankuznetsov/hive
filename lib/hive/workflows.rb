@@ -158,6 +158,12 @@ module Hive
       @all_terminal_stage_dirs ||= Registry.all.map { |workflow| workflow.stages.last.dir }.uniq.freeze
     end
 
+    def reset_union_cache!
+      @all_stage_dirs = nil
+      @all_stage_names = nil
+      @all_terminal_stage_dirs = nil
+    end
+
     # The shared "valid stage refs" hint tail — "<full dirs> or short names
     # <short names>" — appended to every union-scope unknown-stage error so the
     # two emit sites (resolve_stage_ref_across_workflows below and Approve's

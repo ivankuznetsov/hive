@@ -153,18 +153,7 @@ module HiveWorkflowTestHelper
   end
 
   def with_registered_workflow(descriptor)
-    original_fetch = Hive::Workflows::Registry.method(:fetch)
-    original_all = Hive::Workflows::Registry.method(:all)
-    original_ids = Hive::Workflows::Registry.method(:ids)
-    Hive::Workflows::Registry.define_singleton_method(:fetch) do |id|
-      id == descriptor.id ? descriptor : original_fetch.call(id)
-    end
-    Hive::Workflows::Registry.define_singleton_method(:all) do
-      (original_all.call + [ descriptor ]).uniq(&:id)
-    end
-    Hive::Workflows::Registry.define_singleton_method(:ids) do
-      (original_ids.call + [ descriptor.id ]).uniq
-    end
+    Hive::Workflows::Registry.register!(descriptor)
     # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union
     # (the registry is frozen in production, so the cache is permanent there).
     # This helper is the ONE place the registry mutates, so it must drop the
@@ -173,15 +162,11 @@ module HiveWorkflowTestHelper
     reset_workflow_union_cache!
     yield
   ensure
-    Hive::Workflows::Registry.define_singleton_method(:fetch, original_fetch) if original_fetch
-    Hive::Workflows::Registry.define_singleton_method(:all, original_all) if original_all
-    Hive::Workflows::Registry.define_singleton_method(:ids, original_ids) if original_ids
+    Hive::Workflows::Registry.reset_runtime_registrations!
     reset_workflow_union_cache!
   end
 
   def reset_workflow_union_cache!
-    Hive::Workflows.instance_variable_set(:@all_stage_dirs, nil)
-    Hive::Workflows.instance_variable_set(:@all_stage_names, nil)
-    Hive::Workflows.instance_variable_set(:@all_terminal_stage_dirs, nil)
+    Hive::Workflows.reset_union_cache!
   end
 end

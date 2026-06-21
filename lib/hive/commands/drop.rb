@@ -11,6 +11,7 @@ require "hive/lock"
 require "hive/process_kill"
 require "hive/stages"
 require "hive/workflows"
+require "hive/workflows/project"
 require "hive/worktree"
 
 module Hive
@@ -34,7 +35,7 @@ module Hive
         @target = target
         @project_filter = project
         @from = from
-        @stage_filter = Hive::Workflows.resolve_stage_ref_across_workflows(from)
+        @stage_filter = from
         @json = json
       end
 
@@ -116,7 +117,7 @@ module Hive
           # Scan the union of every registered workflow's stage dirs (not
           # just the coding `Hive::Stages::DIRS`) so a generic task folder is
           # findable by slug. Mirrors Hive::TaskResolver#find_slug_across_projects.
-          stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
+          stages = stages_for_project(project)
           folders = collect_stage_folders(project["hive_state_path"], @target, stages)
           next if folders.empty?
 
@@ -175,17 +176,19 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         all_matches = projects.flat_map do |project|
+          Hive::Workflows::Project.load!(project["path"])
           collect_stage_folders(project["hive_state_path"], @target, Hive::Workflows.all_stage_dirs).map do |folder|
             [ project, folder ]
           end
         end
         return if all_matches.empty? || all_matches.map { |project, _| project["name"] }.uniq.size > 1
 
+        expected_stage = Hive::Workflows.resolve_stage_ref_across_workflows(@stage_filter)
         actual_stage = all_matches.first[1][:stage]
         raise Hive::WrongStage.new(
-          "task is at #{actual_stage} but --from expected #{@stage_filter}",
+          "task is at #{actual_stage} but --from expected #{expected_stage}",
           current_stage: actual_stage,
-          target_stage: @stage_filter
+          target_stage: expected_stage
         )
       end
 
@@ -197,8 +200,15 @@ module Hive
       def project_hint
         hints = []
         hints << "project '#{@project_filter}'" if @project_filter
-        hints << "stage '#{@stage_filter}'" if @stage_filter
+        hints << "stage '#{@from}'" if @from
         hints.empty? ? "" : " in #{hints.join(' and ')}"
+      end
+
+      def stages_for_project(project)
+        Hive::Workflows::Project.load!(project["path"])
+        return Hive::Workflows.all_stage_dirs unless @stage_filter
+
+        [ Hive::Workflows.resolve_stage_ref_across_workflows(@stage_filter) ]
       end
 
       def guard_archived!(context)

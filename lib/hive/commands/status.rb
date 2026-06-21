@@ -6,6 +6,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/stages"
 require "hive/workflows"
+require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
 require "hive/task_action"
@@ -170,6 +171,7 @@ module Hive
         elsif !File.directory?(hive_state)
           base.merge("error" => "not_initialised", "tasks" => [])
         else
+          Hive::Workflows::Project.load!(path)
           # JSON path: pay the diagnostic-extraction cost because
           # external consumers (TUI, daemon, bots) read `diagnostic` off
           # every row. Schema mandates the field.
@@ -402,6 +404,7 @@ module Hive
           return
         end
 
+        Hive::Workflows::Project.load!(path)
         # Text-mode renders icon / state_label / suggested_command / age
         # only — `diagnostic` is unused here, so skip the bounded file-
         # I/O that TaskAction#diagnostic performs per red row. JSON path

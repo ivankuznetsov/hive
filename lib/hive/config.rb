@@ -1703,18 +1703,25 @@ module Hive
       end
     end
 
-    # Collect every `permissions:` spec that Config.permission_spec will
-    # actually resolve, paired with a human label for error messages: each
-    # single-agent / generic-agent stage block (a top-level Hash) plus the
-    # dotted review roles and per-reviewer entries. `review` is skipped in
-    # the top-level scan because its own `permissions` key is NOT a resolved
-    # location (reject_unsupported_review_permissions! rejects it) — only its
-    # per-role sub-blocks, added explicitly below, are. Validating exactly
-    # the resolved set keeps a `permissions` key the resolver ignores from
-    # passing load only to be silently dropped at runtime.
+    # Collect `permissions:` specs to shape-validate at load, paired with a
+    # human label for error messages. The top-level `cfg.each` is a deliberate
+    # SUPERSET of the stages Config.permission_spec actually resolves: it
+    # scans every top-level Hash, because generic-workflow stage names aren't
+    # known at load time, so it CANNOT enumerate exactly the resolved set.
+    # Over-collecting is intentional — a malformed `permissions:` under any
+    # block fails the *load* instead of surviving to a confusing spawn-time
+    # error. (A well-formed `permissions:` key the resolver happens to ignore
+    # — e.g. under a non-stage block — passes load and is silently dropped at
+    # runtime; that fail-open is a separate, accepted concern, not what this
+    # scan guards.) `review` and `patrol.review` are skipped in the top-level
+    # scan because their own `permissions` key is NOT a resolved location
+    # (reject_unsupported_review_permissions! rejects both) — only their
+    # per-role sub-blocks and per-reviewer entries, added explicitly below,
+    # are resolved. Patrol tasks dispatch `patrol.review.reviewers` through the
+    # same adapters as `review.reviewers`, so those entries are validated too.
     def permission_entries(cfg)
       entries = []
-      # One guard shape, three call sites: only collect a `permissions:`
+      # One guard shape, several call sites: only collect a `permissions:`
       # value when the block is a Hash that declares the key.
       collect = lambda do |label, block|
         entries << [ label, block["permissions"] ] if block.is_a?(Hash) && block.key?("permissions")
@@ -1734,6 +1741,13 @@ module Hive
         end
       end
 
+      patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
+      if patrol_review.is_a?(Hash)
+        Array(patrol_review["reviewers"]).each_with_index do |entry, idx|
+          collect.call("patrol.review.reviewers[#{idx}]", entry)
+        end
+      end
+
       entries
     end
 
@@ -1743,14 +1757,28 @@ module Hive
     # downgrade: the operator believes review is scoped while every review
     # sub-stage still runs the project default (often yolo). Reject it
     # loudly and point at the supported per-role / per-reviewer locations.
+    # `patrol.review.permissions` is the exact patrol analog — patrol tasks
+    # dispatch `patrol.review.reviewers` through the same adapters, and no
+    # resolver reads a `patrol.review.permissions` key — so reject it too,
+    # pointing at the patrol per-reviewer location.
     def reject_unsupported_review_permissions!(cfg, source_path)
-      review = cfg["review"]
-      return unless review.is_a?(Hash) && review.key?("permissions")
+      reject_unsupported_permissions_at!(
+        cfg["review"], "review.permissions", source_path,
+        "set permissions per role under review.{ci,triage,fix,browser_test} or per reviewer entry"
+      )
+      patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
+      reject_unsupported_permissions_at!(
+        patrol_review, "patrol.review.permissions", source_path,
+        "set permissions per reviewer entry under patrol.review.reviewers"
+      )
+    end
+
+    def reject_unsupported_permissions_at!(block, label, source_path, suggestion)
+      return unless block.is_a?(Hash) && block.key?("permissions")
 
       raise ConfigError,
-            "review.permissions in #{describe_source(source_path)} is not a supported " \
-            "scope location; set permissions per role under " \
-            "review.{ci,triage,fix,browser_test} or per reviewer entry instead."
+            "#{label} in #{describe_source(source_path)} is not a supported " \
+            "scope location; #{suggestion} instead."
     end
 
     def validate_permission_spec!(spec, label, source_path)
@@ -1775,12 +1803,9 @@ module Hive
     end
 
     def permission_at(cfg, stage)
-      parts = stage.to_s.split(".")
-      block = if parts.length == 1
-        cfg[parts.first]
-      else
-        cfg.dig(*parts)
-      end
+      # `cfg.dig(*parts)` already handles the single-element case identically
+      # to `cfg[parts.first]`, so no length branch is needed.
+      block = cfg.dig(*stage.to_s.split("."))
       return MISSING_PERMISSION unless block.is_a?(Hash) && block.key?("permissions")
 
       block["permissions"]

@@ -277,6 +277,24 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_abbreviated_report_flag_with_usage
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "abbrev.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--rep", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/invalid option: --rep/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(report)
+    end
+  end
+
   def test_cli_rejects_missing_option_values_with_usage
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "missing-scenario.json")

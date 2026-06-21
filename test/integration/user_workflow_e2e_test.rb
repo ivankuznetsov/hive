@@ -36,11 +36,18 @@ class UserWorkflowE2ETest < Minitest::Test
         assert_equal "my-flow", Hive::TaskMeta.read(inbox)[:workflow]
         assert_includes File.read(File.join(inbox, "idea.md")), "<!-- COMPLETE -->"
 
+        # Each `hive` invocation is a fresh CLI process with NO project workflow
+        # pre-registered. Drop the in-process overlay before each command so the
+        # test exercises that reality — otherwise leftover module state from the
+        # prior command would mask the U9-3 bug where `hive approve` rejected a
+        # custom stage (e.g. 2-work) before loading the project.
+        Hive::Workflows::Project.reset!
         capture_io { Hive::Commands::Approve.new(File.basename(inbox), project: project, from: "1-inbox").call }
         work = task_folder(project_root, "2-work")
         assert File.directory?(work)
         refute File.directory?(inbox)
 
+        Hive::Workflows::Project.reset!
         ran = []
         with_deterministic_content_agent(record: ran) do
           capture_io { Hive::Commands::Run.new(File.basename(work), project: project).call }
@@ -50,6 +57,7 @@ class UserWorkflowE2ETest < Minitest::Test
         assert File.file?(File.join(work, "work.md"))
         assert_includes File.read(File.join(work, "work.md")), "<!-- COMPLETE -->"
 
+        Hive::Workflows::Project.reset!
         capture_io { Hive::Commands::Approve.new(File.basename(work), project: project, from: "2-work").call }
         done = task_folder(project_root, "3-done")
         assert File.directory?(done)
@@ -57,6 +65,7 @@ class UserWorkflowE2ETest < Minitest::Test
         assert File.file?(File.join(done, "work.md"))
         assert_equal "my-flow", Hive::TaskMeta.read(done)[:workflow]
 
+        Hive::Workflows::Project.reset!
         capture_io { Hive::Commands::New.new(project, "coding path still works").call }
         coding_inbox = task_folder(project_root, "1-inbox")
         assert File.directory?(coding_inbox)

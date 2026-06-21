@@ -1337,6 +1337,18 @@ module Hive
               error_message: "#{e.class}: #{e.message}"
             )
           rescue StandardError => e
+            # A8 fail-closed: a non-yolo permission scope on a reviewer whose
+            # runner can't enforce tool scoping (codex / pi) raises
+            # Hive::ConfigError from stage_permission_scope. Swallowing it as a
+            # per-reviewer :error would let the rest of the pass continue after
+            # silently dropping the unenforceable reviewer — a silent security
+            # downgrade. Re-raise so the outer `Stages::Review.run!`
+            # Hive::ConfigError rescue stamps the `config_error` review_error
+            # marker and hard-fails the run. Only the typed config error
+            # propagates; genuine per-reviewer infra failures (spawn errors,
+            # adapter timeouts) still degrade to a recorded :error below.
+            raise if e.is_a?(Hive::ConfigError)
+
             Hive::Reviewers::Result.new(
               name: spec["name"],
               output_path: adapter.output_path,

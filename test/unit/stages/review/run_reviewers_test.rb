@@ -1833,4 +1833,61 @@ class RunReviewersTest < Minitest::Test
     FileUtils.rm_rf(log_dir) if log_dir
     ENV.delete("HIVE_FAKE_GH_LOG_DIR")
   end
+
+  # A8 fail-closed: a reviewer carrying a non-yolo permission scope on a
+  # runner that cannot enforce tool scoping (codex / pi) makes
+  # stage_permission_scope raise Hive::ConfigError. The real Agent#run!
+  # raises it before spawning; model that here.
+  class UnenforceableScopeReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      raise Hive::ConfigError,
+            "stage review.reviewers requests permissions \"read-only\" but runner :codex " \
+            "cannot enforce tool scoping (claude only)"
+    end
+  end
+
+  # A8 contract: an unenforceable reviewer permission scope must HARD-ERROR
+  # the whole review. The Hive::ConfigError must propagate out of
+  # run_reviewers so Stages::Review.run!'s ConfigError rescue lands
+  # :review_error — it must NOT be silently caught by run_reviewer_spec's
+  # per-reviewer rescue and dropped, which would let a mixed pass continue
+  # after dropping the unenforceable reviewer (a silent security downgrade).
+  def test_unenforceable_reviewer_scope_hard_errors_the_run
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "headless" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "scoped-codex", "output_basename" => "scoped-codex",
+              "kind" => "agent", "agent" => "codex",
+              "permissions" => "read-only" },
+            { "name" => "ok", "output_basename" => "ok" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = [
+        UnenforceableScopeReviewer.new(cfg["review"]["reviewers"][0], ctx),
+        OkReviewer.new(cfg["review"]["reviewers"][1], ctx)
+      ]
+
+      err = nil
+      with_stubbed_dispatch(adapters) do
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Stages::Review.run_reviewers(
+            cfg, ctx, Task.new(dir, File.join(dir, "task.md"))
+          )
+        end
+      end
+
+      assert_match(/cannot enforce tool scoping/, err.message,
+                   "the unenforceable-scope ConfigError must propagate, not be swallowed")
+
+      # The pass must NOT continue past the unenforceable reviewer: the
+      # surviving OK reviewer never publishes a finding, because the run
+      # hard-errored instead of silently dropping the bad reviewer.
+      refute File.exist?(File.join(dir, "reviews", "ok-01.md")),
+             "review must hard-error, not silently drop the reviewer and continue"
+    end
+  end
 end

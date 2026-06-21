@@ -52,17 +52,30 @@ claude:
 brainstorm:
   agent: <%= planning_agent %>
   # skill: /ce-brainstorm
-  # permissions: read-only
+  # Brainstorm must WRITE brainstorm.md (its WAITING/COMPLETE marker), so a
+  # read-only scope would block it from completing — grant Write/Edit via a
+  # scoped block instead. Non-yolo scopes are claude-only, so this stage's
+  # agent must be claude to use it.
+  # permissions:
+  #   preset: scoped
+  #   tools: [Read, Write, Edit]
   # Legacy configs may still carry brainstorm.runtime; new projects use
   # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
   # skill: /plan
-  # permissions: read-only
+  # Plan must WRITE plan.md (its marker), so a read-only scope would block it
+  # from completing — grant Write/Edit via a scoped block instead. Non-yolo
+  # scopes are claude-only, so this stage's agent must be claude to use it.
+  # permissions:
+  #   preset: scoped
+  #   tools: [Read, Write, Edit]
 execute:
   agent: <%= development_agent %>
   # Scoped dirs extend the task folder add-dir list; relative paths are
-  # resolved from the task folder.
+  # resolved from the task folder. Non-yolo scopes are claude-only: to
+  # uncomment this you must also set `agent: claude` here, since the
+  # development default is codex, which cannot enforce tool scoping.
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]

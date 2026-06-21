@@ -85,8 +85,9 @@ review:
 
 ## Scoped Options
 
-`tools:` is authoritative. Hive passes exactly those tools as Claude's
-`--allowedTools` value. Hive also emits a `--disallowedTools` deny list —
+`tools:` is authoritative. Hive passes those tools as Claude's
+`--allowedTools` value, deduplicated and with blank entries dropped. Hive also
+emits a `--disallowedTools` deny list —
 the `read-only` mutating/shell set (`Write`, `Edit`, `MultiEdit`,
 `NotebookEdit`, `Bash`) minus whatever you granted — so a tool you grant
 is never also denied. (Claude's deny rules win over allow rules, so an
@@ -112,5 +113,6 @@ directly in `tools:` when you provide a custom list.
 
 Hive validates permission specs at config load and spawn time. Unknown presets,
 unknown keys, malformed maps, and `bash:` plus `tools:` are hard errors.
-Runner-support errors are checked when a stage resolves its agent profile, so a
-non-yolo scope on Codex or Pi fails before the agent is spawned.
+Runner-support errors are checked inside `PermissionScope.resolve` (when a stage
+resolves its permission scope), so a non-yolo scope on Codex or Pi fails before
+the agent is spawned.

@@ -1890,4 +1890,76 @@ class RunReviewersTest < Minitest::Test
              "review must hard-error, not silently drop the reviewer and continue"
     end
   end
+
+  # --- shared-session reviewer grouping (multi-scope) -------------------
+
+  # Reviewers that resolve to the SAME effective permission scope share one
+  # group (one tmux session); a reviewer with a DIFFERING scope splits into
+  # its own group. An explicit `permissions: yolo` and a reviewer inheriting
+  # the project default yolo are the same effective scope → one group; a
+  # read-only reviewer is a different scope → a second group.
+  def test_shared_reviewer_groups_dedups_equal_scopes_and_splits_differing_ones
+    cfg = { "permissions" => "yolo" }
+    specs = [
+      { "name" => "inherits-default" },
+      { "name" => "explicit-yolo", "permissions" => "yolo" },
+      { "name" => "read-only", "permissions" => "read-only" }
+    ]
+
+    groups = Hive::Stages::Review.shared_reviewer_groups(cfg, specs)
+
+    assert_equal 2, groups.length,
+                 "equal-scope reviewers share one group; the read-only reviewer splits off"
+    yolo_group = groups.find { |g| g.map { |s| s["name"] }.sort == %w[explicit-yolo inherits-default] }
+    refute_nil yolo_group,
+               "explicit yolo and inherited-default yolo must land in the SAME group"
+    read_only_group = groups.find { |g| g.map { |s| s["name"] } == %w[read-only] }
+    refute_nil read_only_group, "the read-only reviewer must be its own group"
+  end
+
+  # Only the first group reuses the base session name; each subsequent
+  # differing-scope group gets a distinct "-scopeN" suffix so two scopes
+  # never collide on one tmux session.
+  def test_shared_reviewer_session_name_suffixes_only_secondary_scope_groups
+    with_tmp_dir do |dir|
+      task = Task.new(dir, File.join(dir, "task.md"))
+
+      base = Hive::Stages::Review.shared_reviewer_session_name(task, 2, 0)
+      second = Hive::Stages::Review.shared_reviewer_session_name(task, 2, 1)
+
+      refute_includes base, "-scope", "the first group keeps the base session name"
+      assert_includes second, "-scope2", "the second scope group gets a -scope2 suffix"
+      refute_equal base, second, "differing-scope groups must not share a session name"
+    end
+  end
+
+  # The reviewer path builds each group's scope from group.first via
+  # stage_permission_scope("review.reviewers", base_add_dirs: [ctx.task_folder]).
+  # A `scoped` reviewer's `dirs:` must EXTEND that base list (relative resolved
+  # from the task folder, absolute honored) rather than replacing it.
+  def test_shared_reviewer_permission_scope_extends_task_folder_with_scoped_dirs
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      absolute = File.join(dir, "abs-extra")
+      spec = {
+        "name" => "scoped-reviewer",
+        "permissions" => {
+          "preset" => "scoped",
+          "tools" => %w[Read Grep],
+          "dirs" => [ "./notes", absolute ]
+        }
+      }
+
+      scope = Hive::Stages::Review.shared_reviewer_permission_scope(
+        { "claude" => { "mode" => "tmux" } }, ctx, task, spec
+      )
+
+      assert_equal [ ctx.task_folder, File.join(ctx.task_folder, "notes"), absolute ],
+                   scope.fetch(:add_dirs),
+                   "scoped dirs must EXTEND [ctx.task_folder], not replace it"
+      assert_equal %w[Read Grep], scope.fetch(:allowed_tools)
+      assert_equal "default", scope.fetch(:permission_mode)
+    end
+  end
 end

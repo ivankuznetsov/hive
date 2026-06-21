@@ -534,6 +534,42 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  # default_allowed_tools_for_mode guard clause: a NON-claude profile never
+  # gets the tmux builtin allowlist threaded, even in tmux mode with a default
+  # set — codex/pi can't take claude's --allowedTools. The yolo tmux tests
+  # above only cover the claude branch; this pins the `profile.name == :claude`
+  # guard returning nil.
+  def test_stage_permission_scope_yolo_drops_default_tools_for_non_claude_in_tmux
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      cfg = { "permissions" => "yolo", "claude" => { "mode" => "tmux" } }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, Hive::AgentProfiles.lookup(:codex),
+        default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+      )
+
+      assert_nil scope.fetch(:allowed_tools), "non-claude profile must not receive a tmux allowlist"
+      assert_nil scope.fetch(:permission_mode)
+    end
+  end
+
+  # default_allowed_tools_for_mode guard clause: with NO default_allowed_tools
+  # passed, the first guard (`return nil unless default_allowed_tools`) yields
+  # nil even for claude in tmux mode — so no builtin allowlist is threaded.
+  def test_stage_permission_scope_yolo_emits_no_allowlist_when_default_tools_absent
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      cfg = { "permissions" => "yolo", "claude" => { "mode" => "tmux" } }
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, "execute", task, Hive::AgentProfiles.lookup(:claude)
+      )
+
+      assert_nil scope.fetch(:allowed_tools), "absent default_allowed_tools must yield no allowlist"
+    end
+  end
+
   # A7 golden: pin the actual emitted argv for the absent-permissions
   # (yolo) plan stage in BOTH modes, threading stage_permission_scope's
   # output through the real argv builders. The scope-dict tests above
@@ -670,6 +706,74 @@ class SpawnAgentTest < Minitest::Test
       ]
       assert_equal expected_tmux, wrapper,
                    "yolo tmux execute wrapper argv must be byte-identical (IMPLEMENTER allowlist)"
+    end
+  end
+
+  # A7 golden, brainstorm stage: brainstorm has a DISTINCT dual-path impl
+  # (run_headless! → spawn_agent vs run_claude! → spawn_claude_with_tmux_marker!,
+  # plus the legacy brainstorm_tmux.rb) that threads
+  # stage_permission_scope("brainstorm", ...) independently of plan/execute. The
+  # plan/execute goldens don't exercise it, so pin the absent-permissions (yolo)
+  # argv in BOTH modes here — a brainstorm path that dropped the builtin
+  # allowlist or leaked a tool-scope flag fails here, not just for plan/execute.
+  def test_yolo_brainstorm_argv_is_byte_identical_in_both_modes
+    with_tmp_dir do |dir|
+      task = make_task(dir, "2-brainstorm")
+      profile = Hive::AgentProfiles.lookup(:claude)
+
+      headless_cfg = {
+        "permissions" => "yolo",
+        "claude" => { "mode" => "headless", "permission_mode" => "bypassPermissions" }
+      }
+      headless_scope = Hive::Stages::Base.stage_permission_scope(
+        headless_cfg, "brainstorm", task, profile,
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+      agent = Hive::Agent.new(
+        task: task, prompt: "PROMPT", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile,
+        add_dirs: headless_scope.fetch(:add_dirs),
+        permission_mode: headless_scope.fetch(:permission_mode),
+        allowed_tools: headless_scope.fetch(:allowed_tools),
+        disallowed_tools: headless_scope.fetch(:disallowed_tools)
+      )
+      expected_headless = [
+        profile.bin, "-p", "--dangerously-skip-permissions",
+        "--add-dir", task.folder,
+        "--max-budget-usd", "1",
+        "--output-format", "stream-json", "--include-partial-messages",
+        "--verbose", "--no-session-persistence",
+        "PROMPT"
+      ]
+      assert_equal expected_headless, agent.send(:build_cmd),
+                   "yolo headless brainstorm argv must carry no tool-scope flags"
+
+      tmux_cfg = {
+        "permissions" => "yolo",
+        "claude" => { "mode" => "tmux", "permission_mode" => "bypassPermissions" }
+      }
+      tmux_scope = Hive::Stages::Base.stage_permission_scope(
+        tmux_cfg, "brainstorm", task, profile,
+        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+      )
+      wrapper = Hive::ClaudeLauncher.wrapper_command(
+        cwd: task.folder,
+        add_dirs: tmux_scope.fetch(:add_dirs),
+        profile: profile,
+        permission_mode: tmux_scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(tmux_cfg),
+        allowed_tools: tmux_scope.fetch(:allowed_tools),
+        disallowed_tools: tmux_scope.fetch(:disallowed_tools)
+      )
+      expected_tmux = [
+        "bash", WRAPPER_SCRIPT,
+        "--cwd", task.folder,
+        "--add-dir", task.folder,
+        "--dangerously-skip-permissions",
+        "--allowedTools", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
+        "--bin", profile.bin
+      ]
+      assert_equal expected_tmux, wrapper,
+                   "yolo tmux brainstorm wrapper argv must be byte-identical (PLANNER allowlist)"
     end
   end
 

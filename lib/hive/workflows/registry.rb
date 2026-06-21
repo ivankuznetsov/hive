@@ -64,6 +64,25 @@ module Hive
         workflows.keys
       end
 
+      # The registry resolves workflows across THREE tiers, lowest precedence
+      # first (see #workflows): built-in `WORKFLOWS` ◁ runtime `registrations`
+      # ◁ project `project_registrations`. `merge` is last-wins, so a project
+      # descriptor shadows a runtime one, which shadows a built-in — though in
+      # practice register! REFUSES any id already present in a lower tier (the
+      # collision guard below), so the precedence only governs lookup order, not
+      # silent overrides.
+      #
+      # Two distinct overlay tiers exist on purpose:
+      #   - project_registrations — PRODUCTION overlay. Owner-authored
+      #     descriptors discovered from `<hive_state_path>/workflows/*.yml` and
+      #     installed by Hive::Workflows::Project.load!; swapped per active
+      #     project and reset with reset_project_registrations!.
+      #   - registrations — TEST-injection overlay. The only writer is the test
+      #     helper `with_registered_workflow` (register!(project: false)); reset
+      #     with reset_runtime_registrations!. Kept separate from the project
+      #     tier so a test fixture and a real project overlay can coexist without
+      #     one clobbering the other (collapsing them would break that
+      #     isolation), and so production code paths touch ONLY the project tier.
       def register!(descriptor, source_path: nil, project: false)
         id = descriptor.id.to_sym
         target = project ? project_registrations : registrations
@@ -91,6 +110,8 @@ module Hive
         reset_union_cache
       end
 
+      # Three-tier precedence, last-wins: built-in ◁ runtime(test) ◁ project.
+      # See register! for why the two overlay tiers are kept distinct.
       def workflows
         WORKFLOWS.merge(registrations).merge(project_registrations)
       end

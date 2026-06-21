@@ -1,5 +1,11 @@
 require "test_helper"
 require "hive/workflows/registry"
+# Pulls in Hive::Workflows.reset_union_cache!, which the shared
+# HiveWorkflowTestHelper (with_registered_workflow / reset_workflow_union_cache!)
+# delegates to. registry.rb alone does not define it, so an isolated run of this
+# file would NoMethodError without this require (full `rake test` only passed by
+# load-order luck).
+require "hive/workflows"
 
 class WorkflowsRegistryTest < Minitest::Test
   def test_default_returns_coding_workflow

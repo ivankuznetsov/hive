@@ -142,10 +142,11 @@ module Hive
     end
 
     def stages_for_project(project)
-      Hive::Workflows::Project.load!(project["path"])
-      return Hive::Workflows.all_stage_dirs unless @stage_filter
-
-      [ Hive::Workflows.resolve_stage_ref_across_workflows(@stage_filter) ]
+      # Shared per-project resolution rule (loads the project overlay, then
+      # returns the stage-dir union or the filtered dir). Tolerates a
+      # stage_filter that names a stage absent from THIS project but present in
+      # another, so scanning a project that lacks it skips rather than aborts.
+      Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
     end
 
     def validate_project_path_match!(task)

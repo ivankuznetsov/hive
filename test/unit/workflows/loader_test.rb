@@ -27,6 +27,9 @@ class WorkflowsLoaderTest < Minitest::Test
             kind: agent
             state_file: work.md
             instruction: ./my-flow/work.md
+          - name: done
+            kind: terminal
+            state_file: done.md
       YAML
 
       workflows = Hive::Workflows::Loader.load(project_root)
@@ -36,7 +39,11 @@ class WorkflowsLoaderTest < Minitest::Test
     end
   end
 
-  def test_load_dir_reports_broken_descriptor_path
+  # Per-file isolation (plan U9-2): a single malformed descriptor must NOT abort
+  # loading its siblings — the good one still loads, and the broken one is
+  # reported (with its path) on stderr instead of raising and bricking every
+  # task in the project.
+  def test_load_dir_skips_broken_descriptor_and_reports_its_path
     with_tmp_dir do |workflows_dir|
       FileUtils.mkdir_p(File.join(workflows_dir, "good"))
       File.write(File.join(workflows_dir, "good", "work.md"), "Do it.\n")
@@ -50,13 +57,21 @@ class WorkflowsLoaderTest < Minitest::Test
             kind: agent
             state_file: work.md
             instruction: ./good/work.md
+          - name: done
+            kind: terminal
+            state_file: done.md
       YAML
       broken = File.join(workflows_dir, "zz-broken.yml")
       File.write(broken, "id: [\n")
 
-      error = assert_raises(Hive::ConfigError) { Hive::Workflows::Loader.load_dir(workflows_dir) }
+      workflows = nil
+      _out, err = capture_io { workflows = Hive::Workflows::Loader.load_dir(workflows_dir) }
 
-      assert_includes error.message, broken
+      assert_equal [ :good ], workflows.keys,
+                   "the good descriptor must still load even when a sibling is malformed"
+      assert_equal "2-work", workflows.fetch(:good).stage_named("work").dir
+      assert_includes err, broken,
+                      "the malformed descriptor must be reported with its path on stderr"
     end
   end
 end

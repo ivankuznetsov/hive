@@ -74,14 +74,21 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
-  def test_builtin_id_collision_is_reported_with_descriptor_path
+  # A project descriptor whose id collides with a built-in must NOT raise out of
+  # load! — that would brick the eager Project.load! in Task#initialize for
+  # EVERY task in the project, including built-in coding ones. It is reported on
+  # stderr with its path and skipped; the built-in coding workflow stays intact.
+  def test_builtin_id_collision_is_reported_on_stderr_and_skipped_not_raised
     with_tmp_dir do |project_root|
       path = write_project_workflow(project_root, "coding")
 
-      error = assert_raises(Hive::ConfigError) { Hive::Workflows::Project.load!(project_root) }
+      _out, err = capture_io { Hive::Workflows::Project.load!(project_root) }
 
-      assert_includes error.message, path
-      assert_includes error.message, "collides with registered workflow :coding"
+      assert_includes err, path
+      assert_includes err, "collides with registered workflow :coding"
+      # The built-in coding workflow is untouched and still resolvable, so
+      # coding tasks in this project keep loading.
+      assert_equal :coding, Hive::Workflows::Registry.fetch(:coding).id
     end
   end
 
@@ -164,6 +171,9 @@ class WorkflowsProjectTest < Minitest::Test
             kind: agent
             state_file: #{stage_name}.md
             instruction: ./#{id}/#{stage_name}.md
+          - name: done
+            kind: terminal
+            state_file: done.md
       YAML
       path
     end

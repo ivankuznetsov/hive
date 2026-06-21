@@ -1,4 +1,5 @@
 require "hive/workflows/registry"
+require "hive/workflows/project"
 
 module Hive
   # Public source of truth for the CODING workflow verbs (brainstorm, plan,
@@ -136,10 +137,13 @@ module Hive
       coding_id?(row.workflow)
     end
 
-    # Memoized: the registry is frozen at load, so the union of every
-    # workflow's stage dirs/names never changes after boot. Recomputing a
-    # frozen array on every call (status snapshots, drop, resolver) is pure
-    # waste. Not an eager constant — that would re-enter the require cycle
+    # Memoized: the built-in registry is fixed at boot, so this union is
+    # computed once and cached. It is NOT permanent, though — project workflow
+    # overlays register at runtime (Hive::Workflows::Project.load!), which is
+    # why the cache is explicitly dropped via reset_union_cache! whenever the
+    # project (or test) registrations change. Recomputing a frozen array on
+    # every call (status snapshots, drop, resolver) when nothing changed is
+    # pure waste. Not an eager constant — that would re-enter the require cycle
     # (workflows.rb ⇆ registry.rb) before the registry is populated.
     def all_stage_dirs
       @all_stage_dirs ||= Registry.all.flat_map(&:stage_dirs).uniq.freeze
@@ -192,6 +196,35 @@ module Hive
 
       raise Hive::InvalidTaskPath,
             "unknown stage '#{stage_ref}'; valid: #{stage_ref_hint}"
+    end
+
+    # Resolve which stage dirs to scan when locating a task by slug/id inside
+    # one registered project. Loads that project's workflow overlay first (so
+    # its owner-authored stages are registered), then returns the cross-workflow
+    # stage-dir union — or, when `stage_filter` is given, the single canonical
+    # dir it resolves to (wrapped in an array).
+    #
+    # Cross-project tolerance (U9-3): a `stage_filter` that names a stage which
+    # exists in a DIFFERENT project's workflow (but not this one) resolves to
+    # nil here rather than raising, so scanning a project that lacks the filter's
+    # stage skips it (returns []) instead of aborting the whole cross-project
+    # search for tasks living in healthy projects. An AMBIGUOUS ref (valid in
+    # >1 of THIS project's workflows) still raises, mirroring approve.rb's
+    # known_stage_ref?.
+    #
+    # Shared by Hive::TaskResolver and Hive::Commands::Drop so the per-project
+    # resolution rule lives in exactly one place (no byte-for-byte duplicate to
+    # drift between the two cross-project resolution paths).
+    def stages_for_project(project, stage_filter: nil)
+      Hive::Workflows::Project.load!(project["path"])
+      return all_stage_dirs if stage_filter.nil? || stage_filter.to_s.strip.empty?
+
+      resolved = resolve_stage_ref_across_workflows(stage_filter)
+      resolved ? [ resolved ] : []
+    rescue Hive::InvalidTaskPath => e
+      raise if e.message.start_with?("ambiguous stage")
+
+      []
     end
   end
 end

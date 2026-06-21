@@ -118,6 +118,14 @@ module Hive
 
         projects.each do |project|
           render_project(project, project_count: projects.size)
+        rescue StandardError => e
+          # Symmetry with the JSON path's project_payload_or_degraded: isolate
+          # per-project failures so one project (e.g. a malformed workflow
+          # descriptor or config) doesn't blank text `status` for every other
+          # project. Degrade to a one-line breadcrumb and keep rendering the rest.
+          warn "hive: status: project #{project['name'].inspect} failed to render " \
+               "(#{e.class}: #{e.message}); skipping it so other projects still display"
+          puts "#{project['name']}: failed to load (#{e.message})"
         end
       end
 

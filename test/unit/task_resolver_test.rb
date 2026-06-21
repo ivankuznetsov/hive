@@ -64,7 +64,13 @@ class TaskResolverTest < Minitest::Test
     end
   end
 
-  def test_unknown_stage_filter_lists_registered_generic_stage_dirs
+  # U9-3 tolerance: a stage filter that resolves in NO scanned project's
+  # workflows is skipped per-project rather than aborting the cross-project scan
+  # (the case it protects is a filter valid in a DIFFERENT project than the one
+  # scanned first — see the user-workflow e2e for the positive path). A
+  # genuinely unknown filter therefore degrades to "no task folder" instead of
+  # raising "unknown stage" mid-scan.
+  def test_unknown_stage_filter_is_tolerated_and_degrades_to_not_found
     descriptor = dispatch_workflow
 
     with_registered_workflow(descriptor) do
@@ -72,8 +78,8 @@ class TaskResolverTest < Minitest::Test
         Hive::TaskResolver.new("generic-task", stage_filter: "nope").resolve
       end
 
-      assert_includes error.message, "2-gather"
-      assert_includes error.message, "gather"
+      assert_includes error.message, "no task folder for slug 'generic-task'"
+      assert_includes error.message, "stage 'nope'"
     end
   end
 

@@ -15,13 +15,10 @@ module Hive
     READ_ONLY_ALLOWED = %w[Read LS Grep Glob].freeze
     READ_ONLY_DISALLOWED = %w[Write Edit MultiEdit NotebookEdit Bash].freeze
 
-    # Non-yolo scopes rely on allowedTools/disallowedTools to pre-approve
-    # the intended set. `read-only` denies the static READ_ONLY_DISALLOWED
-    # set; `scoped` derives its deny list from READ_ONLY_DISALLOWED with the
-    # granted tools subtracted out (see scoped_scope) so its two lists never
-    # overlap — Claude's deny rules win, so a tool in both would be denied
-    # despite being granted. Do not use plan mode here; it changes agent
-    # behavior.
+    # The permission mode every non-yolo scope runs in. "default" (not plan
+    # mode, which would change agent behavior) lets allowedTools/disallowedTools
+    # pre-approve the intended set without prompting. The allow/deny list
+    # derivation is documented at READ_ONLY_ALLOWED above and in scoped_scope.
     NON_PROMPTING_PERMISSION_MODE = "default".freeze
 
     PRESETS = {
@@ -74,18 +71,23 @@ module Hive
       # rather than only inside those factories — a future third
       # construction site can't silently reintroduce a deny-wins-over-grant
       # overlap (the bug fixed in b6a0c72b) or a yolo scope that carries tool
-      # lists. The result is frozen so the validated state can't be mutated
-      # after the fact.
+      # lists. `Struct.new` exposes a public `new`; it is made private below
+      # (private_class_method :new) so `build` is the ONLY way to construct a
+      # Scope and the invariants can't be bypassed. The result — and its
+      # tool/dir member arrays — is frozen so the validated state (including
+      # the disjoint allow/deny lists) can't be mutated in place after the
+      # fact to reintroduce an overlap.
       def self.build(preset:, permission_mode:, allowed_tools:, disallowed_tools:, add_dirs_extra:)
         validate_invariants!(preset, permission_mode, allowed_tools, disallowed_tools, add_dirs_extra)
         new(
           preset: preset,
           permission_mode: permission_mode,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          add_dirs_extra: add_dirs_extra
+          allowed_tools: allowed_tools&.freeze,
+          disallowed_tools: disallowed_tools&.freeze,
+          add_dirs_extra: add_dirs_extra.freeze
         ).freeze
       end
+      private_class_method :new
 
       def self.validate_invariants!(preset, permission_mode, allowed_tools, disallowed_tools, add_dirs_extra)
         unless add_dirs_extra.is_a?(Array)
@@ -104,6 +106,16 @@ module Hive
         end
 
         raise ArgumentError, "non-yolo scope #{preset.inspect} requires a permission_mode" if permission_mode.nil?
+
+        # A non-yolo scope MUST grant at least one tool. tool_csv emits no
+        # --allowedTools flag for an empty list, so an empty allowed_tools
+        # would silently grant nothing (defense-in-depth: validate_tools!
+        # already requires a non-empty tools: list upstream).
+        if Array(allowed_tools).empty?
+          raise ArgumentError,
+                "non-yolo scope #{preset.inspect} requires a non-empty allowed_tools list; " \
+                "an empty list would emit no --allowedTools and silently grant nothing"
+        end
 
         # Claude's deny rules win over allow rules, so the lists MUST be
         # disjoint or a granted tool would be silently denied.
@@ -261,9 +273,25 @@ module Hive
       end
 
       tools.each_with_index do |tool, idx|
-        next if (tool.is_a?(String) || tool.is_a?(Symbol)) && !tool.to_s.strip.empty?
+        unless (tool.is_a?(String) || tool.is_a?(Symbol)) && !tool.to_s.strip.empty?
+          raise invalid_spec(stage, original, "tools[#{idx}] must be a non-empty String")
+        end
 
-        raise invalid_spec(stage, original, "tools[#{idx}] must be a non-empty String")
+        # A tool entry is ONE element to the allow/deny disjointness
+        # invariant, but Claude splits a comma-bearing value (`"Read,Write"`)
+        # into several tools and never matches a whitespace-mangled name —
+        # either way silently re-denying the tool the operator meant to grant,
+        # with no operator-visible error. A NUL additionally crashes
+        # Process.spawn (mirrors validate_dirs!'s null-byte guard). Real
+        # Claude tool names carry none of these, so reject them. (Surrounding
+        # whitespace is checked post-strip, matching normalize_tools, which
+        # strips it on the resolve path.)
+        stripped = tool.to_s.strip
+        if stripped.match?(/[,\s]/) || stripped.include?("\0")
+          raise invalid_spec(stage, original,
+                             "tools[#{idx}] #{tool.inspect} must be a single tool name " \
+                             "without commas, whitespace, or null bytes")
+        end
       end
     end
 
@@ -285,14 +313,17 @@ module Hive
       raise invalid_spec(stage, original, "bash: must be true or false")
     end
 
-    def build_scope(preset, add_dirs_extra: [])
+    def build_scope(preset)
       data = PRESETS.fetch(preset)
       Scope.build(
         preset: preset,
         permission_mode: data.fetch(:permission_mode),
         allowed_tools: data[:allowed_tools]&.dup,
         disallowed_tools: data[:disallowed_tools]&.dup,
-        add_dirs_extra: add_dirs_extra
+        # yolo/read-only presets never carry `dirs:`, so the extra add-dir
+        # list is always empty here (scoped is the only preset that resolves
+        # dirs, via scoped_scope).
+        add_dirs_extra: []
       )
     end
 
@@ -330,10 +361,19 @@ module Hive
 
     def resolve_dirs(dirs, task_folder:, stage:)
       # `dirs` arrived via parse_spec, which already ran validate_scoped! →
-      # validate_dirs! on the resolve path, so no re-validation here.
+      # validate_dirs! on the resolve path (non-blank, null-byte-free
+      # Strings), so no re-validation here — but File.expand_path still
+      # raises ArgumentError on an un-expandable `~user` (e.g. "~nouser/x")
+      # and TypeError on a non-String. Re-raise those as a typed
+      # Hive::ConfigError so the U10-4 fail-closed contract holds:
+      # stage_permission_scope_or_mark! / Review.run! rescue ConfigError and
+      # stamp an attributed :error marker instead of letting a bare crash
+      # strand the stage's AGENT_WORKING / REVIEW_WORKING marker (a hang).
       Array(dirs).map do |dir|
         raw = dir.to_s
         File.absolute_path?(raw) ? File.expand_path(raw) : File.expand_path(raw, task_folder)
+      rescue ArgumentError, TypeError => e
+        raise invalid_spec(stage, raw, "dirs entry could not be resolved (#{e.message})")
       end
     end
 

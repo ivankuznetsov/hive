@@ -487,6 +487,92 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_permission_spec_defaults_to_yolo
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "yolo", cfg["permissions"]
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "plan")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "review.triage")
+    end
+  end
+
+  def test_permission_spec_uses_project_default_when_stage_is_silent
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions: read-only
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "plan")
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "execute")
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "review.fix")
+    end
+  end
+
+  def test_stage_permission_spec_fully_replaces_project_default
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions:
+          preset: scoped
+          tools: [Read]
+          dirs:
+            - shared
+        execute:
+          permissions:
+            preset: scoped
+            tools: [Read, Write]
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      execute_permissions = Hive::Config.permission_spec(cfg, "execute")
+      assert_equal({ "preset" => "scoped", "tools" => [ "Read", "Write" ] }, execute_permissions)
+      refute execute_permissions.key?("dirs"), "stage override must not inherit dirs from project default"
+      assert_equal [ "shared" ], Hive::Config.permission_spec(cfg, "plan")["dirs"]
+    end
+  end
+
+  def test_nested_review_permission_spec_is_read_by_dot_stage_name
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions: yolo
+        review:
+          triage:
+            permissions: read-only
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "review.triage")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "review.fix")
+    end
+  end
+
+  def test_permission_config_errors_fail_closed_at_load
+    cases = [
+      [ "permissions: reckless\n", /unknown preset "reckless"/ ],
+      [ "plan:\n  permissions:\n    tools: [Read]\n", /map must include preset/ ],
+      [ "execute:\n  permissions:\n    preset: scoped\n    tools: [Read, Bash]\n    bash: true\n", /express Bash via tools/ ],
+      [ "review:\n  triage:\n    permissions:\n      preset: scoped\n", /scoped requires tools: or bash:/ ]
+    ]
+
+    cases.each do |yaml, pattern|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/permissions/, error.message)
+        assert_match(pattern, error.message)
+      end
+    end
+  end
+
   def test_load_raises_when_claude_permission_mode_is_unknown
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

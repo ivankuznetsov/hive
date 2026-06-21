@@ -732,8 +732,10 @@ module Hive
         # registered workflow the numbered prompt offers no alternative yet still
         # blocks on stdin, which can hang a PTY-allocating wrapper (tmux /
         # `script` / expect). Treat size==1 as :implicit (coding default).
-        workflow_names = Hive::WorkflowSelection.valid_names(project_root: @project_path)
-        if workflow_names.size > 1 && @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
+        if @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
+          workflow_names = Hive::WorkflowSelection.valid_names(project_root: @project_path)
+          return WorkflowChoice.new(descriptor: Hive::Workflows::Registry.default, source: :implicit) unless workflow_names.size > 1
+
           # On a re-init the prompt defaults to (and a bare Enter keeps) the
           # project's CURRENT default rather than coding — pressing Enter must
           # never silently reset a non-coding default back to coding and rebind

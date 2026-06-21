@@ -129,11 +129,12 @@ module Hive
       def parse_advance_verb(stage, name:, index:, path:, label:)
         return nil if index == 1 && !stage.key?("advance_verb")
 
-        verb_name = if stage.key?("advance_verb")
-                      optional_string(stage["advance_verb"], path: path, label: "#{label} advance_verb")
-                    else
-                      name
-                    end
+        verb_name =
+          if stage.key?("advance_verb")
+            optional_string(stage["advance_verb"], path: path, label: "#{label} advance_verb")
+          else
+            name
+          end
         return nil if verb_name.nil?
 
         Hive::Workflow::AdvanceVerb.new(name: verb_name)

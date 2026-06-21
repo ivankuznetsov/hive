@@ -164,10 +164,11 @@ module Hive
       return unless @stage_filter
 
       actual = "#{task.stage_index}-#{task.stage_name}"
-      return if actual == @stage_filter
+      expected = task.workflow.resolve_stage_ref(@stage_filter) || @stage_filter
+      return if actual == expected
 
       raise Hive::InvalidTaskPath,
-            "TARGET is at #{actual} but --stage/--from says #{@stage_filter}"
+            "TARGET is at #{actual} but --stage/--from says #{expected}"
     end
   end
 end

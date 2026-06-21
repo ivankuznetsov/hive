@@ -40,8 +40,16 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       assert_nil work.skill
       assert_equal File.join(dir, "my-flow", "work.md"), work.instruction
       assert_equal "work", work.advance_verb.name
+      # Pin the round-tripped values, not just `.frozen?`: a stringify_hash /
+      # deep_freeze regression that dropped `dirs:` or mangled `tools` would
+      # still leave the (corrupted) hash frozen — `.frozen?` alone wouldn't
+      # catch it on this security-relevant field.
       assert work.permissions.frozen?
+      assert_equal "scoped", work.permissions.fetch("preset")
+      assert_equal %w[Read Write], work.permissions.fetch("tools")
+      assert_equal %w[../extra], work.permissions.fetch("dirs")
       assert work.permissions.fetch("tools").frozen?
+      assert work.permissions.fetch("dirs").frozen?
 
       assert_equal "publish", workflow.stage_named("done").advance_verb.name
     end
@@ -170,6 +178,43 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     )
 
     assert_includes error.message, "stage 1 state_file must be a non-empty string"
+  end
+
+  # state_file is joined onto task.folder at run time and flows into
+  # Markers.set → mkdir_p/write_atomic, so a value escaping the task folder
+  # (absolute, or with a `..` segment) would make hive write marker files out
+  # of the task tree. Reject both — an authoring typo as much as malice.
+  def test_state_file_rejects_path_traversal
+    %w[../escape.md ../../etc/passwd nested/../../escape.md].each do |bad|
+      error = assert_config_error(
+        { "id" => "bad", "stages" => [ { "name" => "inbox", "kind" => "terminal", "state_file" => bad } ] },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, "must stay inside the task folder", "#{bad} must be rejected"
+    end
+  end
+
+  def test_state_file_rejects_absolute_path
+    error = assert_config_error(
+      { "id" => "bad", "stages" => [ { "name" => "inbox", "kind" => "terminal", "state_file" => "/etc/passwd" } ] },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "must stay inside the task folder"
+  end
+
+  def test_state_file_allows_nested_basename_inside_task_folder
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "nested",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "sub/idea.md" }
+        ]
+      },
+      path: "/tmp/nested.yml"
+    )
+
+    assert_equal "sub/idea.md", workflow.stages.first.state_file
   end
 
   def test_council_kind_is_reserved

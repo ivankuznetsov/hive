@@ -64,8 +64,10 @@ module Hive
 
       # Narrowed to JUST the Workflow.new construction. `validate_structure!`
       # raises ArgumentError for descriptor-level structural problems (gapped
-      # indices, duplicate stage names/dirs, an unknown kind, a non-terminal
-      # last stage), which we relabel as a user-facing descriptor ConfigError.
+      # indices, duplicate stage names/dirs, an unknown kind), which we relabel
+      # as a user-facing descriptor ConfigError. (The non-terminal-last-stage
+      # rule is enforced earlier and separately by `validate_terminal_last_stage!`,
+      # which raises ConfigError before this method runs.)
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
@@ -114,7 +116,7 @@ module Hive
         Hive::Workflow::Stage.new(
           name: name,
           index: index,
-          state_file: required_string(stage["state_file"], path: path, label: "#{label} state_file"),
+          state_file: parse_state_file(stage["state_file"], path: path, label: label),
           advance_verb: parse_advance_verb(stage, name: name, index: index, path: path, label: label),
           kind: kind,
           skill: skill,
@@ -128,6 +130,25 @@ module Hive
         return name if SAFE_SLUG.match?(name)
 
         raise descriptor_error(path, "#{label} name #{name.inspect} must match #{SAFE_SLUG.source}")
+      end
+
+      # `state_file` is joined onto `task.folder` at run time
+      # (`File.join(task.folder, stage.state_file)` in Hive::Stages::Agent, and
+      # the same value flows into Markers.set → ensure_dir/mkdir_p + write_atomic).
+      # Unlike `id`/`name` it was previously only `required_string`-guarded, so a
+      # descriptor with `state_file: ../../escape.md` — an authoring typo as much
+      # as malice — would make hive mkdir/write marker files OUTSIDE the task
+      # folder. Built-in descriptors all use bare basenames; reject any value
+      # that could escape: no leading "/" (absolute) and no ".." path segment.
+      def parse_state_file(value, path:, label:)
+        file = required_string(value, path: path, label: "#{label} state_file")
+        return file unless file.start_with?("/") || file.split("/").include?("..")
+
+        raise descriptor_error(
+          path,
+          "#{label} state_file #{file.inspect} must stay inside the task folder " \
+          "(no leading '/', no '..' path segment)"
+        )
       end
 
       def parse_kind(value, path:, label:)
@@ -196,7 +217,10 @@ module Hive
       end
 
       def validate_agent_instruction!(skill:, instruction:, path:, label:)
-        return if skill.nil? ^ instruction.nil?
+        # Exactly one of skill/instruction must be present. `optional_string`
+        # already normalized blanks to nil, so `compact.one?` reads more
+        # plainly than an XOR over the two `nil?` results.
+        return if [ skill, instruction ].compact.one?
 
         raise descriptor_error(path, "#{label} agent stages must declare exactly one of skill or instruction")
       end

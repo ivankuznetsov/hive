@@ -2,6 +2,7 @@ require "erb"
 require "fileutils"
 require "json"
 require "pathname"
+require "shellwords"
 require "hive"
 require "hive/config"
 require "hive/git_ops"
@@ -172,7 +173,7 @@ module Hive
           "id" => id,
           "descriptor_path" => paths.fetch(:descriptor),
           "instruction_path" => paths.fetch(:instruction),
-          "next" => "hive new --workflow #{id} \"<your idea>\""
+          "next" => "hive new #{Shellwords.escape(File.basename(@project_root))} --workflow #{id} \"<your idea>\""
         }
       end
 

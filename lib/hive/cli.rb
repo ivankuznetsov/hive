@@ -294,7 +294,7 @@ module Hive
                   instruction at <hive_state_path>/workflows/ID/work.md.
 
       The blank workflow is inbox -> work -> done and is immediately usable
-      with `hive new --workflow ID "<your idea>"`.
+      with `hive new PROJECT --workflow ID "<your idea>"`.
     DESC
     def workflow(subcommand, id = nil)
       require "hive/commands/workflow"

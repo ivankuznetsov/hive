@@ -1,13 +1,13 @@
 ---
 title: Hive::Workflows
 type: module
-source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb
+source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
 created: 2026-04-26
-updated: 2026-06-20
+updated: 2026-06-21
 tags: [module, workflow, verbs, selection]
 ---
 
-**TLDR**: The coding and content workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, and runner metadata. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in and runtime/test registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` as a fallback for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`.
+**TLDR**: The coding, content, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, and optional permission specs. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` as a fallback for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`.
 
 ## Descriptor and registry
 
@@ -20,13 +20,28 @@ tags: [module, workflow, verbs, selection]
   - `#stage_for_dir(dir)` — soft lookup by `index-name` dir, returns the `Stage` or nil.
   - `#resolve_stage_ref(ref)` — accepts a full dir (`3-plan`) or short name (`plan`) and returns the canonical `Stage#dir` (or nil); used by `Approve` to canonicalize `--to`/`--from`.
   - `#has_stage?(ref)` — predicate wrapper around `#resolve_stage_ref`. An additive affordance (U6.3) for coding-scoped consumers to skip absent-stage behavior; it has no production call sites yet (the U6 literal-routing sweep used `coding_workflow?` / `== :coding` guards instead) and is currently exercised only by its own unit test.
-- `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `status_mode`, `budget_usd`, and `timeout_sec` is carried for runner selection and prompt rendering. The generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:20`), `skill`, `budget_usd`, and `timeout_sec` (defaulting to `DEFAULT_TIMEOUT_SEC` when both cfg and descriptor omit it). As of U6 the runner also honors the descriptor's `status_mode`, falling back to `:state_file_marker` only when the stage leaves it unset (`agent.rb:35`). The speculative `capability` field was dropped (no producer, no consumer).
+- `Hive::Workflow::Stage` — frozen stage value object. `#dir` returns `"#{index}-#{name}"`; metadata such as `kind`, `skill`, `instruction`, `permissions`, `status_mode`, `budget_usd`, and `timeout_sec` is carried for runner selection and prompt rendering. The generic runner path consumes `kind: :agent` (for runner selection), `state_file` (`agent.rb:20`), `skill`, `instruction`, descriptor-level `permissions`, `budget_usd`, and `timeout_sec` (defaulting to `DEFAULT_TIMEOUT_SEC` when both cfg and descriptor omit it). As of U6 the runner also honors the descriptor's `status_mode`, falling back to `:state_file_marker` only when the stage leaves it unset (`agent.rb:35`). The speculative `capability` field was dropped (no producer, no consumer).
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
 - `Hive::Workflows::Coding::DESCRIPTOR` — the default built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.
 - `Hive::Workflows::Content::DESCRIPTOR` — built-in non-coding descriptor (`id: :content`) for `inbox -> research -> outline -> draft -> critique -> done`. `inbox` is inert and captures `idea.md`; every later stage is a generic `kind: :agent` stage with `status_mode: :state_file_marker`, slash-skill metadata, explicit budgets/timeouts, and `done` writing the terminal `article.md`.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
-- `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:content`, plus any scoped test/runtime registrations). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
-- `Hive::WorkflowSelection.fetch!(name)` — CLI-facing selector validation used by [[commands/init]] and [[commands/new]]. Blank/nil normalizes to `coding`; unknown names raise `Hive::Workflows::UnknownWorkflow` with `valid workflows: ...` from the live registry.
+- `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:content`, plus any scoped test/runtime registrations and the active project's discovered descriptors). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
+- `Hive::WorkflowSelection.fetch!(name, project_root: Dir.pwd)` — CLI-facing selector validation used by [[commands/init]], [[commands/new]], and project-aware callers. Blank/nil normalizes to `coding`; unknown names raise `Hive::Workflows::UnknownWorkflow` with `valid workflows: ...` from the live registry after project descriptor discovery.
+
+## Project-authored descriptors
+
+Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulting to `.hive-state/workflows/*.yml`. `Hive::Workflows::DescriptorParser` validates YAML into `Hive::Workflow` objects:
+
+- `id` is required, must match the filename stem, and must match `/\A[a-z0-9][a-z0-9-]*\z/`.
+- user-facing `kind: agent` maps to `:agent`; `kind: terminal` maps to `:inert`; `kind: council` is reserved and rejected until council support ships.
+- stage indexes are derived from array order; non-entry stages default their incoming `advance_verb` to the stage name.
+- every user-authored agent stage declares exactly one of `skill:` or `instruction:`.
+- `instruction:` paths are resolved relative to the descriptor directory and stored on the stage as absolute paths.
+- `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.
+
+`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root)` is the idempotent boundary call. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+
+`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`.
 
 ## Constants
 

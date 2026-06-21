@@ -84,6 +84,11 @@ execute:
 The stage value is a full replacement, not a field merge. In the example above,
 `execute.permissions.tools` does not inherit anything from the project default.
 
+Project workflow descriptors can also put `permissions:` directly on an agent
+stage in `.hive-state/workflows/<id>.yml`. That descriptor value is validated
+with the same rules and overrides the config-keyed stage lookup for that
+descriptor stage.
+
 Review substages use their dotted stage names in config:
 
 ```yaml

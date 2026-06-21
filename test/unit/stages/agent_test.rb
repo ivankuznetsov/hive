@@ -391,6 +391,60 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_rerun_overwrites_a_stale_complete_marker_when_preflight_fails
+    # On a re-run of an already-markered stage, a {status: :error} preflight
+    # failure must OVERWRITE the stale :complete rather than leave it in place —
+    # otherwise `hive run` exits 0 reporting :complete and the failure is
+    # unobservable (NO-SILENT-CAPS). The spawn wrote no marker this run, so
+    # clobbering the stale one is correct (this is what dropping the
+    # `marker.name == :none` guard buys).
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      File.write(task.state_file, "<!-- COMPLETE -->\n")
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        { status: :error, error_message: "version too old" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result,
+                     "a preflight failure on re-run must report :error, not the stale :complete")
+        assert_equal :error, marker.name
+        assert_equal "agent_preflight_failed", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_rerun_overwrites_a_stale_marker_when_instruction_unreadable
+    # Same NO-SILENT-CAPS guarantee for the instruction-read failure path: a
+    # stale :waiting from a prior run must not survive when the stage's own
+    # instruction has since become unreadable (the read happens before any
+    # spawn, so no agent wrote a marker this run).
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do the work.\n")
+      descriptor = instruction_workflow(instruction_path)
+      task = task_for(project, "work", descriptor: descriptor)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      original = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |candidate, *args, **kwargs|
+        raise Errno::EACCES, candidate if candidate == instruction_path
+
+        original.call(candidate, *args, **kwargs)
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result,
+                     "an unreadable instruction on re-run must report :error, not the stale :waiting")
+        assert_equal :error, marker.name
+        assert_equal "instruction_unreadable", marker.attrs.fetch("reason")
+      end
+    end
+  end
+
   def test_marker_actions_map_to_commit_and_status
     {
       "" => [ nil, :none ],

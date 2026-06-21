@@ -60,11 +60,15 @@ module Hive
         # coding claude path, which routes through
         # `spawn_claude_with_tmux_marker!` and stamps an attributed marker.
         # The generic runner uses bare `spawn_agent` for every profile, so we
-        # must consume that envelope here: otherwise the reread yields `:none`,
-        # `hive run` exits 0, and the row silently re-classifies as
-        # `ready_to_run` forever (NO-SILENT-CAPS). Write an attributed `:error`
-        # marker — but never clobber a marker the agent already wrote.
-        if result.is_a?(Hash) && result[:status] == :error && marker.name == :none
+        # must consume that envelope here: otherwise the reread yields the
+        # marker from a PRIOR run (`:none` on a first run, but a stale
+        # `:waiting`/`:complete` when the operator edits and re-runs an
+        # already-markered stage), `hive run` exits 0 reporting that status,
+        # and the preflight failure is unobservable (NO-SILENT-CAPS). The
+        # `{status: :error}` envelope means the spawn wrote no marker THIS run,
+        # so overwriting any stale marker with the attributed `:error` is
+        # correct — there is no agent-written marker to clobber.
+        if result.is_a?(Hash) && result[:status] == :error
           Hive::Markers.set(
             output_path, :error,
             reason: "agent_preflight_failed",
@@ -92,19 +96,19 @@ module Hive
 
       # Stamp an attributed :error marker for an unreadable instruction file and
       # return the same result shape as a normal run, so the row classifies as
-      # :error rather than dying with an uncaught SystemCallError. Never clobber
-      # a marker the agent already wrote (defensive: the read happens before any
-      # spawn, so :none is expected here).
+      # :error rather than dying with an uncaught SystemCallError. The
+      # instruction read happens BEFORE any spawn, so no agent wrote a marker
+      # this run — overwrite any marker present (`:none` on a first run, but a
+      # stale `:waiting`/`:complete` when the operator re-runs an already-markered
+      # stage whose instruction has since become unreadable), or the failure is
+      # unobservable and the row silently re-classifies as ready_to_run.
       def instruction_error_result(output_path, error)
+        Hive::Markers.set(
+          output_path, :error,
+          reason: "instruction_unreadable",
+          message: "#{error.class}: #{error.message}"[0, 200]
+        )
         marker = Hive::Markers.current(output_path)
-        if marker.name == :none
-          Hive::Markers.set(
-            output_path, :error,
-            reason: "instruction_unreadable",
-            message: "#{error.class}: #{error.message}"[0, 200]
-          )
-          marker = Hive::Markers.current(output_path)
-        end
         { commit: action_for(marker.name), status: marker.name }
       end
 

@@ -142,6 +142,71 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  # HIGH 2: the per-project overlay mutation (Registry.register! et al.) must run
+  # INSIDE Project::LOCK. The web tier calls load! from both the StatusFeed
+  # poller thread and per-request threads; an unsynchronized load! could clear
+  # one project's overlay mid-resolve of another. Assert the registry mutation
+  # observes the lock as held by the current thread (mon_owned?), proving the
+  # critical section is synchronized — a deterministic alternative to a flaky
+  # two-thread race.
+  def test_load_mutates_registry_inside_the_lock
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "locked-flow")
+      owned_during_mutation = nil
+
+      original = Hive::Workflows::Registry.method(:register!)
+      with_replaced_singleton_method(
+        Hive::Workflows::Registry, :register!, lambda { |descriptor, **kwargs|
+          owned_during_mutation = Hive::Workflows::Project::LOCK.mon_owned?
+          original.call(descriptor, **kwargs)
+        }
+      ) do
+        Hive::Workflows::Project.load!(project_root)
+      end
+
+      assert_equal true, owned_during_mutation,
+                   "register! must run while the calling thread holds Project::LOCK"
+    end
+  end
+
+  # HIGH 2: prove mutual exclusion, not just that the lock is acquired. While one
+  # thread holds Project::LOCK, a second thread's load! must BLOCK (not mutate the
+  # registry) until the lock is released — so a concurrent load!(other project)
+  # can never swap the overlay out from under a mid-resolve reader.
+  def test_load_blocks_while_another_thread_holds_the_lock
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "blocked-flow")
+      holder_ready = Queue.new
+      release = Queue.new
+      loaded = false
+
+      holder = Thread.new do
+        Hive::Workflows::Project::LOCK.synchronize do
+          holder_ready << true
+          release.pop # hold the lock until the main thread signals
+        end
+      end
+
+      holder_ready.pop # the helper thread now owns the lock
+      loader = Thread.new do
+        Hive::Workflows::Project.load!(project_root)
+        loaded = true
+      end
+
+      # The loader cannot progress while the lock is held. Give it room to run;
+      # if it ignored the lock it would set `loaded` here.
+      assert_nil loader.join(0.2), "load! must block while another thread holds Project::LOCK"
+      refute loaded, "load! must not mutate the registry while the lock is held"
+
+      release << true # let the holder drop the lock
+      holder.join
+      loader.join(2)
+
+      assert loaded, "load! must complete once the lock is released"
+      assert_includes Hive::Workflows::Registry.ids, :"blocked-flow"
+    end
+  end
+
   # The collision/parse skip warning is deduped per source_path: only the parse
   # result is cached, so register_descriptor re-runs on every load! that swaps
   # @active_root — without dedup a multi-project daemon alternating roots would

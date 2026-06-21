@@ -1,0 +1,12 @@
+id: <%= id %>
+stages:
+  - name: inbox
+    kind: terminal
+    state_file: idea.md
+  - name: work
+    kind: agent
+    state_file: work.md
+    instruction: ./<%= id %>/work.md
+  - name: done
+    kind: terminal
+    state_file: done.md

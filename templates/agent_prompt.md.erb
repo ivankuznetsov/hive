@@ -6,6 +6,8 @@ State file: <%= output_file %>
 Instruction:
 <%- if skill_invocation -%>
 Use the <%= skill_invocation %> skill for this stage.
+<%- elsif instruction_body -%>
+<%= instruction_body %>
 <%- else -%>
 Write `<%= output_file %>` - produce the best `<%= stage_name %>` you can.
 <%- end -%>

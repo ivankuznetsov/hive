@@ -201,6 +201,62 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_instruction_backed_stage_uses_instruction_body_without_skill_or_generic_fallback
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Write a concise implementation note.\n")
+      descriptor = instruction_workflow(instruction_path)
+      task = task_for(project, "work", descriptor: descriptor)
+      File.write(File.join(task.folder, "idea.md"), "prior idea\n")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        prompt = captured.first.fetch(:prompt)
+        assert_includes prompt, "Write a concise implementation note."
+        assert_includes prompt, "## idea.md\nprior idea"
+        refute_includes prompt, "Use the"
+        refute_includes prompt, "produce the best `work`"
+      end
+    end
+  end
+
+  def test_descriptor_permissions_override_config_permission_spec
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do scoped work.\n")
+      descriptor = instruction_workflow(instruction_path, permissions: "read-only")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "permissions" => "yolo" })
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal "default", kwargs.fetch(:permission_mode)
+        assert_equal %w[Read LS Grep Glob], kwargs.fetch(:allowed_tools)
+        assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], kwargs.fetch(:disallowed_tools)
+      end
+    end
+  end
+
+  def test_descriptor_permissions_fail_closed_when_runner_cannot_enforce_scope
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do scoped work.\n")
+      descriptor = instruction_workflow(instruction_path, permissions: "read-only")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Agent.run!(task, { "work" => { "agent" => "codex" } })
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_match(/cannot enforce tool scoping/, error.message)
+      assert_equal :error, marker.name
+      assert_equal "permission_config_error", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_spawn_uses_task_folder_state_marker_mode_cfg_and_descriptor_defaults
     with_tmp_dir do |project|
       task = task_for(project, "brainstorm")
@@ -324,4 +380,24 @@ class StagesAgentTest < Minitest::Test
       end
     end
   end
+
+  private
+
+    def instruction_workflow(instruction_path, permissions: nil)
+      Hive::Workflow.new(
+        id: :instruction,
+        stages: [
+          Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+          Hive::Workflow::Stage.new(
+            name: "work",
+            index: 2,
+            state_file: "work.md",
+            advance_verb: Hive::Workflow::AdvanceVerb.new(name: "work"),
+            kind: :agent,
+            instruction: instruction_path,
+            permissions: permissions
+          )
+        ]
+      )
+    end
 end

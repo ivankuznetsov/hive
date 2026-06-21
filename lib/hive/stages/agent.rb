@@ -20,8 +20,9 @@ module Hive
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
         prompt = render_prompt(task, cfg, stage, profile: profile)
+        permission_kwargs = stage.permissions.nil? ? {} : { explicit_permission_spec: stage.permissions }
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
-          cfg, task.stage_name, task, profile
+          cfg, task.stage_name, task, profile, **permission_kwargs
         )
 
         result = Hive::Stages::Base.spawn_agent(
@@ -63,6 +64,7 @@ module Hive
 
       def render_prompt(task, _cfg, stage, profile:)
         skill_invocation = stage.skill && profile.format_skill_invocation(stage.skill)
+        instruction_body = File.read(stage.instruction) if stage.instruction
         Hive::Stages::Base.render(
           "agent_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -70,7 +72,8 @@ module Hive
             output_file: stage.state_file,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
             prior_context: prior_artifacts(task, stage.state_file),
-            skill_invocation: skill_invocation
+            skill_invocation: skill_invocation,
+            instruction_body: instruction_body
           )
         )
       end

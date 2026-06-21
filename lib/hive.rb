@@ -625,3 +625,5 @@ module Hive
     end
   end
 end
+
+require "hive/permission_scope"

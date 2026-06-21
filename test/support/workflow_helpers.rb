@@ -141,10 +141,14 @@ module HiveWorkflowTestHelper
     )
   end
 
-  def with_deterministic_content_agent(record: nil)
+  # `prompts:`, when given an array, captures each spawned agent's rendered
+  # prompt so a test can assert the descriptor's instruction body reached it
+  # (distinguishing "ran the custom instruction" from "ran a generic fallback").
+  def with_deterministic_content_agent(record: nil, prompts: nil)
     original = Hive::Stages::Base.method(:spawn_agent)
-    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **_kwargs|
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **kwargs|
       record << task.stage_name if record
+      prompts << kwargs[:prompt] if prompts
       File.write(task.state_file, "# #{task.stage_name}\nartifact: #{task.stage_name}\n<!-- COMPLETE -->\n")
       { status: :complete }
     end

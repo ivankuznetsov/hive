@@ -49,13 +49,25 @@ class UserWorkflowE2ETest < Minitest::Test
 
         Hive::Workflows::Project.reset!
         ran = []
-        with_deterministic_content_agent(record: ran) do
+        prompts = []
+        with_deterministic_content_agent(record: ran, prompts: prompts) do
           capture_io { Hive::Commands::Run.new(File.basename(work), project: project).call }
         end
 
         assert_equal [ "work" ], ran
         assert File.file?(File.join(work, "work.md"))
         assert_includes File.read(File.join(work, "work.md")), "<!-- COMPLETE -->"
+
+        # The work stage's prompt must embed the SCAFFOLDED work.md instruction
+        # body — proof the runner ran the custom instruction, not a generic
+        # "produce the best output" fallback. The scaffold writes a known line to
+        # <hive_state_path>/workflows/my-flow/work.md, which agent.rb reads and
+        # renders verbatim into the prompt.
+        instruction_path = File.join(project_root, ".hive-state", "workflows", "my-flow", "work.md")
+        instruction_body = File.read(instruction_path).strip
+        refute_empty instruction_body
+        assert_includes prompts.join("\n"), instruction_body,
+                        "the spawned work prompt must carry the scaffolded work.md instruction body"
 
         Hive::Workflows::Project.reset!
         capture_io { Hive::Commands::Approve.new(File.basename(work), project: project, from: "2-work").call }

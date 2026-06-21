@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "json_schemer"
 require "hive/commands/init"
 require "hive/commands/workflow"
 require "hive/workflow_selection"
@@ -102,6 +103,37 @@ class WorkflowNewTest < Minitest::Test
       # The rejected id rides a structured `value` field so an agent recovers it
       # without regexing the message (UsageError#value surfaced via extras).
       assert_equal "coding", payload.fetch("value")
+    end
+  end
+
+  # Round-trip: hive-workflow-new is enveloped like every other hive-* command,
+  # so BOTH arms must validate against the published schema. The usage arm
+  # carries the `value` extra (the b80907fa regression added it to the producer
+  # without declaring it in the schema's ErrorPayload, whose
+  # additionalProperties:false then rejected every UsageError envelope).
+  def test_json_envelopes_validate_against_published_schema
+    with_initialized_project do |project_root|
+      schemer = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-new")))
+      )
+
+      ok_out, = with_captured_exit do
+        Hive::Commands::Workflow.new("new", "round-trip-flow", project_root: project_root, json: true).call
+      end
+      ok_payload = JSON.parse(ok_out)
+      ok_errors = schemer.validate(ok_payload).map { |e| e["error"] }
+      assert_empty ok_errors,
+                   "hive-workflow-new SuccessPayload must validate (errors: #{ok_errors.inspect})"
+
+      err_out, = with_captured_exit do
+        Hive::Commands::Workflow.new("new", "coding", project_root: project_root, json: true).call
+      end
+      err_payload = JSON.parse(err_out)
+      assert_equal "coding", err_payload.fetch("value")
+      err_errors = schemer.validate(err_payload).map { |e| e["error"] }
+      assert_empty err_errors,
+                   "hive-workflow-new usage ErrorPayload (with `value`) must validate " \
+                   "against the published schema (errors: #{err_errors.inspect})"
     end
   end
 

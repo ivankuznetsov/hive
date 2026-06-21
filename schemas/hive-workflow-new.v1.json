@@ -103,6 +103,10 @@
         "message": {
           "type": "string"
         },
+        "value": {
+          "type": "string",
+          "description": "Present only for usage errors: the rejected/colliding workflow id (or unknown subcommand) echoed verbatim so an agent recovers it from a structured field instead of regexing `message`."
+        },
         "holder": {
           "type": "object",
           "description": "Present only for concurrent_run: metadata about the lock holder.",

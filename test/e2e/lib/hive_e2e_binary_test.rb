@@ -185,6 +185,33 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_replay_symlinked_repro_emits_json_artifact_error_when_requested
+    Dir.mktmpdir("e2e-replay-test") do |tmp_runs_dir|
+      target = File.join(tmp_runs_dir, "outside-repro.sh")
+      File.write(target, "#!/usr/bin/env bash\nexit 0\n")
+      File.chmod(0o755, target)
+
+      script = File.join(tmp_runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.symlink(target, script)
+
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+        hive_e2e, "replay", "--json", "run-1", "scenario-1"
+      )
+
+      assert_equal 78, status.exitstatus
+      assert_empty err
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-error", payload["schema"]
+      assert_equal false, payload["ok"]
+      assert_equal "unusable_repro", payload["error_kind"]
+      assert_equal 78, payload["exit_code"]
+      assert_match(/not executable/, payload["message"])
+    end
+  end
+
   def test_leading_json_replay_dispatches_to_replay
     out, err, status = Open3.capture3(hive_e2e, "--json", "replay", "missing-run", "missing-scenario")
     assert_equal 78, status.exitstatus

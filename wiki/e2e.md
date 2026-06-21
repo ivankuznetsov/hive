@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-17
+updated: 2026-06-21
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -39,8 +39,9 @@ Successful `--json` commands emit exactly one top-level JSON document on stdout,
 resolves the stored `scenarios/<scenario>/repro.sh` under the selected run
 directory, and only `exec`s it when it is both a regular file and executable.
 Missing scripts return `error_kind: missing_repro`; existing but unusable
-scripts return `error_kind: unusable_repro`. Both are config failures (`78`)
-and use the `hive-e2e-error` envelope in `--json` mode.
+scripts, including symlinked repro entries, return
+`error_kind: unusable_repro`. Both are config failures (`78`) and use the
+`hive-e2e-error` envelope in `--json` mode.
 
 `bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
 `hive-cli` executable. It handles top-level `--version` / `-v` before Thor

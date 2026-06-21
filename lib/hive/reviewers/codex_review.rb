@@ -1,5 +1,6 @@
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
+require "hive/reviewers/synthetic_task"
 require "hive/agent_profiles"
 require "hive/stages/base"
 
@@ -140,6 +141,16 @@ module Hive
         ensure_reviews_dir!
 
         profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
+        # A8 fail-closed gate. codex_review ALWAYS runs a non-claude runner
+        # (`codex review`), which cannot enforce tool scoping. A reviewer that
+        # declares a non-yolo `permissions:` (which load-validation accepts as
+        # a valid reviewer entry) therefore can't be honored — resolve the
+        # scope so PermissionScope.resolve raises Hive::ConfigError on a
+        # non-yolo spec, the same hard error the agent adapter triggers,
+        # instead of silently running `codex review` unscoped. The resolved
+        # scope is intentionally discarded: `codex review` is inherently
+        # read-only and takes no tool-list args, so only the gate matters.
+        enforce_permission_scope_gate!(profile)
         begin
           profile.check_version!
         rescue Hive::AgentError => e
@@ -181,6 +192,25 @@ module Hive
       end
 
       private
+
+      # Resolve this reviewer's permission scope purely for its A8 side
+      # effect: PermissionScope.resolve raises Hive::ConfigError when a
+      # non-yolo spec lands on a runner that can't enforce tool scoping
+      # (codex_review is always such a runner). Mirrors the agent adapter's
+      # scope kwargs so an explicit per-reviewer `permissions:` and the
+      # project default resolve through the same "review.reviewers" path.
+      def enforce_permission_scope_gate!(profile)
+        scope_kwargs = { base_add_dirs: [ ctx.task_folder ] }
+        scope_kwargs[:explicit_permission_spec] = spec["permissions"] if spec.key?("permissions")
+        Hive::Stages::Base.stage_permission_scope(
+          @cfg || {}, "review.reviewers", synthetic_task, profile, **scope_kwargs
+        )
+        nil
+      end
+
+      def synthetic_task
+        Hive::Reviewers.synthetic_task_for(ctx)
+      end
 
       # Captured-process result. exit_code is nil on launch failure / timeout.
       Run = Struct.new(:stdout, :exit_code, :error) do

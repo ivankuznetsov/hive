@@ -73,6 +73,12 @@ module Hive
     # PRs inlined the string literal across 11 sites and silently drifted
     # when one of them was updated without the others. R4 in the plan
     # called out the implementer/planner split — keep them separate.
+    #
+    # These are CSV STRINGS, while a resolved PermissionScope::Scope feeds
+    # Arrays into the same `allowed_tools:`/`disallowed_tools:` params. That
+    # is intentional: both forms are normalized by PermissionScope.tool_csv
+    # at the argv chokepoint, which accepts CSV String | Array | nil (see its
+    # doc for the idempotency caveat).
     PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
     IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS

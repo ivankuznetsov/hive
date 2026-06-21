@@ -142,12 +142,25 @@ module Hive
       end
     end
 
-    # Build the `--allowedTools` / `--disallowedTools` CSV. Blank entries
-    # are dropped and duplicates are collapsed (first occurrence wins) so a
-    # user `tools: [Read, Read]` list — or any other accidental repeat —
-    # can't reach Claude's argv twice. Order is preserved: it is the single
-    # chokepoint for both tool lists, and a stable, deduped order keeps the
-    # emitted argv byte-identical across runs for golden-arg tests.
+    # Build the `--allowedTools` / `--disallowedTools` CSV from a tool list.
+    #
+    # Param contract — accepts CSV String | Array | nil. Two historical
+    # representations both feed Claude's `allowed_tools:`/`disallowed_tools:`
+    # params and converge here: the `*_ALLOWED_TOOLS` constants
+    # (ClaudeLauncher) are pre-joined CSV Strings, while
+    # PermissionScope::Scope#allowed_tools is an Array. Both work because
+    # `Array("Read,LS") → ["Read,LS"] → "Read,LS"` is idempotent on an
+    # already-joined CSV String and an Array round-trips normally. Caveat: a
+    # CSV String is treated as ONE element, so duplicates/blanks INSIDE it are
+    # not split out — only Array entries are deduped/blank-dropped. Prefer
+    # passing Arrays.
+    #
+    # Blank entries are dropped and duplicates are collapsed (first
+    # occurrence wins) so a user `tools: [Read, Read]` list — or any other
+    # accidental repeat — can't reach Claude's argv twice. Order is preserved:
+    # it is the single chokepoint for both tool lists, and a stable, deduped
+    # order keeps the emitted argv byte-identical across runs for golden-arg
+    # tests.
     def tool_csv(tools)
       values = Array(tools).compact.map(&:to_s).reject(&:empty?).uniq
       return nil if values.empty?

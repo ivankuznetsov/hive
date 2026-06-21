@@ -152,6 +152,30 @@ module Hive
         }
       end
 
+      # The three tool-scoping kwargs every spawn site forwards from a
+      # resolved-scope Hash to spawn_agent / spawn_claude! /
+      # with_shared_session. Splat this (`**Base.tool_scope_kwargs(scope)`)
+      # instead of restating the triplet at each call so the keys can't drift
+      # across the ~14 spawn sites. `scope` is the Hash stage_permission_scope
+      # returns, NOT the PermissionScope::Scope struct.
+      def tool_scope_kwargs(scope)
+        {
+          permission_mode: scope.fetch(:permission_mode),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools)
+        }
+      end
+
+      # The per-spec explicit-permission passthrough every reviewer
+      # scope-building site needs: forward `spec["permissions"]` as
+      # :explicit_permission_spec ONLY when the key is present, so an absent
+      # key falls through to the project default (the MISSING sentinel) rather
+      # than overriding it with nil. Returns {} when absent so callers can
+      # splat it unconditionally into stage_permission_scope.
+      def explicit_permission_kwargs(spec)
+        spec.key?("permissions") ? { explicit_permission_spec: spec["permissions"] } : {}
+      end
+
       # Single-agent stage variant of stage_permission_scope that attributes
       # the A8 runner-gate failure to the stage's own task marker.
       #

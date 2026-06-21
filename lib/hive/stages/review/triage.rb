@@ -87,9 +87,7 @@ module Hive
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
             expected_output: escalations,
-            permission_mode: scope.fetch(:permission_mode),
-            allowed_tools: scope.fetch(:allowed_tools),
-            disallowed_tools: scope.fetch(:disallowed_tools),
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
           spawn_result =

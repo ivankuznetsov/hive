@@ -33,9 +33,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
           log_label: task.stage_name,
           profile: profile,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools),
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.
           status_mode: stage.status_mode || :state_file_marker,

@@ -73,9 +73,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools),
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Pin the status-detection mode regardless of which profile the
           # user picked: brainstorm's lifecycle contract is "agent writes
           # WAITING/COMPLETE marker to brainstorm.md", which only the
@@ -106,9 +104,7 @@ module Hive
           profile: profile,
           session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task), # coding-scoped: coding brainstorm stage tmux session
           status_mode: :state_file_marker,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools)
+          **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

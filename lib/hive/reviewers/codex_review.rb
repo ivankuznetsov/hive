@@ -200,10 +200,10 @@ module Hive
       # scope kwargs so an explicit per-reviewer `permissions:` and the
       # project default resolve through the same "review.reviewers" path.
       def enforce_permission_scope_gate!(profile)
-        scope_kwargs = { base_add_dirs: [ ctx.task_folder ] }
-        scope_kwargs[:explicit_permission_spec] = spec["permissions"] if spec.key?("permissions")
         Hive::Stages::Base.stage_permission_scope(
-          @cfg || {}, "review.reviewers", synthetic_task, profile, **scope_kwargs
+          @cfg || {}, "review.reviewers", synthetic_task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          **Hive::Stages::Base.explicit_permission_kwargs(spec)
         )
         nil
       end

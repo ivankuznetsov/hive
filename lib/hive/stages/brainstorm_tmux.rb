@@ -34,9 +34,7 @@ module Hive
           session_name: session_name_for(task),
           status_mode: :state_file_marker,
           profile: profile,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools)
+          **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }

@@ -1148,7 +1148,7 @@ module Hive
           return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
                                          wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
-          shared_reviewer_groups(claude_specs).each_with_index do |group, group_idx|
+          shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
             scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
             Hive::ClaudeLauncher.with_shared_session(
               task: task,
@@ -1156,9 +1156,7 @@ module Hive
               session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
-              allowed_tools: scope.fetch(:allowed_tools),
-              disallowed_tools: scope.fetch(:disallowed_tools),
-              permission_mode: scope.fetch(:permission_mode)
+              **Hive::Stages::Base.tool_scope_kwargs(scope)
             ) do |handle|
               group.each do |spec|
                 result = run_reviewer_spec(
@@ -1218,8 +1216,17 @@ module Hive
         Array(cfg.dig("review", "reviewers"))
       end
 
-      def shared_reviewer_groups(specs)
-        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : :stage_default }.values
+      # Group reviewers that share an effective permission scope so they can
+      # share one tmux session. The group key is the RESOLVED spec — an
+      # explicit `permissions:` value, or the project/stage default when the
+      # key is omitted — so a reviewer spelling out `permissions: yolo` and
+      # one inheriting the default yolo land in the SAME group (identical
+      # effective scope → one session) instead of two sessions keyed on
+      # present-vs-absent. Each group's scope is built from group.first, which
+      # is sound because every member resolves to the same effective spec.
+      def shared_reviewer_groups(cfg, specs)
+        default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
+        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
       end
 
       def shared_reviewer_session_name(task, pass, group_idx)
@@ -1229,13 +1236,11 @@ module Hive
 
       def shared_reviewer_permission_scope(cfg, ctx, task, spec)
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        kwargs = {
-          base_add_dirs: [ ctx.task_folder ],
-          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-        }
-        kwargs[:explicit_permission_spec] = spec["permissions"] if spec.key?("permissions")
         Hive::Stages::Base.stage_permission_scope(
-          cfg, "review.reviewers", task, profile, **kwargs
+          cfg, "review.reviewers", task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+          **Hive::Stages::Base.explicit_permission_kwargs(spec)
         )
       end
 
@@ -1665,9 +1670,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools),
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
         if profile.name == :claude

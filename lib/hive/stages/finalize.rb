@@ -114,9 +114,7 @@ module Hive
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools),
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
         if profile.name == :claude

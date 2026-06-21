@@ -246,9 +246,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
-          permission_mode: scope.fetch(:permission_mode),
-          allowed_tools: scope.fetch(:allowed_tools),
-          disallowed_tools: scope.fetch(:disallowed_tools),
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
         if profile.name == :claude

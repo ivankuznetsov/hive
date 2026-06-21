@@ -39,7 +39,8 @@ Successful `--json` commands emit exactly one top-level JSON document on stdout,
 resolves the stored `scenarios/<scenario>/repro.sh` under the selected run
 directory, and only `exec`s it when it is both a regular file and executable.
 Missing scripts return `error_kind: missing_repro`; existing but unusable
-scripts, including symlinked repro entries, return
+scripts, including symlinked repro entries (even dangling symlinks, which are a
+present-but-unusable repro entry rather than a missing one), return
 `error_kind: unusable_repro`. Both are config failures (`78`) and use the
 `hive-e2e-error` envelope in `--json` mode.
 

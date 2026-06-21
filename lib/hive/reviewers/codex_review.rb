@@ -141,15 +141,15 @@ module Hive
         ensure_reviews_dir!
 
         profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
-        # A8 fail-closed gate. codex_review ALWAYS runs a non-claude runner
-        # (`codex review`), which cannot enforce tool scoping. A reviewer that
-        # declares a non-yolo `permissions:` (which load-validation accepts as
-        # a valid reviewer entry) therefore can't be honored — resolve the
-        # scope so PermissionScope.resolve raises Hive::ConfigError on a
-        # non-yolo spec, the same hard error the agent adapter triggers,
-        # instead of silently running `codex review` unscoped. The resolved
-        # scope is intentionally discarded: `codex review` is inherently
-        # read-only and takes no tool-list args, so only the gate matters.
+        # A8 fail-closed gate. This adapter always runs codex's built-in
+        # `<bin> review` subcommand — a read-only pass that takes no tool-list
+        # args — regardless of which `agent` profile the entry names (a
+        # `kind: codex_review, agent: claude` entry still runs `<bin> review`,
+        # NOT claude's tool scoping). So a reviewer that declares a non-yolo
+        # `permissions:` (which load-validation accepts as a valid reviewer
+        # entry) can never be honored. enforce_permission_scope_gate! raises
+        # the same Hive::ConfigError the agent adapter triggers instead of
+        # silently running `codex review` with the declared scope discarded.
         enforce_permission_scope_gate!(profile)
         begin
           profile.check_version!
@@ -193,19 +193,32 @@ module Hive
 
       private
 
-      # Resolve this reviewer's permission scope purely for its A8 side
-      # effect: PermissionScope.resolve raises Hive::ConfigError when a
-      # non-yolo spec lands on a runner that can't enforce tool scoping
-      # (codex_review is always such a runner). Mirrors the agent adapter's
+      # Fail closed when this reviewer's effective permission scope is
+      # anything other than yolo, since `codex review` can't enforce tool
+      # scoping (see the A8 comment in run!). Mirrors the agent adapter's
       # scope kwargs so an explicit per-reviewer `permissions:` and the
       # project default resolve through the same "review.reviewers" path.
+      #
+      # For a non-claude `agent` the resolve below already raises (the A8
+      # runner gate in PermissionScope.resolve fires on any non-yolo spec for
+      # a non-claude profile). But an `agent: claude` codex_review entry
+      # resolves cleanly through the claude profile — so the gate must ALSO
+      # fire here: stage_permission_scope returns permission_mode: nil for a
+      # yolo scope and the concrete NON_PROMPTING mode for any non-yolo scope,
+      # so a non-nil permission_mode means a scope codex_review would silently
+      # discard. Raise the same ConfigError shape regardless of profile.
       def enforce_permission_scope_gate!(profile)
-        Hive::Stages::Base.stage_permission_scope(
+        scope = Hive::Stages::Base.stage_permission_scope(
           @cfg || {}, "review.reviewers", synthetic_task, profile,
           base_add_dirs: [ ctx.task_folder ],
           **Hive::Stages::Base.explicit_permission_kwargs(spec)
         )
-        nil
+        return nil if scope[:permission_mode].nil?
+
+        raise Hive::ConfigError,
+              "review.reviewers reviewer #{name.inspect} (kind: codex_review) requests a " \
+              "non-yolo permission scope, but `codex review` is read-only and cannot enforce " \
+              "tool scoping; remove the permissions: key or set it to yolo"
       end
 
       def synthetic_task

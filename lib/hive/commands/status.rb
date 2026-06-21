@@ -179,27 +179,35 @@ module Hive
         elsif !File.directory?(hive_state)
           base.merge("error" => "not_initialised", "tasks" => [])
         else
-          Hive::Workflows::Project.load!(path)
-          # JSON path: pay the diagnostic-extraction cost because
-          # external consumers (TUI, daemon, bots) read `diagnostic` off
-          # every row. Schema mandates the field.
-          rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
-          rows = annotate_dependencies(rows, project)
-          rows = archive_rows(rows) if @archive
-          out = base.merge("tasks" => rows.map { |r| task_payload(r) })
-          # Always emit `legacy_stage_dirs` (default empty array) so
-          # consumers can branch on `.empty?` without a `key?` probe and
-          # the schema's optional-but-never-undefined contract holds.
-          legacy_stage_dirs = detect_legacy_stage_dirs(hive_state)
-          out["legacy_stage_dirs"] = legacy_stage_dirs
-          # `legacy_migrate_command` is the machine-readable parity of the
-          # text-mode "run `hive migrate`" recovery hint. Agents reading
-          # the JSON envelope get a ready-to-execute command string when
-          # legacy_stage_dirs is non-empty; `null` otherwise. The field is
-          # always present (never absent) — same diagnostic-field
-          # convention as `diagnostic` on tasks. Issue #94.
-          out["legacy_migrate_command"] = legacy_stage_dirs.empty? ? nil : "hive migrate"
-          out
+          # Hold the project overlay stable across load! + resolve: StatusFeed
+          # runs this on both the poller thread and per-request threads, so a
+          # concurrent load!(other project) must not clear THIS project's
+          # overlay mid-resolve (which would make its custom-workflow rows
+          # raise UnknownWorkflow and degrade the whole project). See
+          # Hive::Workflows::Project::LOCK.
+          Hive::Workflows::Project.synchronize do
+            Hive::Workflows::Project.load!(path)
+            # JSON path: pay the diagnostic-extraction cost because
+            # external consumers (TUI, daemon, bots) read `diagnostic` off
+            # every row. Schema mandates the field.
+            rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
+            rows = annotate_dependencies(rows, project)
+            rows = archive_rows(rows) if @archive
+            out = base.merge("tasks" => rows.map { |r| task_payload(r) })
+            # Always emit `legacy_stage_dirs` (default empty array) so
+            # consumers can branch on `.empty?` without a `key?` probe and
+            # the schema's optional-but-never-undefined contract holds.
+            legacy_stage_dirs = detect_legacy_stage_dirs(hive_state)
+            out["legacy_stage_dirs"] = legacy_stage_dirs
+            # `legacy_migrate_command` is the machine-readable parity of the
+            # text-mode "run `hive migrate`" recovery hint. Agents reading
+            # the JSON envelope get a ready-to-execute command string when
+            # legacy_stage_dirs is non-empty; `null` otherwise. The field is
+            # always present (never absent) — same diagnostic-field
+            # convention as `diagnostic` on tasks. Issue #94.
+            out["legacy_migrate_command"] = legacy_stage_dirs.empty? ? nil : "hive migrate"
+            out
+          end
         end
       end
 

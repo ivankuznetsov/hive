@@ -96,10 +96,147 @@ class WorkflowsProjectTest < Minitest::Test
     with_tmp_dir do |project_root|
       FileUtils.mkdir_p(File.join(project_root, ".hive-state"))
       File.write(File.join(project_root, ".hive-state", "config.yml"), "default_workflow: [\n")
+      # A descriptor sitting in the DEFAULT workflows dir must still load via the
+      # fallback even though config.yml is unreadable (the fallback resolves to
+      # `<root>/.hive-state/workflows`).
+      write_project_workflow(project_root, "fallback-flow", stage_name: "build")
 
-      Hive::Workflows::Project.load!(project_root)
+      _out, err = capture_io { Hive::Workflows::Project.load!(project_root) }
 
-      assert_equal [ :coding, :content ], Hive::Workflows::Registry.ids
+      assert_equal [ :coding, :content, :"fallback-flow" ], Hive::Workflows::Registry.ids,
+                   "descriptors must load from the fallback dir when hive_state_path is unreadable"
+      assert_match(/could not read hive_state_path/, err,
+                   "the fallback must leave a stderr breadcrumb")
+      assert_match(/falling back to/, err)
+    end
+  end
+
+  # The documented mid-load exception safety: load! drops @active_root to nil
+  # BEFORE loading and re-sets it only after a clean load, so a load that raises
+  # partway leaves @active_root nil — the next same-root load! re-attempts
+  # rather than short-circuiting on a stale/empty registry.
+  def test_load_reattempts_after_a_midload_raise_rather_than_serving_stale_registry
+    with_tmp_dir do |project_root|
+      workflows_dir = File.join(project_root, ".hive-state", "workflows")
+      descriptor = project_descriptor("retry-flow")
+      calls = 0
+
+      with_replaced_singleton_method(Hive::Workflows::Loader, :workflow_dir, ->(_root) { workflows_dir }) do
+        with_replaced_singleton_method(Hive::Workflows::Loader, :load_dir, lambda { |_dir|
+          calls += 1
+          raise Hive::ConfigError, "boom mid-load" if calls == 1
+
+          { descriptor.id => descriptor }
+        }) do
+          assert_raises(Hive::ConfigError) { Hive::Workflows::Project.load!(project_root) }
+          refute_includes Hive::Workflows::Registry.ids, :"retry-flow",
+                          "the failed load must leave no overlay registered"
+
+          Hive::Workflows::Project.load!(project_root)
+          assert_includes Hive::Workflows::Registry.ids, :"retry-flow",
+                          "a subsequent same-root load! must re-attempt, not short-circuit"
+        end
+      end
+
+      assert_equal 2, calls, "the second load! must re-run load_dir, not serve a stale memo"
+    end
+  end
+
+  # The collision/parse skip warning is deduped per source_path: only the parse
+  # result is cached, so register_descriptor re-runs on every load! that swaps
+  # @active_root — without dedup a multi-project daemon alternating roots would
+  # re-emit the breadcrumb every tick.
+  def test_collision_skip_warn_is_emitted_once_per_source_path
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "coding")           # collides with built-in
+        write_project_workflow(root_b, "flow-b", stage_name: "beta")
+
+        _out, first = capture_io { Hive::Workflows::Project.load!(root_a) }
+        assert_includes first, "collides with registered workflow :coding"
+
+        capture_io { Hive::Workflows::Project.load!(root_b) } # swap overlay away
+
+        _out, second = capture_io { Hive::Workflows::Project.load!(root_a) } # swap back → re-registers
+        refute_includes second, "collides with registered workflow :coding",
+                         "the skip breadcrumb must not re-emit on a later overlay swap"
+      end
+    end
+  end
+
+  # U9-3: an explicitly-named workflow whose descriptor collides with a built-in
+  # must surface the real ConfigError at the resolution boundary, not silently
+  # resolve to the built-in.
+  def test_explicit_workflow_request_surfaces_builtin_collision_config_error
+    with_tmp_dir do |project_root|
+      path = write_project_workflow(project_root, "coding")
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { Hive::WorkflowSelection.fetch!("coding", project_root: project_root) }
+      end
+
+      assert_includes error.message, path
+      assert_includes error.message, "collides with registered workflow :coding"
+    end
+  end
+
+  # U9-3: an explicitly-named workflow whose descriptor is malformed must
+  # surface the real parse error, not a misleading "unknown workflow".
+  def test_explicit_workflow_request_surfaces_malformed_descriptor_error
+    with_tmp_dir do |project_root|
+      workflows_dir = File.join(project_root, ".hive-state", "workflows")
+      FileUtils.mkdir_p(workflows_dir)
+      path = File.join(workflows_dir, "broken-flow.yml")
+      File.write(path, "id: [\n")
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { Hive::WorkflowSelection.fetch!("broken-flow", project_root: project_root) }
+      end
+
+      assert_includes error.message, path
+      assert_includes error.message, "not valid YAML"
+    end
+  end
+
+  # A clean, registered project descriptor resolves normally — the
+  # resolution-boundary guard must not interfere with the happy path.
+  def test_explicit_workflow_request_resolves_clean_descriptor
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "my-flow")
+
+      assert_equal :"my-flow", Hive::WorkflowSelection.fetch!("my-flow", project_root: project_root).id
+    end
+  end
+
+  def test_stages_for_project_reraises_ambiguous_short_name
+    with_tmp_dir do |project_root|
+      project = { "path" => project_root, "hive_state_path" => File.join(project_root, ".hive-state") }
+
+      # `done` is the terminal short name of BOTH built-ins (coding 9-done,
+      # content 6-done): ambiguous refs re-raise through stages_for_project.
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Workflows.stages_for_project(project, stage_filter: "done")
+      end
+
+      assert_includes error.message, "ambiguous stage 'done'"
+    end
+  end
+
+  def test_stages_for_project_tolerates_unknown_stage_filter
+    with_tmp_dir do |project_root|
+      project = { "path" => project_root, "hive_state_path" => File.join(project_root, ".hive-state") }
+
+      assert_equal [], Hive::Workflows.stages_for_project(project, stage_filter: "nonexistent-stage"),
+                   "a stage absent from this project must skip (return []), not abort the scan"
+    end
+  end
+
+  def test_stages_for_project_returns_full_union_without_filter
+    with_tmp_dir do |project_root|
+      project = { "path" => project_root, "hive_state_path" => File.join(project_root, ".hive-state") }
+
+      assert_equal Hive::Workflows.all_stage_dirs,
+                   Hive::Workflows.stages_for_project(project, stage_filter: nil)
     end
   end
 

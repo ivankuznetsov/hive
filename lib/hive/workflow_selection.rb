@@ -9,6 +9,13 @@ module Hive
       Hive::Workflows::Project.load!(project_root)
       raw = name.to_s.strip
       id = raw.empty? ? Hive::Workflows::CODING_ID : raw.to_sym
+      # An explicitly-named workflow (not the blank→coding default) whose
+      # descriptor file exists but was skipped at load — malformed, or colliding
+      # with a built-in — surfaces its real ConfigError here instead of silently
+      # resolving to the built-in (collision) or raising a misleading
+      # UnknownWorkflow (parse error). U9-3. The blank default never triggers it
+      # so a stray `coding.yml` doesn't break `hive new` without `--workflow`.
+      Hive::Workflows::Project.assert_descriptor_loadable!(id, project_root: project_root) unless raw.empty?
       Hive::Workflows::Registry.fetch(id)
     rescue Hive::Workflows::UnknownWorkflow
       # Thread project_root through so the valid-names list includes THIS

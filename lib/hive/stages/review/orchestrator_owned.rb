@@ -15,6 +15,7 @@ module Hive
         fix-guardrail-
         fix-success-
         errors-
+        suppressed
       ].freeze
 
       module_function

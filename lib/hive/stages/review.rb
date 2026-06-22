@@ -515,6 +515,7 @@ module Hive
             # fix agent rewriting or deleting it would erase the failure
             # provenance the user relies on for triage.
             "reviews/errors-#{format('%02d', pass)}.md",
+            "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)

@@ -1199,6 +1199,8 @@ class RunReviewersTest < Minitest::Test
     refute Hive::Stages::Review.reviewer_file?("errors-01.md"),
            "errors-NN.md must be classified as orchestrator-owned"
     refute Hive::Stages::Review.reviewer_file?("errors-99.md")
+    refute Hive::Stages::Review.reviewer_file?("suppressed.md"),
+           "suppressed.md must be classified as orchestrator-owned"
     # Sanity: a real reviewer file is still recognized.
     assert Hive::Stages::Review.reviewer_file?("claude-ce-code-review-01.md")
   end

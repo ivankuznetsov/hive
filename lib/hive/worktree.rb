@@ -52,6 +52,13 @@ module Hive
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
       reuse_existing = exists.success?
       stacked_override = !base_override.to_s.strip.empty?
+      # Delete-then-recreate is intentionally non-atomic: if the `worktree add`
+      # below fails after this delete, the placeholder branch is gone with no
+      # rollback. This is safe ONLY because `empty_placeholder?` positively
+      # proved the branch carries no unique commits (it sits at a default ref's
+      # tip), so nothing recoverable is lost. A future loosening of that
+      # emptiness gate would silently turn this into data loss — keep the proof
+      # strictly ahead of the delete.
       if reuse_existing && stacked_override && empty_placeholder?(branch_name, default_branch)
         delete_local_branch!(branch_name)
         reuse_existing = false
@@ -332,7 +339,7 @@ module Hive
       measured = false
       base_refs.each do |base_ref|
         out, err, status = Open3.capture3("git", "-C", @project_root,
-                                          "rev-list", "--count", "#{base_ref}..#{branch_name}")
+                                          "rev-list", "--count", "#{base_ref}..refs/heads/#{branch_name}")
         unless status.success?
           warn "[hive] worktree base: cannot measure #{branch_name} against #{base_ref} " \
                "(#{err.strip[0, 200]}); skipping this base"

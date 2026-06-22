@@ -278,6 +278,50 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Regression for the tag-shadowing safeguard in `override_local_or_default`
+  # (worktree.rb returns `refs/heads/<prereq>`, not a bare `<prereq>`): under
+  # gitrevisions precedence a same-named `refs/tags/<prereq>` shadows
+  # `refs/heads/<prereq>`, so a bare start-point would silently base the stacked
+  # worktree on the tagged commit instead of the prereq branch. A reversion to
+  # the bare name would make this test create the worktree at the tag's commit.
+  def test_local_stack_prefers_branch_over_same_named_tag
+    with_initialized_project do |dir, root|
+      # Decoy commit the tag points at (distinct from the prereq branch tip).
+      File.write(File.join(dir, "tagged-decoy.txt"), "tagged decoy\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "tagged decoy commit", "--quiet")
+      tag_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      run!("git", "-C", dir, "tag", "prereq-collision", tag_sha)
+      run!("git", "-C", dir, "reset", "--hard", "HEAD~1", "--quiet")
+
+      # Local branch of the SAME name at a different commit (the real prereq).
+      run!("git", "-C", dir, "checkout", "-b", "prereq-collision", "--quiet")
+      File.write(File.join(dir, "branch-prereq.txt"), "branch prereq\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "branch prereq work", "--quiet")
+      branch_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      run!("git", "-C", dir, "checkout", "master", "--quiet")
+
+      refute_equal tag_sha, branch_sha,
+                   "decoy tag and prereq branch must point at distinct commits for the test to bite"
+
+      wt = Hive::Worktree.new(dir, "dependent-tag-collision", worktree_root: root)
+      capture_io do
+        wt.create!("dependent-tag-collision", default_branch: "master", base_override: "prereq-collision")
+      end
+
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal branch_sha, worktree_sha,
+                   "the stacked base must resolve to refs/heads/<prereq>, not a same-named tag"
+      refute_equal tag_sha, worktree_sha,
+                   "a same-named tag must not shadow the branch as the stacked start-point"
+      assert File.exist?(File.join(wt.path, "branch-prereq.txt")),
+             "the stacked worktree must contain the branch prereq's code"
+      refute File.exist?(File.join(wt.path, "tagged-decoy.txt")),
+             "the tagged decoy commit must not become the stacked base"
+    end
+  end
+
   # Regression for the origin-ahead-of-local placeholder miss: a prior run
   # created the placeholder from origin/<default> (freshest_base), so it sits
   # at origin/master's tip while local master lags behind. Measured against
@@ -304,6 +348,8 @@ class WorktreeTest < Minitest::Test
                    "an empty placeholder at origin/master (local behind) must be re-pointed onto origin/<prereq>"
       refute_equal origin_sha, worktree_sha,
                    "the placeholder must not be preserved on origin/master merely because local default lags"
+      assert File.exist?(File.join(wt.path, "prereq-ahead.txt")),
+             "the re-pointed worktree must contain the prerequisite's code"
     end
   end
 
@@ -330,13 +376,18 @@ class WorktreeTest < Minitest::Test
                    "an empty placeholder at local master (origin behind) must be re-pointed onto origin/<prereq>"
       refute_equal local_sha, worktree_sha,
                    "the placeholder must not be preserved at local master merely because origin lags"
+      assert File.exist?(File.join(wt.path, "prereq-local-ahead.txt")),
+             "the re-pointed worktree must contain the prerequisite's code"
     end
   end
 
-  # `empty_placeholder?` fail-closed path: when the emptiness measurement
-  # itself errors (here a nonexistent default branch makes `rev-list` exit
-  # non-zero), the branch must be preserved and attached as-is — never deleted
-  # on an inconclusive check — and no WorktreeError raised.
+  # `empty_placeholder?` fail-closed path #1 — no measurable ref: when a
+  # nonexistent default branch leaves `default_base_refs` empty, the per-ref
+  # `rev-list` loop is never entered (the `base_refs.empty?` early return fires),
+  # so the branch must be preserved and attached as-is — never deleted on an
+  # inconclusive check — and no WorktreeError raised. The sibling test below
+  # covers the distinct path where a present base ref's own `rev-list --count`
+  # measurement errors.
   def test_create_preserves_branch_when_placeholder_check_errors
     with_initialized_project do |dir, root|
       run!("git", "-C", dir, "branch", "dependent-unmeasurable", "master")
@@ -351,8 +402,43 @@ class WorktreeTest < Minitest::Test
       worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
       assert_equal head_sha, worktree_sha,
                    "an unmeasurable branch attaches as-is (fail-closed) instead of being deleted"
-      assert_match(/cannot measure dependent-unmeasurable/, err,
-                   "the fail-closed path must warn so a dropped re-point is observable")
+      assert_match(/cannot measure dependent-unmeasurable against no-such-default/, err,
+                   "the no-measurable-ref fail-closed path must warn so a dropped re-point is observable")
+    end
+  end
+
+  # `empty_placeholder?` fail-closed path #2 — present-but-unmeasurable ref:
+  # when a default ref IS in the measurement set but its `rev-list --count`
+  # exits non-zero, that ref is skipped with a warning (per-ref error arm), and
+  # when no ref could be measured the branch is preserved and attached as-is
+  # (all-refs-unmeasurable arm). `default_base_refs` is stubbed to return a
+  # present-looking but nonexistent ref so `rev-list` errors deterministically —
+  # the production trigger is a TOCTOU race or repo corruption between the
+  # rev-parse existence check and the rev-list measurement.
+  def test_create_preserves_branch_when_base_ref_measurement_errors
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "branch", "dependent-revlist-error", "master")
+      head_sha = run!("git", "-C", dir, "rev-parse", "dependent-revlist-error").strip
+
+      wt = Hive::Worktree.new(dir, "dependent-revlist-error", worktree_root: root)
+      # Force a non-empty base-ref list whose sole ref `rev-list` cannot resolve,
+      # so the per-ref error arm and then the all-refs-unmeasurable arm both fire.
+      wt.define_singleton_method(:default_base_refs) do |_default_branch|
+        [ "refs/heads/__no_such_base_ref__" ]
+      end
+
+      _, err = capture_io do
+        wt.create!("dependent-revlist-error", default_branch: "master", base_override: "prereq")
+      end
+
+      assert wt.exists?, "branch must survive when a base ref's rev-list measurement errors"
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal head_sha, worktree_sha,
+                   "an unmeasurable base ref attaches the branch as-is (fail-closed) instead of deleting it"
+      assert_match(%r{cannot measure dependent-revlist-error against refs/heads/__no_such_base_ref__}, err,
+                   "the per-ref failure must warn so a skipped base is observable")
+      assert_match(/cannot measure dependent-revlist-error against any default ref/, err,
+                   "the all-refs-unmeasurable preserve path must warn")
     end
   end
 
@@ -426,6 +512,45 @@ class WorktreeTest < Minitest::Test
         assert_equal default_sha, worktree_sha,
                      "missing dependency branch must fall back to origin/default"
         assert_match(/worktree base: fetch origin missing-base failed/, err)
+      ensure
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
+  # `override_local_or_default` local-stack arm via the FETCH-FAILED reason.
+  # The sibling test above hits the same fetch-failure with NO local prereq, so
+  # it falls through to the default base. Here a local-only prereq branch (never
+  # pushed to origin, so its colon-refspec fetch exits non-zero) exists, so
+  # stacking must land on the local prereq rather than collapsing onto default —
+  # the second of the three fallback reasons exercising the local-stack path.
+  def test_stacks_on_local_prereq_when_origin_fetch_fails
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        # Local-only prereq carrying its own commit; absent from origin so the
+        # override fetch fails (fetch-failed reason).
+        run!("git", "-C", dir, "checkout", "-b", "prereq-local-only", "--quiet")
+        File.write(File.join(dir, "prereq-local-only.txt"), "local only prereq\n")
+        run!("git", "-C", dir, "add", ".")
+        run!("git", "-C", dir, "commit", "-m", "local-only prereq work", "--quiet")
+        prereq_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+        run!("git", "-C", dir, "checkout", "master", "--quiet")
+
+        wt = Hive::Worktree.new(dir, "dependent-fetch-fail-local", worktree_root: root)
+        _, err = capture_io do
+          wt.create!("dependent-fetch-fail-local", default_branch: "master", base_override: "prereq-local-only")
+        end
+
+        worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+        assert_equal prereq_sha, worktree_sha,
+                     "a fetch failure with a present local prereq must stack on the local prereq"
+        assert File.exist?(File.join(wt.path, "prereq-local-only.txt")),
+               "the stacked worktree must contain the local prerequisite's code"
+        assert_match(/fetch origin prereq-local-only failed.*stacking on local prereq-local-only/m, err,
+                     "the fetch-failed local-stack path must warn with the fetch-failure reason")
       ensure
         FileUtils.rm_rf(origin_dir)
       end
@@ -596,6 +721,60 @@ class WorktreeTest < Minitest::Test
                      "an override ref missing after a successful fetch must fall back to origin/default"
         assert_match(/origin\/ghost-base not found after fetch/, err,
                      "the ghost-ref fallback must surface a 'not found after fetch' warning")
+      ensure
+        if Hive::Worktree.singleton_class.method_defined?(:__real_fetch_origin_branch)
+          Hive::Worktree.singleton_class.send(:alias_method, :fetch_origin_branch, :__real_fetch_origin_branch)
+          Hive::Worktree.singleton_class.send(:alias_method, :origin_branch_ref_exists?, :__real_origin_branch_ref_exists?)
+          Hive::Worktree.singleton_class.send(:remove_method, :__real_fetch_origin_branch)
+          Hive::Worktree.singleton_class.send(:remove_method, :__real_origin_branch_ref_exists?)
+        end
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
+  # `override_local_or_default` local-stack arm via the REF-MISSING-AFTER-FETCH
+  # reason. The sibling ghost-ref test above hits the same reason with NO local
+  # prereq and falls through to the default base; here a present local prereq
+  # must be stacked on instead — the third of the three fallback reasons
+  # exercising the local-stack path. Fetch is stubbed to "succeed" while
+  # `origin_branch_ref_exists?` reports the ref absent, exactly as the sibling
+  # test does, so only the ref-existence check drops the override.
+  def test_stacks_on_local_prereq_when_origin_ref_missing_after_fetch
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+
+        # Local prereq carrying its own commit; the stubbed fetch "succeeds" but
+        # the ref reads as absent, so the ref-missing reason reaches the
+        # local-stack arm and finds this branch.
+        run!("git", "-C", dir, "checkout", "-b", "prereq-ghost-local", "--quiet")
+        File.write(File.join(dir, "prereq-ghost-local.txt"), "ghost local prereq\n")
+        run!("git", "-C", dir, "add", ".")
+        run!("git", "-C", dir, "commit", "-m", "ghost local prereq work", "--quiet")
+        prereq_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+        run!("git", "-C", dir, "checkout", "master", "--quiet")
+
+        _out, _err, ok_status = Open3.capture3("git", "-C", dir, "fetch", "origin", "master")
+        Hive::Worktree.singleton_class.send(:alias_method, :__real_fetch_origin_branch, :fetch_origin_branch)
+        Hive::Worktree.singleton_class.send(:alias_method, :__real_origin_branch_ref_exists?, :origin_branch_ref_exists?)
+        Hive::Worktree.define_singleton_method(:fetch_origin_branch) { |_root, _branch| [ "", "", ok_status ] }
+        Hive::Worktree.define_singleton_method(:origin_branch_ref_exists?) { |_root, _branch| false }
+
+        wt = Hive::Worktree.new(dir, "dependent-ghost-local", worktree_root: root)
+        _, err = capture_io do
+          wt.create!("dependent-ghost-local", default_branch: "master", base_override: "prereq-ghost-local")
+        end
+
+        worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+        assert_equal prereq_sha, worktree_sha,
+                     "an override ref missing after a successful fetch must stack on a present local prereq"
+        assert File.exist?(File.join(wt.path, "prereq-ghost-local.txt")),
+               "the stacked worktree must contain the local prerequisite's code"
+        assert_match(/origin\/prereq-ghost-local not found after fetch.*stacking on local prereq-ghost-local/m, err,
+                     "the ref-missing local-stack path must warn with the not-found-after-fetch reason")
       ensure
         if Hive::Worktree.singleton_class.method_defined?(:__real_fetch_origin_branch)
           Hive::Worktree.singleton_class.send(:alias_method, :fetch_origin_branch, :__real_fetch_origin_branch)

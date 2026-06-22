@@ -72,10 +72,10 @@ returns the prerequisite slug as the intended base. `Hive::Worktree#create!`
 then tries to create the dependent branch from `origin/<prerequisite-slug>`,
 then local `refs/heads/<prerequisite-slug>`, then the freshest default branch.
 If a same-named dependent branch already exists, real committed work is
-preserved; only an empty placeholder branch — zero commits relative to the
-default branch base used for the emptiness check (`origin/<default>` when that
-tracking ref exists, else local `<default>`) — is deleted and recreated via
-the origin→local→default base resolution above.
+preserved; only an empty placeholder branch — carrying no unique commits beyond
+*either* default ref used for the emptiness check (`origin/<default>` when its
+tracking ref exists, **and** local `<default>` when that branch exists) — is
+deleted and recreated via the origin→local→default base resolution above.
 
 When the same dependent reaches `5-open-pr`, `OpenPr#render_prompt` includes
 `--base <prerequisite-slug>` in the `gh pr create` command only if the

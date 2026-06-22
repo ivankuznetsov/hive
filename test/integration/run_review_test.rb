@@ -1252,7 +1252,10 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_complete, marker.name
         assert_equal "2", marker.attrs["pass"]
-        assert_nil marker.attrs["reason"], "convergence must use the clean branch, not REVIEW_STALE reason=wall_clock"
+        assert_nil marker.attrs["reason"],
+                   "convergence must reach REVIEW_COMPLETE via the all-clean branch (reason=nil), " \
+                   "not a REVIEW_STALE reason; reviewers/triage are stubbed to return instantly here, " \
+                   "so this asserts the convergence path, NOT the wall-clock budget itself"
         assert_includes pass2_triage_input, "SUPPRESSED: lib/foo.rb:88 leaks stale state",
                         "pass-2 re-emitted no-fix finding must be stripped before triage"
         refute_includes pass2_triage_input, "- [ ] lib/foo.rb:88 leaks stale state"
@@ -1280,8 +1283,13 @@ class RunReviewTest < Minitest::Test
               "## High\n- [ ] lib/fix.rb fixes real bug: apply patch\n" \
                 "- [ ] lib/security.rb leaks token: triage accepts risk\n"
             else
-              # A genuine, DIFFERENT-title High on the same file/severity.
-              "## High\n- [ ] lib/security.rb exposes secret in logs: needs design call\n"
+              # A genuine, DIFFERENT-title High on the same file/severity,
+              # PLUS the prior no-fix re-emitted. The re-emit must be stripped
+              # (proving strip executed against the populated list, not a
+              # no-op) while the different-title High survives to triage.
+              "## High\n" \
+                "- [ ] lib/security.rb leaks token: re-emitted no-fix\n" \
+                "- [ ] lib/security.rb exposes secret in logs: needs design call\n"
             end
           File.write(path, body)
           :ok
@@ -1323,9 +1331,10 @@ class RunReviewTest < Minitest::Test
           )
         end
 
+        run_err = nil
         with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_stub) do
           with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_stub) do
-            capture_io { Hive::Commands::Run.new(folder).call }
+            _out, run_err = capture_io { Hive::Commands::Run.new(folder).call }
           end
         end
 
@@ -1333,10 +1342,18 @@ class RunReviewTest < Minitest::Test
         assert_equal :review_waiting, marker.name
         assert_equal "1", marker.attrs["escalations"]
         assert_equal "2", marker.attrs["pass"]
+        # Strip executed against the populated list (the re-emit was stripped),
+        # distinguishing "strip ran and correctly skipped the High" from
+        # "strip never ran" — neutering strip_suppressed! drops both signals.
+        assert_match(/suppressed 1 no-fix finding\(s\) before triage for pass 02/, run_err,
+                     "strip must run against the populated list at pass 2, not no-op")
+        assert_includes pass2_triage_input, "SUPPRESSED: lib/security.rb leaks token",
+                        "the re-emitted prior no-fix must be stripped, proving strip ran"
         assert_includes pass2_triage_input, "- [ ] lib/security.rb exposes secret in logs",
                         "a genuine High must reach triage unstripped even when a same-file no-fix " \
                         "was previously seeded (A7) — strip keys by title, not file+severity"
-        refute_includes pass2_triage_input, "SUPPRESSED:"
+        refute_includes pass2_triage_input, "SUPPRESSED: lib/security.rb exposes secret in logs",
+                        "the genuine different-title High must never be stripped"
         suppressed = File.read(File.join(folder, "reviews", "suppressed.md"))
         assert_includes suppressed, "lib/security.rb leaks token",
                         "the prior no-fix seed must still be live at pass 2 — proving strip saw a populated list"
@@ -1360,7 +1377,12 @@ class RunReviewTest < Minitest::Test
               "## High\n- [ ] lib/fix.rb fixes real bug: apply patch\n" \
                 "- [ ] lib/foo.rb leaks stale state: triage accepts risk\n"
             else
-              "## High\n- [ ] lib/foo.rb drops retry state: new title must triage\n"
+              # The different-title finding PLUS the prior no-fix re-emitted.
+              # The re-emit must be stripped (proving strip ran against the
+              # populated list) while the different-title finding survives.
+              "## High\n" \
+                "- [ ] lib/foo.rb leaks stale state: re-emitted no-fix\n" \
+                "- [ ] lib/foo.rb drops retry state: new title must triage\n"
             end
           File.write(path, body)
           :ok
@@ -1389,18 +1411,27 @@ class RunReviewTest < Minitest::Test
           )
         end
 
+        run_err = nil
         with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_stub) do
           with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_stub) do
-            capture_io { Hive::Commands::Run.new(folder).call }
+            _out, run_err = capture_io { Hive::Commands::Run.new(folder).call }
           end
         end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_complete, marker.name
         assert_equal "2", marker.attrs["pass"]
+        # Strip executed against the populated list (the re-emit was stripped),
+        # distinguishing "strip ran and correctly skipped the new title" from
+        # "strip never ran".
+        assert_match(/suppressed 1 no-fix finding\(s\) before triage for pass 02/, run_err,
+                     "strip must run against the populated list at pass 2, not no-op")
+        assert_includes pass2_triage_input, "SUPPRESSED: lib/foo.rb leaks stale state",
+                        "the re-emitted prior no-fix must be stripped, proving strip ran"
         assert_includes pass2_triage_input, "- [ ] lib/foo.rb drops retry state",
                         "different-title finding must reach triage normally"
-        refute_includes pass2_triage_input, "SUPPRESSED:"
+        refute_includes pass2_triage_input, "SUPPRESSED: lib/foo.rb drops retry state",
+                        "the genuine different-title finding must never be stripped"
         assert_includes File.read(File.join(folder, "reviews", "suppressed.md")),
                         "lib/foo.rb leaks stale state",
                         "the prior no-fix seed must still be live at pass 2 — proving the " \

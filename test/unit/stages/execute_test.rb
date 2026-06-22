@@ -159,6 +159,31 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  # End-to-end through the real 4-execute spawn helper: a non-yolo scope on
+  # a non-claude runner (the A8 gate) must replace the stale AGENT_WORKING
+  # marker with an attributed :error before the ConfigError propagates,
+  # rather than escaping uncaught and leaving 4-execute looking alive.
+  def test_spawn_implementation_attributes_error_marker_on_non_claude_scope
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      Hive::Markers.set(task.state_file, :agent_working)
+      cfg = {
+        "permissions" => "yolo",
+        "execute" => { "agent" => "codex", "permissions" => "read-only" }
+      }
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Execute.spawn_implementation(task, cfg, File.join(dir, "worktree"))
+      end
+      assert_match(/runner :codex/, error.message)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name, "stale AGENT_WORKING must become attributed :error"
+      assert_equal "permission_config_error", marker.attrs["reason"]
+    end
+  end
+
   def build_task(project_root, depends_on: nil)
     folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260522-aaaa")
     FileUtils.mkdir_p(folder)

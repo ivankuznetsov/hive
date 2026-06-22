@@ -134,14 +134,19 @@ module Hive
       end
 
       def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path)
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "open_pr", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "open_pr") || 50,
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
           log_label: "open-pr",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
         if profile.name == :claude
@@ -149,8 +154,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task), # coding-scoped: coding open-pr stage tmux session
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: coding open-pr stage tmux session
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

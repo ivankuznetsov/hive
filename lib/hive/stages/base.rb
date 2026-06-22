@@ -4,8 +4,10 @@ require "securerandom"
 require "time"
 require "hive/agent"
 require "hive/agent_profiles"
+require "hive/config"
 require "hive/events"
 require "hive/markers"
+require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
@@ -115,6 +117,103 @@ module Hive
         name = cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
+
+      def stage_permission_scope(cfg, stage_name, task, profile,
+                                 base_add_dirs: [ task.folder ],
+                                 default_allowed_tools: nil,
+                                 explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC)
+        spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
+          Hive::Config.permission_spec(cfg || {}, stage_name)
+        else
+          explicit_permission_spec
+        end
+        scope = Hive::PermissionScope.resolve(
+          spec,
+          task_folder: task.folder,
+          profile: profile,
+          stage: stage_name
+        )
+        base_dirs = Array(base_add_dirs)
+
+        if scope.yolo?
+          return {
+            add_dirs: base_dirs,
+            permission_mode: nil,
+            allowed_tools: default_allowed_tools_for_mode(cfg, profile, default_allowed_tools),
+            disallowed_tools: nil
+          }
+        end
+
+        {
+          add_dirs: base_dirs + scope.add_dirs_extra,
+          permission_mode: scope.permission_mode,
+          allowed_tools: scope.allowed_tools,
+          disallowed_tools: scope.disallowed_tools
+        }
+      end
+
+      # The three tool-scoping kwargs every spawn site forwards from a
+      # resolved-scope Hash to spawn_agent / spawn_claude! /
+      # with_shared_session. Splat this (`**Base.tool_scope_kwargs(scope)`)
+      # instead of restating the triplet at each call so the keys can't drift
+      # across the spawn sites. `scope` is the Hash stage_permission_scope
+      # returns, NOT the PermissionScope::Scope struct.
+      def tool_scope_kwargs(scope)
+        {
+          permission_mode: scope.fetch(:permission_mode),
+          allowed_tools: scope.fetch(:allowed_tools),
+          disallowed_tools: scope.fetch(:disallowed_tools)
+        }
+      end
+
+      # The per-spec explicit-permission passthrough every reviewer
+      # scope-building site needs: forward `spec["permissions"]` as
+      # :explicit_permission_spec ONLY when the key is present, so an absent
+      # key falls through to the project default (the MISSING sentinel) rather
+      # than overriding it with nil. Returns {} when absent so callers can
+      # splat it unconditionally into stage_permission_scope.
+      def explicit_permission_kwargs(spec)
+        spec.key?("permissions") ? { explicit_permission_spec: spec["permissions"] } : {}
+      end
+
+      # Single-agent stage variant of stage_permission_scope that attributes
+      # the A8 runner-gate failure to the stage's own task marker.
+      #
+      # PermissionScope.resolve raises Hive::ConfigError when a non-yolo
+      # scope lands on a runner that can't enforce tool scoping (codex / pi)
+      # — or on any malformed spec that slips past load-time validation.
+      # That raise is the FIRST line of every single-agent spawn helper
+      # (plan / execute / open_pr / finalize / artifacts / brainstorm /
+      # generic agent), none of which rescue it, so it would otherwise
+      # propagate through with_stage_events uncaught and leave the stage's
+      # prior marker (e.g. AGENT_WORKING) stale. The plan's U10-4 contract
+      # requires an attributed :error marker, not a bare crash. Mirror
+      # Review.run!'s ConfigError rescue: stamp an attributed :error on the
+      # real task, then re-raise so the failure still surfaces loudly
+      # (fail-closed) to the runner and test suite.
+      #
+      # Review sub-stages deliberately do NOT use this helper: their
+      # synthetic-task spawns share state with the main review task and the
+      # outer Review.run! rescue maps the same ConfigError to :review_error
+      # against the real task (see review.rb).
+      def stage_permission_scope_or_mark!(cfg, stage_name, task, profile, **kwargs)
+        stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+      rescue Hive::ConfigError => e
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "permission_config_error",
+                          message: e.message.to_s[0, 200])
+        raise
+      end
+
+      def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
+        return nil unless default_allowed_tools
+        return nil unless profile.name == :claude
+        return nil unless cfg && Hive::Config.claude_mode(cfg) == :tmux
+
+        default_allowed_tools
+      end
+
+      MISSING_EXPLICIT_PERMISSION_SPEC = Object.new.freeze
 
       # Stage labels whose runner mutates the worktree directly. Adding a
       # new worktree-touching stage requires a deliberate edit here —
@@ -403,7 +502,8 @@ module Hive
       def spawn_agent(task, prompt:, max_budget_usd:, timeout_sec:,
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
-                      cfg: nil, permission_mode: nil)
+                      cfg: nil, permission_mode: nil, allowed_tools: nil,
+                      disallowed_tools: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -442,6 +542,8 @@ module Hive
           expected_output: expected_output,
           status_mode: status_mode,
           permission_mode: permission_mode,
+          allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools,
           cli_flags: cli_flags
         ).run!
         record_usage(task, profile, result, started_at)
@@ -451,7 +553,8 @@ module Hive
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
                          session_name:, add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
-                         allowed_tools: nil)
+                         permission_mode: nil, allowed_tools: nil,
+                         disallowed_tools: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -473,7 +576,9 @@ module Hive
           status_mode: status_mode,
           expected_output: expected_output,
           profile: profile,
-          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS
+          permission_mode: permission_mode,
+          allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools
         )
       end
 

@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: interactive_claude_wrapper.sh --cwd DIR [--add-dir DIR ...] [--permission-mode MODE | --dangerously-skip-permissions] [--allowedTools TOOLS] [--model MODEL] [--effort LEVEL] [--bin PATH]" >&2
+  echo "usage: interactive_claude_wrapper.sh --cwd DIR [--add-dir DIR ...] [--permission-mode MODE | --dangerously-skip-permissions] [--allowedTools TOOLS] [--disallowedTools TOOLS] [--model MODEL] [--effort LEVEL] [--bin PATH]" >&2
   exit 64
 }
 
@@ -43,6 +43,12 @@ while [ "$remaining" -gt 0 ]; do
     --allowedTools)
       [ "$remaining" -ge 1 ] || usage
       set -- "$@" "--allowedTools" "$1"
+      shift
+      remaining=$((remaining - 1))
+      ;;
+    --disallowedTools)
+      [ "$remaining" -ge 1 ] || usage
+      set -- "$@" "--disallowedTools" "$1"
       shift
       remaining=$((remaining - 1))
       ;;

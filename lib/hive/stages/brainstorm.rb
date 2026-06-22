@@ -50,22 +50,30 @@ module Hive
       def run_headless!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
-        # add_dirs is intentionally limited to the task folder. Brainstorm
-        # operates on user-supplied idea text and must not have write access
-        # to the project source code: widening add-dir would let a
-        # prompt-injected idea reach project files. (Claude-on-tmux is now
-        # routed through `run_claude!`; this method only covers codex / pi
-        # — both run with their own profile permissions, not Claude's
-        # `--dangerously-skip-permissions`.)
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "brainstorm", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
+        # By default add_dirs is limited to the task folder. Brainstorm
+        # operates on user-supplied idea text and should not have write
+        # access to the project source code: a wide add-dir would let a
+        # prompt-injected idea reach project files. A `scoped` brainstorm
+        # with `dirs:` deliberately opts into a wider add-dir set
+        # (scope.fetch(:add_dirs) appends those extras) — that is an
+        # operator's explicit, config-level choice, not the default.
+        # (Claude-on-tmux is now routed through `run_claude!`; this method
+        # only covers codex / pi — both run with their own profile
+        # permissions, not Claude's `--dangerously-skip-permissions`.)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Pin the status-detection mode regardless of which profile the
           # user picked: brainstorm's lifecycle contract is "agent writes
           # WAITING/COMPLETE marker to brainstorm.md", which only the
@@ -80,11 +88,15 @@ module Hive
       def run_claude!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "brainstorm", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
         Hive::Stages::Base.spawn_claude_with_tmux_marker!(
           task,
           cfg,
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
@@ -92,7 +104,7 @@ module Hive
           profile: profile,
           session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task), # coding-scoped: coding brainstorm stage tmux session
           status_mode: :state_file_marker,
-          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+          **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

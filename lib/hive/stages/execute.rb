@@ -219,6 +219,10 @@ module Hive
           )
         )
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "execute", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         # 4-execute's lifecycle contract is "stage runner writes
         # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
         # not "the agent writes its own marker" — `templates/
@@ -236,12 +240,13 @@ module Hive
         # :output_file_exists; this pin overrides it for both modes.
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
         if profile.name == :claude
@@ -249,8 +254,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task), # coding-scoped: coding execute stage tmux session
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task) # coding-scoped: coding execute stage tmux session
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

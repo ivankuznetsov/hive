@@ -104,4 +104,4 @@ The trade-off is more intermediate files than a chat-only workflow. The benefit 
 
 ## Deeper Reference
 
-Start with [wiki/architecture.md](../wiki/architecture.md), [wiki/state-model.md](../wiki/state-model.md), [wiki/decisions.md](../wiki/decisions.md), and [docs/architecture.md](architecture.md).
+Start with [wiki/architecture.md](../wiki/architecture.md), [wiki/state-model.md](../wiki/state-model.md), [wiki/decisions.md](../wiki/decisions.md), [docs/architecture.md](architecture.md), and [docs/permissions.md](permissions.md).

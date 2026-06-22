@@ -8,6 +8,7 @@ require "hive/agent_limit"
 require "hive/agent/message_extractor"
 require "hive/events"
 require "hive/lock"
+require "hive/permission_scope"
 
 module Hive
   class Agent
@@ -29,7 +30,8 @@ module Hive
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
-                   permission_mode: nil, cli_flags: [])
+                   permission_mode: nil, allowed_tools: nil,
+                   disallowed_tools: nil, cli_flags: [])
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -51,6 +53,8 @@ module Hive
       end
       @status_mode = status_mode
       @permission_mode = permission_mode
+      @allowed_tools = allowed_tools
+      @disallowed_tools = disallowed_tools
       @cli_flags = Array(cli_flags)
     end
 
@@ -256,6 +260,7 @@ module Hive
     # Order is fixed:
     #   bin, headless_flag, permission flags (if any),
     #   --add-dir <dir> repeated for each add_dir (if profile supports),
+    #   Claude-only tool scope flags (if supplied),
     #   budget_flag <amount> (if profile supports),
     #   output_format_flags...,
     #   extra_flags...,
@@ -272,6 +277,14 @@ module Hive
       if @profile.add_dir_flag
         @add_dirs.each do |d|
           cmd << @profile.add_dir_flag << d
+        end
+      end
+      if @profile.name == :claude
+        if (allowed = Hive::PermissionScope.tool_csv(@allowed_tools))
+          cmd << "--allowedTools" << allowed
+        end
+        if (disallowed = Hive::PermissionScope.tool_csv(@disallowed_tools))
+          cmd << "--disallowedTools" << disallowed
         end
       end
       if @profile.budget_flag && @max_budget_usd

@@ -8,6 +8,7 @@ require "hive/commands/update"
 require "hive/commands/uninstall"
 require "hive/commands/migrate"
 require "hive/commands/new"
+require "hive/commands/workflow"
 require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
@@ -124,6 +125,16 @@ class HiveCliTest < Minitest::Test
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
     assert_equal Hive::ExitCodes::GENERIC, status
     assert_match(/missing task text/, err)
+  end
+
+  def test_workflow_new_dispatches_to_command_with_json
+    with_command_new_stub(Hive::Commands::Workflow) do |calls|
+      Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])
+
+      assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
+      assert_equal({ project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
   end
 
   def test_generate_name_passes_lookup_options

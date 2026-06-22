@@ -327,18 +327,25 @@ module Hive
       when :waiting
         ACTIONS.fetch(:generic_needs_input)
       when :none
-        # Auto-advance a markerless inert stage (no agent to run) whenever it
-        # is not also terminal. Any non-inert kind (`:agent`, `:marker`, or
-        # `nil` — the gate is `stage.kind == :inert`, which excludes all
-        # three) must run rather than be approved past it. The entry-only
-        # restriction is intentionally dropped: an inert NON-entry middle
-        # stage would otherwise strand — `Resolver.resolve` raises
-        # `StageError` for `kind: :inert`, so it can neither run nor advance.
-        # A terminal inert stage has nowhere to advance, so it falls through
-        # to ready-to-run (degenerate single-stage / terminal case).
-        inert_advanceable = !terminal && stage.kind == :inert
-
-        inert_advanceable ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+        if terminal
+          # A TERMINAL inert stage (e.g. the blank scaffold's `done`) has no
+          # runner — `Resolver.resolve` raises `StageError` for `kind: :inert` —
+          # and nowhere to advance. A task parked there is finished, so classify
+          # it as archived; otherwise status/daemon would offer a `hive run`
+          # that can only fail and the daemon would re-dispatch it every tick.
+          # A terminal stage of any OTHER kind still has an agent, so it keeps
+          # falling through to ready-to-run.
+          stage.kind == :inert ? ACTIONS.fetch(:done) : ACTIONS.fetch(:generic_ready_to_run)
+        else
+          # Auto-advance a markerless inert NON-terminal stage (no agent to run)
+          # past itself. Any non-inert kind (`:agent`, `:marker`, or `nil` — the
+          # gate is `stage.kind == :inert`, which excludes all three) must run
+          # rather than be approved past it. The entry-only restriction is
+          # intentionally dropped: an inert NON-entry middle stage would
+          # otherwise strand — `Resolver.resolve` raises `StageError` for
+          # `kind: :inert`, so it can neither run nor advance.
+          stage.kind == :inert ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+        end
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end

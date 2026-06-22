@@ -42,8 +42,9 @@ module HiveWorkflowTestHelper
   end
 
   # Degenerate single-stage descriptor: its only stage is simultaneously entry
-  # and terminal. Used to pin that a markerless inert entry does NOT auto-advance
-  # when there is nowhere to advance to.
+  # and terminal. Used to pin that a markerless inert TERMINAL stage neither
+  # auto-advances (nowhere to advance) nor offers `hive run` (no runner for
+  # kind: :inert) — it classifies as archived instead.
   def single_stage_workflow
     Hive::Workflow.new(
       id: :single,
@@ -140,10 +141,14 @@ module HiveWorkflowTestHelper
     )
   end
 
-  def with_deterministic_content_agent(record: nil)
+  # `prompts:`, when given an array, captures each spawned agent's rendered
+  # prompt so a test can assert the descriptor's instruction body reached it
+  # (distinguishing "ran the custom instruction" from "ran a generic fallback").
+  def with_deterministic_content_agent(record: nil, prompts: nil)
     original = Hive::Stages::Base.method(:spawn_agent)
-    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **_kwargs|
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **kwargs|
       record << task.stage_name if record
+      prompts << kwargs[:prompt] if prompts
       File.write(task.state_file, "# #{task.stage_name}\nartifact: #{task.stage_name}\n<!-- COMPLETE -->\n")
       { status: :complete }
     end
@@ -153,35 +158,22 @@ module HiveWorkflowTestHelper
   end
 
   def with_registered_workflow(descriptor)
-    original_fetch = Hive::Workflows::Registry.method(:fetch)
-    original_all = Hive::Workflows::Registry.method(:all)
-    original_ids = Hive::Workflows::Registry.method(:ids)
-    Hive::Workflows::Registry.define_singleton_method(:fetch) do |id|
-      id == descriptor.id ? descriptor : original_fetch.call(id)
-    end
-    Hive::Workflows::Registry.define_singleton_method(:all) do
-      (original_all.call + [ descriptor ]).uniq(&:id)
-    end
-    Hive::Workflows::Registry.define_singleton_method(:ids) do
-      (original_ids.call + [ descriptor.id ]).uniq
-    end
-    # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union
-    # (the registry is frozen in production, so the cache is permanent there).
-    # This helper is the ONE place the registry mutates, so it must drop the
-    # cache on both enter and exit or the fixture's stage dirs would be missing
-    # inside the block and leak after it.
+    Hive::Workflows::Registry.register!(descriptor)
+    # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union.
+    # The union cache is NOT permanent: production mutates the registry too
+    # (Hive::Workflows::Project.register_descriptor → Registry.register!(project:
+    # true)), and every register!/reset path invalidates the cache. This helper
+    # registers into the TEST overlay, so it must drop the cache on both enter
+    # and exit or the fixture's stage dirs would be missing inside the block and
+    # leak after it.
     reset_workflow_union_cache!
     yield
   ensure
-    Hive::Workflows::Registry.define_singleton_method(:fetch, original_fetch) if original_fetch
-    Hive::Workflows::Registry.define_singleton_method(:all, original_all) if original_all
-    Hive::Workflows::Registry.define_singleton_method(:ids, original_ids) if original_ids
+    Hive::Workflows::Registry.reset_runtime_registrations!
     reset_workflow_union_cache!
   end
 
   def reset_workflow_union_cache!
-    Hive::Workflows.instance_variable_set(:@all_stage_dirs, nil)
-    Hive::Workflows.instance_variable_set(:@all_stage_names, nil)
-    Hive::Workflows.instance_variable_set(:@all_terminal_stage_dirs, nil)
+    Hive::Workflows.reset_union_cache!
   end
 end

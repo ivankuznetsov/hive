@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-new.v1.json",
+  "title": "hive workflow new output (v1)",
+  "description": "Stable contract emitted by `hive workflow new ID --json`. Scaffolds a blank per-project workflow descriptor (inbox -> work -> done) under <hive_state_path>/workflows/ID.yml plus a placeholder instruction at <hive_state_path>/workflows/ID/work.md, then records a hive/state commit. Both the success and error arms route through Hive::Schemas::ErrorEnvelope so the keys match every other hive-* command. A missing/invalid/reserved id or an unknown subcommand is a USAGE error (64); commit-lock contention is a retryable TEMPFAIL (75).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "id",
+        "descriptor_path",
+        "instruction_path",
+        "next"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-workflow-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "id": {
+          "type": "string",
+          "description": "The scaffolded workflow id (matches the descriptor filename stem)."
+        },
+        "descriptor_path": {
+          "type": "string",
+          "description": "Absolute path to the written <id>.yml descriptor."
+        },
+        "instruction_path": {
+          "type": "string",
+          "description": "Absolute path to the written placeholder instruction (<id>/work.md)."
+        },
+        "next": {
+          "type": "string",
+          "description": "Copy-paste command to create the first task pinned to this workflow."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-workflow-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage",
+            "config",
+            "git",
+            "concurrent_run",
+            "error"
+          ],
+          "description": "usage = missing/invalid/reserved id or unknown subcommand (64). config = malformed config.yml (78). git = commit failure (70). concurrent_run = commit-lock contention (75, retryable). error = uncategorised fallback."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            1,
+            64,
+            70,
+            75,
+            78
+          ],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 75=TEMPFAIL, 78=CONFIG."
+        },
+        "message": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string",
+          "description": "Present only for usage errors: the rejected/colliding workflow id (or unknown subcommand) echoed verbatim so an agent recovers it from a structured field instead of regexing `message`."
+        },
+        "holder": {
+          "type": "object",
+          "description": "Present only for concurrent_run: metadata about the lock holder.",
+          "additionalProperties": true
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Present only for concurrent_run: the contended commit-lock path."
+        }
+      }
+    }
+  }
+}

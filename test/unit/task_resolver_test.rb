@@ -64,16 +64,26 @@ class TaskResolverTest < Minitest::Test
     end
   end
 
-  def test_unknown_stage_filter_lists_registered_generic_stage_dirs
-    descriptor = dispatch_workflow
+  # U9-3 tolerance is preserved for a stage filter valid in a DIFFERENT project
+  # than the one scanned first (it's skipped per-project rather than aborting the
+  # scan — see the user-workflow e2e for that positive path). But a filter that
+  # resolves in NO registered project is a usage error: it surfaces the specific
+  # "unknown stage" diagnostic again rather than degrading to a generic "no task
+  # folder for slug" — the message lost when stage-ref resolution moved into
+  # stages_for_project (its rescue swallows the unknown-stage error to []).
+  def test_unknown_stage_filter_raises_unknown_stage_diagnostic
+    with_tmp_global_config do |home|
+      project_root = File.join(home, "project-a")
+      task_folder(project_root, "2-brainstorm", "demo-task")
+      write_registered_project(home, "project-a", project_root)
 
-    with_registered_workflow(descriptor) do
       error = assert_raises(Hive::InvalidTaskPath) do
-        Hive::TaskResolver.new("generic-task", stage_filter: "nope").resolve
+        Hive::TaskResolver.new("demo-task", stage_filter: "nope").resolve
       end
 
-      assert_includes error.message, "2-gather"
-      assert_includes error.message, "gather"
+      assert_includes error.message, "unknown stage 'nope'"
+      refute_includes error.message, "no task folder",
+                      "a bogus --from/--stage must name itself, not degrade to a missing-slug message"
     end
   end
 

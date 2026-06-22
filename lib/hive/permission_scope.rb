@@ -131,7 +131,18 @@ module Hive
     module_function
 
     def validate!(spec, stage: nil)
-      parse_spec(spec, stage: stage)
+      parsed = parse_spec(spec, stage: stage)
+      # Push the parse-time check TOWARD resolve so a `scoped` block's `dirs:`
+      # that can never resolve (an unknown `~user`, e.g. `~nouser/x`, raises
+      # ArgumentError in resolve_dirs) is rejected at LOAD/parse time, not only
+      # when the stage runs and stamps an attributed :error marker. A relative
+      # dir needs a task folder to fully resolve, but only `~user`/type errors
+      # raise — and those don't depend on the task folder — so a placeholder root
+      # surfaces them. (The non-`claude` profile mismatch can't be checked here,
+      # since the profile is a run-time choice; resolve still fails closed on it.)
+      if parsed.fetch("preset") == "scoped" && parsed.key?("dirs")
+        resolve_dirs(parsed["dirs"], task_folder: "/", stage: stage)
+      end
       true
     end
 

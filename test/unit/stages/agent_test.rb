@@ -201,6 +201,62 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_instruction_backed_stage_uses_instruction_body_without_skill_or_generic_fallback
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Write a concise implementation note.\n")
+      descriptor = instruction_workflow(instruction_path)
+      task = task_for(project, "work", descriptor: descriptor)
+      File.write(File.join(task.folder, "idea.md"), "prior idea\n")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        prompt = captured.first.fetch(:prompt)
+        assert_includes prompt, "Write a concise implementation note."
+        assert_includes prompt, "## idea.md\nprior idea"
+        refute_includes prompt, "Use the"
+        refute_includes prompt, "produce the best `work`"
+      end
+    end
+  end
+
+  def test_descriptor_permissions_override_config_permission_spec
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do scoped work.\n")
+      descriptor = instruction_workflow(instruction_path, permissions: "read-only")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "permissions" => "yolo" })
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal "default", kwargs.fetch(:permission_mode)
+        assert_equal %w[Read LS Grep Glob], kwargs.fetch(:allowed_tools)
+        assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], kwargs.fetch(:disallowed_tools)
+      end
+    end
+  end
+
+  def test_descriptor_permissions_fail_closed_when_runner_cannot_enforce_scope
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do scoped work.\n")
+      descriptor = instruction_workflow(instruction_path, permissions: "read-only")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Agent.run!(task, { "work" => { "agent" => "codex" } })
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_match(/cannot enforce tool scoping/, error.message)
+      assert_equal :error, marker.name
+      assert_equal "permission_config_error", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_spawn_uses_task_folder_state_marker_mode_cfg_and_descriptor_defaults
     with_tmp_dir do |project|
       task = task_for(project, "brainstorm")
@@ -289,6 +345,34 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_stamps_error_marker_when_descriptor_instruction_unreadable
+    # A descriptor instruction can be renamed/deleted/chmod'd between parse and
+    # run (a normal authoring edit). The stage's OWN instruction going missing is
+    # fatal, so the runner must stamp an attributed :error marker and stop —
+    # never die with a raw Errno or silently re-classify the row as ready_to_run.
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do the work.\n")
+      descriptor = instruction_workflow(instruction_path)
+      task = task_for(project, "work", descriptor: descriptor)
+      original = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |candidate, *args, **kwargs|
+        raise Errno::EACCES, candidate if candidate == instruction_path
+
+        original.call(candidate, *args, **kwargs)
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal :error, marker.name
+        assert_equal "instruction_unreadable", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("message"), "Errno::EACCES"
+      end
+    end
+  end
+
   def test_run_turns_error_envelope_without_marker_into_error_marker
     with_tmp_dir do |project|
       task = task_for(project, "plan")
@@ -303,6 +387,60 @@ class StagesAgentTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "agent_preflight_failed", marker.attrs["reason"]
         assert_equal "profile unavailable", marker.attrs["message"]
+      end
+    end
+  end
+
+  def test_rerun_overwrites_a_stale_complete_marker_when_preflight_fails
+    # On a re-run of an already-markered stage, a {status: :error} preflight
+    # failure must OVERWRITE the stale :complete rather than leave it in place —
+    # otherwise `hive run` exits 0 reporting :complete and the failure is
+    # unobservable (NO-SILENT-CAPS). The spawn wrote no marker this run, so
+    # clobbering the stale one is correct (this is what dropping the
+    # `marker.name == :none` guard buys).
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      File.write(task.state_file, "<!-- COMPLETE -->\n")
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        { status: :error, error_message: "version too old" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result,
+                     "a preflight failure on re-run must report :error, not the stale :complete")
+        assert_equal :error, marker.name
+        assert_equal "agent_preflight_failed", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_rerun_overwrites_a_stale_marker_when_instruction_unreadable
+    # Same NO-SILENT-CAPS guarantee for the instruction-read failure path: a
+    # stale :waiting from a prior run must not survive when the stage's own
+    # instruction has since become unreadable (the read happens before any
+    # spawn, so no agent wrote a marker this run).
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      File.write(instruction_path, "Do the work.\n")
+      descriptor = instruction_workflow(instruction_path)
+      task = task_for(project, "work", descriptor: descriptor)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      original = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |candidate, *args, **kwargs|
+        raise Errno::EACCES, candidate if candidate == instruction_path
+
+        original.call(candidate, *args, **kwargs)
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result,
+                     "an unreadable instruction on re-run must report :error, not the stale :waiting")
+        assert_equal :error, marker.name
+        assert_equal "instruction_unreadable", marker.attrs.fetch("reason")
       end
     end
   end
@@ -324,4 +462,24 @@ class StagesAgentTest < Minitest::Test
       end
     end
   end
+
+  private
+
+    def instruction_workflow(instruction_path, permissions: nil)
+      Hive::Workflow.new(
+        id: :instruction,
+        stages: [
+          Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+          Hive::Workflow::Stage.new(
+            name: "work",
+            index: 2,
+            state_file: "work.md",
+            advance_verb: Hive::Workflow::AdvanceVerb.new(name: "work"),
+            kind: :agent,
+            instruction: instruction_path,
+            permissions: permissions
+          )
+        ]
+      )
+    end
 end

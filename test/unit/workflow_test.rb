@@ -15,10 +15,26 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.advance_verb
     assert_nil stage.kind
     assert_nil stage.skill
+    assert_nil stage.instruction
+    assert_nil stage.permissions
     assert_nil stage.status_mode
     assert_nil stage.budget_usd
     assert_nil stage.timeout_sec
     assert_nil stage.capability
+  end
+
+  def test_stage_carries_user_descriptor_instruction_and_permissions
+    stage = Hive::Workflow::Stage.new(
+      name: "work",
+      index: 2,
+      state_file: "work.md",
+      kind: :agent,
+      instruction: "/tmp/hive-work.md",
+      permissions: "read-only"
+    )
+
+    assert_equal "/tmp/hive-work.md", stage.instruction
+    assert_equal "read-only", stage.permissions
   end
 
   def test_advance_verb_defaults_flags_to_false

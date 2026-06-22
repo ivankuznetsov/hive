@@ -602,6 +602,41 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # Text-mode parity with the JSON per-project isolation: one project whose
+  # render raises must degrade to a one-line breadcrumb (stdout + stderr) and
+  # keep rendering the rest, never aborting `hive status` for the whole fleet.
+  def test_text_status_isolates_a_project_that_fails_to_render
+    raising = Class.new(Hive::Commands::Status) do
+      def render_project(project, **)
+        raise "boom in #{project['name']}" if project["name"] == "explodes"
+
+        super
+      end
+    end
+
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(hive_state, "4-execute", "healthy-text-260618-ffff",
+                        state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      projects = [
+        { "name" => "explodes", "path" => project_root, "hive_state_path" => hive_state },
+        { "name" => "healthy", "path" => project_root, "hive_state_path" => hive_state }
+      ]
+
+      out = err = nil
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        out, err = capture_io { raising.new.call }
+      end
+
+      assert_match(/explodes: failed to load \(boom in explodes\)/, out,
+                   "the failing project degrades to a one-line stdout breadcrumb")
+      assert_match(/failed to render/, err,
+                   "the failure must leave a stderr breadcrumb")
+      assert_match(/healthy-text-260618-ffff/, out,
+                   "a healthy project must still render after a sibling fails")
+    end
+  end
+
   # #270: unanswered_question_count must never break `hive status` — a
   # parse error on a mid-write/malformed brainstorm.md degrades to 0.
   def test_unanswered_question_count_degrades_to_zero_on_parse_error

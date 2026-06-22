@@ -203,7 +203,17 @@ class TasksController < ApplicationController
   # coding order if the descriptor is unregistered (a hand-edited or
   # later-removed workflow) so the page still renders something.
   def generic_artifact_order(row)
-    Hive::Workflows::Registry.fetch(row["workflow"].to_sym).stages.map(&:state_file).uniq
+    # The row belongs to @project, but a custom workflow is registered only in
+    # ITS project's overlay. Load that overlay under the lock before fetching:
+    # without it the fetch reads whatever overlay the StatusFeed poller last
+    # left active, so on a multi-project box every project but the active one
+    # raises UnknownWorkflow → falls back to coding ARTIFACT_ORDER and renders
+    # an empty artifact list for the custom-workflow task. The lock holds the
+    # load and the fetch together so a concurrent swap can't race between them.
+    Hive::Workflows::Project.synchronize do
+      Hive::Workflows::Project.load!(@project["path"])
+      Hive::Workflows::Registry.fetch(row["workflow"].to_sym).stages.map(&:state_file).uniq
+    end
   rescue Hive::Workflows::UnknownWorkflow
     ARTIFACT_ORDER
   end

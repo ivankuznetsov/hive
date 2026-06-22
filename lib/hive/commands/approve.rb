@@ -72,8 +72,8 @@ module Hive
       # ── Pipeline ────────────────────────────────────────────────────────
 
       def do_call
-        validate_stage_refs!
         task = resolve_task
+        validate_stage_refs!
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
 
@@ -87,15 +87,16 @@ module Hive
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
       end
 
-      # Reject a clearly-invalid --from/--to stage ref BEFORE resolving the
-      # task, so a typo'd stage on a slug that also doesn't exist reports the
-      # more actionable "unknown stage" instead of the task resolver's "no task
-      # folder". Only refs that resolve in NO registered workflow are caught
-      # here; a ref valid in some workflow defers its workflow-specific check
-      # (validate_from! / resolve_explicit_to) to after resolution, where the
-      # task's own descriptor is known — which keeps --from's idempotency
-      # contract (a ref that's valid but not the current stage still reaches
-      # validate_from!'s WRONG_STAGE path).
+      # Reject a clearly-invalid --from/--to stage ref against the union of every
+      # REGISTERED workflow's stages. Runs AFTER resolve_task (U9-3 boundary fix):
+      # a fresh `hive approve` process has NO project workflow registered until a
+      # task is resolved (Task.new → Project.load! registers the overlay), so an
+      # owner-authored stage like `2-work` would be wrongly rejected if this gate
+      # ran first. With the project loaded, custom stages validate. A ref valid in
+      # some workflow still defers its workflow-specific check (validate_from! /
+      # resolve_explicit_to) to the task's own descriptor — which keeps --from's
+      # idempotency contract (a ref that's valid but not the current stage still
+      # reaches validate_from!'s WRONG_STAGE path).
       def validate_stage_refs!
         # Mirror each downstream handler's own wording so the early check is a
         # pure relocation, not a message change: --from matches validate_from!

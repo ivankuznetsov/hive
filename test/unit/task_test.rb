@@ -158,6 +158,43 @@ class TaskTest < Minitest::Test
     end
   end
 
+  # A per-task `workflow:` pin to a descriptor that was SKIPPED at load (here a
+  # bad stage kind) must surface its REAL ConfigError, not a misleading
+  # UnknownWorkflow → InvalidTaskPath "unknown workflow" — the same boundary
+  # rule the `--workflow` / `hive init` path uses (U9-3). resolve_workflow now
+  # routes the pin through Project.assert_descriptor_loadable! to re-raise it.
+  def test_meta_workflow_pin_to_malformed_descriptor_surfaces_real_config_error
+    with_tmp_dir do |dir|
+      Hive::Workflows::Project.reset!
+      workflows_dir = File.join(dir, ".hive-state", "workflows")
+      FileUtils.mkdir_p(workflows_dir)
+      File.write(File.join(workflows_dir, "badflow.yml"), <<~YAML)
+        id: badflow
+        stages:
+          - name: inbox
+            kind: terminal
+            state_file: idea.md
+          - name: work
+            kind: boguskind
+            state_file: work.md
+      YAML
+      folder = File.join(dir, ".hive-state", "stages", "2-work", "x-260424-7a3b")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "workflow: badflow\n")
+
+      error = nil
+      capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Task.new(folder) }
+      end
+
+      assert_match(/boguskind/, error.message,
+                   "the pin must surface the descriptor's real parse error, not 'unknown workflow'")
+      refute_match(/unknown workflow/, error.message)
+    ensure
+      Hive::Workflows::Project.reset!
+    end
+  end
+
   def test_project_default_workflow_resolves_fieldless_task
     with_tmp_dir do |dir|
       with_registered_workflow(research_workflow) do

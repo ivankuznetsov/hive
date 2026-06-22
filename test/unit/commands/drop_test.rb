@@ -214,6 +214,26 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  # When `--from` names a stage that doesn't resolve in the matched project,
+  # the WrongStage message degrades "expected" to the raw ref rather than
+  # raising mid-message (the resolve rescue in raise_wrong_stage_if_slug_exists_elsewhere!).
+  def test_drop_from_unknown_stage_degrades_expected_to_raw_ref
+    with_drop_project do |dir, _ops, project|
+      slug = "degrade-260522-aaaa"
+      create_task(dir, "3-plan", slug)
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Drop.new(slug, project: project, from: "nonexistent-stage", json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::WRONG_STAGE, status
+      assert_equal "wrong_stage", payload["error_kind"]
+      assert_equal "3-plan", payload["current_stage"]
+      assert_equal "nonexistent-stage", payload["target_stage"],
+                   "an unresolvable --from must degrade to the raw ref, not crash"
+    end
+  end
+
   def seed_generic_task(dir, ops, stage_dir, slug)
     folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
     FileUtils.mkdir_p(folder)

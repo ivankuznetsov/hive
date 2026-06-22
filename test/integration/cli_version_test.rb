@@ -104,13 +104,15 @@ class CliVersionTest < Minitest::Test
     end
   end
 
-  def test_bin_hive_new_treats_workflow_option_as_task_text_after_project
+  def test_bin_hive_new_lifts_workflow_option_after_project
     with_cli_project do |dir, project|
-      out, err, status = run_bin_hive("new", project, "literal", "--workflow", "coding")
+      out, err, status = run_bin_hive("new", project, "--workflow", "coding", "literal")
 
-      assert status.success?, "hive new should capture --workflow as text after PROJECT, stderr was: #{err}"
+      assert status.success?, "hive new should parse --workflow after PROJECT, stderr was: #{err}"
       assert_includes out, "hive: captured"
-      assert_new_idea_includes(dir, "literal --workflow coding")
+      folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "literal-*")].first
+      assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
+      refute_includes File.read(File.join(folder, "idea.md")), "--workflow"
     end
   end
 

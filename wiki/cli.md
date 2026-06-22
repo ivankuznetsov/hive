@@ -25,13 +25,17 @@ reason. Accepted boolean forms match Thor's exact grammar: bare `--json`, exact
 truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
 (`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
 assignments such as `--json=1` or `--json=yes` exit with usage before their
-values can be treated as a command argument or task target. The scan stops at
-the `hive new` text boundary: after `hive new PROJECT`, dash-prefixed tokens
-such as `--help` and unsupported-looking `--json=...` assignments are literal
-task text, and the wrapper inserts `--` before that tail so Thor does not parse
-it as options. When the wrapper itself catches a usage error, JSON-vs-prose mode
-is decided from the last recognized JSON boolean flag in argv, so a trailing
-false form such as `--no-json` or `--json=false` overrides an earlier `--json`.
+values can be treated as a command argument or task target. `hive new` has a
+special lift-and-rebuild path: standalone allow-listed options (`--workflow`,
+`--depends-on`, and JSON booleans, including `--name=value` forms where
+applicable) are lifted from before the project, between project and text, or
+after text, then the remaining `PROJECT TEXT...` tail is protected with `--` so
+Thor does not parse literal task text as options. Non-allow-listed tokens such
+as `--help`, unsupported-looking `--json=...` assignments after `PROJECT`,
+unrecognized `--foo`, and quoted strings containing `--workflow` remain task
+text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
+decided from the last recognized JSON boolean flag in argv, so a trailing false
+form such as `--no-json` or `--json=false` overrides an earlier `--json`.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested

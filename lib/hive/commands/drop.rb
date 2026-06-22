@@ -75,7 +75,7 @@ module Hive
       end
 
       def resolve_context
-        path_target? ? resolve_path_context : resolve_slug_context
+        (path_target? || numeric_target?) ? resolve_path_context : resolve_slug_context
       end
 
       # Slugs match Stages::SLUG_RE — any /, ~, or . means a path.
@@ -84,6 +84,14 @@ module Hive
         @target.to_s.include?("/") || @target.to_s.start_with?("~", ".")
       end
 
+      # An all-digits target is unambiguously a task id: Stages::SLUG_RE
+      # requires a leading lowercase letter, so no slug can be all digits.
+      def numeric_target?
+        @target.to_s.match?(/\A\d+\z/)
+      end
+
+      # Path/id targets flow through TaskResolver so path validation and
+      # numeric-id lookup stay shared with run/approve/findings.
       def resolve_path_context
         task = Hive::TaskResolver.new(
           @target,
@@ -103,7 +111,7 @@ module Hive
           [ active_stage_dirs, archive_stage_dirs ]
         end
         folders = collect_stage_folders(task.hive_state_path, task.slug, active_dirs)
-        # Mirror resolve_slug_context: if the path target landed on the
+        # Mirror resolve_slug_context: if the path/id target landed on the
         # archive stage (no active folders, but the archive folder exists)
         # surface the archive match so guard_archived! refuses cleanly
         # instead of silently dropping nothing.

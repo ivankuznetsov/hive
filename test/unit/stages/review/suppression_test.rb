@@ -65,6 +65,17 @@ class ReviewSuppressionTest < Minitest::Test
     refute_equal a, b
   end
 
+  def test_key_for_distinguishes_severity
+    # Severity is a load-bearing key component (A5a): a Medium no-fix must
+    # not suppress a re-emitted same-title/same-file High. Pin it here so a
+    # regression that collapses the severity_key in key_for (e.g. replacing
+    # it with a constant) can never pass silently.
+    a = Suppression.key_for("lib/foo.rb leaks stale state", severity: "medium")
+    b = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
+
+    refute_equal a, b
+  end
+
   def test_key_for_distinguishes_same_file_line_different_descriptions
     # M1 regression: a reviewer line shaped `file:line: description` must
     # not collapse to just the filename. With the title/justification split
@@ -209,7 +220,16 @@ class ReviewSuppressionTest < Minitest::Test
       FileUtils.rm_f(Suppression.suppressed_path(ctx))
       FileUtils.mkdir_p(Suppression.suppressed_path(ctx))
 
-      assert_empty Suppression.read_active_keys(ctx)
+      keys = nil
+      _out, err = capture_io do
+        keys = Suppression.read_active_keys(ctx)
+      end
+
+      assert_empty keys
+      # The read rescue must surface the potential data loss, not fail
+      # silently — mirror the sibling append_entries_skips test below.
+      assert_match(/unreadable/, err,
+                   "a read failure on a present doc must warn, not degrade silently")
     end
   end
 
@@ -473,6 +493,83 @@ class ReviewSuppressionTest < Minitest::Test
       assert_equal 0, added, "append must skip when the doc is present but unreadable"
       assert_equal before, File.read(path),
                    "a transient read error must not clobber operator-edited suppression state"
+      assert_match(/unreadable/, err)
+    end
+  end
+
+  def test_recorded_base_signals_failure_on_unreadable_header
+    # The SystemCallError/IOError branch in recorded_base must SIGNAL the
+    # failure (not return nil) so the mutation caller skips the write. Drive
+    # it with a header read that genuinely fails — a directory at the path
+    # makes readline raise EISDIR after the byte-0 probe would have passed.
+    with_suppression_task do |ctx|
+      path = Suppression.suppressed_path(ctx)
+      FileUtils.mkdir_p(path)
+
+      assert_raises(Suppression::SuppressedDocReadError) do
+        Suppression.recorded_base(path)
+      end
+    end
+  end
+
+  def test_append_entries_skips_when_full_read_fails_after_probe
+    # The clobber window the byte-0 probe cannot cover: a read error that
+    # surfaces only on the FULL read (e.g. mid-file EIO). append_entries!
+    # must skip the write rather than persist additions over a dropped list.
+    with_suppression_task do |ctx|
+      path = Suppression.suppressed_path(ctx)
+      Suppression.append_entries!(ctx, "abc123", [
+        Entry.new(key: nil, severity: "high", text: "lib/foo.rb leaks stale state", first_pass: 1, active: true)
+      ])
+      before = File.read(path)
+
+      original_readlines = File.method(:readlines)
+      raising = lambda do |rl_path, *args, **kwargs|
+        raise Errno::EIO, "io error" if File.expand_path(rl_path) == File.expand_path(path)
+
+        original_readlines.call(rl_path, *args, **kwargs)
+      end
+
+      added = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(File, :readlines, raising) do
+          added = Suppression.append_entries!(ctx, "abc123", [
+            Entry.new(key: nil, severity: "medium", text: "lib/bar.rb new finding", first_pass: 2, active: true)
+          ])
+        end
+      end
+
+      assert_equal 0, added,
+                   "append must skip when the full read fails after the byte-0 probe passes"
+      assert_equal before, File.read(path),
+                   "a partial-read error must not clobber operator-edited suppression state"
+      assert_match(/unreadable/, err)
+    end
+  end
+
+  def test_reset_skips_write_when_header_read_signals_failure
+    # The reset clobber window: recorded_base signalling a read failure must
+    # make reset_if_base_changed! SKIP the wipe, even when the supplied base
+    # differs (which would otherwise reset the list).
+    with_suppression_task do |ctx|
+      path = Suppression.suppressed_path(ctx)
+      Suppression.append_entries!(ctx, "abc123", [
+        Entry.new(key: nil, severity: "high", text: "lib/foo.rb leaks stale state", first_pass: 1, active: true)
+      ])
+      before = File.read(path)
+
+      failing = ->(_p) { raise Suppression::SuppressedDocReadError, "header unreadable (Errno::EIO: io error)" }
+
+      result = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Suppression, :recorded_base, failing) do
+          result = Suppression.reset_if_base_changed!(ctx, "def456")
+        end
+      end
+
+      refute result, "reset must not run when the header read signals failure"
+      assert_equal before, File.read(path),
+                   "a partial header-read error must not wipe operator-edited entries"
       assert_match(/unreadable/, err)
     end
   end

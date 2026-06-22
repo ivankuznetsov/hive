@@ -10,6 +10,19 @@ module Hive
       module Suppression
         Entry = Data.define(:key, :severity, :text, :first_pass, :active)
 
+        # Raised by the raw readers (read_entries / recorded_base) when the
+        # suppressed doc is present but a genuine read error surfaces — e.g. a
+        # mid-file EIO that slips past the byte-0 probe in
+        # suppressed_doc_unreadable?. Callers translate it per context:
+        # mutation paths (append_entries! / reset_if_base_changed!) rescue it
+        # to SKIP the write, so a transient read error can never clobber
+        # operator-edited tombstones it could not see; query paths
+        # (read_active_entries) rescue it to an empty result so findings simply
+        # re-surface on the next pass. Distinguishing "read failed" from
+        # "legitimately empty" is what keeps the skip-don't-clobber intent of
+        # the byte-0 probe intact on the full read too.
+        class SuppressedDocReadError < StandardError; end
+
         VERSION = "v1".freeze
         HEADER_RE = /\A<!--\s+HIVE-SUPPRESS\s+v1\s+base=([^ ]+)\s+-->\s*\z/.freeze
         CHECKBOX_LINE_RE = /\A\s*-\s+\[([ xX])\]\s+(.*?)(?:\s*<!--(.*?)-->)?\s*\z/.freeze
@@ -113,6 +126,13 @@ module Hive
 
         def read_active_entries(ctx)
           read_entries(suppressed_path(ctx)).select(&:active).to_h { |entry| [ entry.key, entry ] }
+        rescue SuppressedDocReadError => e
+          # Query path: degrade to empty so a transient read error simply lets
+          # findings re-surface next pass. Safe because the mutation paths
+          # refuse to write on the same signal, so nothing is lost.
+          warn "[hive.review] reviews/suppressed.md entries unreadable " \
+               "(#{e.message}); treating the active list as empty for this read"
+          {}
         end
 
         def reset_if_base_changed!(ctx, base_sha)
@@ -124,6 +144,15 @@ module Hive
 
           write_entries(path, base_sha, [])
           true
+        rescue SuppressedDocReadError => e
+          # recorded_base could not read the header after the byte-0 probe
+          # passed (partial-read race). Treating the base as changed here would
+          # wipe the list, so skip the reset and leave operator-edited entries
+          # intact rather than clobber tombstones we cannot see.
+          warn "[hive.review] reviews/suppressed.md header unreadable " \
+               "(#{e.message}); skipping the suppression reset to preserve " \
+               "operator-edited entries"
+          false
         end
 
         def append_entries!(ctx, base_sha, entries)
@@ -149,6 +178,15 @@ module Hive
 
           write_entries(path, base_sha, existing + additions)
           additions.size
+        rescue SuppressedDocReadError => e
+          # read_entries could not enumerate the existing list after the byte-0
+          # probe passed (partial-read race). Writing now would persist only
+          # the additions and drop every operator-edited entry, so skip the
+          # append entirely.
+          warn "[hive.review] reviews/suppressed.md entries unreadable " \
+               "(#{e.message}); skipping the suppression append to preserve " \
+               "operator-edited entries"
+          0
         end
 
         def strip_suppressed!(cfg:, ctx:, base_sha:)
@@ -247,14 +285,12 @@ module Hive
           nil
         rescue SystemCallError, IOError => e
           # A genuine read error (or a partial read that slipped past the
-          # 1-byte probe in suppressed_doc_unreadable?) makes
-          # reset_if_base_changed! treat the doc as base-mismatched and
-          # overwrite it, silently dropping operator-edited entries. Warn
-          # like the sibling reviewer_lines rescue rather than fail quietly.
-          warn "[hive.review] reviews/suppressed.md header unreadable " \
-               "(#{e.class}: #{e.message}); treating the compare base as " \
-               "changed, which resets the suppression list"
-          nil
+          # 1-byte probe in suppressed_doc_unreadable?). Signal the mutation
+          # caller (reset_if_base_changed!) so it SKIPS the reset rather than
+          # treating the doc as base-mismatched and overwriting operator-edited
+          # entries. The caller decides how to surface it (warn + skip on the
+          # mutate path, warn + empty on the query path).
+          raise SuppressedDocReadError, "header unreadable (#{e.class}: #{e.message})"
         end
 
         # True when the suppressed doc is present but a genuine read error
@@ -288,13 +324,11 @@ module Hive
           end
           entries
         rescue SystemCallError, IOError => e
-          # On the mutate path (append_entries!) a swallowed read here means
-          # write_entries persists only the additions and drops every
-          # existing entry. Warn like reviewer_lines so the loss is visible.
-          warn "[hive.review] reviews/suppressed.md entries unreadable " \
-               "(#{e.class}: #{e.message}); treating the list as empty, " \
-               "which can drop operator-edited entries on the next write"
-          []
+          # Signal the caller instead of silently degrading to []. On the
+          # mutate path (append_entries!) a swallowed read here would persist
+          # only the additions and drop every existing entry; mutation callers
+          # rescue this to skip the write, query callers to an empty list.
+          raise SuppressedDocReadError, "entries unreadable (#{e.class}: #{e.message})"
         end
 
         # Reads a reviewer file's lines, degrading to an empty list (with a
@@ -442,6 +476,10 @@ module Hive
             severity: severity,
             text: text,
             first_pass: entry.first_pass,
+            # Active-by-default: `!= false` coerces a nil/absent flag to true,
+            # so only an explicit `false` deactivates an entry. Every
+            # constructor today passes an explicit boolean; this keeps a future
+            # nil-default caller from silently producing an inactive entry.
             active: entry.active != false
           )
         end
@@ -459,6 +497,7 @@ module Hive
           body << "Hive suppresses checked entries here before triage when reviewers re-emit a finding triage already marked no-fix.\n"
           body << "Uncheck an entry (keep the `- [ ]` tombstone) to durably un-suppress: the tombstone stays in the list, so triage sees the finding on the next pass and never re-suppresses it.\n"
           body << "Deleting an entry only un-suppresses until the next no-fix pass, which re-seeds and re-suppresses it.\n"
+          body << "Unchecking or deleting are the only supported un-suppress gestures: editing an entry's severity label (or its `fp=`) does NOT un-suppress — the stored `fp=` stays put while strip recomputes the key from the section severity, so a relabeled entry silently diverges instead of un-suppressing.\n"
           body << "This file is orchestrator-owned and is reset when the reviewer compare base changes.\n\n"
 
           grouped = entries.group_by(&:severity)

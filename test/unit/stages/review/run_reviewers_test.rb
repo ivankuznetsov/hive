@@ -1253,6 +1253,12 @@ class RunReviewersTest < Minitest::Test
     refute Hive::Stages::Review.reviewer_file?("errors-99.md")
     refute Hive::Stages::Review.reviewer_file?("suppressed.md"),
            "suppressed.md must be classified as orchestrator-owned"
+    # The `suppressed.` prefix is dot-terminated, so a reviewer file that
+    # merely begins with `suppressed` is NOT swept into orchestrator-owned.
+    assert Hive::Stages::Review.reviewer_file?("suppressed-checks-01.md"),
+           "suppressed-checks-01.md is a reviewer file, not the suppression doc"
+    assert Hive::Stages::Review.reviewer_file?("suppression-audit-01.md"),
+           "suppression-* must stay an ordinary reviewer file"
     # Sanity: a real reviewer file is still recognized.
     assert Hive::Stages::Review.reviewer_file?("claude-ce-code-review-01.md")
   end

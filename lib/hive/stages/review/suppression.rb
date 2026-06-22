@@ -241,7 +241,19 @@ module Hive
           first = File.open(path, &:readline)
           match = HEADER_RE.match(first.strip)
           match && match[1]
-        rescue EOFError, SystemCallError, IOError
+        rescue EOFError
+          # 0-byte file: no header line and no entries to lose, so the
+          # ensuing reset is legitimate — stay silent.
+          nil
+        rescue SystemCallError, IOError => e
+          # A genuine read error (or a partial read that slipped past the
+          # 1-byte probe in suppressed_doc_unreadable?) makes
+          # reset_if_base_changed! treat the doc as base-mismatched and
+          # overwrite it, silently dropping operator-edited entries. Warn
+          # like the sibling reviewer_lines rescue rather than fail quietly.
+          warn "[hive.review] reviews/suppressed.md header unreadable " \
+               "(#{e.class}: #{e.message}); treating the compare base as " \
+               "changed, which resets the suppression list"
           nil
         end
 
@@ -275,7 +287,13 @@ module Hive
             entries << entry if entry
           end
           entries
-        rescue SystemCallError, IOError
+        rescue SystemCallError, IOError => e
+          # On the mutate path (append_entries!) a swallowed read here means
+          # write_entries persists only the additions and drops every
+          # existing entry. Warn like reviewer_lines so the loss is visible.
+          warn "[hive.review] reviews/suppressed.md entries unreadable " \
+               "(#{e.class}: #{e.message}); treating the list as empty, " \
+               "which can drop operator-edited entries on the next write"
           []
         end
 

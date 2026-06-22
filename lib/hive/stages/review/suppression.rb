@@ -15,11 +15,17 @@ module Hive
         CHECKBOX_LINE_RE = /\A\s*-\s+\[([ xX])\]\s+(.*?)(?:\s*<!--(.*?)-->)?\s*\z/.freeze
         UNCHECKED_LINE_RE = /\A(\s*)-\s+\[\s*\]\s+(.*?)(\r?\n?)\z/.freeze
         RESOLVED_NO_FIX_LINE_RE = /\A\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:\s+(.*?)(?:\r?\n)?\z/i.freeze
-        SECTION_RE = /\A##\s+(.+?)\s*\z/.freeze
         FP_RE = /\bfp=([0-9a-f]{16})\b/i.freeze
         FIRST_PASS_RE = /\bfirst-pass=(\d+)\b/.freeze
         DISPOSITION_PREFIX_RE = /\A(?:AUTO-FIX|RESOLVED\/NO-FIX|RESOLVED|NO-FIX|ESCALATE|SUPPRESSED):\s*/i.freeze
-        HTML_COMMENT_RE = /\s*<!--.*?-->\s*\z/.freeze
+        # Matches a single HTML comment anywhere in the text (non-greedy,
+        # multiline-dotall). clean_finding_text strips ALL comments with a
+        # global sub, not just a trailing one: an anchored `...-->\z` match
+        # would collapse the span from the first `<!--` to the last `-->`,
+        # swallowing any visible text between two comments. Harmless for a
+        # lone trailing comment, but a latent footgun if a finding ever
+        # embeds a mid-text comment.
+        HTML_COMMENT_RE = /<!--.*?-->/m.freeze
         PATH_TOKEN_RE = %r{
           (?:`)?
           ([A-Za-z0-9_.@+\-]+(?:/[A-Za-z0-9_.@+\-]+)*\.[A-Za-z0-9_+\-]+(?::\d+(?::\d+)?)?)
@@ -27,21 +33,21 @@ module Hive
         }x.freeze
         LINE_NUMBER_SUFFIX_RE = /:\d+(?::\d+)?\z/.freeze
         PUNCT_RE = /[[:punct:]]+/.freeze
+        # Canonical severity list for the suppressed doc — the single
+        # source of truth. Section headings, inline labels, the heading
+        # recognizer (parse_section), the inline-severity gate
+        # (split_entry_severity) and normalize_severity all derive from
+        # this list, so they can never disagree. Critically it includes
+        # "unknown", so a `## Unknown` section render_document writes is
+        # re-recognized by parse_section on read-back (it would not when
+        # the recognizer reused Findings::KNOWN_SEVERITIES, which omits
+        # "unknown").
         SEVERITY_ORDER = %w[high medium low nit unknown].freeze
-        SECTION_TITLES = {
-          "high" => "## High - prominent active suppressions",
-          "medium" => "## Medium",
-          "low" => "## Low",
-          "nit" => "## Nit",
-          "unknown" => "## Unknown"
+        SECTION_TITLES = SEVERITY_ORDER.to_h { |severity|
+          title = severity == "high" ? "## High - prominent active suppressions" : "## #{severity.capitalize}"
+          [ severity, title ]
         }.freeze
-        SEVERITY_LABELS = {
-          "high" => "High",
-          "medium" => "Medium",
-          "low" => "Low",
-          "nit" => "Nit",
-          "unknown" => "Unknown"
-        }.freeze
+        SEVERITY_LABELS = SEVERITY_ORDER.to_h { |severity| [ severity, severity.capitalize ] }.freeze
 
         module_function
 
@@ -49,18 +55,36 @@ module Hive
           File.join(ctx.task_folder, "reviews", "suppressed.md")
         end
 
+        # Stable fingerprint for a finding line. Two normalizations make it
+        # robust: the justification body (everything after the first
+        # title/justification ": ") is excluded so a re-emitted finding
+        # with a reworded rationale keeps the same key (A3), and file refs
+        # are folded to a normalized, line-number-free set so the same
+        # finding at a drifted line still matches.
+        #
+        # File refs are extracted (and their `:line[:col]` suffixes
+        # dropped) and then removed from the title BEFORE the
+        # title/justification split. Order is load-bearing: a reviewer line
+        # shaped `file:line: description` would otherwise have the ": " of
+        # the `file:line:` token mistaken for the title separator,
+        # collapsing every distinct finding on that file to one key and
+        # silently suppressing unrelated findings — breaking the plan's
+        # "different-title re-loops" guarantee.
+        #
+        # Symbol-level enrichment of the key (e.g. the enclosing method
+        # name) is a deferred A3 nice-to-have, intentionally NOT in v1.
         def key_for(text, severity:)
-          cleaned = title_text(clean_finding_text(text))
+          cleaned = clean_finding_text(text)
           files = cleaned.scan(PATH_TOKEN_RE).flatten
                          .map { |path| path.sub(LINE_NUMBER_SUFFIX_RE, "").downcase }
                          .uniq
                          .sort
                          .join(",")
-          title = cleaned.gsub(PATH_TOKEN_RE, " ")
-                         .downcase
-                         .gsub(PUNCT_RE, " ")
-                         .gsub(/\s+/, " ")
-                         .strip
+          title = title_text(cleaned.gsub(PATH_TOKEN_RE, " "))
+                  .downcase
+                  .gsub(PUNCT_RE, " ")
+                  .gsub(/\s+/, " ")
+                  .strip
           severity_key = normalize_severity(severity)
           ::Digest::SHA256.hexdigest("#{severity_key}\x01#{files}\x01#{title}")[0, 16]
         end
@@ -75,6 +99,8 @@ module Hive
 
         def reset_if_base_changed!(ctx, base_sha)
           path = suppressed_path(ctx)
+          return false if suppressed_doc_unreadable?(path)
+
           existing_base = recorded_base(path)
           return false if existing_base == base_sha
 
@@ -83,8 +109,13 @@ module Hive
         end
 
         def append_entries!(ctx, base_sha, entries)
-          reset_if_base_changed!(ctx, base_sha)
           path = suppressed_path(ctx)
+          # Bail before mutating if the file is present but unreadable, so a
+          # transient read error can't turn an append into a destructive
+          # overwrite that silently loses operator-edited tombstones.
+          return 0 if suppressed_doc_unreadable?(path)
+
+          reset_if_base_changed!(ctx, base_sha)
           existing = read_entries(path)
           known_keys = existing.map(&:key).to_set
 
@@ -132,21 +163,51 @@ module Hive
           cleaned = cleaned.sub(/\A\s*-\s+\[[ xX]\]\s+/, "")
           loop do
             before = cleaned
-            cleaned = cleaned.sub(HTML_COMMENT_RE, "").strip
+            # Strip ALL HTML comments (replaced with a space so adjacent
+            # tokens never glue), then a leading disposition prefix; repeat
+            # until stable so stacked prefixes/comments fully unwrap.
+            cleaned = cleaned.gsub(HTML_COMMENT_RE, " ").strip
             cleaned = cleaned.sub(DISPOSITION_PREFIX_RE, "").strip
             break if cleaned == before
           end
-          cleaned
+          cleaned.gsub(/\s+/, " ")
         end
 
+        # Title portion of a finding line: everything before the first
+        # ": " (colon-space), which reviewers use to separate a finding's
+        # title from its justification body. Excluding the justification is
+        # what keeps the key stable when triage re-emits the same finding
+        # with a reworded rationale (A3); this split is therefore
+        # load-bearing for suppression matching, and a change here silently
+        # shifts every key. Mirrors
+        # Hive::Findings::Document#split_title_justification.
+        #
+        # key_for passes text with file refs already removed, so a
+        # whitespace-only prefix before the first ": " means that ": " was
+        # the tail of a `file:line:` token, not a real title/justification
+        # separator. In that case re-split on the next ": " in the
+        # remainder, so `file:line: title: justification` still yields just
+        # the title (a true justification stays excluded) while
+        # `file:line: description` yields the whole description.
         def title_text(text)
           idx = text.index(": ")
-          idx ? text[0...idx] : text
+          return text unless idx
+
+          prefix = text[0...idx]
+          return prefix unless prefix.strip.empty?
+
+          rest = text[(idx + 2)..] || ""
+          next_idx = rest.index(": ")
+          next_idx ? rest[0...next_idx] : rest
         end
 
         def normalize_severity(severity)
           value = severity.to_s.downcase.strip
-          value.empty? ? "unknown" : value
+          # Clamp to the canonical set (default "unknown") so an
+          # out-of-enum severity — e.g. an operator-hand-added
+          # `- [x] Critical: ...` — can never be silently dropped by
+          # render_document, which only iterates SEVERITY_ORDER.
+          SEVERITY_ORDER.include?(value) ? value : "unknown"
         end
 
         def enabled?(cfg)
@@ -164,17 +225,32 @@ module Hive
           nil
         end
 
+        # True when the suppressed doc is present but a genuine read error
+        # (permissions, I/O — NOT ENOENT, which is the legitimate
+        # first-run case) blocks reading it. Mutation paths (reset/append)
+        # must skip rather than clobber operator-edited tombstones they
+        # cannot see; query paths (read_active_*) still fail safe to empty
+        # so findings re-surface. Distinguishing absent from unreadable is
+        # what keeps a transient read error from wiping the list.
+        def suppressed_doc_unreadable?(path)
+          return false unless File.exist?(path)
+
+          File.open(path) { |io| io.read(1) }
+          false
+        rescue Errno::ENOENT
+          false
+        rescue SystemCallError, IOError => e
+          warn "[hive.review] reviews/suppressed.md present but unreadable " \
+               "(#{e.class}: #{e.message}); skipping suppression update to " \
+               "preserve operator-edited entries"
+          true
+        end
+
         def read_entries(path)
           return [] unless File.exist?(path)
 
           entries = []
-          current_severity = nil
-          File.readlines(path).each do |line|
-            if (section = parse_section(line))
-              current_severity = section
-              next
-            end
-
+          each_content_line(File.readlines(path)) do |line, current_severity|
             entry = parse_entry_line(line, current_severity)
             entries << entry if entry
           end
@@ -183,12 +259,52 @@ module Hive
           []
         end
 
+        # Reads a reviewer file's lines, degrading to an empty list (with a
+        # warning) when the file is present but unreadable, so one bad
+        # reviewer file can't abort the whole review pass with a top-level
+        # REVIEW_ERROR — matching the deliberate rescue on the suppression
+        # doc. ENOENT (absent) is the silent empty case.
+        def reviewer_lines(path)
+          File.readlines(path)
+        rescue Errno::ENOENT
+          []
+        rescue SystemCallError, IOError => e
+          warn "[hive.review] could not read reviewer file #{path} " \
+               "(#{e.class}: #{e.message}); skipping it for this suppression pass"
+          []
+        end
+
+        # Shared non-fence line iterator. Tracks fenced-code regions and
+        # the current severity heading once (mirroring
+        # Hive::Findings::Document#parse_lines) and yields
+        # [line, current_severity] for each CONTENT line — fence and
+        # heading lines are consumed, not yielded. Used by read_entries and
+        # no_fix_entries so a `## High` or `- [ ] foo` example inside a
+        # ``` fenced block is treated as content, not structure.
+        # strip_file! keeps its own walk because it rewrites lines and must
+        # re-emit the structural lines this iterator skips.
+        def each_content_line(lines)
+          current_severity = nil
+          in_fence = false
+          lines.each do |line|
+            in_fence = !in_fence if Hive::Findings::FENCE_RE.match?(line)
+            next if in_fence
+
+            if (section = parse_section(line))
+              current_severity = section
+              next
+            end
+
+            yield line, current_severity
+          end
+        end
+
         def parse_section(line)
-          match = SECTION_RE.match(line)
+          match = Hive::Findings::SEVERITY_HEADING_RE.match(line)
           return nil unless match
 
           first_word = match[1].split(/\s+/).first&.downcase
-          Hive::Findings::KNOWN_SEVERITIES.include?(first_word) ? first_word : nil
+          SEVERITY_ORDER.include?(first_word) ? first_word : nil
         end
 
         def parse_entry_line(line, current_severity)
@@ -205,7 +321,7 @@ module Hive
         end
 
         def strip_file!(path, active_entries, pass)
-          lines = File.readlines(path)
+          lines = reviewer_lines(path)
           current_severity = nil
           in_fence = false
           changed = false
@@ -217,8 +333,9 @@ module Hive
               current_severity = section
               next line
             end
+            next line if in_fence
 
-            rewritten = suppressed_line(line, current_severity, active_entries, pass, in_fence)
+            rewritten = suppressed_line(line, current_severity, active_entries, pass)
             if rewritten
               changed = true
               stripped += 1
@@ -232,9 +349,7 @@ module Hive
           stripped
         end
 
-        def suppressed_line(line, current_severity, active_entries, pass, in_fence)
-          return nil if in_fence
-
+        def suppressed_line(line, current_severity, active_entries, pass)
           match = UNCHECKED_LINE_RE.match(line)
           return nil unless match
 
@@ -248,22 +363,14 @@ module Hive
         end
 
         def no_fix_entries(path, pass)
-          current_severity = nil
-          in_fence = false
-          File.readlines(path).filter_map do |line|
-            in_fence = !in_fence if Hive::Findings::FENCE_RE.match?(line)
-            if !in_fence && (section = parse_section(line))
-              current_severity = section
-              next nil
-            end
-            next nil if in_fence
-
+          entries = []
+          each_content_line(reviewer_lines(path)) do |line, current_severity|
             match = RESOLVED_NO_FIX_LINE_RE.match(line)
-            next nil unless match
+            next unless match
 
             text = clean_finding_text(match[1])
             severity = normalize_severity(current_severity)
-            Entry.new(
+            entries << Entry.new(
               key: key_for(text, severity: severity),
               severity: severity,
               text: text,
@@ -271,11 +378,18 @@ module Hive
               active: true
             )
           end
+          entries
         end
 
         def split_entry_severity(visible, fallback)
-          if visible =~ /\A([A-Za-z]+):\s+(.+)\z/
-            [ normalize_severity(Regexp.last_match(1)), Regexp.last_match(2).strip ]
+          m = visible.match(/\A([A-Za-z]+):\s+(.+)\z/)
+          # Only treat a leading `Word:` as the severity when it is a known
+          # severity (matching parse_section's gate). Otherwise a hand-added
+          # `- [x] Bug: ...` under `## High` would key with severity "bug"
+          # while strip_suppressed! keys the same finding with the section
+          # severity "high", so the operator's suppression would never match.
+          if m && SEVERITY_ORDER.include?(m[1].downcase)
+            [ normalize_severity(m[1]), m[2].strip ]
           else
             [ normalize_severity(fallback), visible.strip ]
           end

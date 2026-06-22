@@ -65,6 +65,49 @@ class ReviewSuppressionTest < Minitest::Test
     refute_equal a, b
   end
 
+  def test_key_for_distinguishes_same_file_line_different_descriptions
+    # M1 regression: a reviewer line shaped `file:line: description` must
+    # not collapse to just the filename. With the title/justification split
+    # happening before file refs were stripped, the `:line:` colon was
+    # mistaken for the title separator and the title collapsed to "", so two
+    # unrelated findings on the same file silently shared a key.
+    a = Suppression.key_for("lib/foo.rb:42: null deref", severity: "High")
+    b = Suppression.key_for("lib/foo.rb:99: off-by-one", severity: "High")
+
+    refute_equal a, b
+  end
+
+  def test_seed_and_strip_keys_match_across_shapes_and_drifted_lines
+    # The whole feature pivots on this identity: the RESOLVED/NO-FIX seed
+    # shape and the re-emitted unchecked strip shape, at different line
+    # numbers, must fingerprint identically so the strip pass recognizes a
+    # prior no-fix seed.
+    seed = "RESOLVED/NO-FIX: lib/foo.rb:12 leaks stale state: triage accepts risk"
+    strip = "lib/foo.rb:88 leaks stale state: re-emitted no-fix"
+
+    assert_equal Suppression.key_for(seed, severity: "high"),
+                 Suppression.key_for(strip, severity: "high")
+  end
+
+  def test_key_for_excludes_justification_in_file_line_colon_title_shape
+    # `file:line: title: justification` — the file ref is immediately
+    # followed by the separator, so the title split must skip that artifact
+    # colon and still exclude the justification after the real title.
+    a = Suppression.key_for("lib/foo.rb:42: null deref: happens on retry", severity: "High")
+    b = Suppression.key_for("lib/foo.rb:42: null deref: only under load", severity: "High")
+
+    assert_equal a, b
+  end
+
+  def test_parse_section_recognizes_rendered_unknown_heading
+    # render_document emits a `## Unknown` section; parse_section must
+    # accept it so the canonical severity list round-trips. It formerly
+    # reused Findings::KNOWN_SEVERITIES, which omits "unknown".
+    assert_equal "unknown", Suppression.parse_section("## Unknown\n")
+    assert_equal "high", Suppression.parse_section("## High - prominent active suppressions\n")
+    assert_nil Suppression.parse_section("## Detailed Analysis\n")
+  end
+
   def test_key_for_strips_disposition_prefixes_checkbox_and_trailing_comments
     expected = Suppression.key_for("lib/foo.rb leaks stale state", severity: "High")
 
@@ -287,6 +330,117 @@ class ReviewSuppressionTest < Minitest::Test
 
       assert_equal 0, Suppression.seed_from_triage!(cfg: cfg, ctx: ctx, base_sha: "abc123")
       refute File.exist?(Suppression.suppressed_path(ctx))
+    end
+  end
+
+  def test_seed_from_triage_ignores_fenced_no_fix_example
+    with_suppression_task do |ctx|
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, <<~MD)
+        ## High
+        A no-fix line shown only as a fenced example must not be seeded:
+
+        ```
+        - [x] RESOLVED/NO-FIX: lib/foo.rb leaks stale state: example only
+        ```
+      MD
+
+      assert_equal 0, Suppression.seed_from_triage!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      refute File.exist?(Suppression.suppressed_path(ctx))
+    end
+  end
+
+  def test_strip_suppressed_ignores_fenced_unchecked_line
+    with_suppression_task do |ctx|
+      Suppression.append_entries!(ctx, "abc123", [
+        Entry.new(key: nil, severity: "high", text: "lib/foo.rb leaks stale state", first_pass: 1, active: true)
+      ])
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      original = "## High\n```\n- [ ] lib/foo.rb leaks stale state\n```\n"
+      File.write(reviewer, original)
+
+      assert_equal 0, Suppression.strip_suppressed!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      assert_equal original, File.read(reviewer),
+                   "an unchecked line inside a fenced code block must not be suppressed"
+    end
+  end
+
+  def test_strip_preserves_first_pass_provenance_from_earlier_seed
+    with_suppression_task do |ctx|
+      fp = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
+      File.write(Suppression.suppressed_path(ctx), <<~MD)
+        <!-- HIVE-SUPPRESS v1 base=abc123 -->
+
+        ## High
+        - [x] High: lib/foo.rb leaks stale state <!-- fp=#{fp} first-pass=01 -->
+      MD
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-03.md")
+      File.write(reviewer, "## High\n- [ ] lib/foo.rb:88 leaks stale state: re-emitted\n")
+      ctx3 = make_ctx(ctx.task_folder, pass: 3)
+
+      assert_equal 1, Suppression.strip_suppressed!(cfg: default_cfg, ctx: ctx3, base_sha: "abc123")
+
+      content = File.read(reviewer)
+      assert_includes content, "first-pass=01",
+                      "strip must stamp the seed's original first-pass, not the current pass"
+      refute_includes content, "first-pass=03"
+    end
+  end
+
+  def test_out_of_enum_inline_severity_survives_rewrite_under_section
+    with_suppression_task do |ctx|
+      # An operator hand-adds a `Critical:` entry under ## High. The inline
+      # `Critical:` is not a known severity, so split_entry_severity keeps
+      # the section severity ("high") and normalize_severity clamps anything
+      # stray into the canonical set — so the entry is rendered under ## High
+      # on the next rewrite instead of being silently dropped.
+      File.write(Suppression.suppressed_path(ctx), <<~MD)
+        <!-- HIVE-SUPPRESS v1 base=abc123 -->
+
+        ## High
+        - [x] Critical: lib/foo.rb bad
+      MD
+
+      refute_empty Suppression.read_active_keys(ctx)
+
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, "## High\n- [x] RESOLVED/NO-FIX: lib/other.rb thing: rationale\n")
+      Suppression.seed_from_triage!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+
+      content = File.read(Suppression.suppressed_path(ctx))
+      assert_includes content, "Critical: lib/foo.rb bad",
+                      "an out-of-enum inline label must not be dropped on rewrite"
+    end
+  end
+
+  def test_append_entries_skips_when_doc_present_but_unreadable
+    with_suppression_task do |ctx|
+      path = Suppression.suppressed_path(ctx)
+      Suppression.append_entries!(ctx, "abc123", [
+        Entry.new(key: nil, severity: "high", text: "lib/foo.rb leaks stale state", first_pass: 1, active: true)
+      ])
+      before = File.read(path)
+
+      original_open = File.method(:open)
+      raising = lambda do |open_path, *args, **kwargs, &block|
+        raise Errno::EACCES, "denied" if File.expand_path(open_path) == File.expand_path(path)
+
+        original_open.call(open_path, *args, **kwargs, &block)
+      end
+
+      added = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(File, :open, raising) do
+          added = Suppression.append_entries!(ctx, "abc123", [
+            Entry.new(key: nil, severity: "medium", text: "lib/bar.rb new finding", first_pass: 2, active: true)
+          ])
+        end
+      end
+
+      assert_equal 0, added, "append must skip when the doc is present but unreadable"
+      assert_equal before, File.read(path),
+                   "a transient read error must not clobber operator-edited suppression state"
+      assert_match(/unreadable/, err)
     end
   end
 end

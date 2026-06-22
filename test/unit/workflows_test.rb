@@ -118,9 +118,26 @@ class WorkflowsTest < Minitest::Test
     assert_equal "6-review", cfg[:target]
   end
 
-  def test_all_stage_dirs_and_names_default_to_coding_descriptor
-    assert_equal Hive::Workflows::Registry.default.stage_dirs, Hive::Workflows.all_stage_dirs
-    assert_equal Hive::Workflows::Registry.default.stage_names, Hive::Workflows.all_stage_names
+  def test_all_stage_dirs_and_names_default_to_registered_descriptors
+    # Pinned against literals (not re-derived from the same
+    # Registry.all.flat_map expression the production code uses) so a
+    # co-regression in that derivation can't pass this guard — mirrors how
+    # test_all_terminal_stage_dirs_defaults_to_registered_terminals hardcodes
+    # its expected terminals. The trailing content-workflow run is the portion
+    # most at risk of silent drift.
+    expected_dirs = [
+      "1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr",
+      "6-review", "7-artifacts", "8-finalize", "9-done",
+      "2-research", "3-outline", "4-draft", "5-critique", "6-done"
+    ]
+    expected_names = [
+      "inbox", "brainstorm", "plan", "execute", "open-pr",
+      "review", "artifacts", "finalize", "done",
+      "research", "outline", "draft", "critique"
+    ]
+
+    assert_equal expected_dirs, Hive::Workflows.all_stage_dirs
+    assert_equal expected_names, Hive::Workflows.all_stage_names
   end
 
   def test_all_stage_dirs_and_names_include_registered_workflows
@@ -132,8 +149,8 @@ class WorkflowsTest < Minitest::Test
     end
   end
 
-  def test_all_terminal_stage_dirs_defaults_to_coding_terminal
-    assert_equal [ "9-done" ], Hive::Workflows.all_terminal_stage_dirs
+  def test_all_terminal_stage_dirs_defaults_to_registered_terminals
+    assert_equal [ "9-done", "6-done" ], Hive::Workflows.all_terminal_stage_dirs
   end
 
   def test_all_terminal_stage_dirs_includes_registered_workflow_terminal
@@ -168,5 +185,21 @@ class WorkflowsTest < Minitest::Test
       assert_includes error.message, "3-plan"
       assert_includes error.message, "1-plan"
     end
+  end
+
+  def test_resolve_stage_ref_across_workflows_rejects_production_done_short_name
+    # Unlike the synthetic `:alternate_plan` case above (which only proves the
+    # ambiguity *mechanism*), this pins the real registered workflows: `done`
+    # is the terminal short name of BOTH coding (`9-done`) and content
+    # (`6-done`). Pre-`:content` the bare ref resolved cleanly to `9-done`, so
+    # a regression flipping the resolver back to `matches.first` would silently
+    # misroute `hive drop --from done` / `--stage done` instead of erroring.
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Workflows.resolve_stage_ref_across_workflows("done")
+    end
+
+    assert_includes error.message, "ambiguous stage 'done'"
+    assert_includes error.message, "9-done"
+    assert_includes error.message, "6-done"
   end
 end

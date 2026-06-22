@@ -1,5 +1,6 @@
 require "hive"
 require "hive/workflows/coding"
+require "hive/workflows/content"
 
 module Hive
   module Workflows
@@ -28,7 +29,8 @@ module Hive
 
     module Registry
       WORKFLOWS = {
-        coding: Coding::DESCRIPTOR
+        coding: Coding::DESCRIPTOR,
+        content: Content::DESCRIPTOR
       }.freeze
 
       module_function

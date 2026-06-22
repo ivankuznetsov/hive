@@ -309,6 +309,7 @@ class StagesAgentTest < Minitest::Test
 
   def test_marker_actions_map_to_commit_and_status
     {
+      "" => [ nil, :none ],
       "<!-- WAITING -->\n" => [ "round_waiting", :waiting ],
       "<!-- COMPLETE -->\n" => [ "complete", :complete ],
       "<!-- ERROR -->\n" => [ "error", :error ],

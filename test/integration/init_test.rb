@@ -86,7 +86,7 @@ class InitTest < Minitest::Test
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          workflow_input = StringIO.new("2\n")
+          workflow_input = StringIO.new("3\n")
           workflow_input.define_singleton_method(:tty?) { true }
           workflow_output = StringIO.new
           prompts = Hive::Commands::Init::Prompts.new(
@@ -105,7 +105,8 @@ class InitTest < Minitest::Test
           end
 
           assert_includes workflow_output.string, "1) coding"
-          assert_includes workflow_output.string, "2) content_fixture"
+          assert_includes workflow_output.string, "2) content"
+          assert_includes workflow_output.string, "3) content_fixture"
           config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
           assert_equal "content_fixture", config.fetch("default_workflow")
         end
@@ -311,23 +312,25 @@ class InitTest < Minitest::Test
   end
 
   def test_init_single_registered_workflow_skips_prompt_even_on_tty
-    # With only the built-in coding workflow registered, a tty-flagged stdin
+    # With only one workflow registered, a tty-flagged stdin
     # must NOT block on the numbered prompt (it offers no real choice) — init
     # proceeds with the implicit coding default.
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        workflow_input = StringIO.new("crash-if-read\n")
-        workflow_input.define_singleton_method(:tty?) { true }
-        workflow_output = StringIO.new
+    with_replaced_singleton_method(Hive::Workflows::Registry, :ids, -> { [ :coding ] }) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("crash-if-read\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
 
-        capture_io do
-          Hive::Commands::Init.new(dir, workflow_input: workflow_input, workflow_output: workflow_output).call
+          capture_io do
+            Hive::Commands::Init.new(dir, workflow_input: workflow_input, workflow_output: workflow_output).call
+          end
+
+          assert_empty workflow_output.string, "no workflow prompt should print when only one workflow is registered"
+          assert_equal "crash-if-read", workflow_input.gets&.chomp, "stdin must not be consumed by a skipped prompt"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml"))) || {}
+          assert_nil config["default_workflow"], "implicit coding default writes no default_workflow line"
         end
-
-        assert_empty workflow_output.string, "no workflow prompt should print when only one workflow is registered"
-        assert_equal "crash-if-read", workflow_input.gets&.chomp, "stdin must not be consumed by a skipped prompt"
-        config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml"))) || {}
-        assert_nil config["default_workflow"], "implicit coding default writes no default_workflow line"
       end
     end
   end

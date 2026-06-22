@@ -752,6 +752,11 @@ module Hive
 
       ACTION_LABEL_ORDER = [
         "Ready to brainstorm",
+        # Generic-workflow actions (non-coding descriptors). Sorted high with
+        # the other actionable "ready"/"needs" rows so generic status rows
+        # don't fall to the bottom (below "Error") as unknown labels would.
+        "Ready to run",
+        "Ready to advance",
         "Needs your input",
         "Ready to plan",
         "Ready to develop",

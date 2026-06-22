@@ -17,6 +17,37 @@ module HiveWorkflowTestHelper
     )
   end
 
+  # Guard-discriminating descriptor for the `:none` entry split at
+  # task_action.rb. The entry stage is `:agent` (not inert) and the middle
+  # stage is `:inert` but non-entry, so each conjunct of
+  # `entry && !terminal && stage.kind == :inert` is exercised in isolation:
+  #   - dropping `stage.kind == :inert` would wrongly advance the `:agent` entry,
+  #   - dropping `entry` would wrongly advance the inert middle stage.
+  # research_workflow can't catch either regression (its only inert stage is the
+  # entry, so both conjuncts move together there).
+  def agent_entry_workflow
+    Hive::Workflow.new(
+      id: :agent_entry,
+      stages: [
+        Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "draft.md", kind: :agent),
+        Hive::Workflow::Stage.new(name: "hold", index: 2, state_file: "hold.md", kind: :inert),
+        Hive::Workflow::Stage.new(name: "ship", index: 3, state_file: "ship.md", kind: :marker)
+      ]
+    )
+  end
+
+  # Degenerate single-stage descriptor: its only stage is simultaneously entry
+  # and terminal. Used to pin that a markerless inert entry does NOT auto-advance
+  # when there is nowhere to advance to.
+  def single_stage_workflow
+    Hive::Workflow.new(
+      id: :single,
+      stages: [
+        Hive::Workflow::Stage.new(name: "only", index: 1, state_file: "only.md", kind: :inert)
+      ]
+    )
+  end
+
   def with_registered_workflow(descriptor)
     original_fetch = Hive::Workflows::Registry.method(:fetch)
     Hive::Workflows::Registry.define_singleton_method(:fetch) do |id|

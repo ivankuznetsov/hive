@@ -146,6 +146,29 @@ module Hive
         label: "Ready to archive",
         command: "archive"
       },
+      ready_to_advance: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_ADVANCE,
+        label: "Ready to advance",
+        command: "approve"
+      },
+      # `generic_ready_to_run` and `generic_needs_input` deliberately collapse
+      # onto the same NEEDS_INPUT key + `run` command, differing only in label.
+      # This is a lossy merge on the JSON wire: a bot/SDK consumer reading
+      # `key` alone can't tell "stage hasn't produced a WAITING marker yet"
+      # (ready to run) from "agent ran and is now waiting on the user"
+      # (needs input). Sound for daemon routing — it discriminates first-run
+      # vs re-run by the mtime baseline, not by this key — and intended per
+      # plan R3/Q2; see wiki/modules/task_action.md for the wire-format note.
+      generic_ready_to_run: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Ready to run",
+        command: "run"
+      },
+      generic_needs_input: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Needs your input",
+        command: "run"
+      },
       done: {
         key: Hive::Schemas::TaskActionKind::ARCHIVED,
         label: "Archived",
@@ -211,12 +234,18 @@ module Hive
     # Returns a copy-paste-executable shell command, or nil for actions
     # whose state requires manual recovery (agent_running, archived, error).
     #
-    # Workflow-verb commands ALWAYS include `--from <stage>`: that's the
-    # idempotency lever — a retry after a successful advance fails with
-    # WRONG_STAGE (4) instead of silently advancing twice. Generic verbs
-    # (findings/accept-finding/reject-finding) only include `--stage`
-    # when slug-stage ambiguity actually exists.
+    # Non-coding workflows return early through `generic_command` (below),
+    # which emits `--from <stage>` for `approve` and `--stage <stage>` (only
+    # on a slug-stage collision) for `run` — it never adds `--from` to `run`.
+    #
+    # On the coding path, workflow-verb commands ALWAYS include `--from
+    # <stage>`: that's the idempotency lever — a retry after a successful
+    # advance fails with WRONG_STAGE (4) instead of silently advancing twice.
+    # Coding recovery verbs (findings/accept-finding/reject-finding) only
+    # include `--stage` when slug-stage ambiguity actually exists.
     def command
+      return generic_command unless coding_workflow?
+
       verb = action[:command]
       return nil unless verb
 
@@ -257,6 +286,8 @@ module Hive
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
 
+      return generic_action unless coding_workflow?
+
       case task.stage_name
       when "inbox"
         ACTIONS.fetch(:inbox)
@@ -279,6 +310,64 @@ module Hive
       else
         ACTIONS.fetch(:error)
       end
+    end
+
+    # Routes a row to the coding state machine. A nil workflow — only
+    # reachable from test doubles that don't respond to `#workflow`; a real
+    # `Hive::Task` always resolves one — defaults to the coding path, not the
+    # generic one.
+    def coding_workflow?
+      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow.nil? || workflow.id == :coding
+    end
+
+    def generic_action
+      # `validate_workflow_stage!` runs at Task construction (task.rb), so a
+      # real `Hive::Task` always resolves a stage here; this guard only
+      # defends test doubles that bypass that construction-time invariant.
+      stage = workflow_stage
+      return ACTIONS.fetch(:error) unless stage
+
+      terminal = stage == task.workflow.stages.last
+      entry = stage == task.workflow.stages.first
+
+      case marker.name
+      when :complete
+        terminal ? ACTIONS.fetch(:done) : ACTIONS.fetch(:ready_to_advance)
+      when :waiting
+        ACTIONS.fetch(:generic_needs_input)
+      when :none
+        # Auto-advance a markerless entry stage only when it is inert (no
+        # agent to run) AND not also terminal. Any non-inert entry kind
+        # (`:agent`, `:marker`, or `nil` — the gate is `stage.kind == :inert`,
+        # which excludes all three) must run rather than be approved past it,
+        # and a degenerate single-stage workflow (entry == terminal) has
+        # nowhere to advance — so both fall through to ready-to-run.
+        inert_advanceable_entry = entry && !terminal && stage.kind == :inert
+
+        # U5-DEFERRED (plan R3/Q2): the ready-to-run fall-through classifies a
+        # markerless generic stage as `generic_ready_to_run` -> `needs_input`,
+        # which `Hive::Daemon::Policy` routes through EDIT_RESUME_ACTIONS to a
+        # first-sight `:record_baseline`. So a never-run generic stage is NOT
+        # daemon-auto-dispatched until a human edits the state file (unlike
+        # coding's `ready_to_*` auto-dispatch). This is intended, not a bug:
+        # U5 owns wiring up generic auto-dispatch.
+        inert_advanceable_entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+      else
+        ACTIONS.fetch(:generic_ready_to_run)
+      end
+    end
+
+    def generic_command
+      verb = action[:command]
+      return nil unless verb
+
+      stage = workflow_stage
+      parts = [ "hive", verb, task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
+      parts.concat([ "--from", stage.dir ]) if verb == "approve"
+      parts.shelljoin
     end
 
     def review_action
@@ -1078,20 +1167,24 @@ module Hive
     end
 
     # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for
-    # the source-stage assertion; generic verbs (findings/accept-finding/
-    # reject-finding) use --stage for ambiguity disambiguation.
+    # the source-stage assertion; coding recovery verbs (findings/accept-
+    # finding/reject-finding) use --stage for ambiguity disambiguation.
     def from_or_stage_option(verb)
       Hive::Workflows.workflow_verb?(verb) ? "--from" : "--stage"
     end
 
     # Workflow verbs always carry --from for retry idempotency.
-    # Generic verbs only when ambiguity demands disambiguation.
+    # Coding recovery verbs only when ambiguity demands disambiguation.
     def include_stage_filter?(verb)
       Hive::Workflows.workflow_verb?(verb) || @stage_collision
     end
 
     def stage_dir
       "#{task.stage_index}-#{task.stage_name}"
+    end
+
+    def workflow_stage
+      task.workflow.stage_named(task.stage_name)
     end
   end
 end

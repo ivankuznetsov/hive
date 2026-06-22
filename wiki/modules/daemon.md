@@ -3,8 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-18
-updated: 2026-06-16
+updated: 2026-06-20
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -99,6 +98,17 @@ I/O at all — fully unit-testable without forking. The other modules
 each expose a thin enough seam that mock collaborators (see
 `test/unit/daemon/dispatcher_test.rb`) cover the routing behaviour
 without spinning up the whole stack.
+
+Policy's advance-action set includes the descriptor-generic
+`ready_to_advance` action. `Hive::TaskAction` emits it on two paths: non-coding
+workflow `COMPLETE` rows that are not at the terminal descriptor stage, and a
+markerless (`:none`) **inert** entry stage that is not also terminal. Policy treats
+it like the existing `ready_to_*` actions: non-empty command plus no dependency
+block returns `:dispatch`; `blocked: true` returns `:blocked_on_dependency`; nil
+or empty command returns `:skip`. The emitted command is currently
+`hive approve <slug> --from <descriptor-stage-dir>`, so U4 proves the daemon
+decision path without claiming the later descriptor-aware physical move work is
+complete.
 
 ## Trust boundary
 

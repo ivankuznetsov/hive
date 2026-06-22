@@ -1035,6 +1035,27 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # Generic-workflow labels ("Ready to run" / "Ready to advance") must sort with
+  # the actionable rows, ABOVE "Error" — a regression dropping either entry from
+  # ACTION_LABEL_ORDER gives it index `length` (an unknown label) and silently
+  # sinks generic status rows below "Error". `action_labels` is the live sorter
+  # consumed by render_project and the TUI snapshot, so pin both labels here.
+  def test_action_labels_sorts_generic_labels_above_error
+    cmd = Hive::Commands::Status.new
+    rows = [
+      { action_label: "Error" },
+      { action_label: "Ready to advance" },
+      { action_label: "Ready to run" }
+    ]
+
+    sorted = cmd.send(:action_labels, rows)
+
+    assert_operator sorted.index("Ready to run"), :<, sorted.index("Error"),
+                    "generic 'Ready to run' rows must sort above 'Error'"
+    assert_operator sorted.index("Ready to advance"), :<, sorted.index("Error"),
+                    "generic 'Ready to advance' rows must sort above 'Error'"
+  end
+
   def test_render_project_skips_empty_action_label_groups
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

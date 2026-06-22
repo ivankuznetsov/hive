@@ -3,6 +3,36 @@ require "hive/workflow"
 module Hive
   module Workflows
     module Coding
+      ACTION_DISPATCH = {
+        "inbox" => {
+          kind: :inert,
+          default: :inbox
+        },
+        "brainstorm" => {
+          kind: :agent,
+          complete: :brainstorm_complete,
+          default: :brainstorm_waiting
+        },
+        "plan" => {
+          kind: :agent,
+          handler: :plan_action
+        },
+        "open-pr" => {
+          kind: :agent,
+          complete: :open_pr_complete,
+          default: :open_pr_ready
+        },
+        "artifacts" => {
+          kind: :agent,
+          complete: :artifacts_complete,
+          default: :artifacts_ready
+        },
+        "done" => {
+          kind: :inert,
+          default: :done
+        }
+      }.freeze
+
       DESCRIPTOR = Hive::Workflow.new(
         id: :coding,
         stages: [

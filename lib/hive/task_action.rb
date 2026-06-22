@@ -181,7 +181,8 @@ module Hive
     def initialize(task, marker, project_name: nil, project_count: 1, stage_collision: false,
                    pid_alive: nil, state_file_mtime: nil,
                    agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC,
-                   live_task_lock: false)
+                   live_task_lock: false,
+                   dispatch: :case)
       @task = task
       @marker = marker
       @project_name = project_name
@@ -191,6 +192,7 @@ module Hive
       @state_file_mtime = state_file_mtime
       @agent_marker_grace_sec = agent_marker_grace_sec
       @live_task_lock = live_task_lock
+      @dispatch = dispatch
     end
 
     def self.for(task, marker, **)
@@ -240,6 +242,24 @@ module Hive
     private
 
     def action
+      @dispatch == :kind ? action_via_kind : action_via_case
+    end
+
+    def action_via_case
+      override = universal_action
+      return override if override
+
+      coding_workflow? ? coding_action_via_case : generic_action
+    end
+
+    def action_via_kind
+      override = universal_action
+      return override if override
+
+      coding_workflow? ? coding_action_via_kind : generic_action
+    end
+
+    def universal_action
       # A live task lock means `hive run` is already inside this task,
       # including pre-stage work such as auto-rebase. It must pre-empt
       # marker-derived workflow advice; otherwise status can offer a
@@ -259,8 +279,10 @@ module Hive
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
 
-      return generic_action unless coding_workflow?
+      nil
+    end
 
+    def coding_action_via_case
       case task.stage_name
       when "inbox"
         ACTIONS.fetch(:inbox)
@@ -285,6 +307,37 @@ module Hive
       end
     end
 
+    def coding_action_via_kind
+      stage = workflow_stage
+      return ACTIONS.fetch(:error) unless stage
+
+      case stage.kind
+      when :execute
+        execute_action
+      when :"review-council"
+        review_action
+      when :finalize
+        finalize_action
+      when :agent, :inert
+        coding_table_action(stage)
+      else
+        ACTIONS.fetch(:error)
+      end
+    end
+
+    def coding_table_action(stage)
+      config = Hive::Workflows::Coding::ACTION_DISPATCH[stage.name]
+      return ACTIONS.fetch(:error) unless config && config.fetch(:kind) == stage.kind
+
+      if config[:handler]
+        send(config.fetch(:handler))
+      elsif marker.name == :complete && config[:complete]
+        ACTIONS.fetch(config.fetch(:complete))
+      else
+        ACTIONS.fetch(config.fetch(:default))
+      end
+    end
+
     # Routes a row to the coding state machine. A nil workflow — only
     # reachable from test doubles that don't respond to `#workflow`; a real
     # `Hive::Task` always resolves one — defaults to the coding path, not the
@@ -301,7 +354,7 @@ module Hive
       stage = workflow_stage
       return ACTIONS.fetch(:error) unless stage
 
-      terminal = stage == task.workflow.stages.last
+      terminal = stage == task_workflow.stages.last
 
       case marker.name
       when :complete
@@ -631,7 +684,12 @@ module Hive
     end
 
     def workflow_stage
-      task.workflow.stage_named(task.stage_name)
+      task_workflow.stage_named(task.stage_name)
+    end
+
+    def task_workflow
+      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow || Hive::Workflows::Registry.default
     end
   end
 end

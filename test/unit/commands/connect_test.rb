@@ -8,7 +8,7 @@ class ConnectCommandTest < Minitest::Test
   FakeMetadata = Hive::Screenote::OAuthClient::Discovery
 
   class FakeOAuth
-    attr_reader :registered_redirects, :exchanged_codes, :authorize_calls
+    attr_reader :registered_redirects, :exchanged_codes, :authorize_calls, :revoked_tokens
 
     def initialize(token:, client_id: "client-new")
       @token = token
@@ -16,6 +16,12 @@ class ConnectCommandTest < Minitest::Test
       @registered_redirects = []
       @exchanged_codes = []
       @authorize_calls = []
+      @revoked_tokens = []
+    end
+
+    def revoke(token:, client_id:, metadata:)
+      @revoked_tokens << { token: token, client_id: client_id, issuer: metadata.issuer }
+      true
     end
 
     def discover
@@ -221,6 +227,152 @@ class ConnectCommandTest < Minitest::Test
 
       err = assert_raises(Hive::Error) { Hive::Commands::Connect.new("github", output: StringIO.new).call }
       assert_match(/unsupported connect service/, err.message)
+    end
+  end
+
+  def test_connect_revokes_token_when_a_post_exchange_step_fails
+    # After exchange mints a live bearer, a failure before `save` (here an
+    # empty project list) must best-effort revoke it so the next connect does
+    # not re-register and burn the DCR limit, and the grant does not linger.
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          output: StringIO.new,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([]) },
+          browser_opener: ->(_url) { false }
+        ).call
+      end
+
+      assert_match(/returned no projects/, err.message)
+      assert_equal [ "access-123" ], oauth.revoked_tokens.map { |entry| entry[:token] }
+      refute store.present?
+    end
+  end
+
+  def test_connect_maps_oslevel_save_failure_to_typed_error_and_revokes
+    with_tmp_dir do |dir|
+      oauth = FakeOAuth.new(token: token_payload)
+      path = File.join(dir, "screenote.json")
+      failing_store = Object.new
+      failing_store.define_singleton_method(:load) { nil }
+      failing_store.define_singleton_method(:present?) { false }
+      failing_store.define_singleton_method(:path) { path }
+      failing_store.define_singleton_method(:save) { |_cred| raise Errno::EACCES, "screenote.json" }
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          output: StringIO.new,
+          credential_store: failing_store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_1", "name" => "One" } ]) },
+          browser_opener: ->(_url) { false },
+          project_picker: ->(projects) { projects.first }
+        ).call
+      end
+
+      assert_match(/could not write Screenote credential/, err.message)
+      assert_match(/screenote\.json/, err.message)
+      assert_equal [ "access-123" ], oauth.revoked_tokens.map { |entry| entry[:token] }
+    end
+  end
+
+  def test_connect_json_failure_emits_error_envelope
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([]) },
+          browser_opener: ->(_url) { false }
+        ).call
+      end
+
+      assert_match(/returned no projects/, err.message)
+      lines = output.string.each_line.map { |line| JSON.parse(line) }
+      envelope = lines.last
+      assert_equal false, envelope["ok"]
+      assert_equal "screenote", envelope["service"]
+      assert_equal "error", envelope["error_kind"]
+      assert_match(/returned no projects/, envelope["message"])
+      assert_equal [ "access-123" ], oauth.revoked_tokens.map { |entry| entry[:token] }
+    end
+  end
+
+  def test_connect_json_auto_selects_a_lone_project_without_prompting
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+
+      Hive::Commands::Connect.new(
+        "screenote",
+        base_url: "https://screenote.test",
+        json: true,
+        output: output,
+        credential_store: store,
+        oauth_client_factory: ->(_url) { oauth },
+        loopback_factory: -> { FakeLoopback.new },
+        mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_only", "name" => "Only" } ]) },
+        browser_opener: ->(_url) { false }
+      ).call
+
+      assert_equal "proj_only", store.load["project_id"]
+      # Every stdout line must be valid JSON — no human "Select a project"
+      # prose leaked onto the --json stream.
+      output.string.each_line { |line| JSON.parse(line) }
+    end
+  end
+
+  def test_connect_json_emits_needs_project_selection_for_multiple_projects
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) {
+            FakeMcp.new([ { "id" => "proj_one", "name" => "One" }, { "id" => "proj_two", "name" => "Two" } ])
+          },
+          browser_opener: ->(_url) { false }
+        ).call
+      end
+
+      assert_match(/multiple projects/, err.message)
+      lines = output.string.each_line.map { |line| JSON.parse(line) }
+      needs = lines.find { |line| line["stage"] == "needs_project_selection" }
+      refute_nil needs, "expected a needs_project_selection envelope under --json"
+      assert_equal false, needs["ok"]
+      assert_equal %w[proj_one proj_two], needs["projects"].map { |project| project["id"] }
+      refute store.present?
+      assert_equal [ "access-123" ], oauth.revoked_tokens.map { |entry| entry[:token] }
     end
   end
 

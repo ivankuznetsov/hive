@@ -33,39 +33,18 @@ module Hive
 
       def call
         ensure_screenote!
-        base_url = resolved_base_url
-        existing = load_existing_credential
-        oauth = @oauth_client_factory.call(base_url)
-        metadata = oauth.discover
-        loopback = @loopback_factory.call
-        redirect_uri = loopback.redirect_uri
-        client_id = existing["client_id"].to_s
-        client_id = oauth.register(redirect_uri, metadata: metadata)["client_id"] if client_id.empty?
-
-        verifier = Hive::Screenote::PKCE.verifier
-        state = SecureRandom.hex(16)
-        authorize_url = oauth.authorize_url(
-          metadata: metadata,
-          client_id: client_id,
-          redirect_uri: redirect_uri,
-          code_challenge: Hive::Screenote::PKCE.challenge(verifier),
-          state: state
-        )
-        show_authorize_url(authorize_url)
-        callback = loopback.wait_for_callback(expected_state: state)
-        token = oauth.exchange_code(
-          code: callback.fetch("code"),
-          verifier: verifier,
-          redirect_uri: redirect_uri,
-          client_id: client_id,
-          metadata: metadata
-        )
-        projects = @mcp_client_factory.call(resource: metadata.mcp_resource, access_token: token.fetch("access_token")).list_projects
-        project = choose_project(projects)
-        credential = credential_payload(token, metadata: metadata, client_id: client_id,
-                                        project: project, base_url: base_url)
-        @credential_store.save(credential)
-        emit_success(credential, project)
+        do_call
+      rescue Hive::Error => e
+        emit_error_envelope(e) if @json
+        raise
+      rescue SystemCallError => e
+        # An OS-level failure outside the save path (e.g. an unwritable temp
+        # during discovery) is not a Hive::Error, so it would escape bin/hive's
+        # rescue as a raw backtrace. Map it to a typed error with the same
+        # envelope treatment.
+        wrapped = Hive::Error.new("Screenote connect failed: #{e.message}")
+        emit_error_envelope(wrapped) if @json
+        raise wrapped
       end
 
       def self.open_browser(url)
@@ -76,6 +55,99 @@ module Hive
       end
 
       private
+
+      def do_call
+        base_url = resolved_base_url
+        existing = load_existing_credential
+        oauth = @oauth_client_factory.call(base_url)
+        metadata = oauth.discover
+        callback, client_id = run_authorize_flow(oauth, metadata, existing)
+        token = oauth.exchange_code(
+          code: callback.fetch("code"),
+          verifier: @verifier,
+          redirect_uri: @redirect_uri,
+          client_id: client_id,
+          metadata: metadata
+        )
+        finalize_connection(oauth, metadata, token, client_id, base_url)
+      end
+
+      # Bind the loopback, register (if needed), and wait for the callback.
+      # The `ensure` closes the loopback even when register/authorize_url/
+      # show_authorize_url raises BEFORE wait_for_callback (whose own ensure
+      # is otherwise the only close), so an early failure can't leak the bound
+      # TCP socket until GC.
+      def run_authorize_flow(oauth, metadata, existing)
+        loopback = @loopback_factory.call
+        @redirect_uri = loopback.redirect_uri
+        client_id = existing["client_id"].to_s
+        client_id = oauth.register(@redirect_uri, metadata: metadata)["client_id"] if client_id.empty?
+
+        @verifier = Hive::Screenote::PKCE.verifier
+        state = SecureRandom.hex(16)
+        authorize_url = oauth.authorize_url(
+          metadata: metadata,
+          client_id: client_id,
+          redirect_uri: @redirect_uri,
+          code_challenge: Hive::Screenote::PKCE.challenge(@verifier),
+          state: state
+        )
+        show_authorize_url(authorize_url)
+        [ loopback.wait_for_callback(expected_state: state), client_id ]
+      ensure
+        loopback.close if loopback.respond_to?(:close)
+      end
+
+      # Everything after the token is minted. Any failure here (project
+      # listing, selection, payload build, or save) must best-effort revoke
+      # the freshly-issued bearer: otherwise the next connect re-registers
+      # (burning the 10/hr DCR limit) and the grant lingers server-side. An
+      # OS-level save failure is mapped to a typed error so bin/hive's rescue
+      # maps the exit code instead of printing a backtrace.
+      def finalize_connection(oauth, metadata, token, client_id, base_url)
+        projects = @mcp_client_factory.call(
+          resource: metadata.mcp_resource, access_token: token.fetch("access_token")
+        ).list_projects
+        project = choose_project(projects)
+        credential = credential_payload(token, metadata: metadata, client_id: client_id,
+                                        project: project, base_url: base_url)
+        save_credential(credential)
+        emit_success(credential, project)
+      rescue StandardError
+        best_effort_revoke(oauth, metadata, token, client_id)
+        raise
+      end
+
+      def save_credential(credential)
+        @credential_store.save(credential)
+      rescue SystemCallError => e
+        raise Hive::Error, "could not write Screenote credential to #{@credential_store.path}: #{e.message}"
+      end
+
+      def best_effort_revoke(oauth, metadata, token, client_id)
+        access_token = token["access_token"].to_s
+        return if access_token.empty?
+
+        oauth.revoke(token: access_token, client_id: client_id, metadata: metadata)
+      rescue StandardError => e
+        warn "[hive] could not revoke the abandoned Screenote token: #{e.message}"
+      end
+
+      def emit_error_envelope(error)
+        return if @error_emitted
+
+        @error_emitted = true
+        @output.puts JSON.generate(
+          "ok" => false,
+          "service" => "screenote",
+          "error_class" => error.class.name.split("::").last,
+          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
+          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+          "message" => error.message
+        )
+      rescue Errno::EPIPE, JSON::GeneratorError
+        @error_emitted = true
+      end
 
       def ensure_screenote!
         return if @service == "screenote"
@@ -98,7 +170,7 @@ module Hive
         configured = @base_url.to_s.strip
         return configured unless configured.empty?
 
-        Hive::Config.load_global_screenote.fetch("base_url")
+        Hive::Config.global_screenote_base_url
       end
 
       def show_authorize_url(url)
@@ -120,11 +192,31 @@ module Hive
       def choose_project(projects)
         raise Hive::Error, "Screenote returned no projects; create a project in Screenote and reconnect" if projects.empty?
 
+        # Under --json with no injected picker there is no interactive prompt:
+        # writing the human "Select a project" prose onto the JSON stream would
+        # corrupt it and `@input.gets` would block→EOF→"selection is required".
+        # Auto-select a lone project; with several, emit a structured
+        # `needs_project_selection` envelope rather than silently defaulting.
+        return projects.first if @json && @project_picker.nil? && projects.size == 1
+        raise_needs_project_selection(projects) if @json && @project_picker.nil?
+
         selected = @project_picker ? @project_picker.call(projects) : prompt_for_project(projects)
         project = selected.is_a?(Hash) ? selected : projects.find { |candidate| project_id(candidate) == selected.to_s }
         raise Hive::Error, "Screenote project selection is required" unless project
 
         project
+      end
+
+      def raise_needs_project_selection(projects)
+        @error_emitted = true
+        @output.puts JSON.generate(
+          "ok" => false,
+          "service" => "screenote",
+          "stage" => "needs_project_selection",
+          "projects" => projects.map { |p| { "id" => project_id(p), "name" => project_display_name(p) } }
+        )
+        raise Hive::Error,
+              "Screenote returned multiple projects; re-run connect interactively to choose a default project"
       end
 
       def prompt_for_project(projects)
@@ -199,9 +291,12 @@ module Hive
         id.empty? ? project["project_id"].to_s : id
       end
 
+      def project_display_name(project)
+        project["name"].to_s.empty? ? "Unnamed project" : project["name"].to_s
+      end
+
       def project_label(project)
-        name = project["name"].to_s.empty? ? "Unnamed project" : project["name"].to_s
-        "#{name} (#{project_id(project)})"
+        "#{project_display_name(project)} (#{project_id(project)})"
       end
     end
   end

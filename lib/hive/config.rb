@@ -1036,6 +1036,14 @@ module Hive
       merged
     end
 
+    # The resolved global Screenote base URL. `connect` (when no --base-url
+    # is given) and `disconnect` (when the stored credential has no base_url)
+    # both need it, so the `load_global_screenote.fetch("base_url")` lookup
+    # lives here once instead of being duplicated in two commands.
+    def global_screenote_base_url
+      load_global_screenote.fetch("base_url")
+    end
+
     def apply_screenote_env_overrides!(screenote)
       if ENV.key?("HIVE_SCREENOTE_BASE_URL")
         screenote["base_url"] = ENV["HIVE_SCREENOTE_BASE_URL"]
@@ -1866,8 +1874,9 @@ module Hive
       # or `api_token: null` (which the old config.example.yml shipped) is
       # inert. Raising on the mere presence of the key was a catch-22: the
       # prescribed remedy `hive connect screenote` itself loads this config
-      # (commands/connect.rb#load_global_screenote), so every command —
-      # including the fix — died with ConfigError. Reword to instruct
+      # (via Hive::Config.load_global_screenote, called from
+      # commands/connect.rb), so every command — including the fix — died
+      # with ConfigError. Reword to instruct
       # removing the key so connect stays reachable.
       api_token = screenote["api_token"]
       return if api_token.nil? || (api_token.is_a?(String) && api_token.strip.empty?)

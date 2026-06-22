@@ -6,13 +6,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          diagnostic: nil, id: nil, display_name: nil, pr_url: nil)
+          diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding")
     Row.new(
       project: "hive",
       slug: slug,
       id: id,
       display_name: display_name,
       stage: stage,
+      workflow: workflow,
       marker: marker,
       attrs: attrs,
       folder: "/tmp/#{slug}",
@@ -79,6 +80,31 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal "Approve", notification.keyboard.first.first[:text]
     assert_match(/\Aapprove:plan:hive:slug-260514-abcd:2-brainstorm\z/,
                  notification.keyboard.first.first[:callback_data])
+  end
+
+  def test_generic_ready_to_advance_builds_approve_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_advance", marker: "complete", stage: "2-gather", workflow: "research")
+    )
+
+    refute_nil notification, "a generic ready_to_advance row must produce a Telegram notification"
+    assert_equal "approve:approve:hive:slug-260514-abcd:2-gather",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_generic_ready_to_run_builds_run_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_run", marker: "none", stage: "1-intake", workflow: "research")
+    )
+
+    refute_nil notification, "a generic ready_to_run row must produce a Telegram notification"
+    assert_equal "approve:run:hive:slug-260514-abcd:1-intake",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_verb_for_action_maps_generic_ready_actions
+    assert_equal "approve", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_advance")
+    assert_equal "run", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_run")
   end
 
   def test_display_title_handles_name_without_id_and_slug_fallback
@@ -194,6 +220,41 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     assert_equal [ "Answer in chat" ], labels,
                  "brainstorm-waiting keyboard is deterministic Q-by-Q only — no Codex draft, no laptop button"
+  end
+
+  def test_generic_waiting_row_uses_neutral_details_notification
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "waiting", stage: "2-gather", workflow: "dispatch")
+    )
+
+    assert_match(/Needs input: waiting/, notification.text)
+    refute_match(/Brainstorm questions/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Show details" ], labels
+  end
+
+  # Characterization (A7): a coding `waiting` marker only ever appears at
+  # 2-brainstorm / 3-plan in practice (supervisor.rb / notification_dispatcher),
+  # so the U6 routing migration is inert for coding. Pin that a coding `waiting`
+  # at ANY other stage (e.g. 5-open-pr, 8-finalize) falls through to the neutral
+  # "Needs input" / "Show details" default rather than the brainstorm "Answer in
+  # chat" affordance — preserving the byte-identical-coding mandate. Restoring
+  # the old unconditional brainstorm routing would be wrong: it would mislabel a
+  # generic row as "Brainstorm questions".
+  def test_coding_waiting_outside_brainstorm_and_plan_uses_neutral_default
+    %w[5-open-pr 8-finalize].each do |stage|
+      notification = Hive::Bot::NotificationBuilders.build(
+        row(action: "needs_input", marker: "waiting", stage: stage, workflow: "coding")
+      )
+
+      assert_match(/Needs input: waiting/, notification.text,
+                   "coding waiting at #{stage} must use the neutral default, not brainstorm copy")
+      refute_match(/Brainstorm questions/, notification.text)
+      refute_match(/Answer in chat/, notification.text,
+                   "coding waiting at #{stage} must not offer the brainstorm /answer affordance")
+      labels = notification.keyboard.flatten.map { |button| button[:text] }
+      assert_equal [ "Show details" ], labels
+    end
   end
 
   def test_generic_needs_input_marker_builds_show_details_only_keyboard

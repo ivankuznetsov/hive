@@ -963,4 +963,58 @@ class ReviewersCodexReviewTest < Minitest::Test
       assert_match(/codex_review/, err.message)
     end
   end
+
+  # --- A8 permission-scope gate -----------------------------------------
+
+  # A8 verified VIA codex_review.rb (the plan requires it via both adapters):
+  # a non-yolo `permissions:` on a codex_review reviewer can never be honored
+  # (`codex review` is read-only and takes no tool-list args), so run! must
+  # raise Hive::ConfigError BEFORE any spawn — not silently run codex review
+  # with the scope discarded. The standard `agent: codex` entry trips
+  # PermissionScope's runner gate (codex can't enforce scoping).
+  def test_non_yolo_permissions_raises_before_spawn_for_codex_agent
+    with_tmp_dir do |dir|
+      log = File.join(dir, "argv.log")
+      ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
+      reviewer = build_reviewer(dir, "permissions" => "read-only")
+
+      assert_raises(Hive::ConfigError) { reviewer.run! }
+
+      refute File.exist?(log), "the A8 gate must raise before any codex spawn"
+      refute File.exist?(reviewer.output_path), "no findings file may be written when the gate raises"
+    end
+  end
+
+  # A8 bypass guard: a `kind: codex_review, agent: claude` entry resolves
+  # cleanly through the claude profile (claude CAN scope), so the runner gate
+  # alone would NOT fire and the declared scope would be silently discarded.
+  # The adapter must still fail closed — `codex review` ignores the profile
+  # class and never enforces scoping — so any non-yolo effective scope raises
+  # regardless of the configured agent.
+  def test_non_yolo_permissions_raises_even_with_claude_agent
+    with_tmp_dir do |dir|
+      log = File.join(dir, "argv.log")
+      ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
+      reviewer = build_reviewer(dir, "agent" => "claude", "permissions" => "read-only")
+
+      error = assert_raises(Hive::ConfigError) { reviewer.run! }
+      assert_match(/codex review/, error.message)
+      assert_match(/cannot enforce tool scoping/, error.message)
+
+      refute File.exist?(log), "no codex spawn may occur when the scope is non-yolo"
+      refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # Control: an explicit `permissions: yolo` passes the gate and runs normally
+  # — the gate rejects ONLY non-yolo scopes, so the happy path is unaffected.
+  def test_explicit_yolo_permissions_passes_the_gate
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir, "permissions" => "yolo")
+
+      result = reviewer.run!
+
+      assert result.ok?, "explicit yolo must pass the A8 gate and run normally"
+    end
+  end
 end

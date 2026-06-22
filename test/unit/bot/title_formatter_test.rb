@@ -20,18 +20,37 @@ class HiveBotTitleFormatterTest < Minitest::Test
   end
 
   def test_stage_label_uses_known_stage_names
-    assert_equal "Review", Hive::Bot::TitleFormatter.stage_label("6-review")
-    assert_equal "Open PR", Hive::Bot::TitleFormatter.stage_label("5-open-pr")
+    # U6 characterization: coding keeps its bespoke stage labels while
+    # generic/non-coding stage dirs fall through to the titleized fallback.
+    expected = {
+      "1-inbox" => "Inbox",
+      "2-brainstorm" => "Brainstorm",
+      "3-plan" => "Plan",
+      "4-execute" => "Execute",
+      "5-open-pr" => "Open PR",
+      "6-review" => "Review",
+      "7-artifacts" => "Artifacts",
+      "8-finalize" => "Finalize",
+      "9-done" => "Done"
+    }
+
+    expected.each do |stage_dir, label|
+      assert_equal label, Hive::Bot::TitleFormatter.stage_label(stage_dir)
+    end
   end
 
   def test_stage_label_falls_back_and_logs_unknown_stage_once
     logger = StubLogger.new
     Hive::Bot::TitleFormatter.reset_unknown_stage_log_cache!
 
-    assert_equal "Future", Hive::Bot::TitleFormatter.stage_label("99-future", logger: logger)
-    assert_equal "Future", Hive::Bot::TitleFormatter.stage_label("99-future", logger: logger)
+    assert_equal "Gather", Hive::Bot::TitleFormatter.stage_label("2-gather", logger: logger)
+    assert_equal "Deep Dive", Hive::Bot::TitleFormatter.stage_label("3-deep-dive", logger: logger)
+    assert_equal "Gather", Hive::Bot::TitleFormatter.stage_label("2-gather", logger: logger)
 
-    assert_equal [ [ :unknown_stage_label, { stage: "99-future" } ] ], logger.events
+    assert_equal [
+      [ :unknown_stage_label, { stage: "2-gather" } ],
+      [ :unknown_stage_label, { stage: "3-deep-dive" } ]
+    ], logger.events
   end
 
   def test_reset_unknown_stage_log_cache_re_arms_logging

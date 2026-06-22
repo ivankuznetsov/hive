@@ -55,7 +55,12 @@ module Hive
           "ready_for_review"    => "▶ ",
           "ready_to_artifacts"  => "▶ ",
           "ready_to_finalize"   => "▶ ",
-          "ready_to_archive"    => "▶ "
+          "ready_to_archive"    => "▶ ",
+          # Generic-workflow action keys (non-coding descriptors): a markerless
+          # stage runs, a complete non-terminal stage advances. Without these
+          # they fell through to DEFAULT_ICON and rendered iconless.
+          "ready_to_run"        => "▶ ",
+          "ready_to_advance"    => "▶ "
         }.freeze
         DEFAULT_ICON = "  ".freeze
 

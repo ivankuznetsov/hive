@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-06-11
+updated: 2026-06-20
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -58,9 +58,51 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
 | `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
+| `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
+| `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
+| `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
+
+`generic_ready_to_run` and `generic_needs_input` are distinct on the JSON wire.
+Markerless generic stages emit `READY_TO_RUN` so the daemon can dispatch
+`hive run <slug>` on first sight. Generic `WAITING` markers still emit
+`NEEDS_INPUT` and go through the edit/mtime debounce path. This split is additive
+to `Hive::Schemas::TaskActionKind` and is mirrored by `hive-status` and
+`hive-stage-action` schemas.
+
+## Workflow-aware branch
+
+`TaskAction#action` keeps the coding workflow on the existing hand-tuned
+stage-name `case` after the workflow-agnostic short-circuits (`live_task_lock`,
+`AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`). Routing is decided by
+`coding_workflow?`: a resolved `task.workflow.id == :coding` — and also a nil
+workflow, reachable only from test doubles — stays on the coding path. Tasks
+whose resolved `task.workflow.id` is any other value use a descriptor-positioned
+generic classifier instead:
+
+- `COMPLETE` at the terminal descriptor stage -> `archived`.
+- `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
+- `WAITING` -> `generic_needs_input` (wire kind `NEEDS_INPUT`).
+- markerless any non-terminal inert stage -> `ready_to_advance`. The gate is
+  `!terminal && stage.kind == :inert` with no entry-stage condition: the
+  entry-only restriction was intentionally dropped so an inert MIDDLE stage
+  advances rather than stranding (`Resolver.resolve` raises `StageError` for
+  `kind: :inert`, so it can neither run nor advance otherwise).
+- markerless stage of any non-inert kind (`:agent`, `:marker`, or `nil`), or a
+  terminal inert stage (degenerate single-stage workflow, entry == terminal) ->
+  `generic_ready_to_run` with label "Ready to run".
+
+This keeps coding behavior byte-stable while letting registered non-coding
+workflows surface non-error status rows once a task has resolved to its
+descriptor. `Commands::Approve` and `Commands::Run` resolve generic advance
+destinations through the task's descriptor, the CLI accepts runtime-registered
+stage refs for `--from`/`--to`/`--stage`, `Status#collect_rows` scans
+`Hive::Workflows.all_stage_dirs`, and `TaskResolver` can find generic-only
+stage dirs by bare slug. U6's integration test proves a registered generic task
+advancing through status -> policy -> `hive run`/`hive approve` for two stage
+hops.
 
 ## Marker carve-outs
 
@@ -79,6 +121,12 @@ Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This m
 Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`artifacts`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
 
 Generic verbs (`findings`/`accept-finding`/`reject-finding`) include `--stage <stage>` only when slug-stage ambiguity actually exists (`stage_collision: true`).
+
+For non-coding workflows, command emission bypasses the coding
+`Hive::Workflows::VERBS` table. `ready_to_advance` emits
+`hive approve <slug> --from <descriptor-stage-dir>` and generic run/input rows
+emit `hive run <slug>` (plus `--project` when the status snapshot spans multiple
+projects, and `--stage` for run rows only when a stage collision was reported).
 
 `--project <name>` is appended whenever `project_count > 1` so multi-project status output emits unambiguous commands.
 

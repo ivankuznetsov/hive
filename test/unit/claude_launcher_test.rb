@@ -28,7 +28,9 @@ class ClaudeLauncherTest < Minitest::Test
           timeout_sec: 1,
           log_label: "test",
           session_name: "hive-test-session",
-          status_mode: :state_file_marker
+          status_mode: :state_file_marker,
+          allowed_tools: %w[Read LS],
+          disallowed_tools: %w[Write Bash]
         )
 
         assert_equal({ status: :complete }, result)
@@ -36,6 +38,8 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal "prompt", captured.fetch(1).fetch(:prompt)
         assert_equal :claude, captured.fetch(1).fetch(:profile).name
         assert_equal "auto", captured.fetch(1).fetch(:permission_mode)
+        assert_equal %w[Read LS], captured.fetch(1).fetch(:allowed_tools)
+        assert_equal %w[Write Bash], captured.fetch(1).fetch(:disallowed_tools)
       end
     end
   end
@@ -786,6 +790,20 @@ def test_wrapper_command_carries_model_and_effort_pins
 
     refute_includes command, "--model", "no pin configured -> claude inherits the operator default"
     refute_includes command, "--effort"
+  end
+
+  def test_wrapper_command_carries_allowed_and_disallowed_tools
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "default",
+      allowed_tools: %w[Read LS],
+      disallowed_tools: %w[Write Bash]
+    )
+
+    assert_equal %w[--allowedTools Read,LS], command.each_cons(2).find { |a, _| a == "--allowedTools" }
+    assert_equal %w[--disallowedTools Write,Bash], command.each_cons(2).find { |a, _| a == "--disallowedTools" }
   end
 
   # Readiness-wins contract: the limit menu is only classified AFTER the

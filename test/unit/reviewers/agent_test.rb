@@ -89,6 +89,29 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # A8 fail-closed, REAL adapter path: a non-yolo permissions scope on a
+  # reviewer whose runner can't enforce tool scoping (codex) must raise
+  # Hive::ConfigError from the ACTUAL Reviewers::Agent#run! →
+  # stage_permission_scope call before any spawn — not from a hand-written
+  # stub that itself raises. A regression making the real adapter swallow or
+  # skip the gate would fail here.
+  def test_run_hard_errors_on_non_yolo_scope_for_codex_runner
+    with_tmp_dir do |dir|
+      ENV["HIVE_CODEX_BIN"] = File.expand_path("../../fixtures/fake-codex", __dir__)
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(
+        make_spec("agent" => "codex", "permissions" => "read-only"), ctx
+      )
+
+      error = assert_raises(Hive::ConfigError) { reviewer.run! }
+      assert_match(/cannot enforce tool scoping/, error.message)
+      assert_match(/runner :codex/, error.message)
+    ensure
+      ENV.delete("HIVE_CODEX_BIN")
+    end
+  end
+
   def test_orchestrator_marker_is_not_clobbered_by_reviewer_spawn
     # Crucial regression: the 6-review runner sets REVIEW_WORKING phase=reviewers
     # before spawning each reviewer. The reviewer's spawn must not overwrite
@@ -275,6 +298,42 @@ class ReviewersAgentTest < Minitest::Test
 
   def error_result(message = "agent exited with status=:timeout")
     { status: :error, error_message: message }
+  end
+
+  # A per-reviewer `permissions:` spec must be resolved through the
+  # reviewer runner into the actual spawn scope — not merely validated at
+  # config load. Captures the spawn_agent kwargs and asserts the scoped
+  # tool lists and the extra add-dir reached the spawn.
+  def test_reviewer_permissions_spec_resolves_into_spawn_scope
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer, = with_stubbed_adapter(
+        dir,
+        "permissions" => { "preset" => "scoped", "tools" => %w[Read Grep], "dirs" => [ "notes" ] }
+      )
+
+      captured = nil
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+      begin
+        reviewer.run!
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+
+      refute_nil captured, "spawn_agent must have been called"
+      assert_equal "default", captured[:permission_mode]
+      assert_equal %w[Read Grep], captured[:allowed_tools]
+      # Read/Grep are not in the read-only deny set, so the deny list is
+      # unchanged — and it never overlaps the granted tools.
+      assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], captured[:disallowed_tools]
+      assert_empty captured[:allowed_tools] & captured[:disallowed_tools]
+      assert_includes captured[:add_dirs], File.join(ctx.task_folder, "notes")
+    end
   end
 
   def test_run_does_not_retry_when_first_attempt_succeeds

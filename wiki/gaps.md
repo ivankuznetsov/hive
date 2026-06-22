@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-06-19
+updated: 2026-06-20
 tags: [gap, todo]
 ---
 
@@ -135,6 +135,8 @@ evidence closing the following June 16 gaps.
 3. **Two patterns for marker writes** — `Markers.set` (now uses flock + tempfile-rename atomic write) vs the agent writing into the state file via `Edit`/`Write`. The orchestrator now owns the terminal marker after every stage (the reviewer template explicitly does not write `task.md`), so concurrent-write races on the state file should not arise during normal flow. The remaining unprotected case is a user editing the state file in vim/VSCode while AGENT_WORKING — documented as "don't do that" in the README.
 
 ## Open enhancements
+
+- **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` / `ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today for production workflows; a future descriptor-workflow follow-up should wire a generic error/stale surface without changing coding's bespoke action map. See [[modules/task_action]].
 
 - **Parse provider reset-time hints for `limits_reached` cooldown** — the healer currently uses a fixed `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` cooldown (default 1h) to self-heal limit-parked tasks (see [[daemon]]). Providers sometimes print a concrete reset hint (e.g. codex's "try again at 4:42 PM"); parsing that wall-clock time could retry sooner/later than the fixed window. Deferred because wall-clock parsing across providers/timezones is brittle and the fixed cooldown is the robust default.
 

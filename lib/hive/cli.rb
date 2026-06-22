@@ -1,11 +1,26 @@
 require "thor"
 require "hive/stages"
+require "hive/workflows/registry"
 
 module Hive
   class CLI < Thor
     def self.exit_on_failure?
       true
     end
+
+    # Stage vocabulary embedded in `--from`/`--to`/`--stage` option help so
+    # `hive help run|approve|status` still advertises the valid stages to an
+    # agent reading `--help`. R1 dropped Thor's static `enum:` (it couldn't
+    # hold runtime workflows and auto-generated a "Possible values:" list), so
+    # this derives the same list from the default coding workflow descriptor —
+    # no literal stage dirs in source, so it stays in sync with a renumber.
+    STAGE_VOCABULARY = "stages: #{Hive::Stages::DIRS.join(', ')}".freeze
+
+    # Registered workflow names embedded in the `--workflow` option help so an
+    # agent reading `hive help init|new` discovers valid workflows from
+    # `--help` instead of via a failed call — the STAGE_VOCABULARY pattern,
+    # applied to workflows.
+    WORKFLOW_VOCABULARY = "valid: #{Hive::Workflows::Registry.ids.join(', ')}".freeze
 
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, and the workflow verbs
@@ -18,7 +33,6 @@ module Hive
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
-    APPROVE_TO_ENUM = (Hive::Stages::DIRS + Hive::Stages::NAMES).freeze
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 
     desc "version", "Print hive version"
@@ -85,9 +99,16 @@ module Hive
       See `wiki/commands/init.md` for the full prompt flow and ADR-023.
     DESC
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
+    option :workflow, type: :string,
+                      desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
-      Hive::Commands::Init.new(project_path, force: options[:force], json: options[:json]).call
+      Hive::Commands::Init.new(
+        project_path,
+        force: options[:force],
+        json: options[:json],
+        workflow: options[:workflow]
+      ).call
     end
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
@@ -265,6 +286,26 @@ module Hive
       ).call
     end
 
+    desc "workflow SUBCOMMAND [ID]", "Manage per-project workflow descriptors"
+    long_desc <<~DESC
+      Subcommands:
+        new ID    Scaffold a blank per-project workflow descriptor under
+                  <hive_state_path>/workflows/ID.yml, plus a placeholder
+                  instruction at <hive_state_path>/workflows/ID/work.md.
+
+      The blank workflow is inbox -> work -> done and is immediately usable
+      with `hive new PROJECT --workflow ID "<your idea>"`.
+    DESC
+    def workflow(subcommand, id = nil)
+      require "hive/commands/workflow"
+      Hive::Commands::Workflow.new(
+        subcommand,
+        id,
+        project_root: Dir.pwd,
+        json: options[:json]
+      ).call
+    end
+
     desc "bench SUBCOMMAND [SLUG]", "Contribute to hive-bench: `bench submit SLUG` extracts a 9-done task and opens a PR"
     long_desc <<~DESC
       Subcommands:
@@ -287,9 +328,11 @@ module Hive
       end
     end
 
-    desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
+    desc "new PROJECT TEXT", "Create a new task in PROJECT"
     long_desc <<~DESC
-      Create a new task in 1-inbox of PROJECT from the free-text TEXT.
+      Create a new task in PROJECT from the free-text TEXT. By default, the task
+      uses the project's default workflow; pass --workflow to pin a registered
+      workflow for this task.
 
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
@@ -306,19 +349,26 @@ module Hive
                         desc: "stack on a prerequisite task id or slug; hold daemon " \
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
+    option :workflow, type: :string,
+                      desc: "pin this task to a registered workflow (#{WORKFLOW_VOCABULARY})"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
       raise Hive::Error, "missing task text" if text.strip.empty?
 
-      Hive::Commands::New.new(project, text, depends_on: options[:depends_on]).call
+      Hive::Commands::New.new(
+        project,
+        text,
+        depends_on: options[:depends_on],
+        workflow: options[:workflow]
+      ).call
     end
     map "new" => :new_task
 
     desc "generate-name TARGET", "Generate a human-readable display name for TARGET"
     option :project, type: :string, desc: "scope lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope lookup to one stage (full '1-inbox' or short 'inbox')"
+    option :stage, type: :string,
+                   desc: "scope lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
     def generate_name(target)
       require "hive/commands/generate_name"
       Hive::Commands::GenerateName.new(
@@ -331,8 +381,8 @@ module Hive
 
     desc "run TARGET", "Run the stage agent for TARGET (slug or task folder)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
     option :no_rebase, type: :boolean, default: false,
                        desc: "skip the auto-rebase pre-step for this run only (one-off override of cfg.rebase.enabled)"
     def run_task(target)
@@ -349,8 +399,8 @@ module Hive
 
     desc "rebase-status TARGET", "Print the auto-rebase status for TARGET without running anything (read-only)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
     def rebase_status(target)
       require "hive/commands/rebase_status"
       Hive::Commands::RebaseStatus.new(
@@ -363,32 +413,32 @@ module Hive
     map "rebase-status" => :rebase_status
 
     desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def brainstorm(target)
       run_stage_action("brainstorm", target)
     end
 
     desc "plan TARGET", "Move a completed brainstorm task into plan, or run an existing plan task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def plan(target)
       run_stage_action("plan", target)
     end
 
     desc "develop TARGET", "Move a completed plan task into execute, or run an existing execute task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def develop(target)
       run_stage_action("develop", target)
     end
 
     desc "open-pr TARGET", "Move a completed execute task into open-pr, or run an existing open-pr task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def open_pr(target)
       run_stage_action("open-pr", target)
@@ -397,24 +447,24 @@ module Hive
     map "pr" => :open_pr
 
     desc "review TARGET", "Move a completed open-pr task into review, or run an existing review task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def review(target)
       run_stage_action("review", target)
     end
 
     desc "artifacts TARGET", "Move a completed review task into artifacts, or run an existing artifacts task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def artifacts(target)
       run_stage_action("artifacts", target)
     end
 
     desc "finalize TARGET", "Move a completed artifacts task into finalize, or run an existing finalize task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def finalize(target)
       run_stage_action("finalize", target)
@@ -428,8 +478,8 @@ module Hive
       With TARGET, preserves the workflow behavior: move a completed finalize
       task into done, or run an existing done task.
     DESC
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :recover_merged_error_reason, type: :string,
                                           desc: "internal: archive a merged PR despite this finalize ERROR reason"
@@ -469,8 +519,8 @@ module Hive
         75 — hive/state commit-lock contention (retryable; error_kind: error)
         78 — malformed project or global config (config)
     DESC
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; raises WRONG_STAGE on mismatch"
+    option :from, type: :string,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def drop(target)
       require "hive/commands/drop"
@@ -563,7 +613,10 @@ module Hive
       nullable `diagnostic` field — null for green rows, populated with
       a bounded summary + artifact tail + marker signature for red
       recovery/error rows, plus a nullable `pr_url` field — null until a
-      PR exists, then the pull-request URL once one is opened.
+      PR exists, then the pull-request URL once one is opened. Each row also
+      carries an optional `workflow` field — the descriptor id that resolved
+      the task (e.g. "coding"); omitted on older/synthetic producers, where
+      consumers should default to "coding".
 
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v1) and emit the diagnostic for a single task. Useful
@@ -588,8 +641,8 @@ module Hive
     DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
     option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope --diagnose slug lookup to one stage"
+    option :stage, type: :string,
+                   desc: "scope --diagnose slug lookup to one stage (#{STAGE_VOCABULARY})"
     option :write, type: :boolean, default: false,
                    desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
     option :force, type: :boolean, default: false,
@@ -622,10 +675,10 @@ module Hive
       before advancing — a previously successful call would fail with exit
       code 4 (WRONG_STAGE) instead of silently advancing a second stage.
     DESC
-    option :to, type: :string, enum: APPROVE_TO_ENUM,
-                desc: "destination stage (full '3-plan' or short 'plan'); default: next stage"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; raises WRONG_STAGE on mismatch (idempotency)"
+    option :to, type: :string,
+                desc: "destination stage, full or short form; default: next stage (#{STAGE_VOCABULARY})"
+    option :from, type: :string,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch, idempotency (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :force, type: :boolean, default: false, desc: "skip terminal-marker check on forward move"
     def approve(target)
@@ -653,8 +706,8 @@ module Hive
     DESC
     option :pass, type: :numeric, desc: "review pass to inspect (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (default: any stage)"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, default any (#{STAGE_VOCABULARY})"
     def findings(target)
       require "hive/commands/findings"
       Hive::Commands::Findings.new(
@@ -679,8 +732,8 @@ module Hive
                       desc: "accept all findings of the given severity"
     option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (default: any stage)"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, default any (#{STAGE_VOCABULARY})"
     def accept_finding(target, *ids)
       require "hive/commands/finding_toggle"
       Hive::Commands::FindingToggle.new(
@@ -702,8 +755,8 @@ module Hive
                       desc: "reject all findings of the given severity"
     option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (default: any stage)"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, default any (#{STAGE_VOCABULARY})"
     def reject_finding(target, *ids)
       require "hive/commands/finding_toggle"
       Hive::Commands::FindingToggle.new(

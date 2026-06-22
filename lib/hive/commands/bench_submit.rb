@@ -69,7 +69,7 @@ module Hive
       # Find <project>/.hive-state/stages/9-done/<slug> across registered projects.
       def resolve_done_task!
         candidates = registered.filter_map do |proj|
-          dir = File.join(proj["path"], ".hive-state", "stages", "9-done", @slug)
+          dir = File.join(proj["path"], ".hive-state", "stages", "9-done", @slug) # coding-scoped: bench submit only extracts completed coding tasks
           [ dir, proj["path"] ] if Dir.exist?(dir)
         end
         raise UsageError, "no completed (9-done) task '#{@slug}' found#{@project ? " in #{@project}" : ''}" if candidates.empty?

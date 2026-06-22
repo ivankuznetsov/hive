@@ -116,7 +116,7 @@ module Hive
         if key == "X"
           return Messages::Flash.new(text: "focus the tasks pane first (Tab or l)") unless pane_focus == :right
           return Messages::Flash.new(text: "select a task first; press / to filter or 1-9 to scope") if row.nil?
-          return Messages::Flash.new(text: "task is archived; nothing to drop") if row.stage == "9-done"
+          return Messages::Flash.new(text: "task is archived; nothing to drop") if row.stage == "9-done" # coding-scoped: TUI drop guard uses coding archive stage
 
           return Messages::DropFocusedTask.new(row: row)
         end

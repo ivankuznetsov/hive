@@ -3,6 +3,7 @@ require "fileutils"
 require "securerandom"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
+require "hive/permission_scope"
 require "hive/paths"
 
 module Hive
@@ -11,8 +12,12 @@ module Hive
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
       "default_branch" => nil,
-      "dependency_gate_stage" => "8-finalize",
+      "default_workflow" => "coding",
+      "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
       "project_name" => nil,
+      # Project-wide default for per-stage permission scoping. "yolo"
+      # preserves today's launch behavior; narrower scopes are opt-in.
+      "permissions" => Hive::PermissionScope::YOLO,
       "claude" => {
         "mode" => "tmux",
         "permission_mode" => "bypassPermissions",
@@ -545,7 +550,7 @@ module Hive
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
     # deliberate review point here, not a silent propagation — if DIRS
     # changes, update this list to match.
-    DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze
+    DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
 
@@ -1296,6 +1301,7 @@ module Hive
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
+      validate_permissions!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
@@ -1686,6 +1692,136 @@ module Hive
       raise ConfigError,
             "claude.permission_mode in #{describe_source(source_path)} must be one of " \
             "#{CLAUDE_PERMISSION_MODES.inspect}; got #{permission_mode.inspect} (#{permission_mode.class})"
+    end
+
+    def validate_permissions!(cfg, source_path)
+      validate_permission_spec!(cfg["permissions"], "project default", source_path)
+      reject_unsupported_review_permissions!(cfg, source_path)
+
+      permission_entries(cfg).each do |label, spec|
+        validate_permission_spec!(spec, label, source_path)
+      end
+    end
+
+    # Collect `permissions:` specs to shape-validate at load, paired with a
+    # human label for error messages. This is ONLY a load-time SHAPE check; it
+    # does NOT mean every collected block is a resolved scope. `permissions:` is
+    # a stage-level control: it is resolved only for pipeline STAGE spawns and
+    # for REVIEW REVIEWERS. The project-level default is the default *for those*,
+    # not a global permission floor. A `permissions:` key on a non-stage block
+    # (daemon, rebase, babysitter, digest, web, patrol, bot, update, …) is NOT a
+    # per-stage scope and never gates those internal agents — they stay
+    # write-capable by design.
+    #
+    # The top-level `cfg.each` is a deliberate SUPERSET of the stages
+    # Config.permission_spec actually resolves: it scans every top-level Hash,
+    # because generic-workflow stage names aren't known at load time, so it
+    # CANNOT enumerate exactly the resolved set. Over-collecting is intentional —
+    # a malformed `permissions:` under any block fails the *load* instead of
+    # surviving to a confusing spawn-time error. A well-formed `permissions:` key
+    # on a non-stage block passes the shape check and is then simply ignored at
+    # runtime (not resolved into a scope); that is the documented stage/reviewer
+    # boundary above, not a bug this scan tries to catch. `review` is the one
+    # top-level key the scan explicitly skips (see the `next` below) because
+    # its own `permissions` key is NOT a resolved location
+    # (reject_unsupported_review_permissions! rejects it) — only its per-role
+    # sub-blocks and per-reviewer entries, added explicitly below, are
+    # resolved. `patrol.review` is NOT explicitly skipped; it is simply never
+    # reached, because this scan is shallow (a top-level `patrol` Hash IS
+    # collected and shape-validated, but the scan does not recurse into its
+    # `review` child). Its per-reviewer entries are added explicitly below.
+    # Patrol tasks dispatch `patrol.review.reviewers` through the same adapters
+    # as `review.reviewers`, so those entries are validated too.
+    def permission_entries(cfg)
+      entries = []
+      # One guard shape, several call sites: only collect a `permissions:`
+      # value when the block is a Hash that declares the key.
+      collect = lambda do |label, block|
+        entries << [ label, block["permissions"] ] if block.is_a?(Hash) && block.key?("permissions")
+      end
+
+      cfg.each do |key, value|
+        next if key.to_s == "review"
+
+        collect.call(key.to_s, value)
+      end
+
+      review = cfg["review"]
+      if review.is_a?(Hash)
+        %w[ci triage fix browser_test].each { |role| collect.call("review.#{role}", review[role]) }
+        Array(review["reviewers"]).each_with_index do |entry, idx|
+          collect.call("review.reviewers[#{idx}]", entry)
+        end
+      end
+
+      patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
+      if patrol_review.is_a?(Hash)
+        Array(patrol_review["reviewers"]).each_with_index do |entry, idx|
+          collect.call("patrol.review.reviewers[#{idx}]", entry)
+        end
+      end
+
+      entries
+    end
+
+    # A top-level `review: { permissions: ... }` is never resolved —
+    # permission_spec only reads review.{ci,triage,fix,browser_test} and the
+    # per-reviewer entries — so honoring it silently would be a fail-OPEN
+    # downgrade: the operator believes review is scoped while every review
+    # sub-stage still runs the project default (often yolo). Reject it
+    # loudly and point at the supported per-role / per-reviewer locations.
+    # `patrol.review.permissions` is the exact patrol analog — patrol tasks
+    # dispatch `patrol.review.reviewers` through the same adapters, and no
+    # resolver reads a `patrol.review.permissions` key — so reject it too,
+    # pointing at the patrol per-reviewer location.
+    def reject_unsupported_review_permissions!(cfg, source_path)
+      reject_unsupported_permissions_at!(
+        cfg["review"], "review.permissions", source_path,
+        "set permissions per role under review.{ci,triage,fix,browser_test} or per reviewer entry"
+      )
+      patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
+      reject_unsupported_permissions_at!(
+        patrol_review, "patrol.review.permissions", source_path,
+        "set permissions per reviewer entry under patrol.review.reviewers"
+      )
+    end
+
+    def reject_unsupported_permissions_at!(block, label, source_path, suggestion)
+      return unless block.is_a?(Hash) && block.key?("permissions")
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} is not a supported " \
+            "scope location; #{suggestion} instead."
+    end
+
+    def validate_permission_spec!(spec, label, source_path)
+      Hive::PermissionScope.validate!(spec, stage: label)
+    rescue Hive::ConfigError => e
+      raise ConfigError, "#{e.message} in #{describe_source(source_path)}"
+    end
+
+    # Sentinel distinguishing "stage declared no permissions key" from a
+    # stage that explicitly declared `permissions: nil`. permission_spec and
+    # permission_at — its only collaborators — live alongside it here.
+    MISSING_PERMISSION = Object.new.freeze
+
+    # Resolve a stage's effective permission spec: the stage's own
+    # `permissions:` block when declared, otherwise the project default.
+    # Dotted review paths (e.g. "review.triage") are supported.
+    def permission_spec(cfg, stage)
+      stage_value = permission_at(cfg, stage)
+      return stage_value unless stage_value.equal?(MISSING_PERMISSION)
+
+      cfg.fetch("permissions", DEFAULTS.fetch("permissions"))
+    end
+
+    def permission_at(cfg, stage)
+      # `cfg.dig(*parts)` already handles the single-element case identically
+      # to `cfg[parts.first]`, so no length branch is needed.
+      block = cfg.dig(*stage.to_s.split("."))
+      return MISSING_PERMISSION unless block.is_a?(Hash) && block.key?("permissions")
+
+      block["permissions"]
     end
 
     def validate_dependency_gate_stage!(cfg, source_path)

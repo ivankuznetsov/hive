@@ -8,6 +8,7 @@ require "hive/commands/update"
 require "hive/commands/uninstall"
 require "hive/commands/migrate"
 require "hive/commands/new"
+require "hive/commands/workflow"
 require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
@@ -54,9 +55,9 @@ class HiveCliTest < Minitest::Test
 
   def test_init_forget_prune_update_uninstall_and_migrate_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
-      Hive::CLI.start([ "init", "/tmp/project", "--force", "--json" ])
+      Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-      assert_equal({ force: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ force: true, json: true, workflow: "content_fixture" }, calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
 
@@ -112,18 +113,28 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::New) do |calls|
       Hive::CLI.start([ "new", "proj", "build", "thing" ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
-      assert_equal({ depends_on: nil }, calls.first.fetch(:kwargs))
+      assert_equal({ depends_on: nil, workflow: nil }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([ "new", "proj", "--depends-on", "base-task", "build", "thing" ])
+      Hive::CLI.start([ "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture", "build", "thing" ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
-      assert_equal({ depends_on: "base-task" }, calls.first.fetch(:kwargs))
+      assert_equal({ depends_on: "base-task", workflow: "content_fixture" }, calls.first.fetch(:kwargs))
     end
 
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
     assert_equal Hive::ExitCodes::GENERIC, status
     assert_match(/missing task text/, err)
+  end
+
+  def test_workflow_new_dispatches_to_command_with_json
+    with_command_new_stub(Hive::Commands::Workflow) do |calls|
+      Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])
+
+      assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
+      assert_equal({ project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
   end
 
   def test_generate_name_passes_lookup_options
@@ -203,14 +214,14 @@ class HiveCliTest < Minitest::Test
 
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
-      Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "execute", "--write", "--force", "--json" ])
-      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "execute", write: true, force: true }, calls.first.fetch(:kwargs))
+      Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
+      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "2-gather", write: true, force: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Approve) do |calls|
-      Hive::CLI.start([ "approve", "slug", "--to", "review", "--from", "open-pr", "--project", "proj", "--force", "--json" ])
+      Hive::CLI.start([ "approve", "slug", "--to", "3-report", "--from", "2-gather", "--project", "proj", "--force", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
-      assert_equal({ to: "review", from: "open-pr", project: "proj", force: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ to: "3-report", from: "2-gather", project: "proj", force: true, json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Findings) do |calls|

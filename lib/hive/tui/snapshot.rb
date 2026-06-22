@@ -46,6 +46,7 @@ module Hive
         :slug,
         :id,
         :display_name,
+        :workflow,
         :depends_on,
         :blocked_by,
         :dependency_stage,
@@ -82,12 +83,13 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
-        def initialize(id: nil, display_name: nil, worktree_path: nil,
+        def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, folder_mtime: nil, live_task_lock: false,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, **rest)
           super(id: id, display_name: display_name,
+                workflow: workflow,
                 depends_on: depends_on,
                 blocked_by: blocked_by,
                 dependency_stage: dependency_stage,
@@ -153,6 +155,7 @@ module Hive
           slug: payload["slug"],
           id: payload["id"],
           display_name: payload["display_name"],
+          workflow: payload["workflow"],
           depends_on: payload["depends_on"],
           blocked_by: payload["blocked_by"],
           dependency_stage: payload["dependency_stage"],

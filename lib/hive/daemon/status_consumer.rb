@@ -16,7 +16,7 @@ module Hive
       # the runner has written its claude_pid to the lock. The daemon
       # healer and dispatcher both need this so they don't race the runner
       # during the pre-claude window (issue #144).
-      Row = Struct.new(:project, :slug, :stage, :marker, :marker_attrs, :folder, :state_file,
+      Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :blocked,
@@ -182,6 +182,7 @@ module Hive
               project: project,
               slug: task["slug"],
               stage: task["stage"],
+              workflow: task["workflow"],
               marker: task["marker"],
               marker_attrs: task["attrs"].is_a?(Hash) ? task["attrs"] : {},
               folder: task["folder"],

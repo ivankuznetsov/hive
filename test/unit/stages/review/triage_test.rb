@@ -268,6 +268,45 @@ class TriageTest < Minitest::Test
     end
   end
 
+  # The parameterized loop above iterates ORCHESTRATOR_OWNED, which does
+  # NOT include reviews/suppressed.md — that's the triage-local
+  # TRIAGE_PROTECTED_FILES addition. Exercise it end-to-end through a spawn
+  # so a regression reverting run!'s snapshot from TRIAGE_PROTECTED_FILES
+  # back to PROTECTED_FILES is caught: a triage agent that rewrites the
+  # suppression list must yield :tampered with suppressed.md surfaced
+  # (U3/A4 require triage protection, not fix protection alone).
+  def test_triage_editing_suppressed_doc_yields_tampered_status
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"), "## Nit\n- [ ] x: y\n")
+      suppressed = File.join(task_folder, "reviews", "suppressed.md")
+      File.write(suppressed, "<!-- HIVE-SUPPRESS v1 base=abc123 -->\n")
+
+      escalations = File.join(task_folder, "reviews", "escalations-01.md")
+      tamper_script = File.join(dir, "tampering-fake-claude")
+      File.write(tamper_script, <<~SH)
+        #!/usr/bin/env bash
+        if [[ "${1:-}" == "--version" ]]; then
+          echo "2.1.118 (Claude Code)"
+          exit 0
+        fi
+        printf '# tampered suppressions\\n' >> "#{suppressed}"
+        printf '# Escalations\\n' > "#{escalations}"
+        exit 0
+      SH
+      File.chmod(0o755, tamper_script)
+      ENV["HIVE_CLAUDE_BIN"] = tamper_script
+
+      result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+      assert_equal :tampered, result.status,
+                   "a triage spawn editing reviews/suppressed.md must yield :tampered"
+      assert_includes result.tampered_files, "reviews/suppressed.md",
+                      "expected reviews/suppressed.md in tampered_files=#{result.tampered_files.inspect}"
+      assert_match(/protected files/, result.error_message)
+    end
+  end
+
   # --- bare per-agent fallbacks align with DEFAULTS ----------------------
   #
   # When a cfg reaches triage without `budget_usd`/`timeout_sec` for

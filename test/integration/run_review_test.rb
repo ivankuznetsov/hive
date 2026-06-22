@@ -1256,7 +1256,10 @@ class RunReviewTest < Minitest::Test
         assert_includes pass2_triage_input, "SUPPRESSED: lib/foo.rb:88 leaks stale state",
                         "pass-2 re-emitted no-fix finding must be stripped before triage"
         refute_includes pass2_triage_input, "- [ ] lib/foo.rb:88 leaks stale state"
-        assert_includes File.read(File.join(folder, "reviews", "suppressed.md")), "lib/foo.rb:12 leaks stale state"
+        suppressed_doc = File.read(File.join(folder, "reviews", "suppressed.md"))
+        assert_includes suppressed_doc, "lib/foo.rb:12 leaks stale state"
+        refute_includes suppressed_doc, "lib/fix.rb",
+                        "only RESOLVED/NO-FIX dispositions seed suppressed.md — the AUTO-FIX line must be excluded"
       end
     end
   end
@@ -1265,32 +1268,56 @@ class RunReviewTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir, cfg_overrides: suppression_reviewer_cfg)
-        triage_input = nil
+        pass2_triage_input = nil
 
         review_stub = lambda do |_cfg, ctx, _task, **_kwargs|
           path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
           FileUtils.mkdir_p(File.dirname(path))
-          File.write(path, "## High\n- [ ] lib/security.rb leaks token: needs design call\n")
+          body =
+            if ctx.pass == 1
+              # An AUTO-FIXable finding (so pass 1 advances to pass 2) plus a
+              # no-fix on lib/security.rb that seeds the suppression list.
+              "## High\n- [ ] lib/fix.rb fixes real bug: apply patch\n" \
+                "- [ ] lib/security.rb leaks token: triage accepts risk\n"
+            else
+              # A genuine, DIFFERENT-title High on the same file/severity.
+              "## High\n- [ ] lib/security.rb exposes secret in logs: needs design call\n"
+            end
+          File.write(path, body)
           :ok
         end
         triage_stub = lambda do |cfg:, ctx:|
-          # Capture exactly what the strip pass handed to triage so a
-          # regression that wrongly pre-suppressed the High to
-          # `- [x] SUPPRESSED:` before triage is caught — not just one that
-          # leaks it into suppressed.md.
-          triage_input = File.read(File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md"))
+          reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
           esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
           FileUtils.mkdir_p(File.dirname(esc))
-          File.write(esc, <<~MD)
-            # Escalations for pass #{format('%02d', ctx.pass)}
+          if ctx.pass == 1
+            # Seed a same-file/severity no-fix so pass 2's strip runs against
+            # a POPULATED list — otherwise strip_suppressed! is a guaranteed
+            # no-op and the test can't tell "High protected" from "nothing to
+            # strip". Pass 1 has no open questions so it advances to pass 2.
+            File.write(reviewer, <<~MD)
+              ## High
+              - [x] AUTO-FIX: lib/fix.rb fixes real bug: apply patch
+              - [x] RESOLVED/NO-FIX: lib/security.rb leaks token: triage accepts risk
+            MD
+            File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
+          else
+            # Capture exactly what the strip pass handed to triage so a
+            # regression that keys without the title (and so strips this
+            # different-title High against the prior same-file no-fix seed)
+            # is caught — as is one that pre-suppresses it to `- [x] SUPPRESSED:`.
+            pass2_triage_input = File.read(reviewer)
+            File.write(esc, <<~MD)
+              # Escalations for pass #{format('%02d', ctx.pass)}
 
-            ## Round 1
+              ## Round 1
 
-            ### Q1. Should hive change the token flow?
-            Source: stub-reviewer-#{format('%02d', ctx.pass)}.md
-            Finding: lib/security.rb leaks token: needs design call
-            ### A1.
-          MD
+              ### Q1. Should hive change the token flow?
+              Source: stub-reviewer-#{format('%02d', ctx.pass)}.md
+              Finding: lib/security.rb exposes secret in logs: needs design call
+              ### A1.
+            MD
+          end
           Hive::Stages::Review::Triage::Result.new(
             status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
           )
@@ -1305,11 +1332,16 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_waiting, marker.name
         assert_equal "1", marker.attrs["escalations"]
-        assert_includes triage_input, "- [ ] lib/security.rb leaks token",
-                        "a High finding must reach triage unstripped — never pre-suppressed (A7)"
-        refute_includes triage_input, "SUPPRESSED:"
+        assert_equal "2", marker.attrs["pass"]
+        assert_includes pass2_triage_input, "- [ ] lib/security.rb exposes secret in logs",
+                        "a genuine High must reach triage unstripped even when a same-file no-fix " \
+                        "was previously seeded (A7) — strip keys by title, not file+severity"
+        refute_includes pass2_triage_input, "SUPPRESSED:"
         suppressed = File.read(File.join(folder, "reviews", "suppressed.md"))
-        refute_includes suppressed, "lib/security.rb leaks token"
+        assert_includes suppressed, "lib/security.rb leaks token",
+                        "the prior no-fix seed must still be live at pass 2 — proving strip saw a populated list"
+        refute_includes suppressed, "exposes secret in logs",
+                        "the escalated High must never be recorded as a suppression"
       end
     end
   end

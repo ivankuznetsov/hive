@@ -14,7 +14,20 @@ module Hive
         :issuer, :authorization_endpoint, :token_endpoint, :registration_endpoint,
         :revocation_endpoint, :mcp_resource,
         keyword_init: true
-      )
+      ) do
+        # `keyword_init` only rejects UNKNOWN keys — `Discovery.new(issuer: "x")`
+        # otherwise succeeds with every other endpoint nil, and a nil would
+        # propagate into `URI(authorization_endpoint)` (ArgumentError) or the
+        # stored `mcp_resource`. Build through this factory so the value type
+        # cannot exist half-populated. `discover` pre-validates each field with
+        # a context-rich message, so here this is the type-level backstop.
+        def self.from_endpoints(**fields)
+          missing = members.select { |key| fields[key].to_s.strip.empty? }
+          raise Hive::Error, "Screenote OAuth discovery is missing #{missing.join(", ")}" if missing.any?
+
+          new(**fields)
+        end
+      end
 
       attr_reader :base_url
 
@@ -31,7 +44,7 @@ module Hive
         auth = get_json("/.well-known/oauth-authorization-server", "Screenote OAuth discovery")
         resource = get_json("/.well-known/oauth-protected-resource", "Screenote MCP resource discovery")
 
-        Discovery.new(
+        Discovery.from_endpoints(
           issuer: required(auth, "issuer", "Screenote OAuth discovery"),
           authorization_endpoint: required(auth, "authorization_endpoint", "Screenote OAuth discovery"),
           token_endpoint: required(auth, "token_endpoint", "Screenote OAuth discovery"),

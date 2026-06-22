@@ -168,6 +168,55 @@ class ScreenoteMcpClientTest < Minitest::Test
     assert_equal [ { "id" => "sse_proj" } ], client.list_projects
   end
 
+  def test_call_tool_raises_on_a_string_json_rpc_error
+    # A non-conformant server may send `"error":"<string>"` rather than an
+    # object; guarding only on is_a?(Hash) let it skip the raise and fall
+    # through to the misleading empty-projects remedy. Any truthy error is a
+    # protocol failure.
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(JSON.generate("error" => "method not found")))
+    )
+    err = assert_raises(Hive::Error) { client.list_projects }
+    assert_match(/list_projects failed/, err.message)
+    assert_match(/method not found/, err.message)
+  end
+
+  def test_list_projects_normalizes_the_project_id_key_to_a_canonical_id
+    # Raw Screenote projects may key the id under "project_id"; the McpClient
+    # seam normalizes it to a canonical "id" so connect/artifacts don't each
+    # re-derive the fallback.
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(JSON.generate("result" => {
+        "projects" => [ { "project_id" => "proj_alt", "name" => "Alt" } ]
+      })))
+    )
+    assert_equal "proj_alt", client.list_projects.first["id"]
+  end
+
+  def test_call_tool_selects_the_result_event_among_interleaved_sse_events
+    # A spec-compliant server may emit a non-JSON keep-alive and a notification
+    # event BEFORE the JSON-RPC result on the same stream; blind-joining every
+    # event's data payload would splice them into an unparseable body. The
+    # result is selected by its JSON-RPC id (the first call's id is 1); a
+    # non-JSON event and an id-less notification are skipped.
+    keep_alive = "keep-alive"
+    notif = JSON.generate("jsonrpc" => "2.0", "method" => "notifications/progress", "params" => {})
+    result = JSON.generate("jsonrpc" => "2.0", "id" => 1, "result" => { "projects" => [ { "id" => "sse_real" } ] })
+    sse = "event: ping\r\ndata: #{keep_alive}\r\n\r\n" \
+          "event: message\r\ndata: #{notif}\r\n\r\n" \
+          "event: message\r\ndata: #{result}\r\n\r\n"
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(sse))
+    )
+    assert_equal [ { "id" => "sse_real" } ], client.list_projects
+  end
+
   def test_call_tool_forwards_arguments_and_increments_request_id
     http = FakeHttp.new(self.class.ok(JSON.generate("result" => {})))
     client = Hive::Screenote::McpClient.new(resource: "https://screenote.test/mcp", access_token: "token", http: http)

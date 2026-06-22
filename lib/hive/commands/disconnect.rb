@@ -1,5 +1,6 @@
 require "json"
 require "hive/config"
+require "hive/commands/screenote_envelope"
 require "hive/screenote/credential_store"
 require "hive/screenote/oauth_client"
 
@@ -89,8 +90,12 @@ module Hive
 
       def emit_absent
         if @json
+          # Carry `revoked` (always false here) so the not-connected path is
+          # shape-consistent with emit_disconnected and the documented
+          # `{ "disconnected", "revoked", "reason" }` contract — a consumer
+          # that unconditionally reads result["revoked"] gets false, not nil.
           @output.puts JSON.generate("ok" => true, "service" => "screenote", "disconnected" => false,
-                                     "reason" => "not_connected")
+                                     "revoked" => false, "reason" => "not_connected")
         else
           @output.puts "Screenote is not connected."
         end
@@ -112,14 +117,7 @@ module Hive
       # the success envelope. Emit a structured `{ "ok": false, … }` line so
       # automation gets a parseable failure document before the non-zero exit.
       def emit_error_envelope(error)
-        @output.puts JSON.generate(
-          "ok" => false,
-          "service" => "screenote",
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        )
+        @output.puts JSON.generate(Hive::Commands::ScreenoteEnvelope.error_payload(error))
       rescue Errno::EPIPE, JSON::GeneratorError
         nil
       end

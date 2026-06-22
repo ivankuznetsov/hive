@@ -1869,15 +1869,17 @@ module Hive
               "screenote.base_url in #{describe_source(source_path)} must be blank or an http(s) URL"
       end
 
-      # Migration guard for the removed REST uploader. Only a NON-BLANK
-      # api_token is a real leftover worth failing on — a bare `api_token:`
-      # or `api_token: null` (which the old config.example.yml shipped) is
-      # inert. Raising on the mere presence of the key was a catch-22: the
-      # prescribed remedy `hive connect screenote` itself loads this config
-      # (via Hive::Config.load_global_screenote, called from
-      # commands/connect.rb), so every command — including the fix — died
-      # with ConfigError. Reword to instruct
-      # removing the key so connect stays reachable.
+      # Migration guard for the removed REST uploader. A blank/null leftover
+      # (a bare `api_token:` or `api_token: null`, as the old
+      # config.example.yml shipped) is now inert: the prior guard raised on the
+      # mere presence of the key, a catch-22 since the prescribed remedy
+      # `hive connect screenote` loads exactly this validation (via
+      # Hive::Config.load_global_screenote, called from commands/connect.rb).
+      # A NON-BLANK token is NOT softened — it is a genuine leftover, so bare
+      # `hive connect screenote` still raises ConfigError here and stays
+      # blocked until the operator removes the key (passing --base-url, which
+      # skips this global load, is the only other escape). That hard failure on
+      # a real leftover token is intended.
       api_token = screenote["api_token"]
       return if api_token.nil? || (api_token.is_a?(String) && api_token.strip.empty?)
 

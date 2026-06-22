@@ -99,6 +99,17 @@ module Hive
         path = request_line.split.fetch(1, "/")
         uri = URI("http://#{host}#{path}")
         [ uri.path, URI.decode_www_form(uri.query.to_s).to_h ]
+      rescue URI::Error, ArgumentError
+        # A junk local request (browser/OS prefetch, a port scanner) may carry
+        # an invalid percent-escape (`/x%ZZ`) or an illegal character in the
+        # request target. `URI(...)` / `URI.decode_www_form` raise
+        # URI::InvalidURIError / ArgumentError, NEITHER of which is a
+        # Hive::Error or SystemCallError — so it would escape Connect#call's
+        # rescues and bin/hive as a raw backtrace (no --json envelope),
+        # defeating the deliberate "tolerate junk local requests" design.
+        # Treat it as a non-`/callback` request: the caller answers 404 and
+        # keeps waiting for the real redirect.
+        [ "/", {} ]
       end
 
       def callback_path?(path)

@@ -1,8 +1,4 @@
----
-date: 2026-06-22
-slug: screenote-oauth-mcp
-pages: [commands/screenote, stages/artifacts, modules/config, dependencies, testing, gaps]
----
+## [2026-06-22T12:05:21Z] commands/screenote — OAuth 2.1 + MCP artifact uploads
 
 Replaced Screenote API-key REST uploads with OAuth 2.1 and MCP-backed artifact
 uploads. `hive connect screenote` now handles auth-code + PKCE setup, dynamic

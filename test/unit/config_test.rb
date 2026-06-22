@@ -2798,9 +2798,12 @@ class ConfigTest < Minitest::Test
 
   def test_load_global_screenote_tolerates_blank_or_null_api_token_leftover
     # A bare `api_token:` (null) or empty string is inert config the old
-    # config.example.yml shipped. Raising on it created a catch-22: the
-    # prescribed `hive connect screenote` itself loads this config, so the
-    # operator could never reach the fix. Only a non-blank token must fail.
+    # config.example.yml shipped, so it must NOT fail. The catch-22 (the
+    # prescribed `hive connect screenote` loads this same validation) is lifted
+    # ONLY for these blank leftovers: a non-blank token still raises, so a
+    # genuine leftover token keeps bricking bare connect until the key is
+    # removed — that intended hard failure is covered by the sibling
+    # rejects-non-blank test above.
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []

@@ -18,7 +18,7 @@ module Hive
 
       def list_projects
         result = call_tool("list_projects")
-        extract_projects(result)
+        extract_projects(result).map { |project| normalize_project(project) }
       end
 
       def call_tool(name, arguments = {})
@@ -36,8 +36,7 @@ module Hive
           params: { name: name, arguments: arguments }
         )
         body = parse_response(request(req), "Screenote MCP #{name}")
-        error = body["error"]
-        raise Hive::Error, "Screenote MCP #{name} failed: #{error["message"] || error}" if error.is_a?(Hash)
+        raise_protocol_error(name, body["error"]) if body["error"]
 
         result = body.fetch("result", body)
         raise_tool_error(name, result)
@@ -45,6 +44,29 @@ module Hive
       end
 
       private
+
+      # Raw Screenote projects key the id under "id" OR "project_id"; normalize
+      # to a canonical "id" at this single seam so callers (connect, artifacts)
+      # don't each re-derive the fallback and a Screenote key change touches one
+      # place. Non-Hash entries pass through untouched.
+      def normalize_project(project)
+        return project unless project.is_a?(Hash)
+
+        id = project["id"].to_s
+        id = project["project_id"].to_s if id.empty?
+        project.merge("id" => id)
+      end
+
+      # A JSON-RPC `error` is normally an object (`{"code","message"}`), but a
+      # non-conformant server may send `"error":"<string>"`. Guarding only on
+      # `is_a?(Hash)` let a string error skip the raise and fall through
+      # extract_projects to `[]`, surfacing the wrong "create a project and
+      # reconnect" remedy — the same misleading class the isError/unparseable
+      # guards close. Treat any truthy `error` as a protocol failure.
+      def raise_protocol_error(name, error)
+        detail = error.is_a?(Hash) ? (error["message"] || error) : error
+        raise Hive::Error, "Screenote MCP #{name} failed: #{detail}"
+      end
 
       def request(req)
         Hive::Screenote::Http.request(http: @http, request: req, uri: resource, context: "Screenote MCP request")
@@ -70,25 +92,52 @@ module Hive
       end
 
       def parse_response(response, context)
-        Hive::Screenote::Http.parse_json_object(unframe_sse(response.body.to_s), context)
+        body = response.body.to_s
+        Hive::Screenote::Http.parse_json_object(unframe_sse(body) || body, context)
       end
 
       # A Streamable-HTTP MCP endpoint may answer a POST with a bare JSON
       # object OR a `text/event-stream` body (`event: message\ndata: {…}`) —
       # the spec lets the server pick either even though we advertise both, so
       # a flat JSON.parse failed a spec-compliant SSE reply as "unparseable
-      # response" and broke every `list_projects`. Concatenate the `data:`
-      # payload(s) so an SSE reply parses; a non-SSE body passes through
-      # untouched.
+      # response" and broke every `list_projects`. The spec also lets the
+      # server interleave OTHER events (e.g. `notifications/*`) before the
+      # JSON-RPC response on the same stream; blind-joining every event's
+      # `data:` payload would splice two JSON objects into an unparseable body.
+      # Split the stream into events and return the one carrying THIS request's
+      # JSON-RPC id, falling back to the last data event so a single-event
+      # reply (or one whose response omits the id) still parses. A non-SSE body
+      # returns nil so the caller parses it untouched.
       def unframe_sse(body)
-        return body unless body.lstrip.start_with?("event:", "data:", "id:", "retry:", ":")
+        return nil unless body.lstrip.start_with?("event:", "data:", "id:", "retry:", ":")
 
-        data = body.each_line.filter_map do |line|
-          next unless line.start_with?("data:")
+        payloads = sse_data_payloads(body)
+        return nil if payloads.empty?
 
-          line.delete_prefix("data:").sub(/\A[ \t]/, "").chomp
+        payloads.find { |payload| sse_response_id(payload) == @request_id } || payloads.last
+      end
+
+      # Group the stream into events (blank-line separated) and return each
+      # event's `data:` payload — its `data:` lines joined with "\n" per the
+      # SSE spec, which is the ONLY place "\n" joining is correct.
+      def sse_data_payloads(body)
+        body.split(/\r?\n\r?\n/).filter_map do |event|
+          data = event.each_line.filter_map do |line|
+            next unless line.start_with?("data:")
+
+            line.delete_prefix("data:").sub(/\A[ \t]/, "").chomp
+          end
+          data.join("\n") unless data.empty?
         end
-        data.empty? ? body : data.join("\n")
+      end
+
+      # The JSON-RPC id echoed in an event's payload, or nil for a payload that
+      # is not (yet) parseable JSON or carries no id (e.g. a notification).
+      def sse_response_id(payload)
+        id = JSON.parse(payload)["id"]
+        id.nil? ? nil : id
+      rescue JSON::ParserError
+        nil
       end
 
       def extract_projects(result)

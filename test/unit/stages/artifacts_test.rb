@@ -144,6 +144,64 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_spawn_artifacts_agent_degrades_to_no_mcp_when_credential_loses_a_key
+    # The OTHER rescue arm: a credential that lost a required key between
+    # screenote_context's check and McpConfig#payload raises Hive::ConfigError,
+    # which must degrade to a no-MCP run (A8 fail-soft), not crash the stage.
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      captured = {}
+      original = Hive::Stages::Base.method(:spawn_claude_with_tmux_marker!)
+      Hive::Stages::Base.define_singleton_method(:spawn_claude_with_tmux_marker!) do |_task, _cfg, **kwargs|
+        captured[:path] = kwargs[:mcp_config_path]
+        captured[:allowed_tools] = kwargs.fetch(:allowed_tools)
+        captured[:strict] = kwargs.fetch(:strict_mcp_config)
+        { status: :complete }
+      end
+
+      failing = Object.new
+      failing.define_singleton_method(:write!) { raise Hive::ConfigError, "screenote credential missing access_token" }
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::Screenote::McpConfig, :new, ->(credential:) { failing }) do
+          with_env("HIVE_HOME" => File.join(dir, "home")) do
+            Hive::Stages::Artifacts.spawn_artifacts_agent(
+              task,
+              {},
+              "collect",
+              Hive::AgentProfiles.lookup(:claude),
+              screenote: connected_screenote_context
+            )
+          end
+        end
+      end
+
+      assert_match(/without Screenote upload/, err)
+      assert_nil captured[:path], "a ConfigError on write must skip injection, not crash"
+      refute_includes captured.fetch(:allowed_tools), "mcp__screenote__"
+      assert_equal false, captured.fetch(:strict)
+    ensure
+      Hive::Stages::Base.define_singleton_method(:spawn_claude_with_tmux_marker!, original) if original
+    end
+  end
+
+  def test_screenote_context_warns_why_upload_is_unavailable_on_a_skip_path
+    # The visible fail-soft: a disconnected/incomplete credential must `warn`
+    # the reason at run time so an operator sees WHY no upload happened, not
+    # just silently degrade.
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      store = Hive::Screenote::CredentialStore.new(path: File.join(dir, "screenote.json"))
+
+      _out, err = capture_io do
+        context = Hive::Stages::Artifacts.screenote_context({}, credential_store: store)
+        refute context[:connected]
+      end
+
+      assert_match(/Screenote upload disabled for artifacts/, err)
+      assert_match(/not connected/, err)
+    end
+  end
+
   def test_spawn_artifacts_agent_injects_and_removes_screenote_mcp_config_for_claude
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)

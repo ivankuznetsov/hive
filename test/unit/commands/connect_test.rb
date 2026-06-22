@@ -181,7 +181,7 @@ class ConnectCommandTest < Minitest::Test
           credential_store: store,
           oauth_client_factory: ->(_url) { oauth },
           loopback_factory: -> { FakeLoopback.new },
-          mcp_client_factory: ->(**) { FakeMcp.new([ { "project_id" => "proj_fallback", "name" => "" } ]) },
+          mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_fallback", "name" => "" } ]) },
           browser_opener: ->(_url) { false }
         ).call
       end
@@ -197,7 +197,7 @@ class ConnectCommandTest < Minitest::Test
         credential_store: store,
         oauth_client_factory: ->(_url) { oauth },
         loopback_factory: -> { FakeLoopback.new },
-        mcp_client_factory: ->(**) { FakeMcp.new([ { "project_id" => "proj_fallback", "name" => "" } ]) },
+        mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_fallback", "name" => "" } ]) },
         browser_opener: ->(_url) { false }
       ).call
       assert_equal "proj_fallback", store.load["project_id"]
@@ -514,6 +514,9 @@ class ConnectCommandTest < Minitest::Test
 
       assert_match(/omitted both expires_at and expires_in/, err.message)
       refute store.present?
+      # credential_payload raised INSIDE the revoke-protected region, so the
+      # freshly-minted bearer must be best-effort revoked, not abandoned live.
+      assert_equal [ "access-123" ], oauth.revoked_tokens.map { |entry| entry[:token] }
     end
   end
 
@@ -542,6 +545,171 @@ class ConnectCommandTest < Minitest::Test
       # A corrupt file did not register a client_id, so registration runs.
       refute_empty oauth.registered_redirects
       assert_equal "access-123", store.load["access_token"]
+    end
+  end
+
+  # Succeeds on the first `puts` (the authorize line) then raises Errno::EPIPE
+  # on every later one — mimicking `hive connect screenote --json | head -1`
+  # closing the pipe after the authorize line.
+  class PipeBreaksAfterFirstLine
+    attr_reader :string
+
+    def initialize
+      @count = 0
+      @string = +""
+    end
+
+    def puts(*args)
+      @count += 1
+      raise Errno::EPIPE, "Broken pipe" if @count > 1
+
+      @string << "#{args.join(" ")}\n"
+    end
+  end
+
+  def test_connect_does_not_revoke_a_saved_credential_when_the_success_line_pipe_breaks
+    # Regression: emit_success used to run inside the revoke-scoped region, so
+    # a closed stdout pipe (Errno::EPIPE from its puts) AFTER save revoked the
+    # persisted bearer, leaving screenote.json advertising a server-revoked
+    # token. The credential must stay connected and the bearer must NOT be
+    # revoked.
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = PipeBreaksAfterFirstLine.new
+
+      Hive::Commands::Connect.new(
+        "screenote",
+        base_url: "https://screenote.test",
+        json: true,
+        output: output,
+        credential_store: store,
+        oauth_client_factory: ->(_url) { oauth },
+        loopback_factory: -> { FakeLoopback.new },
+        mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_only", "name" => "Only" } ]) },
+        browser_opener: ->(_url) { false }
+      ).call
+
+      assert_equal "access-123", store.load["access_token"]
+      assert_empty oauth.revoked_tokens
+    end
+  end
+
+  def test_connect_maps_a_nonsave_oslevel_failure_to_a_typed_error_envelope
+    # A SystemCallError raised OUTSIDE the save path (here ENOSPC during
+    # discovery) is not a Hive::Error, so it would escape bin/hive as a raw
+    # backtrace; `call` maps it to a typed error and still emits an envelope.
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = Object.new
+      oauth.define_singleton_method(:discover) { raise Errno::ENOSPC, "no space left" }
+      output = StringIO.new
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          browser_opener: ->(_url) { false }
+        ).call
+      end
+
+      assert_match(/Screenote connect failed/, err.message)
+      assert_match(/no space left/, err.message)
+      envelope = JSON.parse(output.string.each_line.to_a.last)
+      assert_equal false, envelope["ok"]
+      assert_match(/Screenote connect failed/, envelope["message"])
+    end
+  end
+
+  def test_connect_json_needs_project_selection_carries_kind_exit_and_emits_one_failure
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+
+      assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) {
+            FakeMcp.new([ { "id" => "proj_one", "name" => "One" }, { "id" => "proj_two", "name" => "Two" } ])
+          },
+          browser_opener: ->(_url) { false }
+        ).call
+      end
+
+      lines = output.string.each_line.map { |line| JSON.parse(line) }
+      failures = lines.select { |line| line["ok"] == false }
+      # The @error_emitted guard must suppress a duplicate envelope from
+      # call's rescue: exactly one ok:false line.
+      assert_equal 1, failures.length
+      needs = failures.first
+      assert_equal "needs_project_selection", needs["stage"]
+      assert_equal "needs_selection", needs["error_kind"]
+      assert_equal Hive::ExitCodes::GENERIC, needs["exit_code"]
+    end
+  end
+
+  def test_connect_normalizes_an_epoch_expires_at_to_iso8601
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      # A server that returns expires_at as a Unix-epoch integer (a common
+      # OAuth shape) must be coerced to ISO8601 — storing the epoch verbatim
+      # made expired? read a fresh token as already-expired.
+      epoch = Time.utc(2027, 1, 1, 0, 0, 0).to_i
+      oauth = FakeOAuth.new(token: token_payload("expires_at" => epoch))
+
+      Hive::Commands::Connect.new(
+        "screenote",
+        base_url: "https://screenote.test",
+        output: StringIO.new,
+        credential_store: store,
+        oauth_client_factory: ->(_url) { oauth },
+        loopback_factory: -> { FakeLoopback.new },
+        mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_1", "name" => "One" } ]) },
+        browser_opener: ->(_url) { false },
+        project_picker: ->(projects) { projects.first }
+      ).call
+
+      assert_equal "2027-01-01T00:00:00Z", store.load["expires_at"]
+      refute store.expired?(now: Time.utc(2026, 1, 1, 0, 0, 0)),
+             "a normalized epoch expiry must parse, not read as already-expired"
+    end
+  end
+
+  def test_connect_raises_typed_error_on_an_unparseable_expires_at
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload("expires_at" => "not-a-timestamp"))
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          output: StringIO.new,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_1", "name" => "One" } ]) },
+          browser_opener: ->(_url) { false },
+          project_picker: ->(projects) { projects.first }
+        ).call
+      end
+
+      assert_match(/unparseable expires_at/, err.message)
+      refute store.present?
+      # Raised inside the revoke-protected region → bearer revoked, not left live.
+      assert_equal [ "access-123" ], oauth.revoked_tokens.map { |entry| entry[:token] }
     end
   end
 

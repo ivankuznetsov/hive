@@ -2,6 +2,7 @@ require "json"
 require "securerandom"
 require "time"
 require "hive/config"
+require "hive/commands/screenote_envelope"
 require "hive/screenote/credential_store"
 require "hive/screenote/loopback_server"
 require "hive/screenote/mcp_client"
@@ -49,9 +50,8 @@ module Hive
 
       def self.open_browser(url)
         browser = ENV["BROWSER"].to_s.strip
-        return system(browser, url, out: File::NULL, err: File::NULL) unless browser.empty?
-
-        system("xdg-open", url, out: File::NULL, err: File::NULL)
+        program = browser.empty? ? "xdg-open" : browser
+        system(program, url, out: File::NULL, err: File::NULL)
       end
 
       private
@@ -98,13 +98,27 @@ module Hive
         loopback.close if loopback.respond_to?(:close)
       end
 
-      # Everything after the token is minted. Any failure here (project
-      # listing, selection, payload build, or save) must best-effort revoke
-      # the freshly-issued bearer: otherwise the next connect re-registers
-      # (burning the 10/hr DCR limit) and the grant lingers server-side. An
-      # OS-level save failure is mapped to a typed error so bin/hive's rescue
-      # maps the exit code instead of printing a backtrace.
+      # Everything from minting the token through SAVING the credential
+      # (project listing, selection, payload build, save) must best-effort
+      # revoke the freshly-issued bearer on failure: otherwise the next connect
+      # re-registers (burning the 10/hr DCR limit) and the grant lingers
+      # server-side. An OS-level save failure is mapped to a typed error so
+      # bin/hive's rescue maps the exit code instead of printing a backtrace.
+      #
+      # `emit_success` runs AFTER the protected region returns — NOT inside it.
+      # Once `save` writes screenote.json the connection is real; a broken
+      # stdout pipe (`hive connect screenote --json | head -1` closes the pipe
+      # after the authorize line) makes `emit_success`'s puts raise
+      # Errno::EPIPE, and revoking from there would kill the persisted bearer,
+      # leaving screenote.json advertising a server-revoked token. `emit_success`
+      # additionally swallows a closed-pipe write so a successful save still
+      # exits cleanly.
       def finalize_connection(oauth, metadata, token, client_id, base_url)
+        project, credential = persist_connection(oauth, metadata, token, client_id, base_url)
+        emit_success(credential, project)
+      end
+
+      def persist_connection(oauth, metadata, token, client_id, base_url)
         projects = @mcp_client_factory.call(
           resource: metadata.mcp_resource, access_token: token.fetch("access_token")
         ).list_projects
@@ -112,7 +126,7 @@ module Hive
         credential = credential_payload(token, metadata: metadata, client_id: client_id,
                                         project: project, base_url: base_url)
         save_credential(credential)
-        emit_success(credential, project)
+        [ project, credential ]
       rescue StandardError
         best_effort_revoke(oauth, metadata, token, client_id)
         raise
@@ -137,14 +151,7 @@ module Hive
         return if @error_emitted
 
         @error_emitted = true
-        @output.puts JSON.generate(
-          "ok" => false,
-          "service" => "screenote",
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        )
+        @output.puts JSON.generate(Hive::Commands::ScreenoteEnvelope.error_payload(error))
       rescue Errno::EPIPE, JSON::GeneratorError
         @error_emitted = true
       end
@@ -209,10 +216,18 @@ module Hive
 
       def raise_needs_project_selection(projects)
         @error_emitted = true
+        # Carry the same `error_kind`/`exit_code` fields every other
+        # `{"ok":false}` line does so automation can branch uniformly: a
+        # distinct `needs_selection` kind tells "re-run with a project
+        # selection" apart from an unrecoverable auth/network failure, and the
+        # exit_code matches the GENERIC code bin/hive maps the raised
+        # Hive::Error to below.
         @output.puts JSON.generate(
           "ok" => false,
           "service" => "screenote",
           "stage" => "needs_project_selection",
+          "error_kind" => "needs_selection",
+          "exit_code" => Hive::ExitCodes::GENERIC,
           "projects" => projects.map { |p| { "id" => project_id(p), "name" => project_display_name(p) } }
         )
         raise Hive::Error,
@@ -241,7 +256,7 @@ module Hive
       end
 
       def credential_payload(token, metadata:, client_id:, project:, base_url:)
-        expires_at = token["expires_at"] || computed_expires_at(token)
+        expires_at = normalized_expires_at(token)
         credential = {
           "access_token" => token.fetch("access_token"),
           "expires_at" => expires_at,
@@ -257,10 +272,25 @@ module Hive
         credential
       end
 
-      # Derive expires_at from expires_in when the endpoint omits the
-      # absolute timestamp. A non-conformant token response that supplies
-      # neither used to crash `connect` with a bare KeyError from
-      # `token.fetch("expires_in")`; raise a typed Hive::Error instead.
+      # Both the absolute (`expires_at`) and relative (`expires_in`) branches
+      # funnel through here so the STORED value is always a guaranteed ISO8601
+      # string. The server's raw `expires_at` was previously stored verbatim;
+      # if Screenote ever returns it as a Unix-epoch number (a common OAuth
+      # shape) `CredentialStore#expired?` would `Time.parse` it, raise
+      # ArgumentError, rescue to `true`, and read a fresh token as already
+      # expired — silently disabling Screenote uploads. Coerce every shape to
+      # ISO8601 here instead.
+      def normalized_expires_at(token)
+        raw = token["expires_at"]
+        return computed_expires_at(token) if raw.nil? || (raw.is_a?(String) && raw.strip.empty?)
+
+        to_iso8601(raw)
+      end
+
+      # Derive expires_at from expires_in when the endpoint omits the absolute
+      # timestamp. A non-conformant token response that supplies neither used
+      # to crash `connect` with a bare KeyError from `token.fetch("expires_in")`;
+      # raise a typed Hive::Error instead.
       def computed_expires_at(token)
         expires_in = token["expires_in"]
         if expires_in.nil?
@@ -268,6 +298,22 @@ module Hive
         end
 
         (@clock.call + expires_in.to_i).utc.iso8601
+      end
+
+      # Coerce a server-provided absolute expiry to ISO8601. Accepts an
+      # ISO8601 string, a Unix-epoch number, or an all-digits epoch string;
+      # an unparseable value raises a typed Hive::Error (which triggers the
+      # best-effort revoke) rather than being persisted as a never-parses
+      # timestamp.
+      def to_iso8601(raw)
+        return Time.at(raw).utc.iso8601 if raw.is_a?(Numeric)
+
+        text = raw.to_s.strip
+        return Time.at(text.to_i).utc.iso8601 if text.match?(/\A\d+\z/)
+
+        Time.parse(text).utc.iso8601
+      rescue ArgumentError
+        raise Hive::Error, "Screenote token response had an unparseable expires_at: #{raw.inspect}"
       end
 
       def emit_success(credential, project)
@@ -284,11 +330,19 @@ module Hive
         else
           @output.puts "Connected Screenote project #{project_label(project)}."
         end
+      rescue Errno::EPIPE, IOError, JSON::GeneratorError
+        # The credential is already on disk (save ran before this). A closed
+        # stdout pipe (`hive connect screenote --json | head -1`) must not turn
+        # a real, persisted connection into a failure — and must NOT reach the
+        # finalize revoke path, which would kill the saved bearer. Swallow the
+        # cosmetic success-line write failure.
+        nil
       end
 
+      # McpClient#list_projects normalizes raw Screenote projects to a stable
+      # `{"id","name"}` shape, so the id lives under one key here.
       def project_id(project)
-        id = project["id"].to_s
-        id.empty? ? project["project_id"].to_s : id
+        project["id"].to_s
       end
 
       def project_display_name(project)

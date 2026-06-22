@@ -54,7 +54,7 @@ class DisconnectCommandTest < Minitest::Test
       Hive::Commands::Disconnect.new("screenote", json: true, output: output, credential_store: store_in(dir)).call
 
       assert_equal({ "ok" => true, "service" => "screenote", "disconnected" => false,
-                     "reason" => "not_connected" }, JSON.parse(output.string))
+                     "revoked" => false, "reason" => "not_connected" }, JSON.parse(output.string))
     end
   end
 
@@ -238,5 +238,30 @@ class DisconnectCommandTest < Minitest::Test
     err = assert_raises(Hive::Error) { Hive::Commands::Disconnect.new("github", output: StringIO.new).call }
 
     assert_match(/unsupported disconnect service/, err.message)
+  end
+
+  def test_disconnect_maps_oslevel_clear_failure_to_typed_error_envelope
+    # An OS-level failure clearing the credential (e.g. a read-only FS) is not
+    # a Hive::Error, so it would escape bin/hive as a raw backtrace; `call`
+    # maps it to a typed error and emits an envelope under --json.
+    with_tmp_dir do |dir|
+      path = File.join(dir, "screenote.json")
+      store = Object.new
+      store.define_singleton_method(:load) { { "client_id" => "client-123" } }
+      store.define_singleton_method(:present?) { true }
+      store.define_singleton_method(:path) { path }
+      store.define_singleton_method(:clear) { raise Errno::EROFS, "read-only file system" }
+      output = StringIO.new
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Disconnect.new("screenote", json: true, output: output, credential_store: store).call
+      end
+
+      assert_match(/Screenote disconnect failed/, err.message)
+      assert_match(/read-only file system/, err.message)
+      payload = JSON.parse(output.string)
+      assert_equal false, payload["ok"]
+      assert_match(/Screenote disconnect failed/, payload["message"])
+    end
   end
 end

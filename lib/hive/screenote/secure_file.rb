@@ -20,6 +20,15 @@ module Hive
         File.write(path, "#{JSON.pretty_generate(data)}\n", mode: "w", perm: 0o600)
         File.chmod(0o600, path)
         path
+      rescue StandardError
+        # The file is already created (it holds the secret — a bearer token or
+        # OAuth credential) by the time chmod runs. If chmod (or any step after
+        # create) raises, write_json never returns the path, so the caller
+        # can't clean up a file it never learned about — orphaning a 0600
+        # secret on disk. Unlink the partial file before re-raising so the
+        # secret never lingers; the caller still sees the original failure.
+        FileUtils.rm_f(path)
+        raise
       end
     end
   end

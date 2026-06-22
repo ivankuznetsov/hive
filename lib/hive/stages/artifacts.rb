@@ -24,7 +24,11 @@ module Hive
         { commit: action_for(marker.name), status: marker.name }
       end
 
-      def spawn_artifacts_agent(task, cfg, prompt, profile, screenote: screenote_context(cfg))
+      # `screenote:` is required (no `screenote_context(cfg)` default): the
+      # default ran a real CredentialStore.new.load against the dev machine for
+      # any caller that omitted it, coupling tests to ambient disk state. The
+      # sole production caller (run!) always passes it.
+      def spawn_artifacts_agent(task, cfg, prompt, profile, screenote:)
         cwd = File.directory?(task.worktree_path.to_s) ? task.worktree_path : task.folder
         kwargs = {
           prompt: prompt,
@@ -79,7 +83,7 @@ module Hive
       end
 
       def render_prompt(task, screenote: nil)
-        screenote ||= disconnected("Screenote is not connected; run `hive connect screenote`.", {})
+        screenote ||= build_unavailable_context("Screenote is not connected; run `hive connect screenote`.", {})
         Hive::Stages::Base.render(
           "artifacts_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -98,18 +102,20 @@ module Hive
 
       def screenote_context(cfg, credential_store: Hive::Screenote::CredentialStore.new, now: Time.now)
         credential = credential_store.load
-        return disabled("Screenote is not connected; run `hive connect screenote`.", cfg) unless credential
+        return warn_and_build_unavailable("Screenote is not connected; run `hive connect screenote`.", cfg) unless credential
 
         if credential_store.expired?(credential, now: now)
-          return disabled("Screenote OAuth token expired; run `hive connect screenote`.", cfg)
+          return warn_and_build_unavailable("Screenote OAuth token expired; run `hive connect screenote`.", cfg)
         end
 
         project_id = cfg.dig("screenote", "project_id").to_s.strip
         project_id = credential["project_id"].to_s.strip if project_id.empty?
-        return disabled("Screenote has no default project; run `hive connect screenote`.", cfg) if project_id.empty?
+        if project_id.empty?
+          return warn_and_build_unavailable("Screenote has no default project; run `hive connect screenote`.", cfg)
+        end
 
         if credential["access_token"].to_s.strip.empty? || credential["mcp_resource"].to_s.strip.empty?
-          return disabled("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
+          return warn_and_build_unavailable("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
         end
 
         {
@@ -120,26 +126,27 @@ module Hive
           reason: nil
         }
       rescue Hive::ConfigError => e
-        disabled("Screenote credential is invalid: #{e.message}", cfg)
+        warn_and_build_unavailable("Screenote credential is invalid: #{e.message}", cfg)
       rescue SystemCallError => e
         # A8 fail-soft: a read failure on the credential file (EACCES /
         # EISDIR / a TOCTOU ENOENT) must skip Screenote, not hard-fail the
         # 7-artifacts stage. CredentialStore#load only rescues JSON errors,
         # so an OS-level File.read failure escapes here as SystemCallError.
-        disabled("Screenote credential could not be read: #{e.message}", cfg)
+        warn_and_build_unavailable("Screenote credential could not be read: #{e.message}", cfg)
       end
 
       # Visible fail-soft: warn at run time so an operator watching the run
       # sees WHY no upload happened (the cause was otherwise buried only in
-      # the prompt/manifest), then return the disconnected context. Used by
-      # screenote_context's skip paths; `disconnected` stays the silent
-      # builder for render_prompt's default binding.
-      def disabled(reason, cfg)
+      # the prompt/manifest), then return the unavailable context. Used by
+      # screenote_context's skip paths; `build_unavailable_context` stays the
+      # silent builder for render_prompt's default binding (which deliberately
+      # skips the warn).
+      def warn_and_build_unavailable(reason, cfg)
         warn "[hive] Screenote upload disabled for artifacts: #{reason}"
-        disconnected(reason, cfg)
+        build_unavailable_context(reason, cfg)
       end
 
-      def disconnected(reason, cfg)
+      def build_unavailable_context(reason, cfg)
         {
           connected: false,
           credential: nil,

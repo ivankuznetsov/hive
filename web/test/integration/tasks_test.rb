@@ -586,15 +586,14 @@ class TasksTest < ActionDispatch::IntegrationTest
           "file" => "01-home.png",
           "type" => "still",
           "caption" => "Home page after load",
-          "push_to_screenote" => true,
           "screenote_url" => "https://screenote.test/shot"
         },
         {
           "file" => "demo.gif",
           "type" => "gif",
           "caption" => "Dark mode toggle",
-          "push_to_screenote" => false,
-          "screenote_url" => nil
+          "screenote_url" => nil,
+          "screenote_skipped_reason" => "Screenote is not connected; run `hive connect screenote`."
         }
       ]
     })

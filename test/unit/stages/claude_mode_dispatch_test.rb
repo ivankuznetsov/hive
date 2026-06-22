@@ -191,7 +191,8 @@ class ClaudeModeDispatchTest < Minitest::Test
       task.define_singleton_method(:worktree_path) { worktree_path }
 
       with_spawn_capture do |captured|
-        Hive::Stages::Artifacts.spawn_artifacts_agent(task, cfg, "prompt", claude_profile(cfg))
+        Hive::Stages::Artifacts.spawn_artifacts_agent(task, cfg, "prompt", claude_profile(cfg),
+                                                      screenote: { connected: false })
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
         assert_equal "hive-7-artifacts-dispatch-test", captured[0][:kwargs][:session_name]

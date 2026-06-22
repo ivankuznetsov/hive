@@ -31,6 +31,14 @@ class ScreenoteOAuthClientTest < Minitest::Test
     def start(*) = raise Net::OpenTimeout, "execution expired"
   end
 
+  class SslErrorHttp
+    def start(*) = raise OpenSSL::SSL::SSLError, "certificate verify failed"
+  end
+
+  class WriteTimeoutHttp
+    def start(*) = raise Net::WriteTimeout, "write timed out"
+  end
+
   def self.http_response(klass, code, message, body)
     response = klass.new("1.1", code, message)
     response.instance_variable_set(:@read, true)
@@ -230,5 +238,27 @@ class ScreenoteOAuthClientTest < Minitest::Test
     client = Hive::Screenote::OAuthClient.new(base_url: "https://screenote.test", http: TimeoutHttp.new)
     err = assert_raises(Hive::Error) { client.discover }
     assert_match(/could not reach Screenote/, err.message)
+  end
+
+  def test_tls_and_write_timeout_transport_failures_map_to_hive_error
+    # OpenSSL::SSL::SSLError (TLS/cert failure on the https endpoints) and
+    # Net::WriteTimeout (a stalled POST-body write; Timeout::Error <
+    # RuntimeError, NOT a SystemCallError) must both surface as the friendly
+    # "could not reach Screenote" rather than an unmapped backtrace.
+    client = Hive::Screenote::OAuthClient.new(base_url: "https://screenote.test", http: SslErrorHttp.new)
+    assert_match(/could not reach Screenote/, assert_raises(Hive::Error) { client.discover }.message)
+
+    client = Hive::Screenote::OAuthClient.new(base_url: "https://screenote.test", http: WriteTimeoutHttp.new)
+    assert_match(/could not reach Screenote/, assert_raises(Hive::Error) { client.discover }.message)
+  end
+
+  def test_discovery_from_endpoints_rejects_incomplete_metadata
+    # keyword_init only rejects unknown keys; the factory enforces the value
+    # type's invariant so a Discovery can't be built with a nil endpoint that
+    # would later blow up URI(...) or the stored mcp_resource.
+    err = assert_raises(Hive::Error) do
+      Hive::Screenote::OAuthClient::Discovery.from_endpoints(issuer: "https://screenote.test")
+    end
+    assert_match(/missing/, err.message)
   end
 end

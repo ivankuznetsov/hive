@@ -223,7 +223,9 @@ module Hive
       Discovers Screenote OAuth/MCP metadata, opens an authorize URL in the
       browser via a loopback redirect + PKCE, lists Screenote projects over
       MCP, prompts for a default project, and stores the credential at
-      `~/.config/hive/screenote.json` (mode 0600).
+      `~/.config/hive/screenote.json` (mode 0600). The loopback waits up to
+      300s for the browser callback before timing out, so an automated driver
+      should set an outer deadline above that.
 
       --base-url overrides the resolved Screenote base URL (config /
       HIVE_SCREENOTE_BASE_URL / default https://screenote.ai).
@@ -231,7 +233,11 @@ module Hive
       --json streams structured lines: an `authorize` line carrying the
       `authorize_url` (the fallback when the browser cannot auto-open),
       followed by a success document with `issuer`, `client_id`,
-      `project_id`, `base_url`, and `credential_path`.
+      `project_id`, `base_url`, and `credential_path`. A lone project is
+      auto-selected; when several projects exist and no default can be chosen
+      non-interactively, connect instead emits a `{ "ok": false, "stage":
+      "needs_project_selection", "projects": [...] }` line and exits non-zero
+      — re-run connect interactively (without --json) to pick the default.
     DESC
     option :base_url, type: :string, desc: "Screenote base URL (defaults to config or https://screenote.ai)"
     def connect(service)

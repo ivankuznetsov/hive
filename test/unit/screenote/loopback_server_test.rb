@@ -75,6 +75,40 @@ class ScreenoteLoopbackServerTest < Minitest::Test
     assert_includes response, "Screenote connected"
   end
 
+  def test_wait_for_callback_ignores_an_empty_first_request_line_and_keeps_waiting
+    # An empty/EOF first request line (a bare connect-then-close) must 404 and
+    # keep waiting, not consume the one real redirect.
+    server = Hive::Screenote::LoopbackServer.new
+    waiter = wait_for(server)
+
+    TCPSocket.new(server.host, server.port).close
+
+    response = raw_get(server, "/callback?code=code-123&state=state-123")
+    result = waiter.value
+
+    assert_equal({ "code" => "code-123", "state" => "state-123" }, result)
+    assert_includes response, "Screenote connected"
+  end
+
+  def test_wait_for_callback_tolerates_a_malformed_request_target_and_keeps_waiting
+    # A junk local request with an invalid percent-escape raises
+    # URI::InvalidURIError inside read_callback_request — neither Hive::Error
+    # nor SystemCallError — which used to escape connect as a raw backtrace.
+    # It must 404 and keep waiting for the real redirect instead.
+    server = Hive::Screenote::LoopbackServer.new
+    waiter = wait_for(server)
+
+    malformed = raw_get(server, "/callback?code=%ZZ&state=state-123")
+    assert_includes malformed, "404 Not Found"
+    refute_includes malformed, "Screenote connected"
+
+    response = raw_get(server, "/callback?code=code-123&state=state-123")
+    result = waiter.value
+
+    assert_equal({ "code" => "code-123", "state" => "state-123" }, result)
+    assert_includes response, "Screenote connected"
+  end
+
   def test_wait_for_callback_rejects_oversized_request_headers
     server = Hive::Screenote::LoopbackServer.new
     waiter = wait_for(server)

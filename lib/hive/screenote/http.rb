@@ -21,10 +21,14 @@ module Hive
       # plus ETIMEDOUT/ENETUNREACH/EPIPE, which OS-level TCP failures raise.
       # OpenSSL::SSL::SSLError covers TLS/cert failures on the https
       # endpoints (Screenote is the first user-configured external HTTPS
-      # service, so these became reachable). SocketError and IOError are not
-      # SystemCallError subclasses, so they stay listed explicitly.
+      # service, so these became reachable). Net::WriteTimeout is a
+      # Timeout::Error < RuntimeError (NOT a SystemCallError) and write_timeout
+      # is left at Net::HTTP's 60s default, so a stalled POST-body write would
+      # otherwise escape as an unmapped RuntimeError backtrace. SocketError and
+      # IOError are not SystemCallError subclasses, so they stay listed
+      # explicitly.
       NETWORK_ERRORS = [
-        Net::OpenTimeout, Net::ReadTimeout, SocketError,
+        Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout, SocketError,
         OpenSSL::SSL::SSLError, SystemCallError, IOError
       ].freeze
 

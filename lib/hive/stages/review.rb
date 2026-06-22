@@ -158,6 +158,7 @@ module Hive
 
         ops = Hive::GitOps.new(worktree_path)
         default_branch = reviewer_compare_ref(cfg, ops)
+        reviewer_compare_base_sha = reviewer_compare_base_sha(ops, default_branch)
 
         ctx = Hive::Stages::Review::Context.new(
           worktree_path: worktree_path,
@@ -384,6 +385,13 @@ module Hive
             end
 
             if triage_enabled?(cfg)
+              stripped = Hive::Stages::Review::Suppression.strip_suppressed!(
+                cfg: cfg,
+                ctx: ctx_pass,
+                base_sha: reviewer_compare_base_sha
+              )
+              warn "[hive.review] suppressed #{stripped} no-fix finding(s) before triage for pass #{format('%02d', pass)}" if stripped.positive?
+
               @current_phase = :triage
               triage_result = run_triage_with_retries(
                 cfg, ctx_pass, task, pass: pass,
@@ -724,6 +732,18 @@ module Hive
 
         warn "[hive] origin/#{branch} not found in worktree; reviewers will compare against local #{branch} (diffs may be stale)"
         branch
+      end
+
+      def reviewer_compare_base_sha(ops, ref)
+        out, err, status = Open3.capture3(
+          "git", "-C", ops.project_root,
+          "rev-parse", "--verify", "#{ref}^{commit}"
+        )
+        return out.strip if status.success?
+
+        warn "[hive.review] compare ref #{ref.inspect} did not resolve for suppression binding; " \
+             "falling back to worktree HEAD (#{(err.strip.empty? ? out : err).strip})"
+        ops.head_sha
       end
 
       def mark_working(task, phase:, pass:)
@@ -1467,7 +1487,7 @@ module Hive
 
       def auto_fix_finding_line?(line)
         return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX)\b/i
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
 
         true
       end

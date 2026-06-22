@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/stages/review"
 require "hive/stages/review/suppression"
 require "hive/stages/review/context"
 
@@ -21,6 +22,19 @@ class ReviewSuppressionTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "reviews"))
       yield make_ctx(dir)
+    end
+  end
+
+  def default_cfg(overrides = {})
+    deep_merge_for_test(
+      { "review" => { "triage" => { "enabled" => true } } },
+      overrides
+    )
+  end
+
+  def deep_merge_for_test(base, over)
+    base.merge(over) do |_key, b, o|
+      b.is_a?(Hash) && o.is_a?(Hash) ? deep_merge_for_test(b, o) : o
     end
   end
 
@@ -136,6 +150,62 @@ class ReviewSuppressionTest < Minitest::Test
       assert_includes content, "## High - prominent active suppressions"
       assert_equal 1, content.scan("leaks stale state").size
       assert_match(/- \[x\] High: lib\/foo\.rb:12 leaks stale state <!-- fp=[0-9a-f]{16} first-pass=01 -->/, content)
+    end
+  end
+
+  def test_strip_suppressed_rewrites_matching_unchecked_reviewer_line
+    with_suppression_task do |ctx|
+      Suppression.append_entries!(ctx, "abc123", [
+        Entry.new(
+          key: nil,
+          severity: "high",
+          text: "lib/foo.rb:12 leaks stale state: triage said no fix",
+          first_pass: 1,
+          active: true
+        )
+      ])
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, "## High\n- [ ] lib/foo.rb:88 leaks stale state: re-emitted\n")
+
+      assert_equal 1, Suppression.strip_suppressed!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+
+      content = File.read(reviewer)
+      assert_includes content, "- [x] SUPPRESSED: lib/foo.rb:88 leaks stale state: re-emitted"
+      refute Hive::Stages::Review.auto_fix_finding_line?(content.lines.last)
+    end
+  end
+
+  def test_strip_suppressed_leaves_unmatched_line_untouched
+    with_suppression_task do |ctx|
+      Suppression.append_entries!(ctx, "abc123", [
+        Entry.new(key: nil, severity: "high", text: "lib/foo.rb leaks stale state", first_pass: 1, active: true)
+      ])
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      original = "## High\n- [ ] lib/foo.rb drops retry state\n"
+      File.write(reviewer, original)
+
+      assert_equal 0, Suppression.strip_suppressed!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      assert_equal original, File.read(reviewer)
+    end
+  end
+
+  def test_strip_suppressed_disabled_by_config_is_noop
+    with_suppression_task do |ctx|
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      original = "## High\n- [ ] lib/foo.rb leaks stale state\n"
+      File.write(reviewer, original)
+      cfg = default_cfg("review" => { "triage" => { "suppress_no_fix" => false } })
+
+      assert_equal 0, Suppression.strip_suppressed!(cfg: cfg, ctx: ctx, base_sha: "abc123")
+      assert_equal original, File.read(reviewer)
+      refute File.exist?(Suppression.suppressed_path(ctx))
+    end
+  end
+
+  def test_strip_suppressed_empty_reviewer_files_is_noop_without_writing_suppressed_doc
+    with_suppression_task do |ctx|
+      assert_equal 0, Suppression.strip_suppressed!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      refute File.exist?(Suppression.suppressed_path(ctx))
     end
   end
 end

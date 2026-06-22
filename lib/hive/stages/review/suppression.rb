@@ -13,6 +13,7 @@ module Hive
         VERSION = "v1".freeze
         HEADER_RE = /\A<!--\s+HIVE-SUPPRESS\s+v1\s+base=([^ ]+)\s+-->\s*\z/.freeze
         CHECKBOX_LINE_RE = /\A\s*-\s+\[([ xX])\]\s+(.*?)(?:\s*<!--(.*?)-->)?\s*\z/.freeze
+        UNCHECKED_LINE_RE = /\A(\s*)-\s+\[\s*\]\s+(.*?)(\r?\n?)\z/.freeze
         SECTION_RE = /\A##\s+(.+?)\s*\z/.freeze
         FP_RE = /\bfp=([0-9a-f]{16})\b/i.freeze
         FIRST_PASS_RE = /\bfirst-pass=(\d+)\b/.freeze
@@ -64,7 +65,11 @@ module Hive
         end
 
         def read_active_keys(ctx)
-          read_entries(suppressed_path(ctx)).select(&:active).map(&:key).to_set
+          read_active_entries(ctx).keys.to_set
+        end
+
+        def read_active_entries(ctx)
+          read_entries(suppressed_path(ctx)).select(&:active).to_h { |entry| [ entry.key, entry ] }
         end
 
         def reset_if_base_changed!(ctx, base_sha)
@@ -96,6 +101,21 @@ module Hive
           additions.size
         end
 
+        def strip_suppressed!(cfg:, ctx:, base_sha:)
+          return 0 unless enabled?(cfg)
+
+          reviewer_files = Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+          return 0 if reviewer_files.empty?
+
+          reset_if_base_changed!(ctx, base_sha)
+          active_entries = read_active_entries(ctx)
+          return 0 if active_entries.empty?
+
+          reviewer_files.sum do |path|
+            strip_file!(path, active_entries, ctx.pass)
+          end
+        end
+
         def clean_finding_text(text)
           cleaned = text.to_s.strip
           cleaned = cleaned.sub(/\A\s*-\s+\[[ xX]\]\s+/, "")
@@ -116,6 +136,11 @@ module Hive
         def normalize_severity(severity)
           value = severity.to_s.downcase.strip
           value.empty? ? "unknown" : value
+        end
+
+        def enabled?(cfg)
+          cfg.dig("review", "triage", "enabled") != false &&
+            cfg.dig("review", "triage", "suppress_no_fix") != false
         end
 
         def recorded_base(path)
@@ -166,6 +191,49 @@ module Hive
           key = comment[FP_RE, 1] || key_for(text, severity: severity)
           first_pass = comment[FIRST_PASS_RE, 1]&.to_i
           Entry.new(key: key, severity: severity, text: text, first_pass: first_pass, active: active)
+        end
+
+        def strip_file!(path, active_entries, pass)
+          lines = File.readlines(path)
+          current_severity = nil
+          in_fence = false
+          changed = false
+          stripped = 0
+
+          lines.map! do |line|
+            in_fence = !in_fence if Hive::Findings::FENCE_RE.match?(line)
+            if !in_fence && (section = parse_section(line))
+              current_severity = section
+              next line
+            end
+
+            rewritten = suppressed_line(line, current_severity, active_entries, pass, in_fence)
+            if rewritten
+              changed = true
+              stripped += 1
+              rewritten
+            else
+              line
+            end
+          end
+
+          write_atomic(path, lines.join) if changed
+          stripped
+        end
+
+        def suppressed_line(line, current_severity, active_entries, pass, in_fence)
+          return nil if in_fence
+
+          match = UNCHECKED_LINE_RE.match(line)
+          return nil unless match
+
+          original = match[2].strip
+          key = key_for(original, severity: current_severity)
+          entry = active_entries[key]
+          return nil unless entry
+
+          first_pass = entry.first_pass || pass
+          "#{match[1]}- [x] SUPPRESSED: #{original} <!-- suppressed: fp=#{key} first-pass=#{format('%02d', first_pass)} -->#{match[3]}"
         end
 
         def split_entry_severity(visible, fallback)

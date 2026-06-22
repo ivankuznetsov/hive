@@ -138,9 +138,12 @@ module Hive
         # No origin remote, so the requested stacked base can't be fetched.
         # Warn like the sibling branches below so a dropped stack request is
         # observable instead of silently collapsing onto the default.
-        warn "[hive] worktree base: no origin remote; cannot stack on #{branch}, " \
-             "falling back to the default branch base (origin/#{default_branch} when reachable)"
-        return freshest_base(default_branch)
+        return override_local_or_default(
+          branch,
+          default_branch,
+          "no origin remote; cannot stack on #{branch}, " \
+          "falling back to the default branch base (origin/#{default_branch} when reachable)"
+        )
       end
 
       # The fallbacks below call freshest_base, which returns
@@ -149,16 +152,21 @@ module Hive
       # base rather than a specific ref.
       _, err, status = self.class.fetch_origin_branch(@project_root, branch)
       unless status.success?
-        warn "[hive] worktree base: fetch origin #{branch} failed " \
-             "(#{err.strip[0, 200]}); falling back to the default branch base " \
-             "(origin/#{default_branch} when reachable)"
-        return freshest_base(default_branch)
+        return override_local_or_default(
+          branch,
+          default_branch,
+          "fetch origin #{branch} failed (#{err.strip[0, 200]}); " \
+          "falling back to the default branch base (origin/#{default_branch} when reachable)"
+        )
       end
 
       unless self.class.origin_branch_ref_exists?(@project_root, branch)
-        warn "[hive] worktree base: origin/#{branch} not found after fetch; " \
-             "falling back to the default branch base (origin/#{default_branch} when reachable)"
-        return freshest_base(default_branch)
+        return override_local_or_default(
+          branch,
+          default_branch,
+          "origin/#{branch} not found after fetch; " \
+          "falling back to the default branch base (origin/#{default_branch} when reachable)"
+        )
       end
 
       "origin/#{branch}"
@@ -264,6 +272,16 @@ module Hive
       status.success?
     end
 
+    def self.local_branch_ref_exists?(project_root, branch_name)
+      branch = branch_name.to_s.strip
+      return false if branch.empty?
+
+      _, _, status = Open3.capture3("git", "-C", project_root,
+                                    "rev-parse", "--verify", "--quiet",
+                                    "refs/heads/#{branch}")
+      status.success?
+    end
+
     # Resolve symlinks before the prefix check — File.expand_path normalises
     # `..` and `~` lexically but does not follow symlinks. An agent that
     # writes a symlink at the worktree path could otherwise escape the root.
@@ -300,6 +318,16 @@ module Hive
       detail = err.strip.empty? ? out.strip : err.strip
       raise WorktreeError,
             "cannot re-point empty placeholder branch #{branch_name}: git branch -D failed: #{detail}"
+    end
+
+    def override_local_or_default(branch, default_branch, no_local_warn)
+      if self.class.local_branch_ref_exists?(@project_root, branch)
+        warn "[hive] worktree base: origin/#{branch} unavailable; stacking on local #{branch}"
+        return branch
+      end
+
+      warn "[hive] worktree base: #{no_local_warn}"
+      freshest_base(default_branch)
     end
   end
 end

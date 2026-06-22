@@ -23,6 +23,12 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.capability
   end
 
+  def test_known_kinds_include_coding_runtime_primitives
+    assert_includes Hive::Workflow::KNOWN_KINDS, :execute
+    assert_includes Hive::Workflow::KNOWN_KINDS, :"review-council"
+    assert_includes Hive::Workflow::KNOWN_KINDS, :finalize
+  end
+
   def test_stage_carries_user_descriptor_instruction_and_permissions
     stage = Hive::Workflow::Stage.new(
       name: "work",

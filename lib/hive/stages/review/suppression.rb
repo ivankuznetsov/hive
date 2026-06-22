@@ -14,6 +14,7 @@ module Hive
         HEADER_RE = /\A<!--\s+HIVE-SUPPRESS\s+v1\s+base=([^ ]+)\s+-->\s*\z/.freeze
         CHECKBOX_LINE_RE = /\A\s*-\s+\[([ xX])\]\s+(.*?)(?:\s*<!--(.*?)-->)?\s*\z/.freeze
         UNCHECKED_LINE_RE = /\A(\s*)-\s+\[\s*\]\s+(.*?)(\r?\n?)\z/.freeze
+        RESOLVED_NO_FIX_LINE_RE = /\A\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:\s+(.*?)(?:\r?\n)?\z/i.freeze
         SECTION_RE = /\A##\s+(.+?)\s*\z/.freeze
         FP_RE = /\bfp=([0-9a-f]{16})\b/i.freeze
         FIRST_PASS_RE = /\bfirst-pass=(\d+)\b/.freeze
@@ -114,6 +115,16 @@ module Hive
           reviewer_files.sum do |path|
             strip_file!(path, active_entries, ctx.pass)
           end
+        end
+
+        def seed_from_triage!(cfg:, ctx:, base_sha:)
+          return 0 unless enabled?(cfg)
+
+          reviewer_files = Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+          entries = reviewer_files.flat_map { |path| no_fix_entries(path, ctx.pass) }
+          return 0 if entries.empty?
+
+          append_entries!(ctx, base_sha, entries)
         end
 
         def clean_finding_text(text)
@@ -234,6 +245,32 @@ module Hive
 
           first_pass = entry.first_pass || pass
           "#{match[1]}- [x] SUPPRESSED: #{original} <!-- suppressed: fp=#{key} first-pass=#{format('%02d', first_pass)} -->#{match[3]}"
+        end
+
+        def no_fix_entries(path, pass)
+          current_severity = nil
+          in_fence = false
+          File.readlines(path).filter_map do |line|
+            in_fence = !in_fence if Hive::Findings::FENCE_RE.match?(line)
+            if !in_fence && (section = parse_section(line))
+              current_severity = section
+              next nil
+            end
+            next nil if in_fence
+
+            match = RESOLVED_NO_FIX_LINE_RE.match(line)
+            next nil unless match
+
+            text = clean_finding_text(match[1])
+            severity = normalize_severity(current_severity)
+            Entry.new(
+              key: key_for(text, severity: severity),
+              severity: severity,
+              text: text,
+              first_pass: pass,
+              active: true
+            )
+          end
         end
 
         def split_entry_severity(visible, fallback)

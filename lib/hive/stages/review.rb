@@ -417,6 +417,12 @@ module Hive
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
                          status: :review_error }
               end
+              seeded = Hive::Stages::Review::Suppression.seed_from_triage!(
+                cfg: cfg,
+                ctx: ctx_pass,
+                base_sha: reviewer_compare_base_sha
+              )
+              warn "[hive.review] seeded #{seeded} no-fix suppression(s) from triage for pass #{format('%02d', pass)}" if seeded.positive?
             else
               write_manual_escalations(ctx_pass)
             end

@@ -208,4 +208,53 @@ class ReviewSuppressionTest < Minitest::Test
       refute File.exist?(Suppression.suppressed_path(ctx))
     end
   end
+
+  def test_seed_from_triage_records_high_resolved_no_fix
+    with_suppression_task do |ctx|
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, "## High\n- [x] RESOLVED/NO-FIX: lib/foo.rb:12 leaks stale state: accepted risk\n")
+
+      assert_equal 1, Suppression.seed_from_triage!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+
+      content = File.read(Suppression.suppressed_path(ctx))
+      assert_includes content, "## High - prominent active suppressions"
+      assert_match(/- \[x\] High: lib\/foo\.rb:12 leaks stale state: accepted risk <!-- fp=[0-9a-f]{16} first-pass=01 -->/, content)
+    end
+  end
+
+  def test_seed_from_triage_ignores_auto_fix_lines
+    with_suppression_task do |ctx|
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, "## High\n- [x] AUTO-FIX: lib/foo.rb leaks stale state\n")
+
+      assert_equal 0, Suppression.seed_from_triage!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      refute File.exist?(Suppression.suppressed_path(ctx))
+    end
+  end
+
+  def test_seed_from_triage_dedups_repeated_no_fix_lines
+    with_suppression_task do |ctx|
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, <<~MD)
+        ## Medium
+        - [x] RESOLVED/NO-FIX: lib/foo.rb:12 leaks stale state: first
+        - [x] RESOLVED/NO-FIX: lib/foo.rb:44 leaks stale state: second
+      MD
+
+      assert_equal 1, Suppression.seed_from_triage!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      assert_equal 0, Suppression.seed_from_triage!(cfg: default_cfg, ctx: ctx, base_sha: "abc123")
+      assert_equal 1, File.read(Suppression.suppressed_path(ctx)).scan("leaks stale state").size
+    end
+  end
+
+  def test_seed_from_triage_disabled_by_config_is_noop
+    with_suppression_task do |ctx|
+      reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-01.md")
+      File.write(reviewer, "## High\n- [x] RESOLVED/NO-FIX: lib/foo.rb leaks stale state\n")
+      cfg = default_cfg("review" => { "triage" => { "suppress_no_fix" => false } })
+
+      assert_equal 0, Suppression.seed_from_triage!(cfg: cfg, ctx: ctx, base_sha: "abc123")
+      refute File.exist?(Suppression.suppressed_path(ctx))
+    end
+  end
 end

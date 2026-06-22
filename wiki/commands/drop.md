@@ -3,7 +3,7 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, lib/hive/web/dispatcher.rb, web/app/controllers/tasks_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-06-12
+updated: 2026-06-23
 tags: [command, task, cleanup, json, tui, web]
 ---
 
@@ -13,11 +13,15 @@ tags: [command, task, cleanup, json, tui, web]
 
 ```
 hive drop my-task-260522-abcd
+hive drop 7448 --project demo
 hive drop my-task-260522-abcd --project demo --from 4-execute
 hive drop /path/to/.hive-state/stages/4-execute/my-task-260522-abcd --json
 ```
 
-Bare slugs use [[modules/task_resolver]] lookup. Pass `--project` to disambiguate cross-project collisions and `--from` to assert the current stage on retry.
+Numeric task ids and path targets use [[modules/task_resolver]] lookup; bare
+slugs use Drop's project/stage scan with the same `--project` and `--from`
+scoping rules. Pass `--project` to disambiguate cross-project collisions and
+`--from` to assert the current stage on retry.
 
 ## Refusals
 
@@ -28,7 +32,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 | Dropped successfully | 0 | — |
 | Generic failure (uncategorised) | 1 | `error` |
 | `--from` does not match the resolved active stage | 4 | `wrong_stage` |
-| Unknown slug/path | 64 | `invalid_task_path` |
+| Unknown slug/path/id | 64 | `invalid_task_path` |
 | Ambiguous slug across projects | 64 | `ambiguous_slug` |
 | Task is already in `9-done` | 64 | `already_archived` |
 | Git operation failed (e.g. `branch -D`) | 70 | `git` |
@@ -45,7 +49,7 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 
 `Hive::Commands::Drop#call` runs the cleanup in a fixed, idempotent order:
 
-1. Resolve the task via [[modules/task_resolver]].
+1. Resolve the task target (`TaskResolver` for paths/ids, Drop's project/stage scan for slugs).
 2. Refuse archived-only tasks in `9-done`.
 3. Kill recorded agent PIDs from `.lock` and `AGENT_WORKING pid=...`, guarded by process start time when available.
 4. Close `pr_url` from `pr.md` frontmatter with `gh pr close <url> --comment "task dropped"` best-effort.

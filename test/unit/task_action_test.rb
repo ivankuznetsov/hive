@@ -28,6 +28,13 @@ class TaskActionTest < Minitest::Test
     Marker.new(name: name, attrs: attrs, raw: nil)
   end
 
+  # The diagnostics concern lives in Hive::TaskAction::Diagnostic. Build it the
+  # way the classifier does so the predicate context it receives matches
+  # production exactly.
+  def diagnostic_for(task, marker, **)
+    Hive::TaskAction.for(task, marker, **).send(:diagnostic_builder)
+  end
+
   # ── classification matrix ─────────────────────────────────────────────
 
   def test_inbox_marker_waiting_is_ready_to_brainstorm
@@ -764,7 +771,7 @@ class TaskActionTest < Minitest::Test
       # the middle of the credential — pre-redaction truncation would
       # leave the leading half intact in the emitted summary.
       gh_token = "ghp_#{'A' * 40}"
-      summary_max = Hive::TaskAction::DIAGNOSTIC_SUMMARY_MAX
+      summary_max = Hive::TaskAction::Diagnostic::SUMMARY_MAX
       # The marker_summary is "REVIEW_ERROR phase=fix pass=4 reason=<padding><token>".
       # We need the cut point to fall inside the token bytes — choose a
       # padding that leaves the token spanning the cut.
@@ -1265,29 +1272,29 @@ class TaskActionTest < Minitest::Test
       reviewer = File.join(logs, "review-claude-pass03.log")
       File.write(browser, "browser log\n")
       File.write(reviewer, "reviewer log\n")
-      action = Hive::TaskAction.for(task, marker(:review_error, "pass" => "3"))
+      diagnostic = diagnostic_for(task, marker(:review_error, "pass" => "3"))
 
-      assert_equal [ browser ], action.send(:review_phase_logs, "browser", "03")
-      assert_equal [ browser, reviewer ].sort, action.send(:review_phase_logs, "reviewers", "03").sort
-      assert_empty action.send(:review_phase_logs, "unknown", "03")
+      assert_equal [ browser ], diagnostic.send(:review_phase_logs, "browser", "03")
+      assert_equal [ browser, reviewer ].sort, diagnostic.send(:review_phase_logs, "reviewers", "03").sort
+      assert_empty diagnostic.send(:review_phase_logs, "unknown", "03")
     end
   end
 
   def test_paths_from_marker_files_filters_unsafe_entries
     task = fake_task(stage_name: "review", stage_index: 6)
-    action = Hive::TaskAction.for(
+    diagnostic = diagnostic_for(
       task,
       marker(:review_error, "files" => "reviews/a.md ../escape /tmp/rooted logs/b.log")
     )
 
     assert_equal [ File.join(task.folder, "reviews/a.md"), File.join(task.folder, "logs/b.log") ],
-                 action.send(:paths_from_marker_files)
+                 diagnostic.send(:paths_from_marker_files)
   end
 
   def test_artifact_detail_reports_read_errors
     task = fake_task(stage_name: "review", stage_index: 6)
-    action = Hive::TaskAction.for(task, marker(:review_error))
-    detail = action.send(:artifact_detail, File.join(task.folder, "missing.md"))
+    diagnostic = diagnostic_for(task, marker(:review_error))
+    detail = diagnostic.send(:artifact_detail, File.join(task.folder, "missing.md"))
 
     assert_includes detail, "Errno::ENOENT"
   end
@@ -1298,9 +1305,9 @@ class TaskActionTest < Minitest::Test
       path = File.join(task.folder, "diagnostics", "red-status.md")
       FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "---\nmarker_signature: abc\n---\nbody\n")
-      action = Hive::TaskAction.for(task, marker(:review_error))
+      diagnostic = diagnostic_for(task, marker(:review_error))
 
-      assert_equal "local", action.send(:diagnostic_generated_by, path)
+      assert_equal "local", diagnostic.send(:diagnostic_generated_by, path)
     end
   end
 
@@ -1310,10 +1317,10 @@ class TaskActionTest < Minitest::Test
       path = File.join(task.folder, "diagnostics", "red-status.md")
       FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "---\n: bad\n---\nbody\n")
-      action = Hive::TaskAction.for(task, marker(:review_error))
+      diagnostic = diagnostic_for(task, marker(:review_error))
 
-      assert_equal({}, action.send(:diagnostic_frontmatter, path))
-      assert_equal({}, action.send(:diagnostic_frontmatter, File.join(task.folder, "missing.md")))
+      assert_equal({}, diagnostic.send(:diagnostic_frontmatter, path))
+      assert_equal({}, diagnostic.send(:diagnostic_frontmatter, File.join(task.folder, "missing.md")))
     end
   end
 
@@ -1519,27 +1526,27 @@ class TaskActionTest < Minitest::Test
 
   def test_private_path_helpers_cover_missing_and_empty_inputs
     task = fake_task(stage_name: "review", stage_index: 6)
-    action = Hive::TaskAction.for(task, marker(:review_error))
+    diagnostic = diagnostic_for(task, marker(:review_error))
 
-    assert_nil action.send(:realpath_or_expand, nil)
+    assert_nil diagnostic.send(:realpath_or_expand, nil)
     assert_equal File.expand_path(File.join(task.folder, "missing")),
-                 action.send(:realpath_or_expand, File.join(task.folder, "missing"))
+                 diagnostic.send(:realpath_or_expand, File.join(task.folder, "missing"))
   end
 
   def test_safe_diagnostic_artifact_handles_realpath_failures
     task = fake_task(stage_name: "review", stage_index: 6)
-    action = Hive::TaskAction.for(task, marker(:review_error))
+    diagnostic = diagnostic_for(task, marker(:review_error))
     original_file = File.method(:file?)
     original_realpath = File.method(:realpath)
 
     with_replaced_singleton_method(File, :file?, ->(_path) { true }) do
       with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::ENOENT }) do
-        refute action.send(:safe_diagnostic_artifact?, File.join(task.folder, "gone.md"))
+        refute diagnostic.send(:safe_diagnostic_artifact?, File.join(task.folder, "gone.md"))
       end
 
       with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::EACCES }) do
         _out, err = capture_io do
-          refute action.send(:safe_diagnostic_artifact?, File.join(task.folder, "blocked.md"))
+          refute diagnostic.send(:safe_diagnostic_artifact?, File.join(task.folder, "blocked.md"))
         end
         assert_includes err, "cannot realpath"
       end

@@ -217,6 +217,19 @@ module Hive
       Hive::Commands::Update.new(dry_run: options[:dry_run]).call
     end
 
+    desc "connect SERVICE", "Connect an external service (screenote)"
+    option :base_url, type: :string, desc: "Screenote base URL (defaults to config or https://screenote.ai)"
+    def connect(service)
+      require "hive/commands/connect"
+      Hive::Commands::Connect.new(service, base_url: options[:base_url], json: options[:json]).call
+    end
+
+    desc "disconnect SERVICE", "Disconnect an external service (screenote)"
+    def disconnect(service)
+      require "hive/commands/disconnect"
+      Hive::Commands::Disconnect.new(service, json: options[:json]).call
+    end
+
     desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
     long_desc <<~DESC
       Stops and deregisters the per-user daemon service, removes hive config

@@ -118,12 +118,40 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
-def terminate_new_text_options!(argv)
-  text_start_idx = new_text_start_index(argv)
-  return unless text_start_idx && text_start_idx < argv.length
-  return if argv[text_start_idx] == "--"
+def lift_new_options!(argv)
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return unless cmd_idx && argv[cmd_idx] == "new"
 
-  argv.insert(text_start_idx, "--")
+  lifted = []
+  rest = []
+  protected_tail = false
+  idx = cmd_idx + 1
+  while idx < argv.length
+    arg = argv[idx]
+    if protected_tail
+      rest << arg
+    elsif arg == "--"
+      protected_tail = true
+    elsif JSON_BOOLEAN_OPTIONS.include?(arg)
+      lifted << arg
+    elsif NEW_VALUE_OPTIONS.include?(arg)
+      lifted << arg
+      idx += 1
+      lifted << argv[idx] if idx < argv.length
+    elsif NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+      lifted << arg
+    else
+      rest << arg
+    end
+    idx += 1
+  end
+
+  project = rest.shift
+  return unless project
+
+  rebuilt = argv[0...cmd_idx] + [ "new" ] + lifted + [ project ]
+  rebuilt.concat([ "--", *rest ]) unless rest.empty?
+  argv.replace(rebuilt)
 end
 
 def json_requested?(argv)
@@ -185,7 +213,7 @@ begin
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_json_options!(ARGV)
   rewrite_help_flag!(ARGV)
-  terminate_new_text_options!(ARGV)
+  lift_new_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)

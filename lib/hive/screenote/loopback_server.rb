@@ -7,9 +7,12 @@ module Hive
     class LoopbackServer
       DEFAULT_TIMEOUT_SEC = 300
       # Per-read deadline and header byte cap for the callback request.
-      # IO.select only guards `accept`; without these a stalled or partial
-      # local request could keep `socket.gets` blocked indefinitely (a local
-      # DoS of the connect flow) or stream unbounded header bytes.
+      # IO.select only guards `accept`; without the deadline a stalled or
+      # partial local request could keep `socket.gets` blocked indefinitely
+      # (a local DoS of the connect flow). MAX_REQUEST_BYTES bounds BOTH the
+      # cumulative header bytes AND each individual `socket.gets` read (it is
+      # passed as the gets length limit), so no single unterminated line is
+      # read wholesale into memory.
       READ_TIMEOUT_SEC = 5
       MAX_REQUEST_BYTES = 64 * 1024
 
@@ -29,19 +32,32 @@ module Hive
       end
 
       def wait_for_callback(expected_state:)
-        socket = accept_socket
-        params = read_callback_params(socket)
-        # Decide success/failure BEFORE writing the page. Writing the
-        # success page first (the old order) showed "Screenote connected"
-        # in the browser on a state-mismatch / missing-code callback while
-        # the CLI aborted.
-        error = callback_error(params, expected_state)
-        write_response(socket, error ? failure_page : success_page)
-        raise Hive::Error, error if error
+        # A browser/OS prefetch of `/` or `/favicon.ico` (or an empty/EOF
+        # first line) must NOT consume the one real redirect and surface as a
+        # bogus "state mismatch". Keep accepting until a `/callback` request
+        # arrives; non-callback requests get a 404 and the loop continues.
+        loop do
+          socket = accept_socket
+          begin
+            path, params = read_callback_request(socket)
+            unless callback_path?(path)
+              write_response(socket, not_found_page, status: "404 Not Found")
+              next
+            end
+            # Decide success/failure BEFORE writing the page. Writing the
+            # success page first (the old order) showed "Screenote connected"
+            # in the browser on a state-mismatch / missing-code callback while
+            # the CLI aborted.
+            error = callback_error(params, expected_state)
+            write_response(socket, error ? failure_page : success_page)
+            raise Hive::Error, error if error
 
-        { "code" => params["code"], "state" => params["state"] }
+            return { "code" => params["code"], "state" => params["state"] }
+          ensure
+            socket&.close
+          end
+        end
       ensure
-        socket&.close
         close
       end
 
@@ -66,7 +82,9 @@ module Hive
         nil
       end
 
-      def read_callback_params(socket)
+      # Returns [path, params] for the request. `path` lets the caller drop
+      # non-`/callback` prefetches; `params` is the decoded query string.
+      def read_callback_request(socket)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @read_timeout_sec
         request_line = read_line(socket, deadline).to_s
         bytes = request_line.bytesize
@@ -80,11 +98,17 @@ module Hive
         end
         path = request_line.split.fetch(1, "/")
         uri = URI("http://#{host}#{path}")
-        URI.decode_www_form(uri.query.to_s).to_h
+        [ uri.path, URI.decode_www_form(uri.query.to_s).to_h ]
+      end
+
+      def callback_path?(path)
+        path == "/callback"
       end
 
       # Read one line with a deadline so a stalled local client cannot block
-      # the connect flow forever. Returns nil at EOF (caller ends its loop).
+      # the connect flow forever. The MAX_REQUEST_BYTES gets-limit caps a
+      # single unterminated line so it cannot be slurped wholesale into
+      # memory. Returns nil at EOF (caller ends its loop).
       def read_line(socket, deadline)
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         raise Hive::Error, "timed out reading Screenote OAuth callback request" if remaining <= 0
@@ -92,13 +116,19 @@ module Hive
         ready = IO.select([ socket ], nil, nil, remaining)
         raise Hive::Error, "timed out reading Screenote OAuth callback request" unless ready
 
-        socket.gets
+        socket.gets("\n", MAX_REQUEST_BYTES)
       end
 
-      def write_response(socket, body)
-        payload = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" \
+      def write_response(socket, body, status: "200 OK")
+        payload = "HTTP/1.1 #{status}\r\nContent-Type: text/html; charset=utf-8\r\n" \
                   "Content-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}"
         socket.write(payload)
+      rescue SystemCallError, IOError => e
+        # The browser may have already closed the tab (EPIPE/ECONNRESET); the
+        # page write is cosmetic, so swallow it. Crucially this must not
+        # pre-empt the pending `raise Hive::Error, error` in wait_for_callback,
+        # which carries the REAL reason (state mismatch / missing code).
+        warn "[hive] could not write Screenote loopback response page: #{e.message}"
       end
 
       def success_page
@@ -107,6 +137,10 @@ module Hive
 
       def failure_page
         "<!doctype html><title>Screenote connection failed</title><p>Return to the terminal.</p>"
+      end
+
+      def not_found_page
+        "<!doctype html><title>Screenote</title><p>Waiting for the Screenote authorization redirect.</p>"
       end
     end
   end

@@ -57,6 +57,60 @@ class ScreenoteLoopbackServerTest < Minitest::Test
     assert_match(/timed out/, err.message)
   end
 
+  def test_wait_for_callback_ignores_non_callback_prefetch_and_keeps_waiting
+    # A browser/OS prefetch of `/favicon.ico` must NOT consume the one-shot
+    # accept and surface as a bogus state mismatch — the server answers 404
+    # and keeps waiting for the real `/callback` redirect.
+    server = Hive::Screenote::LoopbackServer.new
+    waiter = wait_for(server)
+
+    prefetch = raw_get(server, "/favicon.ico")
+    assert_includes prefetch, "404 Not Found"
+    refute_includes prefetch, "Screenote connected"
+
+    response = raw_get(server, "/callback?code=code-123&state=state-123")
+    result = waiter.value
+
+    assert_equal({ "code" => "code-123", "state" => "state-123" }, result)
+    assert_includes response, "Screenote connected"
+  end
+
+  def test_wait_for_callback_rejects_oversized_request_headers
+    server = Hive::Screenote::LoopbackServer.new
+    waiter = wait_for(server)
+    socket = TCPSocket.new(server.host, server.port)
+    socket.write("GET /callback?code=c&state=state-123 HTTP/1.1\r\n")
+    begin
+      # > 64 KiB of header lines, each terminated but never the blank line
+      # that ends the header read, so the cumulative cap fires.
+      socket.write("X-Pad: #{"a" * 200}\r\n" * 400)
+    rescue Errno::EPIPE, Errno::ECONNRESET
+      # The server hit the cap and closed mid-write — expected.
+    end
+
+    err = assert_raises(Hive::Error) { waiter.value }
+    assert_match(/exceeded .* bytes/, err.message)
+  ensure
+    socket&.close
+  end
+
+  def test_write_response_swallows_a_broken_socket_write
+    # The success/failure page write is cosmetic; an EPIPE from a closed
+    # browser tab must be swallowed (and warned) so it cannot pre-empt the
+    # pending real `raise Hive::Error` in wait_for_callback.
+    server = Hive::Screenote::LoopbackServer.new(timeout_sec: 0.01)
+    broken = Object.new
+    broken.define_singleton_method(:write) { |_payload| raise Errno::EPIPE, "broken pipe" }
+
+    _out, err = capture_io do
+      server.send(:write_response, broken, "page")
+    end
+
+    assert_match(/could not write Screenote loopback response page/, err)
+  ensure
+    server&.close
+  end
+
   def test_read_callback_times_out_on_a_stalled_partial_request
     server = Hive::Screenote::LoopbackServer.new(read_timeout_sec: 0.05)
     waiter = wait_for(server)

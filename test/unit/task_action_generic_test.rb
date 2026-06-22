@@ -72,7 +72,7 @@ class TaskActionGenericTest < Minitest::Test
     assert_nil complete_terminal.command
 
     # :agent_working / stale-agent / :error short-circuit at the universal
-    # override (task_action.rb:274-279) *before* the coding_workflow? dispatch,
+    # override (task_action.rb:274-279) *before* descriptor-kind dispatch,
     # so these rows pin the override path, not generic classification.
     running = action_for("gather", :agent_working, { "pid" => "12345" }, pid_alive: true)
     assert_equal "agent_running", running.key

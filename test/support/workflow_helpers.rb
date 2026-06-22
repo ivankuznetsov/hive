@@ -13,7 +13,7 @@ module HiveWorkflowTestHelper
       stages: [
         Hive::Workflow::Stage.new(name: "intake", index: 1, state_file: "intake.md", kind: :inert),
         Hive::Workflow::Stage.new(name: "gather", index: 2, state_file: "notes.md", kind: :agent),
-        Hive::Workflow::Stage.new(name: "report", index: 3, state_file: "report.md", kind: :marker)
+        Hive::Workflow::Stage.new(name: "report", index: 3, state_file: "report.md")
       ]
     )
   end
@@ -36,7 +36,7 @@ module HiveWorkflowTestHelper
       stages: [
         Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "draft.md", kind: :agent),
         Hive::Workflow::Stage.new(name: "hold", index: 2, state_file: "hold.md", kind: :inert),
-        Hive::Workflow::Stage.new(name: "ship", index: 3, state_file: "ship.md", kind: :marker)
+        Hive::Workflow::Stage.new(name: "ship", index: 3, state_file: "ship.md")
       ]
     )
   end

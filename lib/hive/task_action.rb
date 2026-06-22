@@ -340,9 +340,9 @@ module Hive
           stage.kind == :inert ? ACTIONS.fetch(:done) : ACTIONS.fetch(:generic_ready_to_run)
         else
           # Auto-advance a markerless inert NON-terminal stage (no agent to run)
-          # past itself. Any non-inert kind (`:agent`, `:marker`, or `nil` — the
-          # gate is `stage.kind == :inert`, which excludes all three) must run
-          # rather than be approved past it. The entry-only restriction is
+          # past itself. Any non-inert kind (`:agent`, coding runtime kinds, or
+          # nil — the gate is `stage.kind == :inert`, which excludes all of
+          # them) must run rather than be approved past it. The entry-only restriction is
           # intentionally dropped: an inert NON-entry middle stage would
           # otherwise strand — `Resolver.resolve` raises `StageError` for
           # `kind: :inert`, so it can neither run nor advance.

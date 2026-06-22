@@ -1,4 +1,6 @@
 require "test_helper"
+require "hive/commands/init"
+require "hive/commands/new"
 require "hive/web/status_feed"
 
 class StatusFeedTest < Minitest::Test
@@ -35,6 +37,25 @@ class StatusFeedTest < Minitest::Test
 
       assert_equal "hive-status", payload["schema"]
       assert_equal [], payload["projects"]
+    end
+  end
+
+  def test_snapshot_preserves_content_workflow_rows
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          capture_io { Hive::Commands::New.new(File.basename(dir), "web content row").call }
+
+          feed = Hive::Web::StatusFeed.new
+          row = feed.snapshot.fetch("projects").first.fetch("tasks").first
+
+          assert_equal "content_fixture", row.fetch("workflow")
+          assert_equal "1-inbox", row.fetch("stage")
+          assert_equal "ready_to_advance", row.fetch("action")
+          assert_match(/\Ahive approve /, row.fetch("suggested_command"))
+        end
+      end
     end
   end
 

@@ -35,13 +35,20 @@ module Hive
     # opt in with one line — without re-introducing foreground
     # takeover for everything.
     stages = Hive::Workflows::Registry.default.stages
-    VERBS = stages.each_with_index.each_with_object({}) do |(stage, index), verbs|
-      advance_verb = stage.advance_verb
+    # each_cons(2) walks adjacent [source, target] pairs so a verb's `source`
+    # is always the stage that PRECEDES its target — expressed directly instead
+    # of via `fetch(index - 1)`, whose negative index at index 0 would wrap a
+    # first-stage advance_verb to the terminal stage. The descriptor's first
+    # stage never carries an advance_verb (enforced by Workflow's
+    # construction-time validation), so starting the pairing at the second
+    # stage drops no verb.
+    VERBS = stages.each_cons(2).each_with_object({}) do |(source, target), verbs|
+      advance_verb = target.advance_verb
       next unless advance_verb
 
       entry = {
-        source: stages.fetch(index - 1).dir,
-        target: stage.dir
+        source: source.dir,
+        target: target.dir
       }
       entry[:force_source] = true if advance_verb.force_source
       entry[:interactive] = true if advance_verb.interactive
@@ -129,12 +136,34 @@ module Hive
       coding_id?(row.workflow)
     end
 
+    # Memoized: the registry is frozen at load, so the union of every
+    # workflow's stage dirs/names never changes after boot. Recomputing a
+    # frozen array on every call (status snapshots, drop, resolver) is pure
+    # waste. Not an eager constant — that would re-enter the require cycle
+    # (workflows.rb ⇆ registry.rb) before the registry is populated.
     def all_stage_dirs
-      Registry.all.flat_map(&:stage_dirs).uniq.freeze
+      @all_stage_dirs ||= Registry.all.flat_map(&:stage_dirs).uniq.freeze
     end
 
     def all_stage_names
-      Registry.all.flat_map(&:stage_names).uniq.freeze
+      @all_stage_names ||= Registry.all.flat_map(&:stage_names).uniq.freeze
+    end
+
+    # Memoized (same rationale as all_stage_dirs): the terminal ("archived")
+    # stage dir of EVERY registered workflow. Single source for drop's
+    # hard-delete archive guard and init's fieldless-task scan, which both
+    # computed `Registry.all.map { |w| w.stages.last.dir }.uniq` inline — a
+    # drift on the drop side re-opens an archived-task delete bug.
+    def all_terminal_stage_dirs
+      @all_terminal_stage_dirs ||= Registry.all.map { |workflow| workflow.stages.last.dir }.uniq.freeze
+    end
+
+    # The shared "valid stage refs" hint tail — "<full dirs> or short names
+    # <short names>" — appended to every union-scope unknown-stage error so the
+    # two emit sites (resolve_stage_ref_across_workflows below and Approve's
+    # early --from/--to check) can't drift apart.
+    def stage_ref_hint
+      "#{all_stage_dirs.join(', ')} or short names #{all_stage_names.join(', ')}"
     end
 
     # Resolve a user-provided stage ref (a full N-name dir or a bare short
@@ -156,8 +185,7 @@ module Hive
       end
 
       raise Hive::InvalidTaskPath,
-            "unknown stage '#{stage_ref}'; valid: #{all_stage_dirs.join(', ')} " \
-            "or short names #{all_stage_names.join(', ')}"
+            "unknown stage '#{stage_ref}'; valid: #{stage_ref_hint}"
     end
   end
 end

@@ -16,13 +16,15 @@ module Hive
     PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_dir>(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*))/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
 
     # Per-process cache of each project's resolved `default_workflow`, keyed by
-    # the project's `.hive-state/config.yml` path and invalidated by its mtime.
-    # Without it `Task.new` re-ran a full `Hive::Config.load` (file read + YAML
-    # parse + validate!) for every field-less task on every `hive status` /
-    # daemon tick — a real per-tick regression, since `resolve_workflow` only
-    # consults the project default when the task meta carries no selector.
-    # mtime-keying keeps a long-lived reader (TUI / daemon) correct when the
-    # config is edited mid-run.
+    # the project's `.hive-state/config.yml` path and invalidated by its
+    # (mtime, size) stamp. Without it `Task.new` re-ran a full `Hive::Config.load`
+    # (file read + YAML parse + validate!) for every field-less task on every
+    # `hive status` / daemon tick — a real per-tick regression, since
+    # `resolve_workflow` only consults the project default when the task meta
+    # carries no selector. Keying on (mtime, size) — not mtime alone — closes the
+    # coarse-mtime window (FAT, some NFS) where a same-second rewrite that changes
+    # the default would otherwise serve a long-lived reader (TUI / daemon) the
+    # stale value until restart; negligible cost on ns-mtime ext4/xfs.
     @project_default_workflow_cache = {}
 
     class << self
@@ -137,17 +139,20 @@ module Hive
 
     def project_default_workflow
       config_path = File.join(@hive_state_path, "config.yml")
-      mtime = begin
-        File.mtime(config_path)
+      # Stamp on (mtime, size) so a coarse-mtime filesystem can't serve a stale
+      # default after a same-second rewrite that changed the file's length.
+      stamp = begin
+        stat = File.stat(config_path)
+        [ stat.mtime, stat.size ]
       rescue SystemCallError
         nil
       end
       cache = Hive::Task.project_default_workflow_cache
       cached = cache[config_path]
-      return cached[:value] if cached && cached[:mtime] == mtime
+      return cached[:value] if cached && cached[:stamp] == stamp
 
       value = load_project_default_workflow(config_path)
-      cache[config_path] = { mtime: mtime, value: value }
+      cache[config_path] = { stamp: stamp, value: value }
       value
     end
 

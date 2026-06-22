@@ -163,7 +163,16 @@ class StagesResolverTest < Minitest::Test
 
   private
 
+  # A minimal valid descriptor whose single stage does NOT match the queried
+  # "mystery" stage, so Resolver.resolve still raises "no runner for stage
+  # mystery". (Hive::Workflow now rejects an empty stage list at construction,
+  # so this can no longer be literally empty.)
   def empty_descriptor
-    Hive::Workflow.new(id: :empty, stages: [])
+    Hive::Workflow.new(
+      id: :empty,
+      stages: [
+        Hive::Workflow::Stage.new(name: "intake", index: 1, state_file: "intake.md", kind: :inert)
+      ]
+    )
   end
 end

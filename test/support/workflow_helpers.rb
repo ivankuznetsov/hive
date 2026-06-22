@@ -1,5 +1,6 @@
 require "hive/workflow"
 require "hive/workflows/registry"
+require "hive/stages/base"
 
 module HiveWorkflowTestHelper
   # Resolution-only fixture: stages carry just name/index/state_file/kind so
@@ -100,6 +101,57 @@ module HiveWorkflowTestHelper
     )
   end
 
+  def content_workflow
+    Hive::Workflow.new(
+      id: :content_fixture,
+      stages: [
+        Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+        Hive::Workflow::Stage.new(
+          name: "research",
+          index: 2,
+          state_file: "research.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "research"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "draft",
+          index: 3,
+          state_file: "draft.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "draft"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done",
+          index: 4,
+          state_file: "done.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "done"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        )
+      ]
+    )
+  end
+
+  def with_deterministic_content_agent(record: nil)
+    original = Hive::Stages::Base.method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **_kwargs|
+      record << task.stage_name if record
+      File.write(task.state_file, "# #{task.stage_name}\nartifact: #{task.stage_name}\n<!-- COMPLETE -->\n")
+      { status: :complete }
+    end
+    yield
+  ensure
+    Hive::Stages::Base.define_singleton_method(:spawn_agent, original) if original
+  end
+
   def with_registered_workflow(descriptor)
     original_fetch = Hive::Workflows::Registry.method(:fetch)
     original_all = Hive::Workflows::Registry.method(:all)
@@ -113,10 +165,23 @@ module HiveWorkflowTestHelper
     Hive::Workflows::Registry.define_singleton_method(:ids) do
       (original_ids.call + [ descriptor.id ]).uniq
     end
+    # Hive::Workflows.all_stage_dirs/all_stage_names memoize the registry union
+    # (the registry is frozen in production, so the cache is permanent there).
+    # This helper is the ONE place the registry mutates, so it must drop the
+    # cache on both enter and exit or the fixture's stage dirs would be missing
+    # inside the block and leak after it.
+    reset_workflow_union_cache!
     yield
   ensure
     Hive::Workflows::Registry.define_singleton_method(:fetch, original_fetch) if original_fetch
     Hive::Workflows::Registry.define_singleton_method(:all, original_all) if original_all
     Hive::Workflows::Registry.define_singleton_method(:ids, original_ids) if original_ids
+    reset_workflow_union_cache!
+  end
+
+  def reset_workflow_union_cache!
+    Hive::Workflows.instance_variable_set(:@all_stage_dirs, nil)
+    Hive::Workflows.instance_variable_set(:@all_stage_names, nil)
+    Hive::Workflows.instance_variable_set(:@all_terminal_stage_dirs, nil)
   end
 end

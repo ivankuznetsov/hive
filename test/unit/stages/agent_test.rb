@@ -115,6 +115,24 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_prior_artifacts_degrades_unreadable_sibling
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      path = File.join(task.folder, "gone.md")
+      File.write(path, "vanishing")
+      original = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |candidate, *args, **kwargs|
+        raise Errno::ENOENT, "gone" if candidate == path
+
+        original.call(candidate, *args, **kwargs)
+      }) do
+        prior = Hive::Stages::Agent.prior_artifacts(task, "plan.md")
+        assert_includes prior, "## gone.md\n(unreadable: Errno::ENOENT)"
+      end
+    end
+  end
+
   def test_run_raises_stage_error_when_stage_absent_from_registry
     with_tmp_dir do |project|
       folder = File.join(project, ".hive-state", "stages", "99-mystery", "demo-260619-aaaa")
@@ -267,6 +285,24 @@ class StagesAgentTest < Minitest::Test
           Hive::Stages::Agent.run!(task, nil),
           "nil cfg must be coerced to {} and run like an empty config"
         )
+      end
+    end
+  end
+
+  def test_run_turns_error_envelope_without_marker_into_error_marker
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        { status: :error, error_message: "profile unavailable" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal :error, marker.name
+        assert_equal "agent_preflight_failed", marker.attrs["reason"]
+        assert_equal "profile unavailable", marker.attrs["message"]
       end
     end
   end

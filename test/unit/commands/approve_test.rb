@@ -242,6 +242,28 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_includes err, "could not compute next_action"
   end
 
+  # Companion to the not-a-task case above: a moved task whose meta.yml carries
+  # an UNREGISTERABLE workflow re-parses past PATH_RE but raises InvalidTaskPath
+  # in resolve_workflow — the deeper trigger the finding names. It must hit the
+  # same degrade-and-warn rescue (hive run fallback + stderr warning), not a
+  # silent drop.
+  def test_json_next_action_degrades_on_unregisterable_meta_workflow
+    Dir.mktmpdir("hive-approve-unit") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260620-aaaa")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "workflow: bogus-unregistered\n")
+
+      action = nil
+      _out, err = capture_io do
+        action = command.send(:json_next_action, folder, research_workflow, "2-gather")
+      end
+
+      assert_equal Hive::Schemas::NextActionKind::RUN, action.fetch("kind")
+      assert_equal "hive run #{folder}", action.fetch("command")
+      assert_includes err, "could not compute next_action"
+    end
+  end
+
   def test_stage_for_dest_raises_on_unresolved_dir
     # Failure arm of the defensive guard: a dir the descriptor can't resolve
     # surfaces a typed InvalidTaskPath, not a NoMethodError on nil. Unreachable

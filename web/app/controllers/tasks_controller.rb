@@ -186,10 +186,26 @@ class TasksController < ApplicationController
   # run's deliverable is what the operator opens the page for, so artifact.md
   # leads (and, being first, renders open). Not at 7-artifacts: the file is
   # still being written there.
+  #
+  # A non-coding workflow has its own stage state_files (research.md, draft.md,
+  # done.md, …) that ARTIFACT_ORDER never lists, so the page rendered nothing
+  # for them. Derive the order from the task's workflow descriptor instead; the
+  # coding branch stays byte-identical.
   def artifact_order(row)
+    return generic_artifact_order(row) unless Hive::Workflows.coding_id?(row["workflow"])
+
     return ARTIFACT_ORDER unless %w[8-finalize 9-done].include?(row["stage"].to_s)
 
     [ "artifact.md" ] + (ARTIFACT_ORDER - [ "artifact.md" ])
+  end
+
+  # Chronological stage state_files for a non-coding workflow. Falls back to the
+  # coding order if the descriptor is unregistered (a hand-edited or
+  # later-removed workflow) so the page still renders something.
+  def generic_artifact_order(row)
+    Hive::Workflows::Registry.fetch(row["workflow"].to_sym).stages.map(&:state_file).uniq
+  rescue Hive::Workflows::UnknownWorkflow
+    ARTIFACT_ORDER
   end
 
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i

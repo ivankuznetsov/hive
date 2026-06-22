@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "rbconfig"
 require "hive/commands/init"
+require "hive/task_meta"
 
 class CliVersionTest < Minitest::Test
   include HiveTestHelper
@@ -89,6 +90,27 @@ class CliVersionTest < Minitest::Test
       assert_includes out, "hive: captured"
       refute_match(/invalid boolean value for --json/, err)
       assert_new_idea_includes(dir, "literal --json=yes text")
+    end
+  end
+
+  def test_bin_hive_new_accepts_workflow_option_before_project
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", "--workflow", "coding", project, "workflow", "flag")
+
+      assert status.success?, "hive new should parse --workflow before PROJECT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "workflow-flag-*")].first
+      assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
+    end
+  end
+
+  def test_bin_hive_new_treats_workflow_option_as_task_text_after_project
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", project, "literal", "--workflow", "coding")
+
+      assert status.success?, "hive new should capture --workflow as text after PROJECT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      assert_new_idea_includes(dir, "literal --workflow coding")
     end
   end
 

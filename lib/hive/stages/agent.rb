@@ -47,11 +47,12 @@ module Hive
         # `ready_to_run` forever (NO-SILENT-CAPS). Write an attributed `:error`
         # marker — but never clobber a marker the agent already wrote.
         if result.is_a?(Hash) && result[:status] == :error && marker.name == :none
-          marker = Hive::Markers.set(
+          Hive::Markers.set(
             output_path, :error,
             reason: "agent_preflight_failed",
             message: result[:error_message].to_s[0, 200]
           )
+          marker = Hive::Markers.current(output_path)
         end
         { commit: action_for(marker.name), status: marker.name }
       end
@@ -92,6 +93,11 @@ module Hive
         when :waiting then "round_waiting"
         when :complete then "complete"
         when :error then "error"
+        # A markerless (:none) run has nothing to commit; return nil so
+        # commit_after's `return unless result[:commit]` guard skips the commit
+        # outright, instead of relying on hive_commit's empty-diff no-op to
+        # swallow a bogus "none" action.
+        when :none then nil
         else marker_name.to_s
         end
       end

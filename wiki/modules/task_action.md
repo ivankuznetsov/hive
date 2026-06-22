@@ -85,11 +85,14 @@ generic classifier instead:
 - `COMPLETE` at the terminal descriptor stage -> `archived`.
 - `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
 - `WAITING` -> `generic_needs_input` (wire kind `NEEDS_INPUT`).
-- markerless inert entry stage (non-terminal) -> `ready_to_advance`. A markerless
-  entry stage of any non-inert kind (`:agent`, `:marker`, or `nil` — the gate is
-  `stage.kind == :inert`) or a degenerate single-stage workflow (entry ==
-  terminal) falls through to the next case instead.
-- markerless non-entry stage -> `generic_ready_to_run` with label "Ready to run".
+- markerless any non-terminal inert stage -> `ready_to_advance`. The gate is
+  `!terminal && stage.kind == :inert` with no entry-stage condition: the
+  entry-only restriction was intentionally dropped so an inert MIDDLE stage
+  advances rather than stranding (`Resolver.resolve` raises `StageError` for
+  `kind: :inert`, so it can neither run nor advance otherwise).
+- markerless stage of any non-inert kind (`:agent`, `:marker`, or `nil`), or a
+  terminal inert stage (degenerate single-stage workflow, entry == terminal) ->
+  `generic_ready_to_run` with label "Ready to run".
 
 This keeps coding behavior byte-stable while letting registered non-coding
 workflows surface non-error status rows once a task has resolved to its

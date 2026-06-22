@@ -5,7 +5,11 @@ require "shellwords"
 require "stringio"
 require "hive/config"
 require "hive/git_ops"
+require "hive/lock"
+require "hive/stages"
+require "hive/task_meta"
 require "hive/worktree"
+require "hive/workflow_selection"
 require "hive/llm_wiki_bootstrap"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
@@ -42,10 +46,19 @@ module Hive
         raw/notes
       ].freeze
 
-      def initialize(project_path, force: false, json: false, prompts: nil)
+      # Immutable value object (Data.define, matching the Workflow/Stage/
+      # AdvanceVerb convention) carrying the resolved descriptor and the
+      # provenance of the choice (:flag | :prompt | :implicit).
+      WorkflowChoice = Data.define(:descriptor, :source)
+
+      def initialize(project_path, force: false, json: false, prompts: nil,
+                     workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
+        @workflow_name = workflow
+        @workflow_input = workflow_input
+        @workflow_output = workflow_output
         # Optional Prompts instance for testability. Tests inject a
         # pre-fed StringIO-backed instance to drive the interactive flow
         # without touching $stdin. Production keeps this nil so the
@@ -60,9 +73,14 @@ module Hive
         validate_clean_tree! unless @force
 
         ops = Hive::GitOps.new(@project_path)
+        workflow_choice = resolve_workflow_choice(ops)
         if ops.hive_state_branch_exists?
-          raise Hive::AlreadyInitialized,
-                "already initialized; hive/state branch present at #{@project_path}"
+          if workflow_choice.source == :implicit
+            raise Hive::AlreadyInitialized,
+                  "already initialized; hive/state branch present at #{@project_path}"
+          end
+          handle_existing_project(ops, workflow_choice: workflow_choice)
+          return
         end
 
         # Prompt placement is load-bearing (per ADR-023): runs AFTER the
@@ -71,20 +89,215 @@ module Hive
         # no orphan branch, no worktree, no master .gitignore update —
         # so a re-run of `hive init` proceeds normally.
         answers = collect_prompt_answers
-        project_config_content = render_project_config(ops, answers: answers)
+        project_config_content = render_project_config(ops, answers: answers, default_workflow: workflow_choice.descriptor.id)
         entry = initialize_project_state(ops, content: project_config_content)
 
         if @json
-          emit_json_summary(entry: entry, ops: ops, answers: answers)
+          emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         else
           print_summary(entry: entry, ops: ops, answers: answers)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight!
+      rescue Hive::Commands::Init::Prompts::Aborted => e
+        # The interactive WORKFLOW prompt (resolve_workflow_choice, which runs
+        # before collect_prompt_answers) aborts on closed stdin. Mirror
+        # collect_prompt_answers' contract: USAGE (64), not a generic
+        # InternalError crash, and zero disk state (the prompt is BEFORE any
+        # writes, per ADR-023).
+        warn "hive: aborted (#{e.message}); no changes made"
+        exit Hive::ExitCodes::USAGE
       rescue Hive::Error
         raise
       rescue StandardError => e
         raise Hive::InternalError, "init failed: #{e.class}: #{e.message}"
+      end
+
+      def handle_existing_project(ops, workflow_choice:)
+        ops.ensure_hive_state_worktree_attached
+        # `:implicit` re-init already raised AlreadyInitialized in `call` before
+        # reaching here, so this path only sees :flag / :prompt — both express a
+        # default-workflow intent and run the (idempotent) rebind.
+        update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
+        Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+        if @json
+          emit_existing_json_summary(ops, workflow_choice: workflow_choice)
+        else
+          write_existing_summary(ops, workflow_choice: workflow_choice)
+        end
+      end
+
+      def write_existing_summary(_ops, workflow_choice:)
+        $stdout.puts "hive: already initialized #{File.basename(@project_path)}"
+        $stdout.puts "workflow: #{workflow_choice.descriptor.id}"
+      rescue Errno::EPIPE
+        nil
+      end
+
+      # An agent re-running `hive init --workflow X --json` on an existing
+      # project would otherwise get exit 0 with EMPTY stdout — no confirmation
+      # of the re-bind. Emit a minimal `already_initialized` hive-init payload
+      # (a distinct oneOf arm from the fresh SuccessPayload in the schema).
+      def emit_existing_json_summary(ops, workflow_choice:)
+        puts JSON.generate(
+          "schema" => "hive-init",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init"),
+          "ok" => true,
+          "already_initialized" => true,
+          "project" => File.basename(@project_path),
+          "path" => @project_path,
+          "hive_state_path" => ops.hive_state_path,
+          "workflow" => workflow_choice.descriptor.id.to_s
+        )
+      rescue Errno::EPIPE
+        nil
+      end
+
+      def update_existing_default_workflow!(ops, workflow_id)
+        cfg_path = File.join(ops.hive_state_path, "config.yml")
+        current, corrupt = current_default_workflow_with_status(ops)
+        next_value = workflow_id.to_s
+        # Idempotent confirm (A8): re-running with the SAME default is a clean
+        # no-op — no warning, no rewrite, no commit. EXCEPT when `current` came
+        # from the corrupt-config rescue (Config.load masks an unparseable file
+        # as coding): there the operator's explicit `hive init --workflow X` is
+        # a repair gesture, so force the rewrite even when X equals the masked
+        # fallback, instead of leaving the broken file untouched.
+        return if current == next_value && !corrupt
+
+        warn_on_fieldless_tasks_rebinding(ops, from: current, to: next_value)
+        # Mutate config.yml atomically and COMMIT it under the per-project
+        # commit lock, like every other hive/state mutation. A bare File.write
+        # left the hive/state worktree permanently dirty (a later reset/clean
+        # silently reverted the default) and an interrupted write could truncate
+        # config.yml — masked by Config.load's Psych-rescue → coding fallback.
+        Hive::Lock.with_commit_lock(ops.hive_state_path) do
+          # Snapshot the pre-write content so a commit failure AFTER atomic_write
+          # has landed the rename can restore it — otherwise the move stays in
+          # the worktree (dirty) and a later git reset/clean silently reverts the
+          # default. Restore makes the mutation all-or-nothing.
+          before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
+          write_default_workflow!(cfg_path, next_value)
+          begin
+            ops.hive_commit(
+              stage_name: "config",
+              slug: "default_workflow",
+              action: "set to #{next_value}",
+              pathspecs: [ "config.yml" ]
+            )
+          rescue StandardError
+            restore_config_snapshot(cfg_path, before)
+            raise
+          end
+        end
+      end
+
+      def restore_config_snapshot(cfg_path, before)
+        if before == :absent
+          FileUtils.rm_f(cfg_path)
+        else
+          File.binwrite(cfg_path, before)
+        end
+      rescue StandardError => e
+        # A failed restore must not mask the original commit error; surface it
+        # and let the original (re-raised by the caller) propagate.
+        write_warn("hive: could not restore config.yml after a failed default_workflow commit " \
+                   "(#{e.class}: #{e.message}); re-run `hive init --workflow` to retry")
+      end
+
+      def current_default_workflow(ops)
+        current_default_workflow_with_status(ops).first
+      end
+
+      # Returns [value, corrupt?]: the resolved default_workflow plus whether the
+      # read fell through the corrupt-config rescue (so update_existing_default_workflow!
+      # can override its idempotency short-circuit and repair an unparseable file).
+      def current_default_workflow_with_status(ops)
+        cfg_path = File.join(ops.hive_state_path, "config.yml")
+        return [ Hive::Config::DEFAULTS["default_workflow"], false ] unless File.exist?(cfg_path)
+
+        raw = YAML.safe_load(File.read(cfg_path)) || {}
+        value = raw.is_a?(Hash) ? raw["default_workflow"].to_s.strip : ""
+        [ value.empty? ? Hive::Config::DEFAULTS["default_workflow"] : value, false ]
+      rescue Psych::Exception, SystemCallError => e
+        # Don't silently assume coding on a corrupt config (unlike a clean
+        # absent/blank value): the rebind warning would under-report and the
+        # line-edit proceeds on an unparseable file. Surface it, mirroring
+        # Task#load_project_default_workflow, and flag it corrupt so the caller
+        # forces the repair rewrite.
+        write_warn("hive: could not read default_workflow from #{cfg_path} " \
+                   "(#{e.class}: #{e.message}); assuming #{Hive::Config::DEFAULTS['default_workflow']}")
+        [ Hive::Config::DEFAULTS["default_workflow"], true ]
+      end
+
+      def write_default_workflow!(cfg_path, workflow_id)
+        FileUtils.mkdir_p(File.dirname(cfg_path))
+        content = File.exist?(cfg_path) ? File.read(cfg_path) : "---\n"
+        lines = content.lines
+        existing = lines.index { |line| line.match?(/\Adefault_workflow:/) }
+
+        if Hive::Workflows.coding_id?(workflow_id)
+          lines.delete_at(existing) if existing
+        elsif existing
+          lines[existing] = "default_workflow: #{workflow_id}\n"
+        else
+          lines.insert(default_workflow_insert_index(lines), "default_workflow: #{workflow_id}\n")
+        end
+
+        atomic_write(cfg_path, lines.join)
+      end
+
+      # Place the new `default_workflow:` line right after `hive_state_path:`
+      # when present; otherwise after the leading `---` document marker (the
+      # first non-marker line), or at the top of a degenerate marker-less file.
+      # Only reachable on a hand-mangled config — the value is read correctly
+      # wherever it lands.
+      def default_workflow_insert_index(lines)
+        after_state_path = lines.index { |line| line.match?(/\Ahive_state_path:/) }
+        return after_state_path + 1 if after_state_path
+
+        lines.index { |line| !line.start_with?("---") } || lines.length
+      end
+
+      # tmp + rename so an interrupted init can never leave a half-written
+      # config.yml that Config.load's Psych-rescue would silently mask as the
+      # coding default.
+      def atomic_write(path, content)
+        tmp = File.join(File.dirname(path), ".#{File.basename(path)}.tmp.#{Process.pid}")
+        File.write(tmp, content)
+        File.rename(tmp, path)
+      ensure
+        FileUtils.rm_f(tmp) if tmp && File.exist?(tmp)
+      end
+
+      def warn_on_fieldless_tasks_rebinding(ops, from:, to:)
+        tasks = fieldless_in_flight_tasks(ops)
+        return if tasks.empty?
+
+        write_warn(
+          "hive: changing default_workflow from #{from} to #{to} re-binds " \
+          "#{tasks.size} in-flight task(s) with no meta.yml workflow: field. Any whose " \
+          "current stage dir #{to} does not define will fail to load as Error rows and " \
+          "stop advancing (Policy maps error → skip) — pin them with `workflow: #{from}` " \
+          "in meta.yml first:"
+        )
+        tasks.first(5).each { |task| write_warn("  #{task}") }
+        write_warn("  ... and #{tasks.size - 5} more") if tasks.size > 5
+      end
+
+      def fieldless_in_flight_tasks(ops)
+        stages_root = File.join(ops.hive_state_path, "stages")
+        terminal_dirs = Hive::Workflows.all_terminal_stage_dirs
+        Dir.glob(File.join(stages_root, "*", "*")).sort.filter_map do |path|
+          next unless File.directory?(path)
+          next unless Hive::Stages.task_slug?(File.basename(path))
+
+          stage_dir = File.basename(File.dirname(path))
+          next if terminal_dirs.include?(stage_dir)
+          next if Hive::TaskMeta.read(path)[:workflow]
+
+          File.join(stage_dir, File.basename(path))
+        end
       end
 
       def initialize_project_state(ops, content:)
@@ -384,13 +597,13 @@ module Hive
         Hive::InvokedBinary.path
       end
 
-      def emit_json_summary(entry:, ops:, answers:)
-        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers))
+      def emit_json_summary(entry:, ops:, answers:, workflow:)
+        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers, workflow: workflow))
       rescue Errno::EPIPE
         nil
       end
 
-      def success_payload(entry:, ops:, answers:)
+      def success_payload(entry:, ops:, answers:, workflow:)
         {
           "schema" => "hive-init",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init"),
@@ -399,6 +612,11 @@ module Hive
           "path" => entry.fetch("path"),
           "default_branch" => ops.default_branch,
           "hive_state_path" => entry.fetch("hive_state_path"),
+          # The bound default workflow, mirroring AlreadyInitializedPayload's
+          # `workflow` field — so an agent running `hive init --workflow X --json`
+          # on a fresh project can confirm the binding from JSON instead of
+          # reading config.yml out of band.
+          "workflow" => workflow.to_s,
           "worktree_root" => worktree_root,
           "answers" => answers,
           "planning_agent" => answers.fetch("planning_agent"),
@@ -485,20 +703,76 @@ module Hive
         File.write(cfg_path, content)
       end
 
-      def render_project_config(ops, answers:)
+      def render_project_config(ops, answers:, default_workflow: Hive::Workflows::CODING_ID)
         require "erb"
         template = File.read(File.expand_path("../../../templates/project_config.yml.erb", __dir__))
         bindings = ProjectConfigBinding.new(
           project_name: File.basename(@project_path),
           default_branch: ops.default_branch,
           worktree_root: worktree_root,
-          answers: answers
+          answers: answers,
+          default_workflow: default_workflow
         )
         ERB.new(template, trim_mode: "-").result(bindings.binding_for_erb)
       end
 
       def worktree_root
         Hive::Worktree.default_worktree_root(File.basename(@project_path))
+      end
+
+      def resolve_workflow_choice(ops)
+        if @workflow_name
+          return WorkflowChoice.new(
+            descriptor: Hive::WorkflowSelection.fetch!(@workflow_name),
+            source: :flag
+          )
+        end
+
+        # Only prompt when there's a real choice to make. With a single
+        # registered workflow the numbered prompt offers no alternative yet still
+        # blocks on stdin, which can hang a PTY-allocating wrapper (tmux /
+        # `script` / expect). Treat size==1 as :implicit (coding default).
+        if Hive::Workflows::Registry.ids.size > 1 && @workflow_input.respond_to?(:tty?) && @workflow_input.tty?
+          # On a re-init the prompt defaults to (and a bare Enter keeps) the
+          # project's CURRENT default rather than coding — pressing Enter must
+          # never silently reset a non-coding default back to coding and rebind
+          # every field-less in-flight task. A fresh init defaults to coding.
+          current = ops.hive_state_branch_exists? ? current_default_workflow(ops) : Hive::Workflows::CODING_ID.to_s
+          return WorkflowChoice.new(descriptor: prompt_workflow(current), source: :prompt)
+        end
+
+        WorkflowChoice.new(descriptor: Hive::Workflows::Registry.default, source: :implicit)
+      end
+
+      def prompt_workflow(current_default = Hive::Workflows::CODING_ID.to_s)
+        ids = Hive::WorkflowSelection.valid_names
+        @workflow_output.puts "Workflows: #{ids.each_with_index.map { |name, index| "#{index + 1}) #{name}" }.join('  ')}"
+        loop do
+          @workflow_output.print "Default workflow [#{current_default}]: "
+          @workflow_output.flush
+          answer = @workflow_input.gets
+          raise Hive::Commands::Init::Prompts::Aborted, "input closed" if answer.nil?
+
+          value = answer.strip
+          return Hive::WorkflowSelection.fetch!(current_default) if value.empty?
+
+          resolved = resolve_workflow_answer(value, ids)
+          return resolved if resolved
+
+          @workflow_output.puts "  unknown workflow #{value.inspect}; pick a name (#{ids.join(', ')}) or 1..#{ids.size}"
+        end
+      end
+
+      def resolve_workflow_answer(value, ids)
+        if value.match?(/\A\d+\z/)
+          index = value.to_i
+          return Hive::WorkflowSelection.fetch!(ids[index - 1]) if index.between?(1, ids.size)
+
+          return nil
+        end
+
+        match = ids.find { |id| id.casecmp(value).zero? }
+        match && Hive::WorkflowSelection.fetch!(match)
       end
 
       # Minimal ANSI palette for one-shot CLI summaries. Honors
@@ -545,10 +819,12 @@ module Hive
       # Budget and timeout sections are also validated against the full
       # prompt LIMIT_KEYS set so nested prompt/template drift fails fast.
       class ProjectConfigBinding
-        def initialize(project_name:, default_branch:, worktree_root:, answers:)
+        def initialize(project_name:, default_branch:, worktree_root:, answers:,
+                       default_workflow: Hive::Workflows::CODING_ID)
           @project_name = project_name
           @default_branch = default_branch
           @worktree_root = worktree_root
+          @default_workflow = default_workflow.to_s
           @planning_agent = answers.fetch("planning_agent")
           @claude_mode = answers.fetch("claude_mode")
           @claude_permission_mode = answers.fetch("claude_permission_mode")
@@ -573,6 +849,7 @@ module Hive
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
+                    :default_workflow,
                     :planning_agent, :claude_mode, :claude_permission_mode,
                     :claude_model, :claude_effort, :development_agent,
                     :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :budgets, :timeouts,

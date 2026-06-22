@@ -348,10 +348,25 @@ module Hive
       verb = action[:command]
       return nil unless verb
 
+      # `validate_workflow_stage!` guarantees a stage for a real Hive::Task;
+      # mirror generic_action's guard so a test double whose stage doesn't
+      # resolve returns nil instead of a NoMethodError on stage.dir.
       stage = workflow_stage
+      return nil unless stage
+
       parts = command_prefix(verb)
       parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
-      parts.concat([ "--from", stage.dir ]) if verb == "approve"
+      if verb == "approve"
+        parts.concat([ "--from", stage.dir ])
+        # A markerless inert stage has no agent to stamp a terminal marker, so
+        # its forward approve can never satisfy Approve#validate_move!'s
+        # VALID_TERMINAL_MARKERS gate — without --force the daemon would
+        # re-dispatch a WrongStage failure every tick and drain the per-project
+        # daily dispatch cap. `:none` here is reachable only for an inert
+        # non-terminal stage (generic_action routes every other `:none` to a
+        # run command), so the override is scoped exactly to that advance.
+        parts << "--force" if marker.name == :none
+      end
       parts.shelljoin
     end
 
@@ -1173,6 +1188,12 @@ module Hive
       Hive::Workflows.workflow_verb?(verb) || @stage_collision
     end
 
+    # `stage_dir` (the coding hot path's "#{index}-#{name}") and
+    # `workflow_stage.dir` (the generic path) are provably equal — Task's
+    # construction-time `validate_workflow_stage!` rejects any task whose folder
+    # stage dir isn't its descriptor's `Stage#dir`. They are kept as two
+    # expressions on purpose so the coding path stays free of a stage lookup and
+    # a nil-guard it can never trip; don't "consolidate" them into one.
     def stage_dir
       "#{task.stage_index}-#{task.stage_name}"
     end

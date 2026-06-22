@@ -734,7 +734,7 @@ module Hive
       # The production glob over a stage dir's task folders, extracted into its
       # own method so the deterministic stage-move race tests can subclass and
       # override it (test StatusRaceCommand) to inject a mid-scan rename/vanish.
-      # collect_rows (:422) is the sole caller.
+      # collect_rows is the sole caller.
       def stage_task_entries(stage_dir)
         Dir[File.join(stage_dir, "*")]
       end

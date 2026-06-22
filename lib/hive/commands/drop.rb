@@ -21,11 +21,6 @@ module Hive
     class Drop
       include Hive::Schemas::EnvelopeEmitter
 
-      # Derived from `Hive::Stages::DIRS` so a stage rename updates
-      # both the active-stage list and the archive-guard predicate
-      # in lockstep.
-      ARCHIVE_STAGE = Hive::Stages::DIRS.last
-
       AlreadyArchived = Class.new(Hive::InvalidTaskPath)
 
       TaskContext = Struct.new(
@@ -101,7 +96,7 @@ module Hive
         # surface the archive match so guard_archived! refuses cleanly
         # instead of silently dropping nothing.
         if folders.empty?
-          archived = collect_stage_folders(task.hive_state_path, task.slug, [ ARCHIVE_STAGE ])
+          archived = collect_stage_folders(task.hive_state_path, task.slug, archive_stage_dirs)
           folders = archived unless archived.empty?
         end
         TaskContext.new(
@@ -145,7 +140,7 @@ module Hive
 
         project, folders = matches_by_project.first
         if @stage_filter.nil?
-          active_folders = folders.reject { |f| f[:stage] == ARCHIVE_STAGE }
+          active_folders = folders.reject { |f| archive_stage_dirs.include?(f[:stage]) }
           folders = active_folders unless active_folders.empty?
         end
         TaskContext.new(
@@ -207,9 +202,9 @@ module Hive
       end
 
       def guard_archived!(context)
-        return unless context.folders.any? && context.folders.all? { |f| f[:stage] == ARCHIVE_STAGE }
+        return unless context.folders.any? && context.folders.all? { |f| archive_stage_dirs.include?(f[:stage]) }
 
-        raise AlreadyArchived, "task #{context.slug} is at #{ARCHIVE_STAGE}; nothing to drop"
+        raise AlreadyArchived, "task #{context.slug} is at #{context.from_stages.uniq.join(', ')}; nothing to drop"
       end
 
       def cleanup_context(context)
@@ -433,9 +428,20 @@ module Hive
       end
 
       # Active stage dirs across EVERY registered workflow (coding + generic),
-      # minus the archive stage — the set `hive drop` may hard-delete from.
+      # minus the archive stages — the set `hive drop` may hard-delete from.
       def active_stage_dirs
-        Hive::Workflows.all_stage_dirs.reject { |stage| stage == ARCHIVE_STAGE }
+        Hive::Workflows.all_stage_dirs.reject { |stage| archive_stage_dirs.include?(stage) }
+      end
+
+      # Terminal ("archived") stage dir of EVERY registered workflow, not just
+      # coding's 9-done. A completed generic-workflow task sits at its own
+      # terminal dir, so `guard_archived!` must recognize the whole union or it
+      # would hard-delete a finished generic task that `AlreadyArchived` should
+      # refuse. Shares `Hive::Workflows.all_terminal_stage_dirs` with init's
+      # fieldless-task scan, and stays in lockstep with `active_stage_dirs` (the
+      # workflow union minus this set).
+      def archive_stage_dirs
+        Hive::Workflows.all_terminal_stage_dirs
       end
 
       def record_drop_commit!(context)

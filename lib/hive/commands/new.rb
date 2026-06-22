@@ -9,6 +9,7 @@ require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
 require "hive/workflows"
+require "hive/workflow_selection"
 require "hive/tui/text"
 
 module Hive
@@ -45,14 +46,30 @@ module Hive
       # callers can distinguish "rephrase the title" feedback from
       # "attachment routing bug" feedback in their rescue lists.
       class InvalidAttachmentError < TypedValueError; end
+      # Raised when a project's configured default_workflow is not a registered
+      # workflow (a hand-edit, or a workflow removed after the project was set
+      # up). Distinct from the user-supplied `--workflow` UnknownWorkflow so the
+      # message can name config.yml and the `call` rescue can report it cleanly
+      # instead of letting a bare UnknownWorkflow block ALL task creation.
+      class UnregisteredProjectWorkflow < TypedValueError; end
+      # Raised when the project config.yml exists but is unreadable/unparseable
+      # (corrupt YAML, a non-hash document, an I/O fault). Unlike the read-only
+      # status/daemon surfaces, which degrade a bad config to a coding fallback,
+      # `hive new` is a mutation: creating a task under a silently-assumed
+      # default could be wrong, so it fails loudly with a typed error naming
+      # config.yml (mirroring UnregisteredProjectWorkflow) instead of crashing
+      # with a raw Psych backtrace that escapes call's rescue list.
+      class ProjectConfigUnreadable < TypedValueError; end
 
-      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil)
+      def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], depends_on: nil,
+                     workflow: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
         @body_override = body_override
         @attachments = attachments
         @depends_on = depends_on
+        @workflow_name = workflow
       end
 
       class << self
@@ -77,9 +94,15 @@ module Hive
       def call
         call!
       rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidAttachmentError,
-             SlugCollisionError, SystemCallError, IOError => e
+             SlugCollisionError, UnregisteredProjectWorkflow, ProjectConfigUnreadable,
+             Hive::Workflows::UnknownWorkflow,
+             SystemCallError, IOError => e
         warn "hive: #{e.message}"
-        exit 1
+        # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
+        # USAGE 64 so an agent can tell "typo'd --workflow, fix the flag" from a
+        # transient GENERIC failure); fall back to 1 for the untyped
+        # SystemCallError/IOError arms.
+        exit(e.respond_to?(:exit_code) ? e.exit_code : 1)
       end
 
       def call!
@@ -95,9 +118,12 @@ module Hive
         validate_slug!(slug)
         depends_on = normalize_dependency(@depends_on)
         validate_dependency!(depends_on) if depends_on
+        workflow_info = resolve_workflow(project)
+        workflow = workflow_info.fetch(:descriptor)
+        entry_stage = workflow.stages.first
 
         hive_state = project["hive_state_path"]
-        task_dir = File.join(hive_state, "stages", "1-inbox", slug) # coding-scoped: hive new seeds the coding inbox
+        task_dir = File.join(hive_state, "stages", entry_stage.dir, slug)
         if File.exist?(task_dir)
           raise SlugCollisionError.new(
             "slug collision at #{task_dir} (rare; retry the command)",
@@ -106,38 +132,92 @@ module Hive
         end
         FileUtils.mkdir_p(task_dir)
 
-        idea_path = File.join(task_dir, "idea.md")
+        idea_path = File.join(task_dir, entry_stage.state_file)
         id = nil
         begin
-          File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
+          File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
           copy_attachments!(task_dir)
           id = allocate_task_id
-          # Pin workflow: coding so the new 1-inbox task resolves against the
-          # coding descriptor regardless of the project's default_workflow — a
-          # non-coding default would otherwise make this field-less folder
-          # resolve to that descriptor and vanish from status as an invalid task.
           Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil,
                                depends_on: depends_on,
-                               workflow: Hive::Workflows::CODING_ID.to_s) # coding-scoped: hive new seeds the coding inbox
+                               workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
-          # uncommitted task on disk that the snapshot would surface as
-          # a broken `1-inbox/` entry. Roll the directory back so the
-          # capture is atomic — either the task is committed or it
-          # never existed.
+          # uncommitted task on disk that the snapshot would surface as a
+          # broken entry under the workflow's entry stage dir (`entry_stage.dir`
+          # — `1-inbox` for coding, but different for other workflows). Roll the
+          # directory back so the capture is atomic — either the task is
+          # committed or it never existed.
           FileUtils.rm_rf(task_dir)
           raise
         end
 
         ops = Hive::GitOps.new(project["path"])
         Hive::Lock.with_commit_lock(hive_state) do
-          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured") # coding-scoped: hive new seeds the coding inbox
+          ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
         end
         spawn_name_generator(task_dir)
 
         puts "hive: captured #{idea_path}"
         target_hint = id ? id.to_s : slug
-        puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', '2-brainstorm/')} && hive run #{target_hint}"
+        next_stage = workflow.next_stage_after(entry_stage.name)
+        if next_stage
+          puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', "#{next_stage.dir}/")} && hive run #{target_hint}"
+        else
+          puts "next: hive run #{target_hint}"
+        end
+      end
+
+      def resolve_workflow(project)
+        override = normalize_workflow(@workflow_name)
+        # With an explicit --workflow the project default is irrelevant (an
+        # override always pins), so don't read config.yml at all — an
+        # unreadable/corrupt config must not block a fully-specified `hive new`.
+        return { descriptor: Hive::WorkflowSelection.fetch!(override), pin: true } if override
+
+        cfg_default = project_default_workflow(project.fetch("path"))
+        {
+          descriptor: fetch_project_default_workflow!(cfg_default, project),
+          pin: !Hive::Workflows.coding_id?(cfg_default)
+        }
+      end
+
+      # A typo'd or later-removed PROJECT default_workflow would otherwise raise
+      # a bare UnknownWorkflow that names no file and was absent from #call's
+      # rescue list — blocking ALL task creation for the project with an opaque
+      # error. Re-raise a typed error naming config.yml, mirroring
+      # Task#warn_if_unregistered_project_default. The user-supplied `--workflow`
+      # path keeps WorkflowSelection.fetch!'s own valid-names message.
+      def fetch_project_default_workflow!(cfg_default, project)
+        Hive::WorkflowSelection.fetch!(cfg_default)
+      rescue Hive::Workflows::UnknownWorkflow
+        cfg_path = File.join(project["hive_state_path"].to_s, "config.yml")
+        raise UnregisteredProjectWorkflow.new(
+          "project default_workflow #{cfg_default.inspect} in #{cfg_path} is not a registered " \
+          "workflow (valid: #{Hive::WorkflowSelection.valid_names.join(', ')}); fix config.yml or pass --workflow",
+          value: cfg_default
+        )
+      end
+
+      def project_default_workflow(project_root)
+        configured = Hive::Config.load(project_root)["default_workflow"].to_s.strip
+        configured.empty? ? Hive::Config::DEFAULTS["default_workflow"] : configured
+      rescue Psych::Exception, Hive::ConfigError, SystemCallError, IOError => e
+        # A corrupt/unparseable config.yml raises Psych::SyntaxError (or
+        # ConfigError for a non-hash document) out of Config.load — neither a
+        # Hive::Error nor caught by call's rescue list, so it would escape as a
+        # raw backtrace (exit 1). Re-raise as a typed error naming config.yml so
+        # the failure is clean and actionable.
+        cfg_path = File.join(File.expand_path(project_root), ".hive-state", "config.yml")
+        raise ProjectConfigUnreadable.new(
+          "could not read #{cfg_path} (#{e.class}: #{e.message}); fix the file or pass --workflow",
+          value: cfg_path
+        )
+      end
+
+      def normalize_workflow(value)
+        string = value.to_s.strip
+        string.empty? ? nil : string
       end
 
       def derive_slug(text)
@@ -200,6 +280,14 @@ module Hive
           created_at: Time.now.utc.iso8601
         )
         ERB.new(template, trim_mode: "-").result(bindings.binding_for_erb)
+      end
+
+      def render_initial_state(slug, text, body_override:, workflow:)
+        content = render_idea(slug, text, body_override: body_override)
+        return content if Hive::Workflows.coding_id?(workflow.id)
+
+        replacement = workflow.stages.first&.kind == :inert ? "\n<!-- COMPLETE -->\n" : "\n"
+        content.sub(/\n?<!-- WAITING -->\n?\z/, replacement)
       end
 
       # Copy each `[src, dest_name]` tuple into `<task_dir>/assets/`.

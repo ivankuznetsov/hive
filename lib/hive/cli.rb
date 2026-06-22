@@ -1,5 +1,6 @@
 require "thor"
 require "hive/stages"
+require "hive/workflows/registry"
 
 module Hive
   class CLI < Thor
@@ -14,6 +15,12 @@ module Hive
     # this derives the same list from the default coding workflow descriptor —
     # no literal stage dirs in source, so it stays in sync with a renumber.
     STAGE_VOCABULARY = "stages: #{Hive::Stages::DIRS.join(', ')}".freeze
+
+    # Registered workflow names embedded in the `--workflow` option help so an
+    # agent reading `hive help init|new` discovers valid workflows from
+    # `--help` instead of via a failed call — the STAGE_VOCABULARY pattern,
+    # applied to workflows.
+    WORKFLOW_VOCABULARY = "valid: #{Hive::Workflows::Registry.ids.join(', ')}".freeze
 
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, and the workflow verbs
@@ -92,9 +99,16 @@ module Hive
       See `wiki/commands/init.md` for the full prompt flow and ADR-023.
     DESC
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
+    option :workflow, type: :string,
+                      desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
-      Hive::Commands::Init.new(project_path, force: options[:force], json: options[:json]).call
+      Hive::Commands::Init.new(
+        project_path,
+        force: options[:force],
+        json: options[:json],
+        workflow: options[:workflow]
+      ).call
     end
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
@@ -294,9 +308,11 @@ module Hive
       end
     end
 
-    desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
+    desc "new PROJECT TEXT", "Create a new task in PROJECT"
     long_desc <<~DESC
-      Create a new task in 1-inbox of PROJECT from the free-text TEXT.
+      Create a new task in PROJECT from the free-text TEXT. By default, the task
+      uses the project's default workflow; pass --workflow to pin a registered
+      workflow for this task.
 
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
@@ -313,12 +329,19 @@ module Hive
                         desc: "stack on a prerequisite task id or slug; hold daemon " \
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
+    option :workflow, type: :string,
+                      desc: "pin this task to a registered workflow (#{WORKFLOW_VOCABULARY})"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
       raise Hive::Error, "missing task text" if text.strip.empty?
 
-      Hive::Commands::New.new(project, text, depends_on: options[:depends_on]).call
+      Hive::Commands::New.new(
+        project,
+        text,
+        depends_on: options[:depends_on],
+        workflow: options[:workflow]
+      ).call
     end
     map "new" => :new_task
 

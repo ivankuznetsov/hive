@@ -4,6 +4,7 @@ require "yaml"
 require "hive/pr"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/workflows"
 
 module Hive
   module Patrol
@@ -38,7 +39,13 @@ module Hive
           task_folder,
           id: allocate_task_id,
           slug: slug,
-          display_name: display_name(finding)
+          display_name: display_name(finding),
+          # Pin the workflow explicitly: this is a hard-coded coding 6-review
+          # handoff, but the task would otherwise inherit the project default —
+          # on a non-coding-default project that produces a 6-review/<slug> that
+          # fails validate_workflow_stage! and surfaces only as a synthetic Error
+          # row. Patrol is coding-only today, so this is defensive.
+          workflow: Hive::Workflows::CODING_ID.to_s
         )
       end
 

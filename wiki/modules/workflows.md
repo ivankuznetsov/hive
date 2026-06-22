@@ -4,10 +4,10 @@ type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb
 created: 2026-04-26
 updated: 2026-06-20
-tags: [module, workflow, verbs]
+tags: [module, workflow, verbs, selection]
 ---
 
-**TLDR**: The coding workflow is described once as `Hive::Workflows::Coding::DESCRIPTOR`: an ordered `Hive::Workflow` value object whose stages carry directory names, state files, incoming advance verbs, and runner metadata. `Hive::Workflows::Registry.default` returns that descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::Workflows::Registry.all` exposes the live descriptor set for runtime/test registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` as a fallback for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`.
+**TLDR**: The coding workflow is described once as `Hive::Workflows::Coding::DESCRIPTOR`: an ordered `Hive::Workflow` value object whose stages carry directory names, state files, incoming advance verbs, and runner metadata. `Hive::Workflows::Registry.default` returns that descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for runtime/test registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` as a fallback for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`.
 
 ## Descriptor and registry
 
@@ -25,6 +25,7 @@ tags: [module, workflow, verbs]
 - `Hive::Workflows::Coding::DESCRIPTOR` — the only built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
 - `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids. Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
+- `Hive::WorkflowSelection.fetch!(name)` — CLI-facing selector validation used by [[commands/init]] and [[commands/new]]. Blank/nil normalizes to `coding`; unknown names raise `Hive::Workflows::UnknownWorkflow` with `valid workflows: ...` from the live registry.
 
 ## Constants
 
@@ -71,6 +72,10 @@ Hive::Workflows.all_stage_names            # union across Registry.all
 ## Runner Selection
 
 `Hive::Stages::Resolver.resolve(task, descriptor: Registry.default)` maps stage names to runner methods. `Hive::Commands::Run#pick_runner` passes `task.workflow`, so non-coding task folders dispatch through their own descriptor. The coding runner table is checked first only when `descriptor.id == :coding`, preserving the historical runtime for the nine coding stages while allowing a non-coding stage named `plan`, `review`, or `execute` to route by descriptor kind instead of accidentally picking a coding bespoke runner. If the descriptor stage has `kind: :agent`, the resolver lazy-requires [[stages/agent]] and returns the generic headless runner. Unknown names still raise `Hive::StageError` with `no runner for stage <name>`.
+
+## Test workflow fixture
+
+`test/support/workflow_helpers.rb` registers a scoped `:content_fixture` descriptor for integration proof tests only. Its stages are `1-inbox -> 2-research -> 3-draft -> 4-done`; the entry is inert and the remaining stages are generic agents with `status_mode: :state_file_marker`. `with_deterministic_content_agent` stubs the generic agent seam to write deterministic state artifacts plus `<!-- COMPLETE -->`, so daemon tests exercise real init/new/status/policy/approve orchestration without network or model calls.
 
 ## Backlinks
 

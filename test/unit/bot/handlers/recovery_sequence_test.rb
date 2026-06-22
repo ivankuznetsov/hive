@@ -135,6 +135,20 @@ class HiveBotRecoverySequenceTest < Minitest::Test
     end
   end
 
+  # A non-:agent (inert/marker) MIDDLE stage has no agent runner —
+  # Stages::Resolver.resolve raises StageError for kind != :agent — so offering
+  # `hive run` there would queue a command that always fails. With the workflow
+  # registered, the inert middle stage yields nil; the :agent middle still runs.
+  def test_retry_verb_for_generic_inert_middle_stage_is_nil
+    with_registered_workflow(agent_entry_workflow) do
+      assert_nil Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage("2-hold", workflow: "agent_entry"),
+                 "an inert middle stage has no agent runner; hive run there would always fail"
+      assert_equal "run",
+                   Hive::Bot::Handlers::RecoverySequence.retry_verb_for_stage("1-draft", workflow: "agent_entry"),
+                   "the :agent entry stage still re-runs via hive run"
+    end
+  end
+
   def test_coding_workflow_retry_unchanged_when_workflow_omitted
     # Default (no workflow) keeps the coding verb table — the inline-button
     # callback path carries no workflow token and must not regress.

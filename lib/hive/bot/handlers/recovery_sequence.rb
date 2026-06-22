@@ -102,6 +102,12 @@ module Hive
             # StageError. Guard it the way the coding path guards `9-done` below.
             return nil if generic_terminal_stage?(stage, workflow)
 
+            # A non-:agent middle stage (inert/marker) likewise has no agent
+            # runner — `Stages::Resolver.resolve` raises StageError for any
+            # kind != :agent — so `hive run` there would queue a command that
+            # always fails. Only the generic re-run verb's :agent stages can run.
+            return nil if generic_non_agent_stage?(stage, workflow)
+
             return "run"
           end
           return nil if stage == "9-done" # coding-scoped: coding retry verbs have no terminal retry
@@ -121,6 +127,21 @@ module Hive
           descriptor = Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
           last = descriptor.stages.last
           !last.nil? && last.dir == stage
+        rescue Hive::Workflows::UnknownWorkflow
+          false
+        end
+
+        # True when `stage` resolves to a NON-:agent stage (inert/marker) of a
+        # registered non-coding workflow — the kinds with no agent runner
+        # (`Stages::Resolver.resolve` raises StageError for kind != :agent), so
+        # offering `hive run` would queue a command that always fails. An
+        # unregistered or unresolvable stage returns false so the caller keeps
+        # its conservative "offer hive run" fallback (matching
+        # generic_terminal_stage?).
+        def self.generic_non_agent_stage?(stage, workflow)
+          descriptor = Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+          found = descriptor.stage_for_dir(stage)
+          !found.nil? && found.kind != :agent
         rescue Hive::Workflows::UnknownWorkflow
           false
         end

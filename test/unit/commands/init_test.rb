@@ -127,6 +127,96 @@ class HiveCommandsInitTest < Minitest::Test
     assert_nil cmd.send(:write_warn, "hive: warning")
   end
 
+  def test_existing_summary_swallows_epipe
+    cmd = command("/tmp/project")
+    old_stdout = $stdout
+    $stdout = StringIO.new
+    $stdout.define_singleton_method(:puts) { |_line| raise Errno::EPIPE, "closed pipe" }
+    choice = Hive::Commands::Init::WorkflowChoice.new(descriptor: content_workflow, source: :flag)
+
+    assert_nil cmd.send(:write_existing_summary, nil, workflow_choice: choice)
+  ensure
+    $stdout = old_stdout
+  end
+
+  def test_current_default_workflow_falls_back_to_coding_on_unreadable_config
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), "default_workflow: [\n")
+      ops = Struct.new(:hive_state_path).new(state)
+
+      _out, err = capture_io { assert_equal "coding", command.send(:current_default_workflow, ops) }
+      # A corrupt config warns (not silently assumes coding) so the rebind
+      # warning can't under-report on an unparseable file.
+      assert_includes err, "could not read default_workflow"
+    end
+  end
+
+  def test_write_default_workflow_creates_fresh_file_when_absent
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, ".hive-state", "config.yml")
+      refute File.exist?(cfg)
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+
+      body = File.read(cfg)
+      assert_match(/\A---\n/, body)
+      assert_includes body, "default_workflow: content_fixture"
+    end
+  end
+
+  def test_write_default_workflow_inserts_at_top_without_hive_state_path_line
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "---\nproject_name: demo\n")
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+
+      lines = File.read(cfg).lines
+      assert_equal "---\n", lines.first
+      # Inserted right after the leading marker, not mid-document or appended.
+      assert_equal "default_workflow: content_fixture\n", lines[1]
+      assert_includes lines, "project_name: demo\n"
+    end
+  end
+
+  def test_write_default_workflow_leaves_no_tmp_file_behind
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "---\nhive_state_path: .hive-state\n")
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+
+      leftovers = Dir[File.join(dir, ".config.yml.tmp.*")]
+      assert_empty leftovers, "atomic write must clean up its tmp file"
+    end
+  end
+
+  def test_write_default_workflow_replaces_and_removes_existing_key
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      cfg = File.join(dir, "config.yml")
+      File.write(cfg, "---\nproject_name: demo\ndefault_workflow: old\n")
+
+      command.send(:write_default_workflow!, cfg, "content_fixture")
+      assert_includes File.read(cfg), "default_workflow: content_fixture"
+
+      command.send(:write_default_workflow!, cfg, "coding")
+      refute_includes File.read(cfg), "default_workflow:"
+    end
+  end
+
+  def test_prompt_workflow_reprompts_invalid_index_and_accepts_case_insensitive_name
+    with_registered_workflow(content_workflow) do
+      input = StringIO.new("99\nCONTENT_FIXTURE\n")
+      output = StringIO.new
+      cmd = Hive::Commands::Init.new("/tmp/project", workflow_input: input, workflow_output: output)
+
+      assert_equal :content_fixture, cmd.send(:prompt_workflow).id
+      assert_includes output.string, "unknown workflow \"99\""
+    end
+  end
+
   def test_register_daemon_service_warns_when_installer_reports_failure
     cmd = command
     warnings = []
@@ -394,7 +484,7 @@ def test_emit_json_summary_swallows_epipe
   }
   cmd.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "closed pipe" }
 
-  assert_nil cmd.send(:emit_json_summary, entry: entry, ops: ops, answers: answers)
+  assert_nil cmd.send(:emit_json_summary, entry: entry, ops: ops, answers: answers, workflow: :coding)
 end
 
   def test_current_binary_path_resolves_hive_from_path

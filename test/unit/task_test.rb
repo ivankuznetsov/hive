@@ -175,6 +175,38 @@ class TaskTest < Minitest::Test
     end
   end
 
+  # The (mtime, size) cache stamp must invalidate when a long-lived reader's
+  # config.yml is rewritten mid-run. Force the SAME mtime so only the file size
+  # differs — proving the size component closes the coarse-mtime window where
+  # mtime-alone keying would serve the stale default until process restart.
+  def test_project_default_workflow_cache_invalidates_on_same_mtime_size_change
+    Hive::Task.project_default_workflow_cache.clear
+    with_tmp_dir do |dir|
+      state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(state)
+      cfg = File.join(state, "config.yml")
+      File.write(cfg, "default_workflow: coding\n")
+      folder = File.join(state, "stages", "2-brainstorm", "x-260620-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = Hive::Task.new(folder)
+      original_mtime = File.mtime(cfg)
+
+      assert_equal "coding", task.send(:project_default_workflow)
+
+      # Rewrite to a longer default but force the original mtime back, so the
+      # cache can only notice the change via the size component of the stamp.
+      File.write(cfg, "default_workflow: research\n")
+      File.utime(File.atime(cfg), original_mtime, cfg)
+
+      resolved = nil
+      _out, err = capture_io { resolved = task.send(:project_default_workflow) }
+
+      assert_equal "research", resolved,
+                   "a same-mtime config rewrite that changes the file size must invalidate the cache"
+      assert_includes err, "not a registered workflow"
+    end
+  end
+
   def test_blank_task_workflow_selector_falls_back_to_project_default
     with_tmp_dir do |dir|
       with_registered_workflow(research_workflow) do

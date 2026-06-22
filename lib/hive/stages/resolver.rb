@@ -1,4 +1,5 @@
 require "hive"
+require "hive/workflows"
 require "hive/workflows/registry"
 
 module Hive
@@ -50,7 +51,7 @@ module Hive
         # bespoke runners even though they are declared kind: :agent in the
         # coding descriptor. Non-coding workflows must route by their own
         # descriptor kind, even when a stage name collides with a coding stage.
-        if descriptor.id == :coding
+        if Hive::Workflows.coding_id?(descriptor.id)
           runner = CODING_RUNNERS[task.stage_name]
           return runner.call if runner
         end

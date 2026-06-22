@@ -403,7 +403,7 @@ module Hive
       def spawn_agent(task, prompt:, max_budget_usd:, timeout_sec:,
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
-                      cfg: nil, permission_mode: nil)
+                      cfg: nil, permission_mode: nil, cli_flags: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -423,8 +423,8 @@ module Hive
           warn_isolation_reduced(task, profile, add_dirs)
         end
 
-        cli_flags = []
-        if cfg && profile.name == :claude
+        cli_flags ||= []
+        if cli_flags.empty? && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg)
         end

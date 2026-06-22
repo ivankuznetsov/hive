@@ -75,6 +75,57 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_shared_session_derives_cli_flags_from_config_when_none_are_passed
+    with_tmp_task do |task|
+      runner = Object.new
+      runner.define_singleton_method(:start_detached) { |command:| @command = command }
+      runner.define_singleton_method(:kill_session) { }
+      captured_flags = nil
+      cfg = {
+        "claude" => {
+          "permission_mode" => "bypassPermissions",
+          "model" => "sonnet",
+          "effort" => "medium"
+        }
+      }
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :build_runner, ->(**) { runner }) do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :preflight!, ->(*) { }) do
+          with_replaced_singleton_method(Hive::ClaudeLauncher, :reset_signal_files, ->(*) { }) do
+            with_replaced_singleton_method(Hive::StopHookInstaller, :install, ->(**) { [] }) do
+              with_replaced_singleton_method(Hive::ClaudeLauncher, :wrapper_command, lambda { |**kwargs|
+                captured_flags = kwargs.fetch(:cli_flags)
+                [ "claude" ]
+              }) do
+                with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_until_session_exists!, ->(*) { }) do
+                  with_replaced_singleton_method(Hive::ClaudeLauncher, :record_claude_pid, ->(*) { }) do
+                    with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, ->(*) { }) do
+                      with_replaced_singleton_method(Hive::ClaudeLauncher, :shutdown_claude, ->(*) { }) do
+                        with_replaced_singleton_method(Hive::ClaudeLauncher, :sweep_orphan_processes, ->(*) { }) do
+                          with_replaced_singleton_method(Hive::ClaudeLauncher, :cleanup_done, ->(*) { }) do
+                            Hive::ClaudeLauncher.with_shared_session(
+                              task: task,
+                              cfg: cfg,
+                              session_name: "hive-test-session",
+                              cwd: task.folder,
+                              add_dirs: []
+                            ) { |_handle| }
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      assert_equal %w[--model sonnet --effort medium], captured_flags
+    end
+  end
+
   def test_launcher_rejects_non_claude_profile
     with_tmp_task do |task|
       err = assert_raises(Hive::AgentError) do

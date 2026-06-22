@@ -396,10 +396,10 @@ module Hive
             end
 
             if triage_enabled?(cfg)
-              if @suppression_base_degraded
+              if @suppression_base_degraded && Hive::Stages::Review::Suppression.enabled?(cfg)
                 warn "[hive.review] suppression base unresolved (compare ref did not resolve); " \
-                     "the list resets across run!/resume re-invocations once HEAD advances and will not " \
-                     "accumulate for pass #{format('%02d', pass)} — no-fix suppression is effectively disabled this run"
+                     "the list still accumulates across passes within this run but resets across " \
+                     "run!/resume re-invocations once HEAD advances past the recorded base"
               end
               stripped = Hive::Stages::Review::Suppression.strip_suppressed!(
                 cfg: cfg,
@@ -777,8 +777,11 @@ module Hive
         )
         # HEAD changes on every fix commit, so binding suppression to it
         # (or to the unresolved-ref token below) means reset_if_base_changed!
-        # wipes the list each pass — flag it degraded so the runner can warn
-        # per pass that suppression is effectively disabled.
+        # resets the list across run!/resume re-invocations once HEAD advances
+        # past the recorded base — flag it degraded so the runner can warn that
+        # suppression won't survive a resume. Within a single run! the base is
+        # resolved once and frozen across the pass loop, so the list still
+        # accumulates across passes (see ReviewerCompareBase).
         return ReviewerCompareBase.new(sha: head_out.strip, degraded: true) if head_status.success?
 
         warn "[hive.review] worktree HEAD did not resolve for suppression binding; " \

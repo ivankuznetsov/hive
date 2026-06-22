@@ -7,37 +7,52 @@ module Hive
     module Agent
       module_function
 
+      # Fallback timeout for a generic :agent stage whose descriptor omits
+      # `timeout_sec` and whose cfg carries no per-stage override. Without it,
+      # `Hive::Agent#run` would do `Time.now + nil` and crash at spawn — the
+      # budget path is nil-guarded downstream, the timeout path is not.
+      DEFAULT_TIMEOUT_SEC = 1800
+
       def run!(task, cfg)
         cfg ||= {}
-        # U3 seam (remaining gap): as of U3 `pick_runner` (commands/run.rb) passes
-        # `descriptor: task.workflow` into `Resolver.resolve`, so runner SELECTION is now
-        # per-task and the resolver's `descriptor:` param is now passed in production (though
-        # inert until a 2nd workflow registers). What is NOT yet
-        # threaded is the descriptor *into* the runner: this lookup still re-resolves the stage
-        # from `Registry.default` rather than from the dispatched `task.workflow`. It is dormant
-        # today because the registry holds only `:coding` (so `Registry.default` is the only
-        # workflow). When a second workflow is registered, this is the call site that must
-        # consume the dispatched descriptor instead of the global default.
-        stage = Hive::Workflows::Registry.default.stages.find { |candidate| candidate.name == task.stage_name }
+        stage = task.workflow.stage_named(task.stage_name)
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
         output_path = File.join(task.folder, stage.state_file)
         profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
         prompt = render_prompt(task, cfg, stage, profile: profile)
 
-        Hive::Stages::Base.spawn_agent(
+        result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
           add_dirs: [ task.folder ],
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", task.stage_name) || stage.budget_usd,
-          timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec,
+          timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
           log_label: task.stage_name,
           profile: profile,
-          status_mode: :state_file_marker,
+          # Honor the descriptor's declared status_mode; fall back to the
+          # marker-file convention only when the stage leaves it unset.
+          status_mode: stage.status_mode || :state_file_marker,
           cfg: cfg
         )
 
         marker = Hive::Markers.current(output_path)
+        # `spawn_agent` returns a `{status: :error}` envelope WITHOUT writing
+        # a marker on a preflight/version failure (base.rb) — unlike the
+        # coding claude path, which routes through
+        # `spawn_claude_with_tmux_marker!` and stamps an attributed marker.
+        # The generic runner uses bare `spawn_agent` for every profile, so we
+        # must consume that envelope here: otherwise the reread yields `:none`,
+        # `hive run` exits 0, and the row silently re-classifies as
+        # `ready_to_run` forever (NO-SILENT-CAPS). Write an attributed `:error`
+        # marker — but never clobber a marker the agent already wrote.
+        if result.is_a?(Hash) && result[:status] == :error && marker.name == :none
+          marker = Hive::Markers.set(
+            output_path, :error,
+            reason: "agent_preflight_failed",
+            message: result[:error_message].to_s[0, 200]
+          )
+        end
         { commit: action_for(marker.name), status: marker.name }
       end
 
@@ -61,7 +76,14 @@ module Hive
         Dir.glob(File.join(task.folder, "*.md")).sort.filter_map do |path|
           next if File.basename(path) == output_file
 
-          "## #{File.basename(path)}\n#{File.read(path)}"
+          begin
+            "## #{File.basename(path)}\n#{File.read(path)}"
+          rescue SystemCallError => e
+            # TOCTOU: a sibling artifact can be deleted or become unreadable
+            # between the glob and the read. Degrade that one file to a
+            # placeholder so it can't abort the whole generic stage run.
+            "## #{File.basename(path)}\n(unreadable: #{e.class})"
+          end
         end.join("\n\n")[0, 8000]
       end
 

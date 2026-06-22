@@ -3,6 +3,7 @@ require "fileutils"
 require "shellwords"
 require "hive/config"
 require "hive/stages"
+require "hive/workflows"
 require "hive/task_action"
 require "hive/brainstorm_parser"
 require "hive/daemon/policy"
@@ -42,7 +43,7 @@ module Hive
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
-      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -700,9 +701,14 @@ module Hive
       def find_post_advance_state_file(hive_state_path, slug)
         return nil unless hive_state_path && Dir.exist?(hive_state_path)
 
-        # Stage names from the SSOT — covers all seven directories,
-        # so adding a new stage in modules/stages.rb auto-extends.
-        Hive::Stages::DIRS.each do |stage_dir|
+        # Scan the runtime union of every registered workflow's stage dirs
+        # (Hive::Workflows.all_stage_dirs), not just the coding descriptor's:
+        # a generic `hive approve` advances a task into a non-coding dir
+        # (e.g. `2-gather`), and a coding-only scan would miss it — leaving
+        # the moved task's mtime baseline stale so its fresh `ready_to_run`
+        # stage mis-debounces or stalls. Mirrors the sibling-gate migration
+        # in task_resolver/status (U6.4).
+        Hive::Workflows.all_stage_dirs.each do |stage_dir|
           slug_dir = File.join(hive_state_path, "stages", stage_dir, slug)
           next unless Dir.exist?(slug_dir)
 
@@ -755,6 +761,7 @@ module Hive
         decision = Policy.decide(
           action: row.action,
           stage: row.stage,
+          workflow: row.workflow,
           command: row.suggested_command,
           state_file_mtime: row.state_file_mtime,
           last_dispatched_state_file_mtime:
@@ -772,7 +779,7 @@ module Hive
           # auto-advance from regular advance-action dispatches. An
           # agent or operator reading daemon.log can then audit WHICH
           # policy branch fired without re-implementing Policy.decide.
-          trigger = Policy.plan_approval?(row.action, row.stage) ? "plan_approval" : "advance"
+          trigger = Policy.plan_approval?(row.action, row.stage, row.workflow) ? "plan_approval" : "advance"
           dispatch_or_block(row, now: now, trigger: trigger)
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,
@@ -813,6 +820,15 @@ module Hive
                                   dependency_stage: row.dependency_stage)
         when :poll_for_merge
           enqueue_merge_watch(row)
+        when :markerless_stalled
+          # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
+          # marker and its state file shows no progress, so it re-classifies to
+          # ready_to_run indefinitely. Log it explicitly (not a bare :skipped)
+          # so the stall is observable rather than silent. The per-project daily
+          # dispatch cap bounds re-dispatch if the file does keep changing.
+          @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
+                                              stage: row.stage, action: row.action,
+                                              reason: "agent_exited_without_marker")
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
@@ -838,6 +854,11 @@ module Hive
       # actively answering.
       def brainstorm_answers_pending?(row)
         return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        # The brainstorm Q&A hold is a coding-workflow gate: only the coding
+        # `2-brainstorm` stage drives the `### Q{n}.` answer flow. A generic
+        # workflow that reuses the `2-brainstorm` dir must take the debounced
+        # generic path, not be held as `answers_pending`.
+        return false unless Policy.coding_workflow_id?(row.workflow)
         return false unless row.stage == BRAINSTORM_STAGE_DIR
 
         path = row.state_file
@@ -959,8 +980,11 @@ module Hive
 
       # Pipeline position of a stage dir (higher = closer to done); -1 for
       # an unrecognized stage so it deprioritizes behind every known stage.
+      # Indexes the runtime union of all registered workflows' stage dirs so
+      # a generic stage gets a real rank instead of sorting behind every
+      # coding row under slot scarcity (consistent with the sibling gates).
       def stage_rank(stage)
-        Hive::Stages::DIRS.index(stage.to_s) || -1
+        Hive::Workflows.all_stage_dirs.index(stage.to_s) || -1
       end
 
       def observe_external_running_rows(rows)

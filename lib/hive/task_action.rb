@@ -151,16 +151,8 @@ module Hive
         label: "Ready to advance",
         command: "approve"
       },
-      # `generic_ready_to_run` and `generic_needs_input` deliberately collapse
-      # onto the same NEEDS_INPUT key + `run` command, differing only in label.
-      # This is a lossy merge on the JSON wire: a bot/SDK consumer reading
-      # `key` alone can't tell "stage hasn't produced a WAITING marker yet"
-      # (ready to run) from "agent ran and is now waiting on the user"
-      # (needs input). Sound for daemon routing — it discriminates first-run
-      # vs re-run by the mtime baseline, not by this key — and intended per
-      # plan R3/Q2; see wiki/modules/task_action.md for the wire-format note.
       generic_ready_to_run: {
-        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        key: Hive::Schemas::TaskActionKind::READY_TO_RUN,
         label: "Ready to run",
         command: "run"
       },
@@ -249,8 +241,7 @@ module Hive
       verb = action[:command]
       return nil unless verb
 
-      parts = [ "hive", verb, task.slug ]
-      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts = command_prefix(verb)
       parts.concat([ from_or_stage_option(verb), stage_dir ]) if include_stage_filter?(verb)
       parts.shelljoin
     end
@@ -318,7 +309,7 @@ module Hive
     # generic one.
     def coding_workflow?
       workflow = task.respond_to?(:workflow) ? task.workflow : nil
-      workflow.nil? || workflow.id == :coding
+      workflow.nil? || Hive::Workflows.coding_id?(workflow.id)
     end
 
     def generic_action
@@ -329,7 +320,6 @@ module Hive
       return ACTIONS.fetch(:error) unless stage
 
       terminal = stage == task.workflow.stages.last
-      entry = stage == task.workflow.stages.first
 
       case marker.name
       when :complete
@@ -337,29 +327,18 @@ module Hive
       when :waiting
         ACTIONS.fetch(:generic_needs_input)
       when :none
-        # Auto-advance a markerless entry stage only when it is inert (no
-        # agent to run) AND not also terminal. Any non-inert entry kind
-        # (`:agent`, `:marker`, or `nil` — the gate is `stage.kind == :inert`,
-        # which excludes all three) must run rather than be approved past it,
-        # and a degenerate single-stage workflow (entry == terminal) has
-        # nowhere to advance — so both fall through to ready-to-run.
-        inert_advanceable_entry = entry && !terminal && stage.kind == :inert
+        # Auto-advance a markerless inert stage (no agent to run) whenever it
+        # is not also terminal. Any non-inert kind (`:agent`, `:marker`, or
+        # `nil` — the gate is `stage.kind == :inert`, which excludes all
+        # three) must run rather than be approved past it. The entry-only
+        # restriction is intentionally dropped: an inert NON-entry middle
+        # stage would otherwise strand — `Resolver.resolve` raises
+        # `StageError` for `kind: :inert`, so it can neither run nor advance.
+        # A terminal inert stage has nowhere to advance, so it falls through
+        # to ready-to-run (degenerate single-stage / terminal case).
+        inert_advanceable = !terminal && stage.kind == :inert
 
-        # U6-DEFERRED (plan R3/Q2): U5 wired generic advance resolution into the
-        # `Commands::Approve` / `Commands::Run` command methods — driven directly
-        # with a folder path they resolve a generic move through the task's
-        # descriptor. The *end-to-end* daemon/agent advance path is ALSO U6-gated,
-        # not just the first-run gap below: the Thor `APPROVE_TO_ENUM` (cli.rb)
-        # rejects a generic `--from <dir>`, `Status#collect_rows` (status.rb)
-        # scans only the coding `Hive::Stages::DIRS` so generic rows never reach
-        # the daemon, and `TaskResolver` can't find a generic-only-dir task by
-        # bare slug. See wiki/gaps.md ("Generic workflow advance-dispatch is
-        # U6-gated end-to-end"). The separate first-run gap here is `generic_ready_to_run`
-        # -> `needs_input`, which `Hive::Daemon::Policy` routes through
-        # EDIT_RESUME_ACTIONS to a first-sight `:record_baseline`, so a never-run
-        # generic stage is NOT daemon-auto-dispatched until a human edits the
-        # state file.
-        inert_advanceable_entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
+        inert_advanceable ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end
@@ -370,8 +349,7 @@ module Hive
       return nil unless verb
 
       stage = workflow_stage
-      parts = [ "hive", verb, task.slug ]
-      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts = command_prefix(verb)
       parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
       parts.concat([ "--from", stage.dir ]) if verb == "approve"
       parts.shelljoin
@@ -998,10 +976,19 @@ module Hive
     end
 
     def workflow_command(verb)
-      parts = [ "hive", verb, task.slug ]
-      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts = command_prefix(verb)
       parts.concat([ "--from", stage_dir ])
       parts.shelljoin
+    end
+
+    # Shared prefix for every `hive <verb> <slug>` builder: the verb, the
+    # slug, and the `--project` qualifier added only when more than one
+    # project is in view (a single-project status never needs it). Callers
+    # append their own `--from`/`--stage` suffix and `shelljoin`.
+    def command_prefix(verb)
+      parts = [ "hive", verb, task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts
     end
 
     def safe_mtime(path)

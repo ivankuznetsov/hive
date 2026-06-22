@@ -15,6 +15,20 @@ module Hive
     STATE_FILES = Hive::Workflows::Registry.default.stages.to_h { |stage| [ stage.name, stage.state_file ] }.freeze
     PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_dir>(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*))/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
 
+    # Per-process cache of each project's resolved `default_workflow`, keyed by
+    # the project's `.hive-state/config.yml` path and invalidated by its mtime.
+    # Without it `Task.new` re-ran a full `Hive::Config.load` (file read + YAML
+    # parse + validate!) for every field-less task on every `hive status` /
+    # daemon tick — a real per-tick regression, since `resolve_workflow` only
+    # consults the project default when the task meta carries no selector.
+    # mtime-keying keeps a long-lived reader (TUI / daemon) correct when the
+    # config is edited mid-run.
+    @project_default_workflow_cache = {}
+
+    class << self
+      attr_reader :project_default_workflow_cache
+    end
+
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,
                 :stage_name, :slug, :state_dir_basename, :workflow
 
@@ -122,13 +136,29 @@ module Hive
     end
 
     def project_default_workflow
+      config_path = File.join(@hive_state_path, "config.yml")
+      mtime = begin
+        File.mtime(config_path)
+      rescue SystemCallError
+        nil
+      end
+      cache = Hive::Task.project_default_workflow_cache
+      cached = cache[config_path]
+      return cached[:value] if cached && cached[:mtime] == mtime
+
+      value = load_project_default_workflow(config_path)
+      cache[config_path] = { mtime: mtime, value: value }
+      value
+    end
+
+    def load_project_default_workflow(config_path)
       configured = Hive::Config.load(@project_root)["default_workflow"].to_s.strip
       return Hive::Config::DEFAULTS["default_workflow"] if configured.empty?
 
       warn_if_unregistered_project_default(configured)
       configured
     rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-      warn "hive: task: failed to read default_workflow from #{File.join(@hive_state_path, "config.yml")} " \
+      warn "hive: task: failed to read default_workflow from #{config_path} " \
            "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"
       Hive::Config::DEFAULTS["default_workflow"]
     end

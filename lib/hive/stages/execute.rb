@@ -249,7 +249,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task),
+            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task), # coding-scoped: coding execute stage tmux session
             allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           )
         else

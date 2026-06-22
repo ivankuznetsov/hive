@@ -59,7 +59,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task),
+            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task), # coding-scoped: coding artifacts stage tmux session
             allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           )
         else

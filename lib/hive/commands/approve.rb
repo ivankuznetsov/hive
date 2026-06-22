@@ -72,6 +72,7 @@ module Hive
       # ── Pipeline ────────────────────────────────────────────────────────
 
       def do_call
+        validate_stage_refs!
         task = resolve_task
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
@@ -84,6 +85,36 @@ module Hive
 
         new_folder, commit_action = perform_move_and_commit(task, next_stage_dir)
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
+      end
+
+      # Reject a clearly-invalid --from/--to stage ref BEFORE resolving the
+      # task, so a typo'd stage on a slug that also doesn't exist reports the
+      # more actionable "unknown stage" instead of the task resolver's "no task
+      # folder". Only refs that resolve in NO registered workflow are caught
+      # here; a ref valid in some workflow defers its workflow-specific check
+      # (validate_from! / resolve_explicit_to) to after resolution, where the
+      # task's own descriptor is known — which keeps --from's idempotency
+      # contract (a ref that's valid but not the current stage still reaches
+      # validate_from!'s WRONG_STAGE path).
+      def validate_stage_refs!
+        # Mirror each downstream handler's own wording so the early check is a
+        # pure relocation, not a message change: --from matches validate_from!
+        # ("unknown --from stage"), --to matches resolve_explicit_to
+        # ("unknown stage"). Both append the same valid-stage list.
+        if @from && !known_stage_ref?(@from)
+          raise Hive::InvalidTaskPath, "unknown --from stage '#{@from}'; valid: #{known_stage_list}"
+        end
+        if @to && !known_stage_ref?(@to)
+          raise Hive::InvalidTaskPath, "unknown stage '#{@to}'; valid: #{known_stage_list}"
+        end
+      end
+
+      def known_stage_ref?(ref)
+        Hive::Workflows.all_stage_dirs.include?(ref) || Hive::Workflows.all_stage_names.include?(ref)
+      end
+
+      def known_stage_list
+        "#{Hive::Workflows.all_stage_dirs.join(', ')} or short names #{Hive::Workflows.all_stage_names.join(', ')}"
       end
 
       # ── Destination resolution ──────────────────────────────────────────
@@ -125,7 +156,8 @@ module Hive
       def validate_from!(task)
         expected = task.workflow.resolve_stage_ref(@from) ||
                    raise(Hive::InvalidTaskPath,
-                         "unknown --from stage '#{@from}'; valid: #{task.workflow.stage_dirs.join(', ')}")
+                         "unknown --from stage '#{@from}'; valid: #{task.workflow.stage_dirs.join(', ')} " \
+                         "or short names #{task.workflow.stage_names.join(', ')}")
         actual = "#{task.stage_index}-#{task.stage_name}"
         return if expected == actual
 
@@ -145,7 +177,7 @@ module Hive
               "Use --force to override or --to to move backward."
       end
 
-      # No `|| raise` here, unlike its three `stage_for_dest!` siblings: a nil
+      # No `|| raise` here, unlike the three `stage_for_dest!` call sites: a nil
       # dest is treated as "not the same stage" (falsy) so the pipeline proceeds
       # to validate_move!, which is the loud backstop that raises InvalidTaskPath
       # on an unresolved dir. Reachable only via a test double today.
@@ -416,6 +448,12 @@ module Hive
         # advance_verb is mv-only, so fall back to `hive run`.
         stage = task.workflow.stage_for_dir(stage_dir)
         return "hive run #{task.slug}" unless stage
+
+        # Only the coding workflow's advance verbs (brainstorm/plan/develop/…)
+        # are registered Thor commands. A generic descriptor's verbs (e.g.
+        # `gather`) are not, so emitting `hive gather …` would suggest a
+        # nonexistent command — the universal generic next step is `hive run`.
+        return "hive run #{task.slug}" unless Hive::Workflows.coding_id?(task.workflow.id)
 
         verb = task.workflow.advance_verb_for(stage.name)
         verb ? "hive #{verb} #{task.slug} --from #{stage.dir}" : "hive run #{task.slug}"

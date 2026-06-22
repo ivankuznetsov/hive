@@ -5,6 +5,7 @@ require "hive/task"
 require "hive/markers"
 require "hive/lock"
 require "hive/stages"
+require "hive/workflows"
 require "hive/archive_filter"
 require "hive/dependencies"
 require "hive/task_action"
@@ -19,12 +20,12 @@ module Hive
     class Status
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
-      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
       # First stage at which a PR exists; `pr.md` is only read from this
       # stage onward (see `pr_url_for`). Named here, and the numeric
       # threshold derived from `Hive::Stages`, so inserting or reordering a
       # stage can't silently shift which stages read `pr.md`.
-      OPEN_PR_STAGE_DIR = "5-open-pr".freeze
+      OPEN_PR_STAGE_DIR = "5-open-pr".freeze # coding-scoped: PR metadata exists only in coding open-pr and later stages
       OPEN_PR_STAGE_INDEX = Hive::Stages.parse(OPEN_PR_STAGE_DIR).first
       # Width of the text-mode PR column (`#NNN`, right-justified). Sourced
       # from the shared `Hive::Pr::NUMBER_WIDTH` so the text and TUI
@@ -192,13 +193,15 @@ module Hive
         end
       end
 
-      # Scan `<hive_state>/stages/` for directories that are NOT in
-      # `Hive::Stages::DIRS` and contain at least one task-slug-shaped
+      # Scan `<hive_state>/stages/` for directories that are NOT in the
+      # runtime union `Hive::Workflows.all_stage_dirs` (every registered
+      # workflow's stage dirs) and contain at least one task-slug-shaped
       # subfolder. Returns `[{"stage_dir" => name, "task_count" => N},
-      # ...]` sorted by name. `collect_rows` walks only canonical DIRS, so
-      # any stage rename in `lib/hive/stages.rb` leaves pre-rename tasks
-      # unreachable from every operator surface — this is the detector
-      # that turns that silent gap into a visible warning instead. Only
+      # ...]` sorted by name. `collect_rows` walks only `all_stage_dirs`, so
+      # any stage rename (or a dropped workflow registration) leaves
+      # pre-rename tasks unreachable from every operator surface — this is
+      # the detector that turns that silent gap into a visible warning
+      # instead. Only
       # `Hive::Stages.task_slug?` children count toward `task_count` so
       # stray `logs/`, `.DS_Store`, or `.gitkeep` siblings don't inflate
       # the number — the same predicate `Hive::Commands::Migrate` uses to
@@ -211,7 +214,7 @@ module Hive
         return [] unless File.directory?(stages_root)
 
         Dir.children(stages_root).filter_map do |basename|
-          next if Hive::Stages::DIRS.include?(basename)
+          next if Hive::Workflows.all_stage_dirs.include?(basename)
           next if STATUS_PRIVATE_STAGE_DIRS.include?(basename)
 
           dir = File.join(stages_root, basename)
@@ -227,7 +230,7 @@ module Hive
       end
 
       def task_payload(row)
-        {
+        payload = {
           "stage" => row[:stage],
           "slug" => row[:slug],
           "id" => row[:id],
@@ -268,6 +271,8 @@ module Hive
           "next_action" => row[:next_action],
           "diagnostic" => row[:diagnostic]
         }
+        payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        payload
       end
 
       # Number of unanswered `### Q{n}.` slots in a brainstorm task's
@@ -279,6 +284,9 @@ module Hive
       # bot answer-writer use, so the three never disagree.
       def unanswered_question_count(row)
         return 0 unless row[:action_key] == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        # Only the coding `2-brainstorm` stage drives the `### Q{n}.` answer
+        # flow; a generic workflow reusing the dir has no Q&A to count.
+        return 0 unless Hive::Workflows.coding_id?(row[:workflow])
         return 0 unless row[:stage] == BRAINSTORM_STAGE_DIR
 
         path = row[:state_file]
@@ -511,7 +519,7 @@ module Hive
 
       def collect_rows(hive_state)
         rows = []
-        Hive::Stages::DIRS.each do |stage|
+        Hive::Workflows.all_stage_dirs.each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
@@ -522,7 +530,19 @@ module Hive
             begin
               begin
                 task = Hive::Task.new(entry)
-              rescue Hive::InvalidTaskPath
+              rescue Hive::InvalidTaskPath => e
+                # U6 widened this rescue's blast radius: a typo'd
+                # `meta.yml workflow:` / `config.yml default_workflow:` or a
+                # stage-dir/workflow mismatch now raises in Task.new. Silently
+                # skipping it once vanished a real task from `hive status` (and
+                # the daemon) — and a typo'd PROJECT default emptied the WHOLE
+                # project to zero rows. Surface a synthetic Error row in the
+                # payload so the breakage is observable to the daemon/UI, not
+                # just on stderr. Stray non-slug dirs stay silent (skipped).
+                next unless Hive::Stages.task_slug?(slug)
+
+                warn "hive: status: #{entry} failed to load (#{e.message}); surfaced as an Error row"
+                rows << invalid_task_row(stage: stage, slug: slug, folder: entry, message: e.message)
                 next
               end
               marker = Hive::Markers.current(task.state_file)
@@ -547,6 +567,7 @@ module Hive
                 slug: slug,
                 id: task.id,
                 display_name: task.display_name,
+                workflow: task.workflow.id,
                 depends_on: task.depends_on,
                 folder: entry,
                 state_file: task.state_file,
@@ -680,6 +701,12 @@ module Hive
       end
 
       def pr_url_for(task)
+        # PR metadata (pr.md) is a coding-workflow artifact, written only from
+        # the coding open-pr stage onward. Gate on the workflow so a generic
+        # task reusing a >= 5 stage index isn't probed for a pr.md it never
+        # writes — inert today (generic tasks have no pr.md → nil) but keeps the
+        # coding PR gate from leaking onto generic rows.
+        return nil unless Hive::Workflows.coding_id?(task.workflow.id) # coding-scoped: PR metadata exists only in the coding workflow
         return nil if task.stage_index < OPEN_PR_STAGE_INDEX
 
         value = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
@@ -772,10 +799,73 @@ module Hive
         "Error"
       ].freeze
 
+      # Synthetic Error row for a task folder that exists but won't load — e.g.
+      # a typo'd `meta.yml workflow:` / project `default_workflow:` that resolves
+      # to no registered descriptor. It carries no real Task object (`task: nil`,
+      # `invalid: true`); annotate_actions stamps a fixed Error annotation and
+      # annotate_dependencies treats it as unblocked, so the broken task shows
+      # in the snapshot instead of being silently dropped. The load error lands
+      # in `marker_attrs[:message]` (surfaced in the JSON row's `attrs`).
+      def invalid_task_row(stage:, slug:, folder:, message:)
+        folder_mtime =
+          begin
+            File.mtime(folder)
+          rescue SystemCallError
+            Time.now
+          end
+        marker = Hive::Markers::State.new(
+          name: :error,
+          attrs: { "reason" => "invalid_task", "message" => message.to_s[0, 200] },
+          raw: nil
+        )
+        icon, state_label = decorate(nil, marker)
+        {
+          invalid: true,
+          stage: stage,
+          slug: slug,
+          id: nil,
+          display_name: nil,
+          workflow: nil,
+          depends_on: nil,
+          folder: folder,
+          # Schema requires a non-null string; the workflow never resolved, so
+          # there's no real state file — point at the folder as a best-effort,
+          # non-misleading placeholder for this un-actionable error row.
+          state_file: folder,
+          worktree_path: nil,
+          pr_url: nil,
+          task: nil,
+          marker_name: marker.name,
+          marker_attrs: marker.attrs,
+          icon: icon,
+          state_label: state_label,
+          mtime: folder_mtime,
+          folder_mtime: folder_mtime,
+          age: humanise_age(folder_mtime),
+          claude_pid: nil,
+          claude_pid_alive: nil,
+          live_task_lock: false
+        }
+      end
+
+      # An invalid (un-loadable) row has no Task to feed Hive::TaskAction.for and
+      # its action is unambiguously error — stamp a fixed Error annotation.
+      def invalid_action_annotation(row)
+        row.merge(
+          action_key: Hive::Schemas::TaskActionKind::ERROR,
+          action_label: "Error",
+          suggested_command: nil,
+          next_action: nil,
+          diagnostic: nil
+        )
+      end
+
       def annotate_actions(rows, project, project_count, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
         grace_sec = agent_marker_grace_sec_from_config
         rows.map do |row|
+          next invalid_action_annotation(row) if row[:invalid]
+
           action = Hive::TaskAction.for(
             row[:task],
             marker_from_row(row),

@@ -71,6 +71,24 @@ class StagesResolverTest < Minitest::Test
     assert_equal Hive::Stages::Agent.method(:run!), runner
   end
 
+  def test_non_coding_stage_name_collision_resolves_by_descriptor_kind
+    descriptor = Hive::Workflow.new(
+      id: :synthetic,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "plan",
+          index: 1,
+          state_file: "plan.md",
+          kind: :agent
+        )
+      ]
+    )
+
+    runner = Hive::Stages::Resolver.resolve(task("plan", workflow: descriptor), descriptor: descriptor)
+
+    assert_equal Hive::Stages::Agent.method(:run!), runner
+  end
+
   def test_present_non_agent_stage_raises_stage_error
     descriptor = Hive::Workflow.new(
       id: :synthetic,

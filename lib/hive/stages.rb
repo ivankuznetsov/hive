@@ -1,10 +1,13 @@
 require "hive/workflows/registry"
 
 module Hive
-  # Public source of truth for the stage list. Consumers (GitOps init, Status
-  # ordering, Run#next_stage_dir, Approve resolution) all read from here, and
-  # because `DIRS` derives from the default workflow descriptor, adding or
-  # renaming a stage in the descriptor flows through to every consumer.
+  # Public source of truth for the CODING stage list. `DIRS` derives from the
+  # default (coding) workflow descriptor, so renaming a coding stage flows
+  # through to every coding-pinned consumer (GitOps init, coding status
+  # ordering). The generic `Run#next_stage_dir` and `Approve` resolution paths
+  # no longer read from here — they route per-task through `task.workflow` and
+  # scan the runtime union via `Hive::Workflows.all_stage_dirs` (U6) so a
+  # non-coding workflow's stages resolve correctly.
   module Stages
     DIRS = Hive::Workflows::Registry.default.stages.map(&:dir).freeze
     NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
@@ -53,7 +56,7 @@ module Hive
       DIRS[current_array_idx - 1]
     end
 
-    # Resolve a user-provided stage string ("3-plan" or "plan") to a
+    # Resolve a user-provided stage string ("3-plan" or "plan") to a # not-a-stage-ref: documentation of accepted input shape
     # canonical DIRS entry, or nil if neither shape matches.
     def resolve(name)
       return name if DIRS.include?(name)

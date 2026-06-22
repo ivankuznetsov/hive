@@ -78,6 +78,86 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_emits_workflow_id_for_scanned_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      create_status_task(hive_state, "4-execute", "coding-task-260618-abcd", marker: "EXECUTE_COMPLETE", age_days: 0)
+
+      payload = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ])
+      task = payload.fetch("projects").first.fetch("tasks").find do |candidate|
+        candidate.fetch("slug") == "coding-task-260618-abcd"
+      end
+
+      assert_equal "coding", task.fetch("workflow")
+    end
+  end
+
+  def test_json_payload_surfaces_error_row_for_unloadable_task_and_stays_silent_on_non_slug
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "broken-wf-260620-abcd"
+      folder = File.join(hive_state, "stages", "4-execute", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      # Unregistered workflow selector → Task.new raises InvalidTaskPath, which
+      # previously vanished the task (and a typo'd project default emptied the
+      # whole project to zero rows).
+      Hive::TaskMeta.write(folder, id: 5, slug: slug, display_name: nil, workflow: "ghost-workflow")
+      # A non-slug sibling dir must stay silent — no row, no warn.
+      FileUtils.mkdir_p(File.join(hive_state, "stages", "4-execute", "NotASlug"))
+
+      payload = nil
+      _out, err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+      end
+
+      tasks = payload.fetch("projects").first.fetch("tasks")
+      row = tasks.find { |candidate| candidate.fetch("slug") == slug }
+
+      refute_nil row, "an unloadable task must surface as an Error row, not vanish from status"
+      assert_equal "error", row.fetch("action")
+      assert_equal "error", row.fetch("marker")
+      assert_equal "invalid_task", row.fetch("attrs").fetch("reason")
+      assert_includes row.fetch("attrs").fetch("message"), "ghost-workflow"
+      refute row.key?("workflow"), "an unresolved workflow is omitted, not emitted as null"
+      assert_match(/failed to load/, err)
+
+      refute(tasks.any? { |candidate| candidate.fetch("slug") == "NotASlug" },
+             "a non-slug dir must not surface as a row")
+      refute_match(/NotASlug/, err, "a non-slug dir must not warn")
+    end
+  end
+
+  def test_json_payload_scans_registered_generic_stage_dirs
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        slug = "generic-task-260620-abcd"
+        folder = File.join(hive_state, "stages", "2-gather", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 77, slug: slug, display_name: "Generic Task", workflow: descriptor.id.to_s)
+        File.write(File.join(folder, "gather.md"), "<!-- WAITING -->\n")
+
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+        project = payload.fetch("projects").first
+        task = project.fetch("tasks").find { |candidate| candidate.fetch("slug") == slug }
+
+        refute_nil task
+        assert_equal "2-gather", task.fetch("stage")
+        assert_equal "dispatch", task.fetch("workflow")
+        assert_equal [], project.fetch("legacy_stage_dirs")
+      end
+    end
+  end
+
   def test_json_payload_populates_pr_url_from_pr_md_frontmatter_in_review_stage
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -163,6 +243,35 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # A non-coding workflow that reuses the `2-brainstorm` dir has no coding
+  # Q&A answer flow, so unanswered_questions must report 0 even if a stray
+  # `### Q{n}.` file is present — the gate keys on the coding workflow, not
+  # just the dir name.
+  def test_json_payload_unanswered_questions_zero_for_generic_brainstorm_dir
+    descriptor = collision_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        slug = "generic-bs-260620-eeee"
+        folder = File.join(hive_state, "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 88, slug: slug, display_name: "Generic BS", workflow: descriptor.id.to_s)
+        File.write(File.join(folder, "brainstorm.md"),
+                   "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+
+        task = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ]).fetch("projects").first.fetch("tasks").find { |t| t.fetch("slug") == slug }
+
+        assert_equal "collision", task.fetch("workflow"), "precondition: generic workflow row"
+        assert_equal "needs_input", task.fetch("action"), "precondition: a WAITING generic stage is needs_input"
+        assert_equal 0, task.fetch("unanswered_questions"),
+                     "a generic 2-brainstorm row must not be counted for coding Q&A"
+      end
+    end
+  end
+
   def test_json_payload_emits_resolved_dependency_state
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -183,6 +292,38 @@ class CommandsStatusTest < Minitest::Test
       assert_equal File.basename(base), row.fetch("blocked_by")
       assert_equal "7-artifacts", row.fetch("dependency_stage")
       assert_equal true, row.fetch("blocked")
+    end
+  end
+
+  def test_coding_status_rows_and_legacy_dirs_are_characterized
+    # U6 characterization: descriptor routing must not change the coding row
+    # actions or legacy-stage warning shape.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(hive_state, "2-brainstorm", "brainstorm-task-260620-aaaa",
+                        state_file: "brainstorm.md", marker: "COMPLETE")
+      write_status_task(hive_state, "3-plan", "plan-task-260620-bbbb",
+                        state_file: "plan.md", marker: "WAITING")
+      write_status_task(hive_state, "4-execute", "execute-task-260620-cccc",
+                        state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      legacy = File.join(hive_state, "stages", "5-review", "legacy-task-260620-dddd")
+      FileUtils.mkdir_p(legacy)
+      File.write(File.join(legacy, "task.md"), "<!-- COMPLETE -->\n")
+
+      payload = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ])
+      project = payload.fetch("projects").first
+      actions_by_slug = project.fetch("tasks").to_h { |task| [ task.fetch("slug"), task.fetch("action") ] }
+
+      assert_equal({
+        "brainstorm-task-260620-aaaa" => "ready_to_plan",
+        "plan-task-260620-bbbb" => "needs_input",
+        "execute-task-260620-cccc" => "ready_to_open_pr"
+      }, actions_by_slug)
+      assert_equal [ { "stage_dir" => "5-review", "task_count" => 1 } ],
+                   project.fetch("legacy_stage_dirs")
+      assert_equal "hive migrate", project.fetch("legacy_migrate_command")
     end
   end
 

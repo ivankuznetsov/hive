@@ -7,7 +7,7 @@ class StagesAgentTest < Minitest::Test
 
   TaskStub = Struct.new(
     :project_root, :folder, :state_file, :stage_name, :slug,
-    :stage_index, :log_dir, :project_name,
+    :stage_index, :log_dir, :project_name, :workflow,
     keyword_init: true
   )
 
@@ -17,9 +17,10 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
-  def task_for(project, stage_name)
-    output_file = Hive::Workflows::Registry.default.stages.find { |stage| stage.name == stage_name }.state_file
-    folder = File.join(project, ".hive-state", "stages", "99-#{stage_name}", "demo-260619-aaaa")
+  def task_for(project, stage_name, descriptor: Hive::Workflows::Registry.default)
+    stage = descriptor.stage_named(stage_name)
+    output_file = stage.state_file
+    folder = File.join(project, ".hive-state", "stages", stage.dir, "demo-260619-aaaa")
     FileUtils.mkdir_p(folder)
     TaskStub.new(
       project_root: project,
@@ -29,7 +30,8 @@ class StagesAgentTest < Minitest::Test
       slug: "demo-260619-aaaa",
       stage_index: 99,
       log_dir: File.join(project, ".hive-state", "logs", "demo-260619-aaaa"),
-      project_name: File.basename(project)
+      project_name: File.basename(project),
+      workflow: descriptor
     )
   end
 
@@ -125,7 +127,8 @@ class StagesAgentTest < Minitest::Test
         slug: "demo-260619-aaaa",
         stage_index: 99,
         log_dir: File.join(project, ".hive-state", "logs", "demo-260619-aaaa"),
-        project_name: File.basename(project)
+        project_name: File.basename(project),
+        workflow: Hive::Workflows::Registry.default
       )
 
       error = assert_raises(Hive::StageError) do
@@ -212,6 +215,23 @@ class StagesAgentTest < Minitest::Test
                      "plan must fall back to its descriptor budget_usd (100)"
         assert_equal 3600, kwargs.fetch(:timeout_sec),
                      "plan must fall back to its descriptor timeout_sec (3600)"
+      end
+    end
+  end
+
+  def test_spawn_uses_task_workflow_descriptor_for_generic_stage
+    with_tmp_dir do |project|
+      descriptor = dispatch_workflow
+      task = task_for(project, "gather", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 1.0, kwargs.fetch(:max_budget_usd)
+        assert_equal 60, kwargs.fetch(:timeout_sec)
+        assert_equal "gather", kwargs.fetch(:log_label)
+        assert_equal File.join(task.folder, "gather.md"), task.state_file
       end
     end
   end

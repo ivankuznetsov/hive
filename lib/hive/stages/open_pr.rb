@@ -149,7 +149,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task),
+            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task), # coding-scoped: coding open-pr stage tmux session
             allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           )
         else

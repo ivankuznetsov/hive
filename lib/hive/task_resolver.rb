@@ -2,6 +2,7 @@ require "hive/config"
 require "hive/task"
 require "hive/task_meta"
 require "hive/stages"
+require "hive/workflows"
 
 module Hive
   # Resolve a CLI TARGET (folder path or bare slug) to a `Hive::Task`.
@@ -20,7 +21,7 @@ module Hive
     def initialize(target, project_filter: nil, stage_filter: nil)
       @target = target
       @project_filter = project_filter
-      @stage_filter = resolve_stage_filter(stage_filter)
+      @stage_filter = Hive::Workflows.resolve_stage_ref_across_workflows(stage_filter)
     end
 
     def resolve
@@ -108,7 +109,7 @@ module Hive
     def find_slug_across_projects(slug)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-      stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+      stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
       projects.flat_map do |project|
         stages.filter_map do |stage|
           folder = File.join(project["hive_state_path"], "stages", stage, slug)
@@ -122,7 +123,7 @@ module Hive
     def find_id_across_projects(id)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-      stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+      stages = @stage_filter ? [ @stage_filter ] : Hive::Workflows.all_stage_dirs
       projects.flat_map do |project|
         stages.flat_map do |stage|
           stage_dir = File.join(project["hive_state_path"], "stages", stage)
@@ -159,15 +160,6 @@ module Hive
 
       raise Hive::InvalidTaskPath,
             "TARGET is at #{actual} but --stage/--from says #{@stage_filter}"
-    end
-
-    def resolve_stage_filter(stage_filter)
-      return nil if stage_filter.nil? || stage_filter.to_s.strip.empty?
-
-      Hive::Stages.resolve(stage_filter) ||
-        raise(Hive::InvalidTaskPath,
-              "unknown stage '#{stage_filter}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
-              "or short names #{Hive::Stages::NAMES.join(', ')}")
     end
   end
 end

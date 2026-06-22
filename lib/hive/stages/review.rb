@@ -122,7 +122,7 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          next_dir = Hive::Workflows.next_dir_after("6-review")
+          next_dir = Hive::Workflows.next_dir_after("6-review") # coding-scoped: coding review clears into artifacts
           warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
@@ -1960,7 +1960,7 @@ module Hive
 
         cleanup = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: coding review stage event
           task: task,
           cfg: cfg,
           reason: :pre_fix_dirty_worktree
@@ -1985,7 +1985,7 @@ module Hive
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: coding review stage event
           event_type: :clean_exit_auto_committed,
           message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
         )

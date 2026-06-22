@@ -98,6 +98,26 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  # Web recover threads the row's workflow so a non-coding task retries via the
+  # universal `hive run --stage` instead of falling to a coding retry verb (or
+  # an invalid `hive run --from`). All other recover tests use coding rows.
+  def test_recover_uses_hive_run_for_a_generic_workflow_row
+    with_tmp_global_config do
+      request_id = Hive::Web::Dispatcher.new.recover(
+        slug: "generic-260620-aaaa", project: "p", stage: "2-gather",
+        marker: "error", attrs: {}, workflow: "research"
+      )
+
+      contents = Dir[File.join(Hive::Paths.state_home, "**", "*#{request_id}*")]
+                 .select { |f| File.file?(f) }
+                 .map { |f| File.read(f) }.join("\n")
+
+      assert_includes contents, "2-gather", "the generic rerun must target the generic stage dir"
+      assert_includes contents, "--stage", "generic rerun scopes by --stage"
+      refute_includes contents, "--from", "generic `hive run` must never use --from"
+    end
+  end
+
   def test_answer_questions_requires_an_awaiting_brainstorm
     Dir.mktmpdir("no-brainstorm") do |dir|
       error = assert_raises(Hive::Error) do
@@ -321,6 +341,33 @@ Already answered
 
       assert_equal "plan", plan[:argv][1], "ready_to_plan must map to `plan`"
       assert_equal "develop", develop[:argv][1], "ready_to_develop must map to `develop`"
+    end
+  end
+
+  def test_dispatch_rejects_ready_to_advance_because_approve_is_not_queue_routable
+    with_tmp_global_config do
+      # `ready_to_advance`'s verb is `hive approve`, which the daemon queue
+      # allowlist excludes (approve is spawned in-process). The web drives
+      # generic advance through the in-process `#approve` method, so the
+      # queue `dispatch` must NOT silently accept it.
+      assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.dispatch(
+          slug: "generic-task", project: "demo", action: "ready_to_advance", stage: "2-gather"
+        )
+      end
+    end
+  end
+
+  def test_dispatch_maps_generic_ready_to_run_to_run_with_stage
+    with_tmp_global_config do
+      # `hive run` has no --from — the web dispatcher must scope it with
+      # --stage, not build an invalid `hive run --from`.
+      result = Hive::Web::Dispatcher.new.dispatch(
+        slug: "generic-task", project: "demo", action: "ready_to_run", stage: "1-intake"
+      )
+
+      assert_equal [ "hive", "run", "generic-task", "--project", "demo", "--stage", "1-intake" ],
+                   result[:argv]
     end
   end
 end

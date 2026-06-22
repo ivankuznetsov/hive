@@ -203,14 +203,14 @@ class HiveCliTest < Minitest::Test
 
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
-      Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "execute", "--write", "--force", "--json" ])
-      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "execute", write: true, force: true }, calls.first.fetch(:kwargs))
+      Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
+      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "2-gather", write: true, force: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Approve) do |calls|
-      Hive::CLI.start([ "approve", "slug", "--to", "review", "--from", "open-pr", "--project", "proj", "--force", "--json" ])
+      Hive::CLI.start([ "approve", "slug", "--to", "3-report", "--from", "2-gather", "--project", "proj", "--force", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
-      assert_equal({ to: "review", from: "open-pr", project: "proj", force: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ to: "3-report", from: "2-gather", project: "proj", force: true, json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Findings) do |calls|

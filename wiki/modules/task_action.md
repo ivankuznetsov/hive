@@ -59,22 +59,18 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
-| `generic_ready_to_run` | `NEEDS_INPUT` | "Ready to run" | run |
+| `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
 | `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
 
-`generic_ready_to_run` and `generic_needs_input` deliberately collapse onto the
-same `NEEDS_INPUT` key and `run` command, differing only by label. This is a
-**lossy merge on the JSON wire**: a bot/SDK consumer reading `key` alone cannot
-distinguish "stage hasn't produced a `WAITING` marker yet" (ready to run, never
-executed) from "the agent ran and is now waiting on the user" (needs input). The
-distinction survives only in the human `label`. This is intentional (plan R3/Q2):
-daemon routing never relies on the key for this — it discriminates first-run vs
-re-run via the state-file mtime baseline (`Hive::Daemon::Policy`), so the merge is
-safe for dispatch. A future stage may split these into distinct keys if a wire
-consumer needs the run-vs-input signal.
+`generic_ready_to_run` and `generic_needs_input` are distinct on the JSON wire.
+Markerless generic stages emit `READY_TO_RUN` so the daemon can dispatch
+`hive run <slug>` on first sight. Generic `WAITING` markers still emit
+`NEEDS_INPUT` and go through the edit/mtime debounce path. This split is additive
+to `Hive::Schemas::TaskActionKind` and is mirrored by `hive-status` and
+`hive-stage-action` schemas.
 
 ## Workflow-aware branch
 
@@ -88,27 +84,22 @@ generic classifier instead:
 
 - `COMPLETE` at the terminal descriptor stage -> `archived`.
 - `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
-- `WAITING` -> `needs_input`.
+- `WAITING` -> `generic_needs_input` (wire kind `NEEDS_INPUT`).
 - markerless inert entry stage (non-terminal) -> `ready_to_advance`. A markerless
   entry stage of any non-inert kind (`:agent`, `:marker`, or `nil` — the gate is
   `stage.kind == :inert`) or a degenerate single-stage workflow (entry ==
   terminal) falls through to the next case instead.
-- markerless non-entry stage -> `needs_input` with label "Ready to run".
+- markerless non-entry stage -> `generic_ready_to_run` with label "Ready to run".
 
 This keeps coding behavior byte-stable while letting registered non-coding
 workflows surface non-error status rows once a task has resolved to its
-descriptor. Post-U5, the `Commands::Approve` and `Commands::Run` command methods
-resolve generic advance destinations through the task's descriptor, so when one
-is driven directly with a folder path a generic `ready_to_advance` row moves to
-its own next stage rather than a coding stage. The **end-to-end daemon/agent
-advance path is also U6-gated**, not just the first-run gap: the Thor
-`APPROVE_TO_ENUM` (`cli.rb`) rejects a generic `--from <dir>`,
-`Status#collect_rows` (`status.rb`) scans only the coding `Hive::Stages::DIRS`
-so generic rows never reach the daemon, and `TaskResolver` can't find a
-generic-only-dir task by bare slug. The separate first-run gap is generic
-auto-dispatch: markerless non-inert generic stages still collapse to
-`NEEDS_INPUT` on the JSON wire and are routed through the daemon edit-baseline
-path until U6 splits that signal. Both gaps are tracked in [[gaps]].
+descriptor. `Commands::Approve` and `Commands::Run` resolve generic advance
+destinations through the task's descriptor, the CLI accepts runtime-registered
+stage refs for `--from`/`--to`/`--stage`, `Status#collect_rows` scans
+`Hive::Workflows.all_stage_dirs`, and `TaskResolver` can find generic-only
+stage dirs by bare slug. U6's integration test proves a registered generic task
+advancing through status -> policy -> `hive run`/`hive approve` for two stage
+hops.
 
 ## Marker carve-outs
 

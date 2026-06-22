@@ -90,7 +90,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
-          session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task),
+          session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task), # coding-scoped: coding brainstorm stage tmux session
           status_mode: :state_file_marker,
           allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )

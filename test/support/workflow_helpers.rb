@@ -17,14 +17,18 @@ module HiveWorkflowTestHelper
     )
   end
 
-  # Guard-discriminating descriptor for the `:none` entry split at
-  # task_action.rb. The entry stage is `:agent` (not inert) and the middle
-  # stage is `:inert` but non-entry, so each conjunct of
-  # `entry && !terminal && stage.kind == :inert` is exercised in isolation:
-  #   - dropping `stage.kind == :inert` would wrongly advance the `:agent` entry,
-  #   - dropping `entry` would wrongly advance the inert middle stage.
-  # research_workflow can't catch either regression (its only inert stage is the
-  # entry, so both conjuncts move together there).
+  # Guard-discriminating descriptor for the `:none` advance gate at
+  # task_action.rb (`!terminal && stage.kind == :inert`). The entry stage is
+  # `:agent` (not inert) and the middle stage is `:inert` but non-entry, so the
+  # two surviving conjuncts are each exercised in isolation:
+  #   - the `:agent` ENTRY must RUN — dropping `stage.kind == :inert` would
+  #     wrongly advance it.
+  #   - the inert NON-entry MIDDLE must ADVANCE — the earlier `entry &&` conjunct
+  #     was deliberately dropped (U6.6), because `Resolver.resolve` raises
+  #     `StageError` for `kind: :inert`, so routing it to `hive run` would strand
+  #     the task (neither runnable nor advanceable).
+  # research_workflow can't catch either case (its only inert stage is the entry,
+  # so kind and position move together there).
   def agent_entry_workflow
     Hive::Workflow.new(
       id: :agent_entry,
@@ -59,13 +63,60 @@ module HiveWorkflowTestHelper
     )
   end
 
+  def dispatch_workflow
+    Hive::Workflow.new(
+      id: :dispatch,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "intake",
+          index: 1,
+          state_file: "intake.md",
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "gather",
+          index: 2,
+          state_file: "gather.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "gather"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        ),
+        Hive::Workflow::Stage.new(
+          name: "report",
+          index: 3,
+          state_file: "report.md",
+          advance_verb: Hive::Workflow::AdvanceVerb.new(name: "report"),
+          kind: :agent,
+          status_mode: :state_file_marker,
+          budget_usd: 1.0,
+          timeout_sec: 60
+        )
+      ]
+    )
+  end
+
   def with_registered_workflow(descriptor)
     original_fetch = Hive::Workflows::Registry.method(:fetch)
+    original_all = Hive::Workflows::Registry.method(:all)
+    original_ids = Hive::Workflows::Registry.method(:ids)
     Hive::Workflows::Registry.define_singleton_method(:fetch) do |id|
       id == descriptor.id ? descriptor : original_fetch.call(id)
+    end
+    Hive::Workflows::Registry.define_singleton_method(:all) do
+      (original_all.call + [ descriptor ]).uniq(&:id)
+    end
+    Hive::Workflows::Registry.define_singleton_method(:ids) do
+      (original_ids.call + [ descriptor.id ]).uniq
     end
     yield
   ensure
     Hive::Workflows::Registry.define_singleton_method(:fetch, original_fetch) if original_fetch
+    Hive::Workflows::Registry.define_singleton_method(:all, original_all) if original_all
+    Hive::Workflows::Registry.define_singleton_method(:ids, original_ids) if original_ids
   end
 end

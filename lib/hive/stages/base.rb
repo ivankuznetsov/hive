@@ -122,7 +122,7 @@ module Hive
       # invariant surgical. `2-brainstorm`, `3-plan`, `5-open-pr`,
       # `7-artifacts`, `9-done` only write to the task state folder
       # (`.hive-state/stages/...`), so the invariant doesn't apply there.
-      WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize].freeze
+      WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize].freeze # coding-scoped: worktree-owning coding stages that CleanExit enforces
 
       def with_stage_events(task, cfg: nil)
         stage = stage_label(task)
@@ -188,8 +188,8 @@ module Hive
       # "Changing what the 4-execute stage does when it detects a
       # waiting dirty worktree mid-pass ... is not in scope").
       #
-      # The list is narrowed to markers actually reachable on
-      # `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`:
+      # The list is narrowed to markers actually reachable on a
+      # WORKTREE_OWNING_STAGES stage (4-execute / 6-review / 8-finalize):
       # the generic `:waiting` and `:manual_steering` markers are
       # written by `2-brainstorm` / `3-plan` agents, never on a
       # worktree-owning stage. Adding a new pause marker to a

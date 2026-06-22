@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/workflows"
 require "hive/tui/text"
 
 module Hive
@@ -96,7 +97,7 @@ module Hive
         validate_dependency!(depends_on) if depends_on
 
         hive_state = project["hive_state_path"]
-        task_dir = File.join(hive_state, "stages", "1-inbox", slug)
+        task_dir = File.join(hive_state, "stages", "1-inbox", slug) # coding-scoped: hive new seeds the coding inbox
         if File.exist?(task_dir)
           raise SlugCollisionError.new(
             "slug collision at #{task_dir} (rare; retry the command)",
@@ -111,7 +112,13 @@ module Hive
           File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
           copy_attachments!(task_dir)
           id = allocate_task_id
-          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on)
+          # Pin workflow: coding so the new 1-inbox task resolves against the
+          # coding descriptor regardless of the project's default_workflow — a
+          # non-coding default would otherwise make this field-less folder
+          # resolve to that descriptor and vanish from status as an invalid task.
+          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil,
+                               depends_on: depends_on,
+                               workflow: Hive::Workflows::CODING_ID.to_s) # coding-scoped: hive new seeds the coding inbox
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as
@@ -124,7 +131,7 @@ module Hive
 
         ops = Hive::GitOps.new(project["path"])
         Hive::Lock.with_commit_lock(hive_state) do
-          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured")
+          ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured") # coding-scoped: hive new seeds the coding inbox
         end
         spawn_name_generator(task_dir)
 

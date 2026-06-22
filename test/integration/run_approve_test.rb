@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "json_schemer"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/approve"
@@ -182,6 +183,19 @@ class RunApproveTest < Minitest::Test
 
           payload = JSON.parse(out)
           assert payload["ok"]
+          # The generic envelope must validate against the PUBLISHED v2 schema
+          # (the repo's near-universal idiom). Before the enums were relaxed to
+          # patterns, a valid generic payload (`to_stage:"report"` /
+          # `to_stage_dir:"3-report"`) failed the closed coding enums — exactly
+          # what bot/daemon consumers validate against. This is the assertion
+          # the field-value checks below were silently missing.
+          schemer = JSONSchemer.schema(
+            JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
+          )
+          errors = schemer.validate(payload).to_a
+          assert_empty errors,
+                       "generic approve --json must validate against hive-approve.v2 " \
+                       "(errors: #{errors.map { |e| e['error'] }.inspect})"
           # Destination resolved through the research descriptor, not the
           # coding stage table — pins the approve-side JSON envelope end-to-end
           # for a generic task (the helper units only exercise the lines).

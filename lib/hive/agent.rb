@@ -487,9 +487,11 @@ module Hive
     # @task is a Hive::Task on stage-runner-owned spawns (4-execute,
     # brainstorm, plan, open-pr) but a Hive::Reviewers::SyntheticTask
     # on 6-review sub-spawns (reviewers, triage, ci-fix, browser-test).
-    # SyntheticTask is a Struct that intentionally omits `slug` /
-    # `stage_index` and stores the full "6-review" label in `stage_name`.
-    # The respond_to? fallback covers both shapes from one call site.
+    # SyntheticTask is a live Struct that intentionally omits `slug` /
+    # `stage_index` and stores the full "6-review" label in `stage_name` # not-a-stage-ref: documents the SyntheticTask stage_name label, not a routing literal
+    # unchanged (no coercion — synthetic_task.rb annotates the same fact as
+    # coding-scoped). The respond_to? fallback covers both shapes from one
+    # call site.
     def event_slug
       @task.respond_to?(:slug) ? @task.slug : File.basename(@task.folder)
     end

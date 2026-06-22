@@ -451,7 +451,8 @@ module Hive
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
                          session_name:, add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
-                         allowed_tools: nil)
+                         allowed_tools: nil, mcp_config_path: nil,
+                         strict_mcp_config: false)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -473,7 +474,9 @@ module Hive
           status_mode: status_mode,
           expected_output: expected_output,
           profile: profile,
-          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS
+          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS,
+          mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config
         )
       end
 

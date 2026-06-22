@@ -3,6 +3,14 @@ You are running stage 7-artifacts for project <%= project_name %>.
 Worktree (cwd): <%= worktree_path || "(none)" %>
 Task folder (--add-dir): <%= task_folder %>
 Artifact file: <%= artifact_file %>
+Screenote:
+<% if screenote_connected -%>
+- connected via MCP
+- base_url: <%= screenote_base_url %>
+- default project_id: <%= screenote_project_id %>
+<% else -%>
+- not connected: <%= screenote_skip_reason %>
+<% end -%>
 
 ## Goal
 

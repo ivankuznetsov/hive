@@ -125,6 +125,32 @@ class InteractiveWrapperScriptTest < Minitest::Test
     end
   end
 
+  def test_mcp_config_flags_are_forwarded_to_claude
+    with_tmp_dir do |dir|
+      log_dir = File.join(dir, "logs")
+      FileUtils.mkdir_p(log_dir)
+      env = { "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir }
+      mcp_config = File.join(dir, "screenote.mcp.json")
+      File.write(mcp_config, "{}")
+
+      _out, err, status = Open3.capture3(
+        env,
+        SCRIPT,
+        "--cwd", dir,
+        "--mcp-config", mcp_config,
+        "--strict-mcp-config",
+        "--allowedTools", "Read,mcp__screenote__list_projects",
+        "--bin", FAKE_BIN
+      )
+
+      assert status.success?, err
+      argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_equal [ "--mcp-config", mcp_config, "--strict-mcp-config",
+                     "--allowedTools", "Read,mcp__screenote__list_projects" ],
+                   argv_args(argv_log)
+    end
+  end
+
   def test_dangerously_skip_permissions_flag_is_forwarded_to_claude
     with_tmp_dir do |dir|
       log_dir = File.join(dir, "logs")

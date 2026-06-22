@@ -762,7 +762,7 @@ class ClaudeLauncherTest < Minitest::Test
     assert_match(/terminated before becoming ready/, err.message)
   end
 
-def test_wrapper_command_carries_model_and_effort_pins
+  def test_wrapper_command_carries_model_and_effort_pins
     profile = Hive::AgentProfiles.lookup(:claude)
     command = Hive::ClaudeLauncher.send(
       :wrapper_command,
@@ -774,6 +774,23 @@ def test_wrapper_command_carries_model_and_effort_pins
     assert_equal %w[--model sonnet], command.each_cons(2).find { |a, _| a == "--model" },
                  "the configured model pin must reach the wrapper argv"
     assert_equal %w[--effort medium], command.each_cons(2).find { |a, _| a == "--effort" }
+  end
+
+  def test_wrapper_command_carries_mcp_config_flags_before_allowed_tools
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "bypassPermissions",
+      mcp_config_path: "/tmp/screenote.mcp.json",
+      strict_mcp_config: true,
+      allowed_tools: "Read,mcp__screenote__list_projects"
+    )
+
+    assert_equal %w[--mcp-config /tmp/screenote.mcp.json],
+                 command.each_cons(2).find { |a, _| a == "--mcp-config" }
+    assert_includes command, "--strict-mcp-config"
+    assert_operator command.index("--strict-mcp-config"), :<, command.index("--allowedTools")
   end
 
   def test_wrapper_command_omits_pins_when_unconfigured

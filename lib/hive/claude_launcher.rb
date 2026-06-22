@@ -123,13 +123,18 @@ module Hive
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
                 allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                permission_mode: nil)
+                permission_mode: nil, mcp_config_path: nil,
+                strict_mcp_config: false)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
+      cli_flags = cfg ? Hive::Config.claude_cli_flags(cfg) : []
+      mcp_flags = mcp_cli_flags(mcp_config_path, strict_mcp_config)
 
       if Hive::Config.claude_mode(cfg) == :headless
         require "hive/stages/base"
+        headless_flags = cli_flags + mcp_flags
+        headless_flags.concat([ "--allowedTools", allowed_tools ]) if mcp_config_path
         return Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -141,7 +146,8 @@ module Hive
           profile: profile,
           expected_output: expected_output,
           status_mode: status_mode,
-          permission_mode: permission_mode
+          permission_mode: permission_mode,
+          cli_flags: headless_flags
         )
       end
 
@@ -154,7 +160,10 @@ module Hive
         add_dirs: add_dirs,
         profile: profile,
         allowed_tools: allowed_tools,
-        permission_mode: permission_mode
+        permission_mode: permission_mode,
+        mcp_config_path: mcp_config_path,
+        strict_mcp_config: strict_mcp_config,
+        cli_flags: cli_flags
       ) do |handle|
         result = handle.send_and_wait!(
           prompt: prompt,
@@ -169,7 +178,8 @@ module Hive
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                            permission_mode: nil)
+                            permission_mode: nil, mcp_config_path: nil,
+                            strict_mcp_config: false, cli_flags: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -202,7 +212,9 @@ module Hive
           profile: profile,
           allowed_tools: allowed_tools,
           permission_mode: permission_mode,
-          cli_flags: cfg ? Hive::Config.claude_cli_flags(cfg) : []
+          cli_flags: cli_flags || (cfg ? Hive::Config.claude_cli_flags(cfg) : []),
+          mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config
         )
         # (Re)establish the shared claude session. Reused as the handle's
         # `reestablish` closure so a reviewer that finds the session dead
@@ -433,7 +445,8 @@ module Hive
     end
 
     def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
-                        allowed_tools: DEFAULT_ALLOWED_TOOLS, cli_flags: [])
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS, cli_flags: [],
+                        mcp_config_path: nil, strict_mcp_config: false)
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
@@ -445,11 +458,20 @@ module Hive
       # pipeline run inherits the operator's interactive default (often
       # their most expensive model).
       command.concat(Array(cli_flags))
+      command.concat(mcp_cli_flags(mcp_config_path, strict_mcp_config))
       command.concat([
         "--allowedTools", allowed_tools,
         "--bin", profile.bin
       ])
       command
+    end
+
+    def mcp_cli_flags(path, strict)
+      return [] if path.to_s.strip.empty?
+
+      flags = [ "--mcp-config", path ]
+      flags << "--strict-mcp-config" if strict
+      flags
     end
 
     def wait_until_session_exists!(runner)

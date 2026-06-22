@@ -14,17 +14,37 @@ class TaskActionDispatchParityTest < Minitest::Test
     keyword_init: true
   )
 
-  CODING_STAGE_KINDS = {
-    "inbox" => :inert,
-    "brainstorm" => :agent,
-    "plan" => :agent,
-    "execute" => :execute,
-    "open-pr" => :agent,
-    "review" => :"review-council",
-    "artifacts" => :agent,
-    "finalize" => :finalize,
-    "done" => :inert
-  }.freeze
+  class LegacyCaseTaskAction < Hive::TaskAction
+    private
+
+      def action
+        override = universal_action
+        return override if override
+
+        case task.stage_name
+        when "inbox"
+          ACTIONS.fetch(:inbox)
+        when "brainstorm"
+          marker.name == :complete ? ACTIONS.fetch(:brainstorm_complete) : ACTIONS.fetch(:brainstorm_waiting)
+        when "plan"
+          plan_action
+        when "execute"
+          execute_action
+        when "open-pr"
+          marker.name == :complete ? ACTIONS.fetch(:open_pr_complete) : ACTIONS.fetch(:open_pr_ready)
+        when "review"
+          review_action
+        when "artifacts"
+          artifacts_action
+        when "finalize"
+          finalize_action
+        when "done"
+          ACTIONS.fetch(:done)
+        else
+          ACTIONS.fetch(:error)
+        end
+      end
+  end
 
   def test_case_and_kind_dispatch_match_for_coding_matrix
     with_tmp_dir do |root|
@@ -34,8 +54,8 @@ class TaskActionDispatchParityTest < Minitest::Test
         scenario[:setup]&.call(task, marker_state)
         kwargs = scenario.fetch(:kwargs, {})
 
-        legacy = Hive::TaskAction.for(task, marker_state, **kwargs, dispatch: :case)
-        kind = Hive::TaskAction.for(task, marker_state, **kwargs, dispatch: :kind)
+        legacy = LegacyCaseTaskAction.new(task, marker_state, **kwargs)
+        kind = Hive::TaskAction.for(task, marker_state, **kwargs)
 
         assert_value_equal legacy.key, kind.key, failure_label(scenario, "key")
         assert_value_equal legacy.label, kind.label, failure_label(scenario, "label")
@@ -58,22 +78,14 @@ class TaskActionDispatchParityTest < Minitest::Test
       Marker.new(name: name, attrs: attrs, raw: nil)
     end
 
-    def future_coding_workflow
-      @future_coding_workflow ||= Hive::Workflow.new(
-        id: :coding,
-        stages: Hive::Workflows::Coding::DESCRIPTOR.stages.map do |stage|
-          stage.with(kind: CODING_STAGE_KINDS.fetch(stage.name))
-        end
-      )
-    end
-
     def build_task(root, scenario, index)
       stage_name = scenario.fetch(:stage)
       stage_index = Hive::Stages::NAMES.index(stage_name) + 1
       slug = scenario.fetch(:slug, format("demo-%02d-260622", index))
       folder = File.join(root, ".hive-state", "stages", "#{stage_index}-#{stage_name}", slug)
       FileUtils.mkdir_p(folder)
-      state_file = File.join(folder, future_coding_workflow.state_file_for(stage_name))
+      workflow = Hive::Workflows::Coding::DESCRIPTOR
+      state_file = File.join(folder, workflow.state_file_for(stage_name))
 
       FakeTask.new(
         stage_name: stage_name,
@@ -84,7 +96,7 @@ class TaskActionDispatchParityTest < Minitest::Test
         folder: folder,
         state_file: state_file,
         log_dir: File.join(root, ".hive-state", "logs", slug),
-        workflow: future_coding_workflow
+        workflow: workflow
       )
     end
 

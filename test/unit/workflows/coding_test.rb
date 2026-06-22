@@ -20,25 +20,30 @@ class WorkflowsCodingTest < Minitest::Test
     refute Hive::Workflows::Coding::DESCRIPTOR.stages.fetch(1).advance_verb.interactive
   end
 
-  def test_descriptor_carries_inert_stage_metadata
+  def test_descriptor_carries_stage_kinds_and_metadata
     stages_by_name = Hive::Workflows::Coding::DESCRIPTOR.stages.to_h { |stage| [ stage.name, stage ] }
 
+    assert_equal :inert, stages_by_name.fetch("inbox").kind
     assert_equal :agent, stages_by_name.fetch("brainstorm").kind
     assert_equal "/ce-brainstorm", stages_by_name.fetch("brainstorm").skill
     assert_equal :state_file_marker, stages_by_name.fetch("plan").status_mode
+    assert_equal :execute, stages_by_name.fetch("execute").kind
     assert_equal :exit_code_only, stages_by_name.fetch("execute").status_mode
     assert_equal 500, stages_by_name.fetch("execute").budget_usd
     assert_equal 14400, stages_by_name.fetch("execute").timeout_sec
-    assert_equal :marker, stages_by_name.fetch("review").kind
+    assert_equal :agent, stages_by_name.fetch("open-pr").kind
+    assert_equal :"review-council", stages_by_name.fetch("review").kind
     assert_nil stages_by_name.fetch("review").status_mode
+    assert_equal :agent, stages_by_name.fetch("artifacts").kind
+    assert_equal :finalize, stages_by_name.fetch("finalize").kind
     assert_equal :inert, stages_by_name.fetch("done").kind
   end
 
-  # Pin the *absence* of metadata on the inert/marker stages so a stray
+  # Pin the *absence* of metadata on the inert/runtime stages so a stray
   # `budget_usd`/`timeout_sec`/`skill` cannot drift in unnoticed. The
   # current runtime leaves these fields unread, but the golden contract
   # should still fail loud if the descriptor sprouts spurious config.
-  def test_inert_and_marker_stages_carry_no_spurious_metadata
+  def test_inert_and_runtime_stages_carry_no_spurious_metadata
     stages_by_name = Hive::Workflows::Coding::DESCRIPTOR.stages.to_h { |stage| [ stage.name, stage ] }
 
     inbox = stages_by_name.fetch("inbox")

@@ -68,7 +68,7 @@ module Hive
             index: 4,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "develop"),
-            kind: :marker,
+            kind: :execute,
             status_mode: :exit_code_only,
             budget_usd: 500,
             timeout_sec: 14400
@@ -78,7 +78,7 @@ module Hive
             index: 5,
             state_file: "pr.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "open-pr"),
-            kind: :marker,
+            kind: :agent,
             status_mode: :state_file_marker,
             budget_usd: 50,
             timeout_sec: 1800
@@ -88,14 +88,14 @@ module Hive
             index: 6,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "review"),
-            kind: :marker
+            kind: :"review-council"
           ),
           Hive::Workflow::Stage.new(
             name: "artifacts",
             index: 7,
             state_file: "artifact.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "artifacts"),
-            kind: :marker,
+            kind: :agent,
             status_mode: :state_file_marker,
             budget_usd: 100,
             timeout_sec: 3600
@@ -105,7 +105,7 @@ module Hive
             index: 8,
             state_file: "pr.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "finalize"),
-            kind: :marker,
+            kind: :finalize,
             status_mode: :state_file_marker,
             budget_usd: 50,
             timeout_sec: 1800

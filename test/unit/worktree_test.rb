@@ -198,6 +198,108 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_repoints_empty_placeholder_onto_origin_prereq
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        push_branch_to_origin(origin_dir, "prereq-origin")
+        prereq_sha = run!("git", "-C", origin_dir, "rev-parse", "prereq-origin").strip
+        default_sha = run!("git", "-C", dir, "rev-parse", "master").strip
+        run!("git", "-C", dir, "branch", "dependent-placeholder-origin", "master")
+
+        wt = Hive::Worktree.new(dir, "dependent-placeholder-origin", worktree_root: root)
+        wt.create!("dependent-placeholder-origin", default_branch: "master", base_override: "prereq-origin")
+
+        worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+        assert_equal prereq_sha, worktree_sha,
+                     "empty placeholder branch must be recreated from origin/<prereq>"
+        refute_equal default_sha, worktree_sha,
+                     "empty placeholder branch must not stay on the default branch"
+        assert File.exist?(File.join(wt.path, "prereq-origin.txt")),
+               "repointed worktree must contain the prerequisite's code"
+      ensure
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
+  def test_repoints_empty_placeholder_onto_local_prereq
+    with_initialized_project do |dir, root|
+      default_sha = run!("git", "-C", dir, "rev-parse", "master").strip
+      run!("git", "-C", dir, "checkout", "-b", "local-prereq", "--quiet")
+      File.write(File.join(dir, "local-prereq.txt"), "local prereq\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "local prereq work", "--quiet")
+      prereq_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      run!("git", "-C", dir, "checkout", "master", "--quiet")
+      run!("git", "-C", dir, "branch", "dependent-placeholder-local", "master")
+
+      wt = Hive::Worktree.new(dir, "dependent-placeholder-local", worktree_root: root)
+      _, err = capture_io do
+        wt.create!("dependent-placeholder-local", default_branch: "master", base_override: "local-prereq")
+      end
+
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal prereq_sha, worktree_sha,
+                   "empty placeholder branch must be recreated from local <prereq> when origin is unavailable"
+      refute_equal default_sha, worktree_sha,
+                   "local-only dependency stacking must not collapse onto the default branch"
+      assert File.exist?(File.join(wt.path, "local-prereq.txt")),
+             "repointed worktree must contain the local prerequisite's code"
+      assert_match(/origin\/local-prereq unavailable; stacking on local local-prereq/, err)
+    end
+  end
+
+  def test_preserves_branch_with_real_commits_over_override
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "checkout", "-b", "dependent-real-work", "--quiet")
+      File.write(File.join(dir, "own-work.txt"), "own work\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "dependent work", "--quiet")
+      own_sha = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      run!("git", "-C", dir, "checkout", "master", "--quiet")
+      run!("git", "-C", dir, "checkout", "-b", "local-prereq-real", "--quiet")
+      File.write(File.join(dir, "prereq-real.txt"), "prereq work\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "prereq work", "--quiet")
+      run!("git", "-C", dir, "checkout", "master", "--quiet")
+
+      wt = Hive::Worktree.new(dir, "dependent-real-work", worktree_root: root)
+      wt.create!("dependent-real-work", default_branch: "master", base_override: "local-prereq-real")
+
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal own_sha, worktree_sha,
+                   "branches with committed work must attach as-is instead of being re-pointed"
+      assert File.exist?(File.join(wt.path, "own-work.txt")),
+             "preserved worktree must contain the branch's own commit"
+      refute File.exist?(File.join(wt.path, "prereq-real.txt")),
+             "preserved worktree must not be replaced by the override base"
+    end
+  end
+
+  def test_repoint_delete_failure_raises_named_error
+    with_initialized_project do |dir, root|
+      branch = "dependent-placeholder-busy"
+      busy_parent = Dir.mktmpdir("busy-placeholder")
+      busy_path = File.join(busy_parent, "checked-out")
+      begin
+        run!("git", "-C", dir, "branch", branch, "master")
+        run!("git", "-C", dir, "worktree", "add", busy_path, branch)
+
+        wt = Hive::Worktree.new(dir, branch, worktree_root: root)
+        err = assert_raises(Hive::WorktreeError) do
+          wt.create!(branch, default_branch: "master", base_override: "prereq")
+        end
+        assert_match(/cannot re-point empty placeholder branch #{branch}/, err.message)
+      ensure
+        run!("git", "-C", dir, "worktree", "remove", "--force", busy_path) if busy_path && File.directory?(busy_path)
+        FileUtils.rm_rf(busy_parent) if busy_parent
+      end
+    end
+  end
+
   def test_create_falls_back_to_default_when_dependency_override_missing_on_origin
     with_initialized_project do |dir, root|
       origin_dir = "#{dir}.origin.git"

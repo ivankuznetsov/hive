@@ -151,6 +151,34 @@ def field_uses_file?(value)
   value.to_s.sub(/\A=/, "").split("=", 2).last.to_s.start_with?("@")
 end
 
+API_SHORT_VALUE_OPTIONS = %w[F H q X p f t].freeze
+
+def api_short_option_effect(arg, next_arg)
+  return nil unless arg.start_with?("-") && !arg.start_with?("--") && arg != "-"
+
+  chars = arg[1..].chars
+  chars.each_with_index do |char, index|
+    next unless API_SHORT_VALUE_OPTIONS.include?(char)
+
+    suffix = chars[(index + 1)..].join
+    value = suffix.empty? ? next_arg : suffix
+    consumes_next = suffix.empty?
+
+    case char
+    when "X"
+      return { method: value&.sub(/\A=/, ""), consumes_next: consumes_next }
+    when "f"
+      return { payload: true, consumes_next: consumes_next }
+    when "F"
+      return { payload: true, unsafe_payload: field_uses_file?(value), consumes_next: consumes_next }
+    else
+      return { consumes_next: consumes_next }
+    end
+  end
+
+  nil
+end
+
 def api_read_only?(rest)
   return false unless rest.first == "api"
 
@@ -206,7 +234,14 @@ def api_read_only?(rest)
       cache = true
       index += 1
     else
-      index += 1
+      if (effect = api_short_option_effect(arg, rest[index + 1]))
+        method = effect[:method] if effect.key?(:method)
+        payload ||= effect.fetch(:payload, false)
+        unsafe_payload ||= effect.fetch(:unsafe_payload, false)
+        index += effect.fetch(:consumes_next) ? 2 : 1
+      else
+        index += 1
+      end
     end
   end
 

@@ -125,6 +125,32 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Inverse of `with_origin_ahead_of_local`: advance LOCAL master past origin
+  # by one commit while the dev repo's tracking ref refs/remotes/origin/master
+  # stays at the pre-advance tip. Models a placeholder created via
+  # `freshest_base`'s fetch-failure fallback from a local default that runs
+  # ahead of a stale origin. Yields [dev_dir, worktree_root, origin_dir,
+  # local_advance_sha].
+  def with_local_ahead_of_origin
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        # Seed the tracking ref at the shared tip, then advance only local
+        # master so origin/master is genuinely behind it.
+        run!("git", "-C", dir, "fetch", "origin")
+        File.write(File.join(dir, "from-local.txt"), "local advance\n")
+        run!("git", "-C", dir, "add", ".")
+        run!("git", "-C", dir, "commit", "-m", "local-advance", "--quiet")
+        local_sha = run!("git", "-C", dir, "rev-parse", "master").strip
+        yield(dir, root, origin_dir, local_sha)
+      ensure
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
   # Push a fresh branch into `origin_dir` via a throwaway scratch clone, so a
   # branch genuinely exists on origin without the dev repo tracking it.
   def push_branch_to_origin(origin_dir, branch)
@@ -278,6 +304,32 @@ class WorktreeTest < Minitest::Test
                    "an empty placeholder at origin/master (local behind) must be re-pointed onto origin/<prereq>"
       refute_equal origin_sha, worktree_sha,
                    "the placeholder must not be preserved on origin/master merely because local default lags"
+    end
+  end
+
+  # Inverse regression for the origin-ahead miss: a prior run created the
+  # placeholder from a LOCAL default that runs ahead of a stale origin
+  # (freshest_base's fetch-failure fallback), so it sits at local master's tip
+  # while refs/remotes/origin/master lags behind. Measured against ORIGIN
+  # master the placeholder looks like it carries the local-ahead commit
+  # (count > 0) and would be wrongly preserved; measured against local master
+  # it is correctly empty and re-pointed onto the prerequisite.
+  def test_repoints_empty_placeholder_when_local_ahead_of_origin
+    with_local_ahead_of_origin do |dir, root, origin_dir, local_sha|
+      push_branch_to_origin(origin_dir, "prereq-local-ahead")
+      prereq_sha = run!("git", "-C", origin_dir, "rev-parse", "prereq-local-ahead").strip
+      # Placeholder created from local master (the prior freshest_base
+      # fallback), so origin/master is genuinely behind the placeholder.
+      run!("git", "-C", dir, "branch", "dependent-local-ahead", "master")
+
+      wt = Hive::Worktree.new(dir, "dependent-local-ahead", worktree_root: root)
+      wt.create!("dependent-local-ahead", default_branch: "master", base_override: "prereq-local-ahead")
+
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal prereq_sha, worktree_sha,
+                   "an empty placeholder at local master (origin behind) must be re-pointed onto origin/<prereq>"
+      refute_equal local_sha, worktree_sha,
+                   "the placeholder must not be preserved at local master merely because origin lags"
     end
   end
 

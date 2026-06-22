@@ -62,9 +62,10 @@ module Hive
         # so committed work is never discarded by dependency stacking. Empty
         # placeholders are the only exception: with a stacked override they
         # are deleted above (see `empty_placeholder?`, which measures
-        # emptiness against `origin/<default>` — local `<default>` only when
-        # that tracking ref is absent — never against the override base) and
-        # recreated through the normal first-creation path below.
+        # emptiness against both `origin/<default>` and local `<default>` —
+        # empty if no unique commits beyond either — never against the
+        # override base) and recreated through the normal first-creation path
+        # below.
         args = [ "worktree", "add", path, branch_name ]
       else
         # Branch new worktrees from `origin/<default>` (after a quick
@@ -303,34 +304,63 @@ module Hive
     # attached as-is.
     #
     # Measurement basis: count the commits `branch_name` carries beyond the
-    # default branch, measured against `origin/<default>` when that tracking
-    # ref (`refs/remotes/origin/<default>`) exists and otherwise against local
-    # `<default>`. Origin is preferred because new branches are created from
-    # `origin/<default>` (see `freshest_base`); measuring against a local
-    # default that lags origin would otherwise count the origin-ahead commits
-    # and misread an empty placeholder as carrying real work. Always measured
-    # vs the default branch, never `base_override` (R1).
+    # default branch, measured against BOTH `origin/<default>` (when its
+    # tracking ref `refs/remotes/origin/<default>` exists) and local
+    # `<default>` (when that branch exists). The branch is an empty placeholder
+    # when it carries no unique commits beyond EITHER ref. Both directions of
+    # drift create empty placeholders that look non-empty against the wrong
+    # ref: one created from `origin/<default>` (freshest_base) sits ahead of a
+    # lagging local default, while one created from a local default that runs
+    # ahead of a stale origin (freshest_base's fetch-failure fallback) sits
+    # ahead of `origin/<default>`. Consulting both refs catches either. Always
+    # measured vs the default branch, never `base_override` (R1).
     #
-    # Fail-closed: any git error (rev-list exits non-zero) returns false, so
-    # the branch is preserved and attached as-is — stacking never deletes a
-    # branch it could not positively prove empty. The failure is warned so a
-    # dropped re-point is observable instead of silent.
+    # Fail-closed: a branch is deleted only on positive proof of emptiness
+    # (some default ref measures zero). Any git error skips that ref rather
+    # than counting it as proof, and if no ref could be measured the branch is
+    # preserved and attached as-is — stacking never deletes a branch it could
+    # not positively prove empty. Each skipped/absent measurement is warned so
+    # a dropped re-point is observable instead of silent.
     def empty_placeholder?(branch_name, default_branch)
-      base_ref = if self.class.origin_branch_ref_exists?(@project_root, default_branch)
-                   "origin/#{default_branch}"
-      else
-                   default_branch
-      end
-
-      out, err, status = Open3.capture3("git", "-C", @project_root,
-                                        "rev-list", "--count", "#{base_ref}..#{branch_name}")
-      unless status.success?
-        warn "[hive] worktree base: cannot measure #{branch_name} against #{base_ref} " \
-             "(#{err.strip[0, 200]}); preserving branch as-is"
+      base_refs = default_base_refs(default_branch)
+      if base_refs.empty?
+        warn "[hive] worktree base: cannot measure #{branch_name} against #{default_branch} " \
+             "(no origin/#{default_branch} or local #{default_branch} ref); preserving branch as-is"
         return false
       end
 
-      out.strip == "0"
+      measured = false
+      base_refs.each do |base_ref|
+        out, err, status = Open3.capture3("git", "-C", @project_root,
+                                          "rev-list", "--count", "#{base_ref}..#{branch_name}")
+        unless status.success?
+          warn "[hive] worktree base: cannot measure #{branch_name} against #{base_ref} " \
+               "(#{err.strip[0, 200]}); skipping this base"
+          next
+        end
+
+        measured = true
+        # Empty against EITHER default ref ⇒ the placeholder carries no unique
+        # work (it sits at one default's tip), so re-pointing is safe.
+        return true if out.strip == "0"
+      end
+
+      unless measured
+        warn "[hive] worktree base: cannot measure #{branch_name} against any default ref " \
+             "(origin/#{default_branch}, #{default_branch}); preserving branch as-is"
+      end
+
+      false
+    end
+
+    # Default refs to measure a placeholder's emptiness against: `origin/<default>`
+    # when its tracking ref exists, and local `<default>` when that branch
+    # exists. A placeholder is empty if it carries no commits beyond either.
+    def default_base_refs(default_branch)
+      refs = []
+      refs << "origin/#{default_branch}" if self.class.origin_branch_ref_exists?(@project_root, default_branch)
+      refs << default_branch if self.class.local_branch_ref_exists?(@project_root, default_branch)
+      refs
     end
 
     def delete_local_branch!(branch_name)
@@ -354,7 +384,11 @@ module Hive
     def override_local_or_default(branch, default_branch, reason)
       if self.class.local_branch_ref_exists?(@project_root, branch)
         warn "[hive] worktree base: #{reason}; stacking on local #{branch}"
-        return branch
+        # Fully-qualify the start-point: a bare `<branch>` resolves through
+        # gitrevisions precedence, where a same-named tag (refs/tags/<branch>)
+        # shadows refs/heads/<branch>. The local ref was just verified to
+        # exist, so refs/heads/<branch> is unambiguous and strictly safer.
+        return "refs/heads/#{branch}"
       end
 
       warn "[hive] worktree base: #{reason}; " \

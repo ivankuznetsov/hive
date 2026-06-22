@@ -43,9 +43,11 @@ module Hive
             begin
               mcp_config_path = Hive::Screenote::McpConfig.new(credential: screenote.fetch(:credential)).write!
               allowed_tools = Hive::Screenote::McpConfig.allowed_tools_csv(allowed_tools)
-            rescue SystemCallError => e
-              # An unwritable/full cache_home must degrade to a no-MCP run
-              # (the agent keeps local media), not hard-fail the stage (A8).
+            rescue SystemCallError, Hive::ConfigError => e
+              # An unwritable/full cache_home (SystemCallError) OR a credential
+              # that lost a required key between screenote_context's check and
+              # McpConfig#payload (Hive::ConfigError) must degrade to a no-MCP
+              # run (the agent keeps local media), not hard-fail the stage (A8).
               warn "[hive] could not write Screenote MCP config; running artifacts " \
                    "without Screenote upload: #{e.message}"
               mcp_config_path = nil
@@ -64,7 +66,16 @@ module Hive
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
       ensure
-        FileUtils.rm_f(mcp_config_path) if mcp_config_path
+        if mcp_config_path
+          begin
+            FileUtils.rm_f(mcp_config_path)
+          rescue SystemCallError => e
+            # The ephemeral 0600 config embeds the bearer; if cleanup fails
+            # (e.g. EACCES) it lingers on disk. Surface it so an operator can
+            # remove it, rather than swallowing the failure silently.
+            warn "[hive] could not remove ephemeral Screenote MCP config #{mcp_config_path}: #{e.message}"
+          end
+        end
       end
 
       def render_prompt(task, screenote: nil)
@@ -87,18 +98,18 @@ module Hive
 
       def screenote_context(cfg, credential_store: Hive::Screenote::CredentialStore.new, now: Time.now)
         credential = credential_store.load
-        return disconnected("Screenote is not connected; run `hive connect screenote`.", cfg) unless credential
+        return disabled("Screenote is not connected; run `hive connect screenote`.", cfg) unless credential
 
         if credential_store.expired?(credential, now: now)
-          return disconnected("Screenote OAuth token expired; run `hive connect screenote`.", cfg)
+          return disabled("Screenote OAuth token expired; run `hive connect screenote`.", cfg)
         end
 
         project_id = cfg.dig("screenote", "project_id").to_s.strip
         project_id = credential["project_id"].to_s.strip if project_id.empty?
-        return disconnected("Screenote has no default project; run `hive connect screenote`.", cfg) if project_id.empty?
+        return disabled("Screenote has no default project; run `hive connect screenote`.", cfg) if project_id.empty?
 
         if credential["access_token"].to_s.strip.empty? || credential["mcp_resource"].to_s.strip.empty?
-          return disconnected("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
+          return disabled("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
         end
 
         {
@@ -109,13 +120,23 @@ module Hive
           reason: nil
         }
       rescue Hive::ConfigError => e
-        disconnected("Screenote credential is invalid: #{e.message}", cfg)
+        disabled("Screenote credential is invalid: #{e.message}", cfg)
       rescue SystemCallError => e
         # A8 fail-soft: a read failure on the credential file (EACCES /
         # EISDIR / a TOCTOU ENOENT) must skip Screenote, not hard-fail the
         # 7-artifacts stage. CredentialStore#load only rescues JSON errors,
         # so an OS-level File.read failure escapes here as SystemCallError.
-        disconnected("Screenote credential could not be read: #{e.message}", cfg)
+        disabled("Screenote credential could not be read: #{e.message}", cfg)
+      end
+
+      # Visible fail-soft: warn at run time so an operator watching the run
+      # sees WHY no upload happened (the cause was otherwise buried only in
+      # the prompt/manifest), then return the disconnected context. Used by
+      # screenote_context's skip paths; `disconnected` stays the silent
+      # builder for render_prompt's default binding.
+      def disabled(reason, cfg)
+        warn "[hive] Screenote upload disabled for artifacts: #{reason}"
+        disconnected(reason, cfg)
       end
 
       def disconnected(reason, cfg)

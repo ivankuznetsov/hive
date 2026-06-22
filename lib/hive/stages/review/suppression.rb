@@ -62,7 +62,7 @@ module Hive
                          .gsub(/\s+/, " ")
                          .strip
           severity_key = normalize_severity(severity)
-          Digest::SHA256.hexdigest("#{severity_key}\x01#{files}\x01#{title}")[0, 16]
+          ::Digest::SHA256.hexdigest("#{severity_key}\x01#{files}\x01#{title}")[0, 16]
         end
 
         def read_active_keys(ctx)

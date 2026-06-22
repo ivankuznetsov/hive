@@ -750,7 +750,15 @@ module Hive
 
         warn "[hive.review] compare ref #{ref.inspect} did not resolve for suppression binding; " \
              "falling back to worktree HEAD (#{(err.strip.empty? ? out : err).strip})"
-        ops.head_sha
+        head_out, head_err, head_status = Open3.capture3(
+          "git", "-C", ops.project_root,
+          "rev-parse", "--verify", "HEAD"
+        )
+        return head_out.strip if head_status.success?
+
+        warn "[hive.review] worktree HEAD did not resolve for suppression binding; " \
+             "using unresolved-ref token (#{(head_err.strip.empty? ? head_out : head_err).strip})"
+        "unresolved-#{::Digest::SHA256.hexdigest(ref.to_s)[0, 16]}"
       end
 
       def mark_working(task, phase:, pass:)

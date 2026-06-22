@@ -34,7 +34,7 @@ module Hive
     # nil means bare-mv advance (no inbound verb) or an unknown name.
     def advance_verb_for(name) = stage_named(name)&.advance_verb&.name
 
-    # A full dir ("3-plan") or a short name ("plan") → the canonical Stage#dir, so
+    # A full dir (`3-plan`) or a short name (`plan`) → the canonical Stage#dir, so
     # callers (rename targets, commit messages) get the descriptor's dir.
     def resolve_stage_ref(ref) = (stage_for_dir(ref) || stage_named(ref))&.dir
     def has_stage?(ref) = !resolve_stage_ref(ref).nil?

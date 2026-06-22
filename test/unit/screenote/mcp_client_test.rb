@@ -125,6 +125,87 @@ class ScreenoteMcpClientTest < Minitest::Test
     assert_equal "application/json, text/event-stream", http.requests.first.headers["accept"].first
   end
 
+  def test_call_tool_raises_typed_error_on_mcp_tool_channel_iserror
+    # A 2xx JSON-RPC reply whose `result` is `{"isError":true,...}` is a TOOL
+    # failure (bad scope / rate-limit / 5xx). It must raise a typed Hive::Error
+    # with the joined content text, not fall through to [] (list_projects) or
+    # be read as a successful upload (create_screenshot_upload).
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(JSON.generate("result" => {
+        "isError" => true,
+        "content" => [ { "type" => "text", "text" => "rate limit exceeded (60/min)" } ]
+      })))
+    )
+    err = assert_raises(Hive::Error) { client.list_projects }
+    assert_match(/list_projects failed/, err.message)
+    assert_match(/rate limit exceeded/, err.message)
+  end
+
+  def test_extract_projects_returns_empty_for_non_hash_result
+    # A `{"result":[…]}` array result used to raise an untyped TypeError from
+    # `result["projects"]`; the guard degrades it to the empty-projects path.
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(JSON.generate("result" => [ { "id" => "x" } ])))
+    )
+    assert_equal [], client.list_projects
+  end
+
+  def test_call_tool_parses_sse_framed_response
+    # A spec-compliant Streamable-HTTP server may answer with an SSE body;
+    # the `data:` payload must be de-framed and parsed, not failed as
+    # "unparseable response".
+    sse = "event: message\r\n" \
+          "data: #{JSON.generate("result" => { "projects" => [ { "id" => "sse_proj" } ] })}\r\n\r\n"
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(sse))
+    )
+    assert_equal [ { "id" => "sse_proj" } ], client.list_projects
+  end
+
+  def test_call_tool_forwards_arguments_and_increments_request_id
+    http = FakeHttp.new(self.class.ok(JSON.generate("result" => {})))
+    client = Hive::Screenote::McpClient.new(resource: "https://screenote.test/mcp", access_token: "token", http: http)
+
+    client.call_tool("create_screenshot_upload", "project_id" => "proj_1", "title" => "Shot")
+    client.call_tool("list_projects")
+
+    first = JSON.parse(http.requests[0].body)
+    second = JSON.parse(http.requests[1].body)
+    assert_equal({ "project_id" => "proj_1", "title" => "Shot" }, first.dig("params", "arguments"))
+    assert_equal 1, first["id"]
+    assert_equal 2, second["id"]
+  end
+
+  def test_call_tool_create_screenshot_upload_round_trips_through_http_seam
+    # Unit coverage for the upload tool's request/response contract through
+    # the FakeHttp seam; the end-to-end live exercise stays in
+    # test/integration/screenote_capture_live_test.rb (skip-blocked until
+    # Screenote ships the non-interactive test-token endpoint).
+    body = JSON.generate("result" => { "structuredContent" => {
+      "upload_url" => "https://uploads.screenote.test/signed",
+      "screenote_url" => "https://screenote.test/s/abc"
+    } })
+    http = FakeHttp.new(self.class.ok(body))
+    client = Hive::Screenote::McpClient.new(resource: "https://screenote.test/mcp", access_token: "token", http: http)
+
+    result = client.call_tool(
+      "create_screenshot_upload",
+      "project_id" => "proj_1", "filename" => "shot.png", "content_type" => "image/png"
+    )
+
+    assert_equal "https://uploads.screenote.test/signed", result.dig("structuredContent", "upload_url")
+    req = JSON.parse(http.requests.first.body)
+    assert_equal "create_screenshot_upload", req.dig("params", "name")
+    assert_equal "proj_1", req.dig("params", "arguments", "project_id")
+    assert_equal "image/png", req.dig("params", "arguments", "content_type")
+  end
+
   def test_call_tool_surfaces_mcp_http_json_and_network_errors
     client = Hive::Screenote::McpClient.new(
       resource: "https://screenote.test/mcp",

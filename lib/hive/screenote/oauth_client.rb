@@ -123,15 +123,7 @@ module Hive
       end
 
       def parse_json_response(response, context)
-        body = response.body.to_s.strip
-        return {} if body.empty?
-
-        parsed = JSON.parse(body)
-        return parsed if parsed.is_a?(Hash)
-
-        raise Hive::Error, "#{context} returned a non-object response"
-      rescue JSON::ParserError
-        raise Hive::Error, "#{context} returned an unparseable response"
+        Hive::Screenote::Http.parse_json_object(response.body, context, empty_object: true)
       end
 
       def required(hash, key, context)

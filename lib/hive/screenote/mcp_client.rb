@@ -39,7 +39,9 @@ module Hive
         error = body["error"]
         raise Hive::Error, "Screenote MCP #{name} failed: #{error["message"] || error}" if error.is_a?(Hash)
 
-        body.fetch("result", body)
+        result = body.fetch("result", body)
+        raise_tool_error(name, result)
+        result
       end
 
       private
@@ -48,16 +50,53 @@ module Hive
         Hive::Screenote::Http.request(http: @http, request: req, uri: resource, context: "Screenote MCP request")
       end
 
-      def parse_response(response, context)
-        parsed = JSON.parse(response.body.to_s)
-        return parsed if parsed.is_a?(Hash)
+      # A 2xx JSON-RPC reply can still carry a *tool* failure on the MCP tool
+      # channel: `result` is `{"isError":true,"content":[{"text":"…"}]}` for a
+      # bad scope, an invalid project_id, a 60/min rate-limit, a 5xx, or a
+      # server-side upload failure. Only `body["error"]` (the protocol channel)
+      # was inspected, so for `list_projects` the error text fell through
+      # `extract_projects` to `[]` and `connect` raised the wrong remedy
+      # ("create a project and reconnect"), while `create_screenshot_upload`
+      # read a failed upload as success. Surface the tool error as a typed
+      # Hive::Error with the joined `content` text.
+      def raise_tool_error(name, result)
+        return unless result.is_a?(Hash) && result["isError"]
 
-        raise Hive::Error, "#{context} returned a non-object response"
-      rescue JSON::ParserError
-        raise Hive::Error, "#{context} returned an unparseable response"
+        text = Array(result["content"]).filter_map do |entry|
+          entry["text"].to_s if entry.is_a?(Hash) && !entry["text"].to_s.strip.empty?
+        end.join("\n").strip
+        detail = text.empty? ? "tool reported an error" : text
+        raise Hive::Error, "Screenote MCP #{name} failed: #{detail}"
+      end
+
+      def parse_response(response, context)
+        Hive::Screenote::Http.parse_json_object(unframe_sse(response.body.to_s), context)
+      end
+
+      # A Streamable-HTTP MCP endpoint may answer a POST with a bare JSON
+      # object OR a `text/event-stream` body (`event: message\ndata: {…}`) —
+      # the spec lets the server pick either even though we advertise both, so
+      # a flat JSON.parse failed a spec-compliant SSE reply as "unparseable
+      # response" and broke every `list_projects`. Concatenate the `data:`
+      # payload(s) so an SSE reply parses; a non-SSE body passes through
+      # untouched.
+      def unframe_sse(body)
+        return body unless body.lstrip.start_with?("event:", "data:", "id:", "retry:", ":")
+
+        data = body.each_line.filter_map do |line|
+          next unless line.start_with?("data:")
+
+          line.delete_prefix("data:").sub(/\A[ \t]/, "").chomp
+        end
+        data.empty? ? body : data.join("\n")
       end
 
       def extract_projects(result)
+        # A non-Hash `result` (e.g. a `{"result":[…]}` array) would make
+        # `result["projects"]` raise an untyped TypeError; degrade to the
+        # documented empty-projects path instead.
+        return [] unless result.is_a?(Hash)
+
         direct = result["projects"]
         return direct if direct.is_a?(Array)
 

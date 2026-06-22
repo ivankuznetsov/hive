@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-06-22
 tags: [test, minitest, fixtures]
 ---
 
@@ -100,7 +100,7 @@ task default: :test
 | `web/agents_auth_test.rb`, `web/agents_auth_login_test.rb`, `web/agents_routes_test.rb` | `Hive::Web::AgentsAuth` — Claude paste-back PTY login URL capture, Codex `--device-auth` URL sanitize/poll-login behavior, `gh auth login --web` URL capture plus auto-Enter prompt handling, binary PTY output scrubbing, rejected-code errors, watchdog/process-group cleanup, concurrent-session cap, Pi token JSON rejection/persistence, and route wiring. |
 | `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
 | `patrol/pr_opener_test.rb` | `Hive::Patrol::PrOpener` — PR creation, fingerprint mapping, optional `ReviewHandoff` creation of synthetic `6-review` tasks, worktree pointer contents, and `patrol.review_prs: false` cleanup behavior. |
-| `stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` | Review phase helpers — CI-fix retries, triage prompt/bias/custom-template/protected-file behavior, triage `review_triage` default fallback values (75 / 1800), browser-test protocol handling, and fix-guardrail approval gates. |
+| `stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}_test.rb` | Review phase helpers — CI-fix retries, triage prompt/bias/custom-template/protected-file behavior, triage `review_triage` default fallback values (75 / 1800), browser-test protocol handling, fix-guardrail approval gates, and no-fix suppression fingerprint/strip/seed behavior. |
 | `stages/review/run_reviewers_test.rb` | `Hive::Stages::Review.run_reviewers` — reviewer list selection for normal vs patrol-sourced tasks, per-reviewer failures, wall-clock deadlines, shared Claude tmux sessions, and GitHub comment mirroring. |
 | `stages/review/phase_failure_helpers_test.rb` | `Hive::Stages::Review` phase-failure helpers — bounded `message=` summary truncation through `review_phase_error_summary`, capped exponential `triage_retry_backoff` delay through stubbed sleep, and the `run_triage_with_retries` wall-clock bail that returns `:wall_clock_exceeded` instead of launching another long triage spawn after the review budget is spent. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive and scan boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, explicit archive views remain age-unfiltered, and stage-move race coverage pins vanished-folder skips, surviving-folder `ENOENT` re-raises, and duplicate-pruning behavior. |
@@ -118,7 +118,7 @@ task default: :test
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
 | `run_open_pr_test.rb` | `hive run` of `5-open-pr/` — push, draft PR creation, idempotent existing-PR path. |
-| `run_review_test.rb` | `hive run` of `6-review/` — pre-flight states, reviewer/triage/fix/browser branching, manual wait and stale/error recovery, auto-commit/guardrail boundaries, provider-limit marker behavior for reviewers, triage limit vs non-limit failures, bounded transient triage retry recovery including wall-clock handoff to `REVIEW_STALE`, and `message=` surfacing on terminal phase-agent (triage and fix) errors — the CI phase writes `reason=ci_unrunnable` directly and carries no `message=`. |
+| `run_review_test.rb` | `hive run` of `6-review/` — pre-flight states, reviewer/triage/fix/browser branching, no-fix suppression convergence and negative cases, manual wait and stale/error recovery, auto-commit/guardrail boundaries, provider-limit marker behavior for reviewers, triage limit vs non-limit failures, bounded transient triage retry recovery including wall-clock handoff to `REVIEW_STALE`, and `message=` surfacing on terminal phase-agent (triage and fix) errors — the CI phase writes `reason=ci_unrunnable` directly and carries no `message=`. |
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, already-merged PR short-circuit (`merged=true`, no `gh pr ready`, no `summary.md`), PR-ready wrap-up, and summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |

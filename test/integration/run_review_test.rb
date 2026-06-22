@@ -94,6 +94,24 @@ class RunReviewTest < Minitest::Test
     base
   end
 
+  def suppression_reviewer_cfg
+    {
+      "review" => {
+        "reviewers" => [
+          {
+            "name" => "stub-reviewer",
+            "kind" => "agent",
+            "agent" => "claude",
+            "skill" => "ce-code-review",
+            "output_basename" => "stub-reviewer",
+            "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+            "timeout_sec" => 5
+          }
+        ]
+      }
+    }
+  end
+
 
   # --- pre-flight terminal markers short-circuit -----------------------
 
@@ -1182,6 +1200,166 @@ class RunReviewTest < Minitest::Test
           Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run!)
           Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run!)
         end
+      end
+    end
+  end
+
+  def test_no_fix_suppression_converges_after_post_fix_rereview
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: suppression_reviewer_cfg)
+        pass2_triage_input = nil
+
+        review_stub = lambda do |_cfg, ctx, _task, **_kwargs|
+          path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(path))
+          body =
+            if ctx.pass == 1
+              "## High\n- [ ] lib/fix.rb fixes real bug: apply patch\n" \
+                "- [ ] lib/foo.rb:12 leaks stale state: triage accepts risk\n"
+            else
+              "## High\n- [ ] lib/foo.rb:88 leaks stale state: re-emitted no-fix\n"
+            end
+          File.write(path, body)
+          :ok
+        end
+
+        triage_stub = lambda do |cfg:, ctx:|
+          reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
+          if ctx.pass == 1
+            File.write(reviewer, <<~MD)
+              ## High
+              - [x] AUTO-FIX: lib/fix.rb fixes real bug: apply patch
+              - [x] RESOLVED/NO-FIX: lib/foo.rb:12 leaks stale state: triage accepts risk
+            MD
+          else
+            pass2_triage_input = File.read(reviewer)
+          end
+          esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(esc))
+          File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
+          Hive::Stages::Review::Triage::Result.new(
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+          )
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_stub) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_stub) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "2", marker.attrs["pass"]
+        assert_nil marker.attrs["reason"], "convergence must use the clean branch, not REVIEW_STALE reason=wall_clock"
+        assert_includes pass2_triage_input, "SUPPRESSED: lib/foo.rb:88 leaks stale state",
+                        "pass-2 re-emitted no-fix finding must be stripped before triage"
+        refute_includes pass2_triage_input, "- [ ] lib/foo.rb:88 leaks stale state"
+        assert_includes File.read(File.join(folder, "reviews", "suppressed.md")), "lib/foo.rb:12 leaks stale state"
+      end
+    end
+  end
+
+  def test_high_escalation_is_not_suppressed_and_waits_for_operator
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: suppression_reviewer_cfg)
+
+        review_stub = lambda do |_cfg, ctx, _task, **_kwargs|
+          path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(path))
+          File.write(path, "## High\n- [ ] lib/security.rb leaks token: needs design call\n")
+          :ok
+        end
+        triage_stub = lambda do |cfg:, ctx:|
+          esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(esc))
+          File.write(esc, <<~MD)
+            # Escalations for pass #{format('%02d', ctx.pass)}
+
+            ## Round 1
+
+            ### Q1. Should hive change the token flow?
+            Source: stub-reviewer-#{format('%02d', ctx.pass)}.md
+            Finding: lib/security.rb leaks token: needs design call
+            ### A1.
+          MD
+          Hive::Stages::Review::Triage::Result.new(
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+          )
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_stub) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_stub) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        assert_equal "1", marker.attrs["escalations"]
+        suppressed = File.read(File.join(folder, "reviews", "suppressed.md"))
+        refute_includes suppressed, "lib/security.rb leaks token"
+      end
+    end
+  end
+
+  def test_different_title_reaches_triage_after_prior_no_fix_seed
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: suppression_reviewer_cfg)
+        pass2_triage_input = nil
+
+        review_stub = lambda do |_cfg, ctx, _task, **_kwargs|
+          path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(path))
+          body =
+            if ctx.pass == 1
+              "## High\n- [ ] lib/fix.rb fixes real bug: apply patch\n" \
+                "- [ ] lib/foo.rb leaks stale state: triage accepts risk\n"
+            else
+              "## High\n- [ ] lib/foo.rb drops retry state: new title must triage\n"
+            end
+          File.write(path, body)
+          :ok
+        end
+
+        triage_stub = lambda do |cfg:, ctx:|
+          reviewer = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
+          if ctx.pass == 1
+            File.write(reviewer, <<~MD)
+              ## High
+              - [x] AUTO-FIX: lib/fix.rb fixes real bug: apply patch
+              - [x] RESOLVED/NO-FIX: lib/foo.rb leaks stale state: triage accepts risk
+            MD
+          else
+            pass2_triage_input = File.read(reviewer)
+            File.write(reviewer, <<~MD)
+              ## High
+              - [x] RESOLVED/NO-FIX: lib/foo.rb drops retry state: new title must triage
+            MD
+          end
+          esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(esc))
+          File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
+          Hive::Stages::Review::Triage::Result.new(
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+          )
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_stub) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_stub) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "2", marker.attrs["pass"]
+        assert_includes pass2_triage_input, "- [ ] lib/foo.rb drops retry state",
+                        "different-title finding must reach triage normally"
+        refute_includes pass2_triage_input, "SUPPRESSED:"
       end
     end
   end

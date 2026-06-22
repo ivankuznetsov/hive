@@ -2741,31 +2741,30 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_screenote_honors_config_and_env_overrides
+  def test_load_global_screenote_honors_base_url_config_and_env_override
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         screenote:
           base_url: https://screenote.example
-          api_token: from-config
       YAML
 
-      with_env("HIVE_SCREENOTE_BASE_URL" => "https://screenote.env", "HIVE_SCREENOTE_API_TOKEN" => "from-env") do
+      with_env("HIVE_SCREENOTE_BASE_URL" => "https://screenote.env") do
         cfg = Hive::Config.load_global_screenote
 
         assert_equal "https://screenote.env", cfg["base_url"]
-        assert_equal "from-env", cfg["api_token"]
+        refute cfg.key?("api_token")
       end
     end
   end
 
-  def test_load_global_screenote_defaults_to_disabled
+  def test_load_global_screenote_defaults_to_screenote_ai
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
       cfg = Hive::Config.load_global_screenote
 
-      assert_nil cfg["base_url"]
-      assert_nil cfg["api_token"]
+      assert_equal "https://screenote.ai", cfg["base_url"]
+      refute cfg.key?("api_token")
     end
   end
 
@@ -2789,10 +2788,23 @@ class ConfigTest < Minitest::Test
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         screenote:
-          api_token: 123
+          api_token: old-secret
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
-      assert_match(/screenote\.api_token.*must be a String/, err.message)
+      assert_equal "Screenote now connects via OAuth — run `hive connect screenote`.", err.message
+    end
+  end
+
+  def test_project_config_with_screenote_api_token_gets_migration_error
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        screenote:
+          api_token: old-secret
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_equal "Screenote now connects via OAuth — run `hive connect screenote`.", err.message
     end
   end
 

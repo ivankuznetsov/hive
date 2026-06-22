@@ -360,12 +360,10 @@ module Hive
         "session_secret_file" => nil
       },
       # Optional hosted screenshot publishing for 7-artifacts visual
-      # manifests. Tokens are operator-global and may be supplied via the
-      # global config (screenote.api_token) or HIVE_SCREENOTE_API_TOKEN; the
-      # agent never receives them.
+      # manifests. OAuth credentials are stored by `hive connect screenote`;
+      # this block only selects the Screenote base URL.
       "screenote" => {
-        "base_url" => nil,
-        "api_token" => nil
+        "base_url" => "https://screenote.ai"
       },
       # Experimental PR babysitter. This is intentionally separate
       # from the pipeline daemon: it polls open GitHub PRs and asks a
@@ -1039,9 +1037,6 @@ module Hive
     def apply_screenote_env_overrides!(screenote)
       if ENV.key?("HIVE_SCREENOTE_BASE_URL")
         screenote["base_url"] = ENV["HIVE_SCREENOTE_BASE_URL"]
-      end
-      if ENV.key?("HIVE_SCREENOTE_API_TOKEN")
-        screenote["api_token"] = ENV["HIVE_SCREENOTE_API_TOKEN"]
       end
       screenote
     end
@@ -1864,11 +1859,10 @@ module Hive
               "screenote.base_url in #{describe_source(source_path)} must be blank or an http(s) URL"
       end
 
-      token = screenote["api_token"]
-      return if token.nil? || token.is_a?(String)
+      return unless screenote.key?("api_token")
 
       raise ConfigError,
-            "screenote.api_token in #{describe_source(source_path)} must be a String when set"
+            "Screenote now connects via OAuth — run `hive connect screenote`."
     end
 
     # R-02: `daemon.child_verb_timeouts` is an optional map of hive verb

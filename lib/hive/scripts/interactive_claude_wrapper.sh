@@ -79,9 +79,8 @@ cd "$cwd"
 
 unset ANTHROPIC_API_KEY
 unset CLAUDE_API_KEY
-# Screenote credentials belong to the parent `hive run artifacts` upload, not
-# the agent — drop them so the artifacts agent's Bash can't read the token.
-unset HIVE_SCREENOTE_API_TOKEN
+# Screenote connection context is passed explicitly by hive, not inherited from
+# the operator shell.
 unset HIVE_SCREENOTE_BASE_URL
 
 exec "$bin" "$@"

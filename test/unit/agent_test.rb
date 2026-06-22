@@ -22,7 +22,7 @@ class AgentTest < Minitest::Test
     %w[HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_LOG_DIR
-       HIVE_SCREENOTE_API_TOKEN HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
+       HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
   end
 
   def make_task(dir, stage = "2-brainstorm", slug = "agent-test-260424-aaaa")
@@ -189,27 +189,19 @@ class AgentTest < Minitest::Test
     end
   end
 
-  # An env-sourced screenote token must never reach the spawned agent: the
-  # upload runs in the parent `hive run artifacts` process, and the agent's
-  # Bash could otherwise read HIVE_SCREENOTE_API_TOKEN straight from its
-  # environment. The headless spawn scrubs both vars to nil (unset) regardless
-  # of what the parent carries.
-  def test_screenote_credentials_are_scrubbed_from_the_agent_child_env
+  def test_screenote_base_url_is_scrubbed_from_the_agent_child_env
     with_tmp_dir do |dir|
       task = make_task(dir)
       log_dir = Dir.mktmpdir("fake-claude-argv")
       ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
-      ENV["HIVE_SCREENOTE_API_TOKEN"] = "parent-screenote-token"
       ENV["HIVE_SCREENOTE_BASE_URL"] = "https://screenote.parent"
       File.write(task.state_file, "<!-- WAITING -->\n")
 
       Hive::Agent.new(task: task, prompt: "do work", max_budget_usd: 1, timeout_sec: 5).run!
 
       argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
-      assert_includes argv_log, "env_HIVE_SCREENOTE_API_TOKEN=__unset__",
-                      "the agent child must not inherit the screenote token"
       assert_includes argv_log, "env_HIVE_SCREENOTE_BASE_URL=__unset__"
-      refute_includes argv_log, "parent-screenote-token"
+      refute_includes argv_log, "https://screenote.parent"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end

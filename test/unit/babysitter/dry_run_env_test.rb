@@ -266,8 +266,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "--repo=owner/repo", "pr", "edit", "42", "--add-label", "ready"
       assert_stubbed env, "gh", "--repo=owner/repo", "pr", "edit", "42", "--add-assignee", "@me"
       assert_stubbed env, "gh", "api", "-X", "POST", "repos/owner/repo/dispatches"
+      assert_stubbed env, "gh", "api", "-iX", "POST", "repos/owner/repo/dispatches"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-f", "body=hi"
+      assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-if", "body=hi"
+      assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-ifbody=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-F", "body=@comment.md"
+      assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-iF", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--raw-field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
@@ -338,6 +342,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      assert_passes env, "gh", "api", "-iX", "GET", "repos/owner/repo/issues", "-f", "state=open"
       # The safe positional forms must still reach real gh, so the new positional
       # gate does not over-block: a bare `OWNER/REPO` slug (one slash) on `repo view`,
       # a numeric operand on `pr view`, and a slash-bearing branch ref the pr-URL rule
@@ -516,8 +521,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh --repo=owner/repo pr edit 42 --add-label ready skipped"
       assert_includes skipped, "gh --repo=owner/repo pr edit 42 --add-assignee @me skipped"
       assert_includes skipped, "gh api -X POST repos/owner/repo/dispatches skipped"
+      assert_includes skipped, "gh api -iX POST repos/owner/repo/dispatches skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -f body=hi skipped"
+      assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -if body=hi skipped"
+      assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -ifbody=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -F body=@comment.md skipped"
+      assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -iF body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --raw-field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
@@ -587,6 +596,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh pr view feature/topic/branch"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, "real-gh api --method GET repos/owner/repo/issues -F state=open"
+      assert_includes real_invocations, "real-gh api -iX GET repos/owner/repo/issues -f state=open"
       assert_includes real_invocations, expected_real_invocation("git", "-C", dir, "status", "--short")
       assert_includes real_invocations, expected_real_invocation("git", "config", "--get", "remote.origin.url")
       assert_includes real_invocations, expected_real_invocation("git", "config", "--get-all", "remote.origin.fetch")

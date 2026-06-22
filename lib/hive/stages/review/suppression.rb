@@ -457,7 +457,8 @@ module Hive
           body << "\n"
           body << "# Suppressed review findings\n\n"
           body << "Hive suppresses checked entries here before triage when reviewers re-emit a finding triage already marked no-fix.\n"
-          body << "Uncheck or delete an entry to let the finding reach triage on the next pass.\n"
+          body << "Uncheck an entry (keep the `- [ ]` tombstone) to durably un-suppress: the tombstone stays in the list, so triage sees the finding on the next pass and never re-suppresses it.\n"
+          body << "Deleting an entry only un-suppresses until the next no-fix pass, which re-seeds and re-suppresses it.\n"
           body << "This file is orchestrator-owned and is reset when the reviewer compare base changes.\n\n"
 
           grouped = entries.group_by(&:severity)

@@ -46,8 +46,10 @@ module Hive
         # rewriting suppressions would defeat the no-fix convergence
         # guarantee (plan U3 / Req-Trace A4 require fix AND triage
         # protection, not fix alone). Snapshotted as a triage-local
-        # addition so the shared ORCHESTRATOR_OWNED constant (also used by
-        # 4-execute and ci-fix) stays untouched. Timing is safe: strip
+        # addition so the shared ORCHESTRATOR_OWNED constant (also consumed
+        # by ci-fix and the review fix phase via FIX_PROTECTED_FILES;
+        # 4-execute carries its own PROTECTED_FILES list) stays untouched.
+        # Timing is safe: strip
         # writes before this snapshot and seed after it, so the
         # orchestrator's own legitimate writes never trip the check.
         TRIAGE_PROTECTED_FILES = (PROTECTED_FILES + [ "reviews/suppressed.md" ]).freeze

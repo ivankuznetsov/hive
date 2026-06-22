@@ -82,10 +82,12 @@ module Hive
       AcceptedFindings = Data.define(:text, :count)
       # Resolved reviewer compare base. `degraded` is true when the
       # configured compare ref did not resolve and we fell back to the
-      # worktree HEAD (or an unresolved-ref token). In that mode the base
-      # moves with every fix commit, so the suppression list resets each
-      # pass and effectively cannot accumulate — the runner surfaces this
-      # per pass so an operator can tell suppression is self-disabled.
+      # worktree HEAD (or an unresolved-ref token). The base is resolved
+      # once per `run!` and frozen across the in-memory pass loop, so it
+      # only moves between separate `run!`/resume invocations once HEAD has
+      # advanced past the recorded base — at which point the suppression
+      # list resets and effectively cannot accumulate. The runner surfaces
+      # this per pass so an operator can tell suppression is self-disabled.
       ReviewerCompareBase = Data.define(:sha, :degraded)
       # Auto-commit scope constants now live on Hive::Stages::AutoCommit
       # (shared with CleanExit). Aliased here as compatibility constants —
@@ -396,8 +398,8 @@ module Hive
             if triage_enabled?(cfg)
               if @suppression_base_degraded
                 warn "[hive.review] suppression base unresolved (compare ref did not resolve); " \
-                     "the list resets on every fix commit and will not accumulate for pass #{format('%02d', pass)} " \
-                     "— no-fix suppression is effectively disabled this run"
+                     "the list resets across run!/resume re-invocations once HEAD advances and will not " \
+                     "accumulate for pass #{format('%02d', pass)} — no-fix suppression is effectively disabled this run"
               end
               stripped = Hive::Stages::Review::Suppression.strip_suppressed!(
                 cfg: cfg,

@@ -355,11 +355,13 @@ class TriageTest < Minitest::Test
     with_triage_dir do |dir, task_folder|
       ctx = make_ctx(dir, task_folder)
 
-      expected = Hive::Stages::Review::Triage::PROTECTED_FILES.map do |name|
+      expected = Hive::Stages::Review::Triage::TRIAGE_PROTECTED_FILES.map do |name|
         File.join(task_folder, name)
       end
 
       assert_equal expected, Hive::Stages::Review::Triage.protected_paths(ctx)
+      assert_includes expected, File.join(task_folder, "reviews", "suppressed.md"),
+                      "the suppression list must be SHA-protected during the triage spawn (U3/A4)"
     end
   end
 

@@ -27,7 +27,7 @@ Missing files are recorded as `nil` so a deletion is detected as a difference (o
 
 - **`Stages::Execute.run!`** — wraps the implementation spawn (ADR-013). Tampering yields `EXECUTE_ERROR phase=implementation reason=tampered`.
 - **`Stages::Review.run!#spawn_fix_agent`** — wraps Phase 4. Includes the per-pass `escalations-NN.md`, reviewer infra/error sentinels, fix-success/guardrail sentinels, and `reviews/suppressed.md` so a fix agent rewriting them (e.g., flipping `[ ]` → `[x]` to short-circuit human review, or clearing no-fix suppressions) trips `REVIEW_ERROR phase=fix reason=fix_tampered`.
-- **`Stages::Review::Triage.run!`** — wraps the triage spawn (`PROTECTED_FILES = ORCHESTRATOR_OWNED`). Triage may edit reviewer files in place but must NOT touch plan.md / worktree.yml / task.md. Tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
+- **`Stages::Review::Triage.run!`** — wraps the triage spawn (`TRIAGE_PROTECTED_FILES = ORCHESTRATOR_OWNED + ["reviews/suppressed.md"]`). Triage may edit reviewer files in place but must NOT touch plan.md / worktree.yml / task.md / the suppression list (clearing no-fix suppressions there would defeat convergence — U3/A4). The triage-local addition leaves the shared `ORCHESTRATOR_OWNED` constant untouched; timing is safe because `strip_suppressed!` writes the list before the snapshot and `seed_from_triage!` after it. Tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 - **`Stages::Review::CiFix.run!`** — wraps each CI-fix attempt. Tampering yields `Result.new(status: :error, error_message: "ci fix agent modified protected files: …")` which the runner translates to `REVIEW_ERROR phase=ci`.
 
 ## Why these three files

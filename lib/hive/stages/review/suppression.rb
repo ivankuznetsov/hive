@@ -26,12 +26,30 @@ module Hive
         # lone trailing comment, but a latent footgun if a finding ever
         # embeds a mid-text comment.
         HTML_COMMENT_RE = /<!--.*?-->/m.freeze
+        # Recognizes a file reference so its `:line[:col]` suffix can be
+        # stripped before fingerprinting. Two alternatives:
+        #   1. a dotted path (`lib/foo.rb`, `a/b/c.tsx:12:3`) — extension
+        #      required, line/col optional;
+        #   2. an extensionless basename that carries a `:line[:col]`
+        #      suffix (`Gemfile:12`, `Dockerfile:8`, `path/Makefile:5`) —
+        #      the suffix is mandatory here so a bare word never reads as a
+        #      path, but a line-drifted re-emission on a common
+        #      extensionless config file still folds to the same key.
         PATH_TOKEN_RE = %r{
           (?:`)?
-          ([A-Za-z0-9_.@+\-]+(?:/[A-Za-z0-9_.@+\-]+)*\.[A-Za-z0-9_+\-]+(?::\d+(?::\d+)?)?)
+          (
+            [A-Za-z0-9_.@+\-]+(?:/[A-Za-z0-9_.@+\-]+)*\.[A-Za-z0-9_+\-]+(?::\d+(?::\d+)?)?
+            |
+            [A-Za-z0-9_.@+\-]+(?:/[A-Za-z0-9_.@+\-]+)*:\d+(?::\d+)?
+          )
           (?:`)?
         }x.freeze
         LINE_NUMBER_SUFFIX_RE = /:\d+(?::\d+)?\z/.freeze
+        # Equal-length placeholder used to mask file-ref tokens while
+        # locating the real title/justification separator (see
+        # title_region). A NUL never appears in reviewer text, so it can't
+        # be mistaken for a genuine character preceding the separator.
+        FILE_REF_MASK = "\x00".freeze
         PUNCT_RE = /[[:punct:]]+/.freeze
         # Canonical severity list for the suppressed doc — the single
         # source of truth. Section headings, inline labels, the heading
@@ -62,29 +80,29 @@ module Hive
         # are folded to a normalized, line-number-free set so the same
         # finding at a drifted line still matches.
         #
-        # File refs are extracted (and their `:line[:col]` suffixes
-        # dropped) and then removed from the title BEFORE the
-        # title/justification split. Order is load-bearing: a reviewer line
-        # shaped `file:line: description` would otherwise have the ": " of
-        # the `file:line:` token mistaken for the title separator,
-        # collapsing every distinct finding on that file to one key and
-        # silently suppressing unrelated findings — breaking the plan's
-        # "different-title re-loops" guarantee.
+        # Both the file-ref set AND the title come from `title_region` —
+        # the part of the line before the real title/justification
+        # separator. The body never feeds the key, so a finding whose
+        # rationale happens to mention a different path keeps the same key
+        # (A3). title_region masks `file:line:` tokens before locating the
+        # separator, so a reviewer line shaped `file:line: description` is
+        # not collapsed by the artifact colon of the `file:line:` token —
+        # preserving the plan's "different-title re-loops" guarantee.
         #
         # Symbol-level enrichment of the key (e.g. the enclosing method
         # name) is a deferred A3 nice-to-have, intentionally NOT in v1.
         def key_for(text, severity:)
-          cleaned = clean_finding_text(text)
-          files = cleaned.scan(PATH_TOKEN_RE).flatten
-                         .map { |path| path.sub(LINE_NUMBER_SUFFIX_RE, "").downcase }
-                         .uniq
-                         .sort
-                         .join(",")
-          title = title_text(cleaned.gsub(PATH_TOKEN_RE, " "))
-                  .downcase
-                  .gsub(PUNCT_RE, " ")
-                  .gsub(/\s+/, " ")
-                  .strip
+          region = title_region(clean_finding_text(text))
+          files = region.scan(PATH_TOKEN_RE).flatten
+                        .map { |path| path.sub(LINE_NUMBER_SUFFIX_RE, "").downcase }
+                        .uniq
+                        .sort
+                        .join(",")
+          title = region.gsub(PATH_TOKEN_RE, " ")
+                        .downcase
+                        .gsub(PUNCT_RE, " ")
+                        .gsub(/\s+/, " ")
+                        .strip
           severity_key = normalize_severity(severity)
           ::Digest::SHA256.hexdigest("#{severity_key}\x01#{files}\x01#{title}")[0, 16]
         end
@@ -173,32 +191,34 @@ module Hive
           cleaned.gsub(/\s+/, " ")
         end
 
-        # Title portion of a finding line: everything before the first
-        # ": " (colon-space), which reviewers use to separate a finding's
-        # title from its justification body. Excluding the justification is
-        # what keeps the key stable when triage re-emits the same finding
-        # with a reworded rationale (A3); this split is therefore
-        # load-bearing for suppression matching, and a change here silently
-        # shifts every key. Mirrors
+        # Title region of a finding line: everything before the first real
+        # ": " (colon-space) separator that reviewers use to split a
+        # finding's title from its justification body, with file refs left
+        # INTACT so key_for can extract them from here (and only here).
+        # Excluding the justification is what keeps the key stable when
+        # triage re-emits the same finding with a reworded rationale (A3);
+        # scoping the file-ref scan to this region is what keeps a reworded
+        # rationale that mentions a different path from changing the key.
+        # This split is load-bearing for suppression matching, and a change
+        # here silently shifts every key. Mirrors
         # Hive::Findings::Document#split_title_justification.
         #
-        # key_for passes text with file refs already removed, so a
-        # whitespace-only prefix before the first ": " means that ": " was
-        # the tail of a `file:line:` token, not a real title/justification
-        # separator. In that case re-split on the next ": " in the
-        # remainder, so `file:line: title: justification` still yields just
-        # the title (a true justification stays excluded) while
-        # `file:line: description` yields the whole description.
-        def title_text(text)
-          idx = text.index(": ")
-          return text unless idx
+        # A `file:line:` ref ends in a colon that, followed by a space,
+        # is indistinguishable from the title/justification separator. We
+        # mask every file-ref token with an equal-length run of NULs
+        # (offsets preserved) and take the first ": " whose colon is not
+        # the masked tail of a ref. So `file:line: description` keeps the
+        # whole description as the title while `file:line: title:
+        # justification` still drops the justification.
+        def title_region(cleaned)
+          masked = cleaned.gsub(PATH_TOKEN_RE) { |m| FILE_REF_MASK * m.length }
+          search_from = 0
+          while (idx = masked.index(": ", search_from))
+            return cleaned[0...idx] if idx.zero? || masked[idx - 1] != FILE_REF_MASK
 
-          prefix = text[0...idx]
-          return prefix unless prefix.strip.empty?
-
-          rest = text[(idx + 2)..] || ""
-          next_idx = rest.index(": ")
-          next_idx ? rest[0...next_idx] : rest
+            search_from = idx + 1
+          end
+          cleaned
         end
 
         def normalize_severity(severity)

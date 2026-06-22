@@ -99,6 +99,39 @@ class ReviewSuppressionTest < Minitest::Test
     assert_equal a, b
   end
 
+  def test_key_for_ignores_file_refs_in_the_justification_body
+    # A3: file refs are pulled from the title region only, so a reworded
+    # rationale that mentions a DIFFERENT path keeps the same key. Before
+    # the fix the scan ran over the whole line, so a body path leaked into
+    # the fingerprint and a reworded no-fix silently re-looped.
+    a = Suppression.key_for("lib/foo.rb leaks stale state: caused by helper in lib/bar.rb", severity: "High")
+    b = Suppression.key_for("lib/foo.rb leaks stale state: caused by helper in lib/baz.rb", severity: "High")
+
+    assert_equal a, b
+  end
+
+  def test_key_for_strips_line_numbers_from_extensionless_file_refs
+    # A3/U1: common extensionless config files (Gemfile, Dockerfile, …)
+    # must also have their `:line` suffix stripped, so a line-drifted
+    # re-emission folds to the same key. Before the fix PATH_TOKEN_RE
+    # required a dotted extension, so `Gemfile:12` kept its line number.
+    a = Suppression.key_for("Gemfile:12 pins insecure gem", severity: "High")
+    b = Suppression.key_for("Gemfile:88 pins insecure gem", severity: "High")
+
+    assert_equal a, b
+  end
+
+  def test_key_for_preserves_text_between_mid_text_html_comments
+    # clean_finding_text strips ALL comments with a global sub: text
+    # between two comments must survive. An anchored `...-->\z` match would
+    # collapse the whole span from the first `<!--` to the last `-->`,
+    # swallowing the visible "bar" and changing the key.
+    spanned = Suppression.key_for("foo <!-- a --> bar <!-- b --> baz", severity: "Low")
+    plain = Suppression.key_for("foo bar baz", severity: "Low")
+
+    assert_equal plain, spanned
+  end
+
   def test_parse_section_recognizes_rendered_unknown_heading
     # render_document emits a `## Unknown` section; parse_section must
     # accept it so the canonical severity list round-trips. It formerly

@@ -8,6 +8,7 @@ class ScreenoteLoopbackServerTest < Minitest::Test
   def test_wait_for_callback_captures_code_and_closes_server
     server = Hive::Screenote::LoopbackServer.new
     port = server.port
+    assert_equal "http://127.0.0.1:#{port}/callback", server.redirect_uri
     waiter = wait_for(server)
 
     response = raw_get(server, "/callback?code=code-123&state=state-123")

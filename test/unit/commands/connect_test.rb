@@ -233,4 +233,14 @@ class ConnectCommandTest < Minitest::Test
     assert_equal [ "xdg-open", "https://screenote.test" ], calls.last.first
     assert_equal({ out: File::NULL, err: File::NULL }, calls.first.last)
   end
+
+  def test_default_mcp_client_factory_builds_authenticated_client
+    command = Hive::Commands::Connect.new("screenote", output: StringIO.new)
+    factory = command.instance_variable_get(:@mcp_client_factory)
+
+    client = factory.call(resource: "https://screenote.test/mcp", access_token: "access-123")
+
+    assert_instance_of Hive::Screenote::McpClient, client
+    assert_equal URI("https://screenote.test/mcp"), client.resource
+  end
 end

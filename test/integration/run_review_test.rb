@@ -1265,6 +1265,7 @@ class RunReviewTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir, cfg_overrides: suppression_reviewer_cfg)
+        triage_input = nil
 
         review_stub = lambda do |_cfg, ctx, _task, **_kwargs|
           path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
@@ -1273,6 +1274,11 @@ class RunReviewTest < Minitest::Test
           :ok
         end
         triage_stub = lambda do |cfg:, ctx:|
+          # Capture exactly what the strip pass handed to triage so a
+          # regression that wrongly pre-suppressed the High to
+          # `- [x] SUPPRESSED:` before triage is caught — not just one that
+          # leaks it into suppressed.md.
+          triage_input = File.read(File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md"))
           esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, <<~MD)
@@ -1299,6 +1305,9 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_waiting, marker.name
         assert_equal "1", marker.attrs["escalations"]
+        assert_includes triage_input, "- [ ] lib/security.rb leaks token",
+                        "a High finding must reach triage unstripped — never pre-suppressed (A7)"
+        refute_includes triage_input, "SUPPRESSED:"
         suppressed = File.read(File.join(folder, "reviews", "suppressed.md"))
         refute_includes suppressed, "lib/security.rb leaks token"
       end
@@ -1360,6 +1369,10 @@ class RunReviewTest < Minitest::Test
         assert_includes pass2_triage_input, "- [ ] lib/foo.rb drops retry state",
                         "different-title finding must reach triage normally"
         refute_includes pass2_triage_input, "SUPPRESSED:"
+        assert_includes File.read(File.join(folder, "reviews", "suppressed.md")),
+                        "lib/foo.rb leaks stale state",
+                        "the prior no-fix seed must still be live at pass 2 — proving the " \
+                        "different-title finding re-looped on a key mismatch, not a vanished seed"
       end
     end
   end

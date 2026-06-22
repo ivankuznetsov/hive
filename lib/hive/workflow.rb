@@ -12,6 +12,28 @@ module Hive
   # class body so they resolve as Workflow::Stage — they can't be declared inside
   # the Data.define block above.
   class Workflow
+    # Soft lookup: returns the Stage or nil so callers can decide how to handle
+    # an unknown name (Task#validate_workflow_stage! raises its own message).
+    def stage_named(name)
+      stages.find { |stage| stage.name == name }
+    end
+
+    # Hard resolve: raises KeyError on an unknown name — used where a missing
+    # stage is a programmer error, not a recoverable condition.
+    def state_file_for(name)
+      stage = stage_named(name)
+      return stage.state_file if stage
+
+      raise KeyError, "unknown stage #{name.inspect} for workflow #{id.inspect}"
+    end
+
+    def stage_names
+      # Frozen to match the parallel frozen Task::STAGE_NAMES constant — a
+      # uniform immutability contract across both sources of truth. A fresh
+      # array is built each call, so freezing it is safe (callers don't mutate).
+      stages.map(&:name).freeze
+    end
+
     Stage = Data.define(
       :name,
       :index,

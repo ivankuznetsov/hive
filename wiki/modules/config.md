@@ -7,7 +7,7 @@ updated: 2026-06-18
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and screenote settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Artifacts-stage screenote uploads use `Config.load_global_screenote`, with env overrides for the base URL and token.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and screenote settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Artifacts-stage screenote uploads use `Config.load_global_screenote`, with env overrides for the base URL and token.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -16,6 +16,7 @@ tags: [config, yaml, validation]
   "hive_state_path"   => ".hive-state",
   "worktree_root"     => nil,
   "default_branch"    => nil,
+  "default_workflow"  => "coding",
   "project_name"      => nil,
   "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions",
                            "model" => "default", "effort" => "default" },
@@ -122,6 +123,8 @@ tags: [config, yaml, validation]
   }
 }
 ```
+
+`default_workflow` is the middle tier in task workflow selection: `<task>/meta.yml workflow:` wins first, then `Config.load(project_root)["default_workflow"]`, then built-in `coding`. It is deliberately not registry-validated during config load; unknown names fail when `Hive::Task` resolves the workflow so the error is tied to the affected task path.
 
 `worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 

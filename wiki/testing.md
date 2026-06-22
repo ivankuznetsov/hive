@@ -59,8 +59,8 @@ task default: :test
 
 | File | Covers |
 |------|--------|
-| `config_test.rb` | `Hive::Config` — defaults, deep-merge, register/find, malformed YAML rejection, normal and patrol reviewer validation, and global Screenote config URL/token type validation. |
-| `task_test.rb` | `Hive::Task` — path regex, stage validation, derived paths, slug edge cases. |
+| `config_test.rb` | `Hive::Config` — defaults, `default_workflow`, deep-merge, register/find, malformed YAML rejection, normal and patrol reviewer validation, and global Screenote config URL/token type validation. |
+| `task_test.rb` | `Hive::Task` — path regex, descriptor-driven stage/index validation, workflow selector/default fallback, derived paths, slug edge cases. |
 | `markers_test.rb` | `Hive::Markers` — set/get round-trip, attribute quoting, last-marker semantics. |
 | `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, commit lock parallelism. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, remove, exists?, pointer round-trip, prefix validation. |
@@ -80,7 +80,7 @@ task default: :test
 | `digest/categorizer_test.rb`, `digest/renderer_test.rb`, `digest/run_test.rb`, `digest/sender_test.rb` | Digest generation/delivery — model JSON mapping and fallbacks, prompt rendering with PR bodies, Telegram MarkdownV2 escaping/category ordering, empty/success/failed-notice orchestration, dry-run token bypass, chat-id resolution, and Telegram send arguments through an injected client. These are unit seams; no real agent or Telegram Bot API call is exercised. |
 | `daemon/digest_scheduler_test.rb` | `Hive::Daemon::DigestScheduler` — first-run no-history guard, local-midnight due calculation, one-day-at-a-time catch-up, catch-up cap logging, non-zero retry behavior, disabled mode, and DST local-date handling. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers and expected-output waits, provider-limit menu classification, signal cleanup, and wrapper argv policy including model/effort pins. |
-| `stages/agent_test.rb`, `stages/resolver_test.rb` | Descriptor-backed runner dispatch — generic `kind: :agent` prompt rendering, prior-artifact nonce wrapping, marker-to-action mapping, spawn kwargs, coding-name bespoke runner precedence, generic non-coding fallback, `StageError` fallback, and lazy require behavior. |
+| `commands/run_test.rb`, `stages/agent_test.rb`, `stages/resolver_test.rb` | Descriptor-backed runner dispatch — `Run#pick_runner` passing `task.workflow`, generic `kind: :agent` prompt rendering, prior-artifact nonce wrapping, marker-to-action mapping, spawn kwargs, coding-name bespoke runner precedence, generic non-coding fallback, `StageError` fallback, and lazy require behavior. |
 | `stages/brainstorm_tmux_sentinel_test.rb` | Claude/tmux sentinel and cleanup behavior — readiness/sentinel delegation, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
 | `tmux_runner_test.rb` | `Hive::TmuxRunner` — detached session startup, environment propagation, prompt injection via tmux buffers, typed tmux failure/timeout classes, prompt-buffer cleanup, paste-settle polling before Enter submit, bounded pane-tail capture, PID lookup, idempotent teardown, and a lightweight fake-tmux timeout harness so setup commands cannot consume the timeout budget before the intentionally hanging `send-keys` call. |

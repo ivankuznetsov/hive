@@ -4,10 +4,10 @@ type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
 updated: 2026-06-19
-tags: [model, task, parsing, task-id, dependencies]
+tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
-**TLDR**: Value object and sidecar helpers for task identity. `Hive::Task` turns a task folder path into a structured `(project_root, hive_state_path, stage_index, stage_name, slug)` tuple plus derived paths; `Hive::TaskMeta` reads `<task>/meta.yml` identity and dependency metadata; `Hive::TaskCounter` allocates global numeric ids for newly captured tasks.
+**TLDR**: Value object and sidecar helpers for task identity. `Hive::Task` turns a task folder path into a structured `(project_root, hive_state_path, stage_index, stage_name, slug, workflow)` tuple plus derived paths; `Hive::TaskMeta` reads `<task>/meta.yml` identity, dependency, and workflow-selector metadata; `Hive::TaskCounter` allocates global numeric ids for newly captured tasks.
 
 ## Constants
 
@@ -19,8 +19,9 @@ tags: [model, task, parsing, task-id, dependencies]
 
 1. `File.expand_path(folder)`.
 2. Match `PATH_RE`; on failure, raise `Hive::InvalidTaskPath` with the offending path.
-3. Validate `stage_name ∈ STAGE_NAMES`; on failure, raise `InvalidTaskPath` with `"unknown stage name: <name>"`.
-4. Strip a trailing `/`, then capture into `@folder`, `@project_root`, `@state_dir_basename`, `@hive_state_path`, `@stage_index`, `@stage_name`, `@slug`.
+3. Strip a trailing `/`, then capture into `@folder`, `@project_root`, `@state_dir_basename`, `@hive_state_path`, `@stage_index`, `@stage_name`, `@slug`.
+4. Resolve `@workflow` from `<task>/meta.yml workflow:`, then project config `default_workflow`, then built-in `coding`. Missing/malformed `meta.yml` returns nil selector; broken project config falls back to `coding` with a warning. Unknown workflow ids are re-raised as `InvalidTaskPath` so one bad task is skipped like a bad stage directory.
+5. Validate the parsed stage name and numeric prefix against the selected descriptor. A descriptor without the stage, or a directory like `3-brainstorm` when the descriptor says `2-brainstorm`, raises `InvalidTaskPath`.
 
 `@hive_state_path` is the *project-rooted* hive-state path: `<project_root>/<state_dir_basename>` — always `<project_root>/.hive-state` in MVP.
 
@@ -29,7 +30,9 @@ tags: [model, task, parsing, task-id, dependencies]
 | Method | Returns |
 |--------|---------|
 | `#project_name` | `File.basename(@project_root)` |
-| `#state_file` | `File.join(folder, STATE_FILES[stage_name])` |
+| `#workflow` | Selected `Hive::Workflow` descriptor |
+| `#stage_names` | Stage names from `#workflow`, not necessarily `Task::STAGE_NAMES` |
+| `#state_file` | `File.join(folder, workflow.state_file_for(stage_name))` |
 | `#reviews_dir` | `File.join(folder, "reviews")` |
 | `#worktree_yml_path` | `File.join(folder, "worktree.yml")` |
 | `#meta_yml_path` | `Hive::TaskMeta.path(folder)` |
@@ -57,9 +60,10 @@ For stages 4 and later:
 
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
-- `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:}` and is total over missing, malformed, or non-Hash YAML.
-- `write(task_folder, id:, slug:, display_name:, depends_on: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes `depends_on` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
-- `update_display_name(task_folder, name)` preserves the existing id, slug, and `depends_on`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
+- `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:, workflow:}` and is total over missing, malformed, or non-Hash YAML.
+- `write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes optional `depends_on` / `workflow` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
+- `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
+- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`; this keeps daemon id backfill from dropping a task-level workflow selector.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
@@ -70,8 +74,8 @@ For stages 4 and later:
 
 ## Tests
 
-- `test/unit/task_test.rb` — path parsing, invalid stage rejection, derived-path correctness, slug edge cases, and `meta.yml` readers.
-- `test/unit/task_meta_test.rb` — sidecar read/write, malformed YAML tolerance, and display-name updates.
+- `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
+- `test/unit/task_meta_test.rb` — sidecar read/write, workflow selector reads/preservation, malformed YAML tolerance, display-name updates, and id backfill.
 - `test/unit/task_counter_test.rb` — first id, sequential ids, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 
 ## Backlinks

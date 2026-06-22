@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/workflow"
+require "hive/workflows/registry"
 
 class WorkflowTest < Minitest::Test
   def test_stage_dir_joins_index_and_name
@@ -45,6 +46,38 @@ class WorkflowTest < Minitest::Test
     assert workflow.frozen?
     assert workflow.stages.frozen?
     refute stages.frozen?, "the caller's array must stay unfrozen — the workflow freezes its own dup"
+  end
+
+  def test_stage_named_returns_stage_by_name
+    workflow = Hive::Workflows::Registry.default
+
+    assert_equal 2, workflow.stage_named("brainstorm").index
+    assert_nil workflow.stage_named("nope")
+  end
+
+  def test_state_file_for_returns_stage_state_file
+    workflow = Hive::Workflows::Registry.default
+
+    assert_equal "plan.md", workflow.state_file_for("plan")
+    assert_equal "task.md", workflow.state_file_for("execute")
+  end
+
+  def test_state_file_for_unknown_stage_raises
+    workflow = Hive::Workflows::Registry.default
+
+    error = assert_raises(KeyError) { workflow.state_file_for("nope") }
+
+    assert_match(/unknown stage "nope"/, error.message)
+    assert_match(/:coding/, error.message)
+  end
+
+  def test_stage_names_returns_descriptor_stage_names
+    workflow = Hive::Workflows::Registry.default
+
+    # Anchor to an independent literal — comparing against workflow.stages.map(&:name)
+    # would be tautological since stage_names IS that expression.
+    assert_equal %w[inbox brainstorm plan execute open-pr review artifacts finalize done],
+                 workflow.stage_names
   end
 
   def test_value_objects_are_immutable_and_copyable

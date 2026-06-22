@@ -345,13 +345,20 @@ module Hive
         # nowhere to advance — so both fall through to ready-to-run.
         inert_advanceable_entry = entry && !terminal && stage.kind == :inert
 
-        # U5-DEFERRED (plan R3/Q2): the ready-to-run fall-through classifies a
-        # markerless generic stage as `generic_ready_to_run` -> `needs_input`,
-        # which `Hive::Daemon::Policy` routes through EDIT_RESUME_ACTIONS to a
-        # first-sight `:record_baseline`. So a never-run generic stage is NOT
-        # daemon-auto-dispatched until a human edits the state file (unlike
-        # coding's `ready_to_*` auto-dispatch). This is intended, not a bug:
-        # U5 owns wiring up generic auto-dispatch.
+        # U6-DEFERRED (plan R3/Q2): U5 wired generic advance resolution into the
+        # `Commands::Approve` / `Commands::Run` command methods — driven directly
+        # with a folder path they resolve a generic move through the task's
+        # descriptor. The *end-to-end* daemon/agent advance path is ALSO U6-gated,
+        # not just the first-run gap below: the Thor `APPROVE_TO_ENUM` (cli.rb)
+        # rejects a generic `--from <dir>`, `Status#collect_rows` (status.rb)
+        # scans only the coding `Hive::Stages::DIRS` so generic rows never reach
+        # the daemon, and `TaskResolver` can't find a generic-only-dir task by
+        # bare slug. See wiki/gaps.md ("Generic workflow advance-dispatch is
+        # U6-gated end-to-end"). The separate first-run gap here is `generic_ready_to_run`
+        # -> `needs_input`, which `Hive::Daemon::Policy` routes through
+        # EDIT_RESUME_ACTIONS to a first-sight `:record_baseline`, so a never-run
+        # generic stage is NOT daemon-auto-dispatched until a human edits the
+        # state file.
         inert_advanceable_entry ? ACTIONS.fetch(:ready_to_advance) : ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:generic_ready_to_run)

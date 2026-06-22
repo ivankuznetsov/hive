@@ -462,10 +462,10 @@ module Hive
       end
 
       def next_stage_dir(task)
-        next_name = Hive::Stages.next_dir(task.stage_index)
-        return nil unless next_name
+        next_stage = task.workflow.next_stage_after(task.stage_name)
+        return nil unless next_stage
 
-        File.join(task.hive_state_path, "stages", next_name)
+        File.join(task.hive_state_path, "stages", next_stage.dir)
       end
 
       def friendly_command(task, marker)

@@ -55,6 +55,70 @@ class WorkflowTest < Minitest::Test
     assert_nil workflow.stage_named("nope")
   end
 
+  def test_next_stage_after_uses_descriptor_order
+    coding = Hive::Workflows::Registry.default
+
+    assert_equal "execute", coding.next_stage_after("plan").name
+    assert_equal "4-execute", coding.next_stage_after("plan").dir
+
+    research = research_workflow
+
+    assert_equal "report", research.next_stage_after("gather").name
+    assert_equal "3-report", research.next_stage_after("gather").dir
+  end
+
+  def test_next_stage_after_returns_nil_for_terminal_stage
+    coding = Hive::Workflows::Registry.default
+    research = research_workflow
+
+    assert_nil coding.next_stage_after("done")
+    assert_nil research.next_stage_after("report")
+  end
+
+  def test_next_stage_after_returns_nil_for_unknown_stage
+    coding = Hive::Workflows::Registry.default
+
+    assert_nil coding.next_stage_after("nope")
+  end
+
+  def test_advance_verb_for_returns_descriptor_verb_name
+    coding = Hive::Workflows::Registry.default
+
+    assert_equal "plan", coding.advance_verb_for("plan")
+    assert_equal "develop", coding.advance_verb_for("execute")
+    assert_nil coding.advance_verb_for("inbox")
+  end
+
+  def test_advance_verb_for_nil_means_mv_only
+    research = research_workflow
+
+    assert_nil research.advance_verb_for("gather")
+    assert_nil research.advance_verb_for("report")
+    assert_nil research.advance_verb_for("nope")
+  end
+
+  def test_stage_for_dir_returns_stage_by_descriptor_dir
+    coding = Hive::Workflows::Registry.default
+    research = research_workflow
+
+    assert_equal 3, coding.stage_for_dir("3-plan").index
+    assert_equal "plan", coding.stage_for_dir("3-plan").name
+    assert_equal 2, research.stage_for_dir("2-gather").index
+    assert_equal "gather", research.stage_for_dir("2-gather").name
+    assert_nil coding.stage_for_dir("99-nope")
+  end
+
+  def test_resolve_stage_ref_accepts_full_dir_and_short_name
+    coding = Hive::Workflows::Registry.default
+    research = research_workflow
+
+    assert_equal "3-plan", coding.resolve_stage_ref("3-plan")
+    assert_equal "3-plan", coding.resolve_stage_ref("plan")
+    assert_equal "3-report", research.resolve_stage_ref("3-report")
+    assert_equal "3-report", research.resolve_stage_ref("report")
+    assert_nil coding.resolve_stage_ref("nope")
+  end
+
   def test_state_file_for_returns_stage_state_file
     workflow = Hive::Workflows::Registry.default
 
@@ -78,6 +142,22 @@ class WorkflowTest < Minitest::Test
     # would be tautological since stage_names IS that expression.
     assert_equal %w[inbox brainstorm plan execute open-pr review artifacts finalize done],
                  workflow.stage_names
+  end
+
+  def test_stage_dirs_returns_descriptor_stage_dirs
+    workflow = Hive::Workflows::Registry.default
+    dirs = workflow.stage_dirs
+
+    # Anchor to an independent literal — comparing against workflow.stages.map(&:dir)
+    # would be tautological since stage_dirs IS that expression. A reorder or
+    # rename in the descriptor must break this.
+    assert_equal %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done],
+                 dirs
+    assert dirs.frozen?
+  end
+
+  def test_single_stage_workflow_has_no_next_stage
+    assert_nil single_stage_workflow.next_stage_after("only")
   end
 
   def test_value_objects_are_immutable_and_copyable

@@ -77,6 +77,12 @@ class WorkflowGoldenTest < Minitest::Test
     assert Hive::Workflows::VERBS.frozen?
   end
 
+  def test_descriptor_verb_derivation_matches_original_literal
+    workflow = Hive::Workflows::Registry.default
+
+    assert_equal EXPECTED_VERBS, derived_verbs_from(workflow)
+  end
+
   # v1 keeps every verb non-interactive by design (no descriptor sets
   # `interactive: true`), so the derived map must carry no `:interactive`
   # key. Locking this against the real VERBS guards the inert path the
@@ -97,4 +103,18 @@ class WorkflowGoldenTest < Minitest::Test
     assert_equal false, Hive::Workflows.interactive?("does-not-exist")
     assert_equal false, Hive::Workflows.interactive?(nil)
   end
+
+  private
+    def derived_verbs_from(workflow)
+      workflow.stages.each_cons(2).each_with_object({}) do |(source, target), verbs|
+        verb_name = workflow.advance_verb_for(target.name)
+        next unless verb_name
+
+        entry = { source: source.dir, target: target.dir }
+        advance_verb = target.advance_verb
+        entry[:force_source] = true if advance_verb.force_source
+        entry[:interactive] = true if advance_verb.interactive
+        verbs[verb_name] = entry
+      end
+    end
 end

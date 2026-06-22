@@ -45,7 +45,7 @@ If passed explicitly, that's used. Otherwise:
 1. `mkdir -p` the parent of `path`.
 2. Probe `git show-ref --verify refs/heads/<branch_name>`:
    - If it exists with no stacked `base_override`, run `git worktree add <path> <branch_name>` (attach to existing branch).
-   - If it exists with a stacked `base_override`, measure `git rev-list --count <default>..<branch_name>`. A non-zero count (or any git error) preserves the branch and attaches as-is. A zero count means the branch is an empty placeholder from the default branch; Hive deletes it with `git branch -D <branch_name>` and falls through to the normal first-creation path below. Delete failure raises `Hive::WorktreeError` naming the branch.
+   - If it exists with a stacked `base_override`, `empty_placeholder?` measures `git rev-list --count <base>..<branch_name>`, where `<base>` is `origin/<default>` when that tracking ref (`refs/remotes/origin/<default>`) exists and local `<default>` otherwise. Origin is preferred because new branches are created from `origin/<default>` (see `freshest_base`), so a local default lagging origin would otherwise count the origin-ahead commits and misread an empty placeholder as carrying work. This emptiness check is a *heuristic* and its base differs from the origin→local→default base the branch is recreated on. A zero count means the branch is an empty placeholder; Hive deletes it with `git branch -D <branch_name>` and falls through to the normal first-creation path below. A non-zero count preserves the branch and attaches as-is; any git error (rev-list non-zero) also preserves it (fail-closed) but warns to stderr so a dropped re-point is observable. Delete failure raises `Hive::WorktreeError` naming the branch (and hinting it may be checked out in another worktree).
    - If not, resolve the base via `base_override` when present, otherwise `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
 3. On non-zero exit, raise `Hive::WorktreeError` with the captured stderr.
 
@@ -116,7 +116,7 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new branch, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local placeholder), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
 
 ## Backlinks
 

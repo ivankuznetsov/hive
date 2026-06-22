@@ -252,6 +252,58 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Regression for the origin-ahead-of-local placeholder miss: a prior run
+  # created the placeholder from origin/<default> (freshest_base), so it sits
+  # at origin/master's tip while local master lags behind. Measured against
+  # LOCAL master the placeholder looks like it carries the origin-ahead
+  # commits (count > 0) and would be wrongly preserved; measured against
+  # origin/master it is correctly empty and re-pointed onto the prerequisite.
+  def test_repoints_empty_placeholder_when_origin_ahead_of_local
+    with_origin_ahead_of_local do |dir, root, origin_dir, origin_sha|
+      # Refresh the tracking ref so refs/remotes/origin/master reflects the
+      # advanced origin tip — the helper's own fetch ran before the advance,
+      # leaving the dev repo's tracking ref stale.
+      run!("git", "-C", dir, "fetch", "origin", "+master:refs/remotes/origin/master")
+      push_branch_to_origin(origin_dir, "prereq-ahead")
+      prereq_sha = run!("git", "-C", origin_dir, "rev-parse", "prereq-ahead").strip
+      # Placeholder created from origin/master (the prior freshest_base
+      # result), so local master is genuinely behind the placeholder.
+      run!("git", "-C", dir, "branch", "dependent-ahead", "origin/master")
+
+      wt = Hive::Worktree.new(dir, "dependent-ahead", worktree_root: root)
+      wt.create!("dependent-ahead", default_branch: "master", base_override: "prereq-ahead")
+
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal prereq_sha, worktree_sha,
+                   "an empty placeholder at origin/master (local behind) must be re-pointed onto origin/<prereq>"
+      refute_equal origin_sha, worktree_sha,
+                   "the placeholder must not be preserved on origin/master merely because local default lags"
+    end
+  end
+
+  # `empty_placeholder?` fail-closed path: when the emptiness measurement
+  # itself errors (here a nonexistent default branch makes `rev-list` exit
+  # non-zero), the branch must be preserved and attached as-is — never deleted
+  # on an inconclusive check — and no WorktreeError raised.
+  def test_create_preserves_branch_when_placeholder_check_errors
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "branch", "dependent-unmeasurable", "master")
+      head_sha = run!("git", "-C", dir, "rev-parse", "dependent-unmeasurable").strip
+
+      wt = Hive::Worktree.new(dir, "dependent-unmeasurable", worktree_root: root)
+      _, err = capture_io do
+        wt.create!("dependent-unmeasurable", default_branch: "no-such-default", base_override: "prereq")
+      end
+
+      assert wt.exists?, "branch must survive when the placeholder measurement errors"
+      worktree_sha = run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal head_sha, worktree_sha,
+                   "an unmeasurable branch attaches as-is (fail-closed) instead of being deleted"
+      assert_match(/cannot measure dependent-unmeasurable/, err,
+                   "the fail-closed path must warn so a dropped re-point is observable")
+    end
+  end
+
   def test_preserves_branch_with_real_commits_over_override
     with_initialized_project do |dir, root|
       run!("git", "-C", dir, "checkout", "-b", "dependent-real-work", "--quiet")
@@ -293,6 +345,11 @@ class WorktreeTest < Minitest::Test
           wt.create!(branch, default_branch: "master", base_override: "prereq")
         end
         assert_match(/cannot re-point empty placeholder branch #{branch}/, err.message)
+        # Also assert the underlying git reason survives in the message, so a
+        # regression dropping the `: #{detail}` interpolation would fail here
+        # instead of shipping a bare, unactionable error.
+        assert_match(/used by worktree|cannot delete/i, err.message,
+                     "the raised error must carry git's underlying reason for the failed delete")
       ensure
         run!("git", "-C", dir, "worktree", "remove", "--force", busy_path) if busy_path && File.directory?(busy_path)
         FileUtils.rm_rf(busy_parent) if busy_parent
@@ -344,6 +401,22 @@ class WorktreeTest < Minitest::Test
         FileUtils.rm_rf(scratch) if scratch
         FileUtils.rm_rf(origin_dir)
       end
+    end
+  end
+
+  # `local_branch_ref_exists?` gained a real caller this PR
+  # (`override_local_or_default`'s local-prereq fallback), so its
+  # empty/whitespace-name guard now matters: a blank base_override must
+  # short-circuit to false without ever shelling out to git (an empty
+  # `refs/heads/` ref-name would otherwise be a malformed query).
+  def test_local_branch_ref_exists_guards_blank_names
+    with_initialized_project do |dir, _root|
+      refute Hive::Worktree.local_branch_ref_exists?(dir, ""),
+             "empty branch name must short-circuit to false"
+      refute Hive::Worktree.local_branch_ref_exists?(dir, "   "),
+             "whitespace-only branch name must short-circuit to false"
+      assert Hive::Worktree.local_branch_ref_exists?(dir, "master"),
+             "an existing local branch must be detected as present"
     end
   end
 
@@ -428,8 +501,8 @@ class WorktreeTest < Minitest::Test
       worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
       assert_equal local_sha, worktree_sha,
                    "no-origin override fallback: worktree HEAD matches local master"
-      assert_match(/cannot stack on base-task/, err,
-                   "a dropped stack request with no origin must surface a 'cannot stack' warning")
+      assert_match(/no origin remote, origin\/base-task unavailable/, err,
+                   "a dropped stack request with no origin must surface a no-origin warning")
     end
   end
 

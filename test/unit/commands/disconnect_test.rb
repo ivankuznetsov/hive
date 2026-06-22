@@ -7,8 +7,9 @@ class DisconnectCommandTest < Minitest::Test
   class FakeOAuth
     attr_reader :revoked
 
-    def initialize(fail_revoke: false)
+    def initialize(fail_revoke: false, revoke_error: nil)
       @fail_revoke = fail_revoke
+      @revoke_error = revoke_error
       @revoked = []
     end
 
@@ -24,6 +25,7 @@ class DisconnectCommandTest < Minitest::Test
     end
 
     def revoke(token:, client_id:, metadata:)
+      raise @revoke_error if @revoke_error
       raise Hive::Error, "already revoked" if @fail_revoke
 
       @revoked << [ token, client_id, metadata.revocation_endpoint ]
@@ -186,6 +188,50 @@ class DisconnectCommandTest < Minitest::Test
       assert_equal "unreadable_credential", payload["reason"]
       refute store.present?
     end
+  end
+
+  def test_disconnect_clears_when_revoke_raises_a_non_hive_error
+    # The broadened `rescue StandardError` must still clear the credential
+    # when discover/revoke raises a NON-Hive error (e.g. an OS-level
+    # timeout) — narrowing the rescue back to Hive::Error would regress this.
+    with_tmp_global_config do |home|
+      store = store_in(home)
+      store.save("access_token" => "access-123", "client_id" => "client-123", "base_url" => "https://screenote.test")
+      output = StringIO.new
+      oauth = FakeOAuth.new(revoke_error: Errno::ETIMEDOUT.new("revoke"))
+
+      _out, err = capture_io do
+        Hive::Commands::Disconnect.new(
+          "screenote",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth }
+        ).call
+      end
+
+      assert_match(/revoke failed/, err)
+      payload = JSON.parse(output.string)
+      assert_equal true, payload["disconnected"]
+      assert_equal false, payload["revoked"]
+      assert_match(/revoke/, payload["reason"])
+      refute store.present?
+    end
+  end
+
+  def test_disconnect_json_unknown_service_emits_error_envelope
+    output = StringIO.new
+
+    err = assert_raises(Hive::Error) do
+      Hive::Commands::Disconnect.new("github", json: true, output: output).call
+    end
+
+    assert_match(/unsupported disconnect service/, err.message)
+    payload = JSON.parse(output.string)
+    assert_equal false, payload["ok"]
+    assert_equal "screenote", payload["service"]
+    assert_equal "error", payload["error_kind"]
+    assert_match(/unsupported disconnect service/, payload["message"])
   end
 
   def test_disconnect_rejects_unknown_service

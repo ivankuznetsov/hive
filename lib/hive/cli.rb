@@ -247,9 +247,10 @@ module Hive
       no-op; a revoke failure (or unreachable endpoint) is warned about but
       still clears the local file.
 
-      --json emits `{ "disconnected": ..., "revoked": ..., "reason": ... }`,
-      where `reason` distinguishes already-revoked / unreachable / no-token
-      when `revoked` is false.
+      --json emits `{ "disconnected": ..., "revoked": ..., "reason": ... }`.
+      Revocation is idempotent (RFC 7009), so when `revoked` is false the
+      `reason` is `no_token`, `unreadable_credential`, or the raw revoke
+      error message.
     DESC
     def disconnect(service)
       require "hive/commands/disconnect"

@@ -50,14 +50,19 @@ module Hive
 
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
-      if exists.success?
-        # A local branch named `branch_name` already exists — only reachable
-        # on a re-run with a stale branch (a normal first creation has no
-        # such branch). Attach the worktree to it as-is; `base_override`
-        # (dependency stacking) is intentionally NOT honored on this path
-        # because the branch already carries history and re-basing it could
-        # discard committed work. `base_override` is honored on the normal
-        # first-creation else-branch below.
+      reuse_existing = exists.success?
+      stacked_override = !base_override.to_s.strip.empty?
+      if reuse_existing && stacked_override && empty_placeholder?(branch_name, default_branch)
+        delete_local_branch!(branch_name)
+        reuse_existing = false
+      end
+
+      if reuse_existing
+        # A local branch named `branch_name` already exists. Attach it as-is
+        # so committed work is never discarded by dependency stacking. Empty
+        # placeholders are the only exception: with a stacked override they
+        # are deleted above and recreated through the normal first-creation
+        # path below.
         args = [ "worktree", "add", path, branch_name ]
       else
         # Branch new worktrees from `origin/<default>` (after a quick
@@ -70,10 +75,10 @@ module Hive
         # fall back to the local default with a stderr warning.
         # Never touches local `<default>` — preserves any unpushed
         # commits the user has there.
-        base = if base_override.to_s.strip.empty?
-                 freshest_base(default_branch)
-        else
+        base = if stacked_override
                  freshest_override_base(base_override, default_branch)
+        else
+                 freshest_base(default_branch)
         end
         args = [ "worktree", "add", path, "-b", branch_name, base ]
       end
@@ -278,6 +283,23 @@ module Hive
     rescue Errno::ENOENT
       # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
       File.expand_path(path)
+    end
+
+    private
+
+    def empty_placeholder?(branch_name, default_branch)
+      out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                         "rev-list", "--count", "#{default_branch}..#{branch_name}")
+      status.success? && out.strip == "0"
+    end
+
+    def delete_local_branch!(branch_name)
+      out, err, status = Open3.capture3("git", "-C", @project_root, "branch", "-D", branch_name)
+      return if status.success?
+
+      detail = err.strip.empty? ? out.strip : err.strip
+      raise WorktreeError,
+            "cannot re-point empty placeholder branch #{branch_name}: git branch -D failed: #{detail}"
     end
   end
 end

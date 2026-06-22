@@ -98,6 +98,15 @@ class ReviewSuppressionTest < Minitest::Test
     end
   end
 
+  def test_reset_if_base_changed_recovers_empty_suppression_doc
+    with_suppression_task do |ctx|
+      FileUtils.touch(Suppression.suppressed_path(ctx))
+
+      assert Suppression.reset_if_base_changed!(ctx, "abc123")
+      assert_includes File.read(Suppression.suppressed_path(ctx)), "base=abc123"
+    end
+  end
+
   def test_read_active_keys_counts_checked_and_ignores_unchecked_tombstones
     with_suppression_task do |ctx|
       key = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
@@ -119,6 +128,15 @@ class ReviewSuppressionTest < Minitest::Test
     end
   end
 
+  def test_read_active_keys_returns_empty_for_unreadable_suppression_doc
+    with_suppression_task do |ctx|
+      FileUtils.rm_f(Suppression.suppressed_path(ctx))
+      FileUtils.mkdir_p(Suppression.suppressed_path(ctx))
+
+      assert_empty Suppression.read_active_keys(ctx)
+    end
+  end
+
   def test_read_active_keys_hashes_operator_added_line_without_fp
     with_suppression_task do |ctx|
       expected = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
@@ -127,6 +145,20 @@ class ReviewSuppressionTest < Minitest::Test
 
         ## High
         - [x] High: lib/foo.rb leaks stale state
+      MD
+
+      assert_includes Suppression.read_active_keys(ctx), expected
+    end
+  end
+
+  def test_read_active_keys_uses_section_severity_for_operator_line_without_inline_severity
+    with_suppression_task do |ctx|
+      expected = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")
+      File.write(Suppression.suppressed_path(ctx), <<~MD)
+        <!-- HIVE-SUPPRESS v1 base=abc123 -->
+
+        ## High
+        - [x] lib/foo.rb leaks stale state
       MD
 
       assert_includes Suppression.read_active_keys(ctx), expected

@@ -40,8 +40,16 @@ module Hive
         if profile.name == :claude
           allowed_tools = Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           if screenote[:connected]
-            mcp_config_path = Hive::Screenote::McpConfig.new(credential: screenote.fetch(:credential)).write!
-            allowed_tools = Hive::Screenote::McpConfig.allowed_tools_csv(allowed_tools)
+            begin
+              mcp_config_path = Hive::Screenote::McpConfig.new(credential: screenote.fetch(:credential)).write!
+              allowed_tools = Hive::Screenote::McpConfig.allowed_tools_csv(allowed_tools)
+            rescue SystemCallError => e
+              # An unwritable/full cache_home must degrade to a no-MCP run
+              # (the agent keeps local media), not hard-fail the stage (A8).
+              warn "[hive] could not write Screenote MCP config; running artifacts " \
+                   "without Screenote upload: #{e.message}"
+              mcp_config_path = nil
+            end
           end
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
@@ -89,19 +97,25 @@ module Hive
         project_id = credential["project_id"].to_s.strip if project_id.empty?
         return disconnected("Screenote has no default project; run `hive connect screenote`.", cfg) if project_id.empty?
 
-        unless credential["access_token"].to_s.strip.empty? || credential["mcp_resource"].to_s.strip.empty?
-          return {
-            connected: true,
-            credential: credential,
-            project_id: project_id,
-            base_url: credential["base_url"].to_s.empty? ? cfg.dig("screenote", "base_url") : credential["base_url"],
-            reason: nil
-          }
+        if credential["access_token"].to_s.strip.empty? || credential["mcp_resource"].to_s.strip.empty?
+          return disconnected("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
         end
 
-        disconnected("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
+        {
+          connected: true,
+          credential: credential,
+          project_id: project_id,
+          base_url: connected_base_url(credential, cfg),
+          reason: nil
+        }
       rescue Hive::ConfigError => e
         disconnected("Screenote credential is invalid: #{e.message}", cfg)
+      rescue SystemCallError => e
+        # A8 fail-soft: a read failure on the credential file (EACCES /
+        # EISDIR / a TOCTOU ENOENT) must skip Screenote, not hard-fail the
+        # 7-artifacts stage. CredentialStore#load only rescues JSON errors,
+        # so an OS-level File.read failure escapes here as SystemCallError.
+        disconnected("Screenote credential could not be read: #{e.message}", cfg)
       end
 
       def disconnected(reason, cfg)
@@ -109,9 +123,20 @@ module Hive
           connected: false,
           credential: nil,
           project_id: nil,
-          base_url: cfg.dig("screenote", "base_url") || Hive::Screenote::OAuthClient::DEFAULT_BASE_URL,
+          base_url: config_base_url(cfg),
           reason: reason
         }
+      end
+
+      # The configured Screenote base URL, falling back to the OAuth
+      # client's default. The `|| DEFAULT_BASE_URL` fallback is load-bearing
+      # for `render_prompt`'s empty-cfg default-arg path.
+      def config_base_url(cfg)
+        cfg.dig("screenote", "base_url") || Hive::Screenote::OAuthClient::DEFAULT_BASE_URL
+      end
+
+      def connected_base_url(credential, cfg)
+        credential["base_url"].to_s.empty? ? config_base_url(cfg) : credential["base_url"]
       end
 
       def action_for(marker_name)
@@ -120,10 +145,6 @@ module Hive
         when :error then "error"
         else marker_name.to_s
         end
-      end
-
-      def media_manifest_path(task)
-        File.join(task.folder, "media", "manifest.json")
       end
     end
   end

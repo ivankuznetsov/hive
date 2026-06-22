@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive"
 require "hive/paths"
+require "hive/screenote/secure_file"
 
 module Hive
   module Screenote
@@ -40,9 +41,7 @@ module Hive
         end
 
         data = JSON.parse(JSON.generate(stringify_keys(credentials)))
-        FileUtils.mkdir_p(File.dirname(path))
-        File.write(path, "#{JSON.pretty_generate(data)}\n", mode: "w", perm: 0o600)
-        File.chmod(0o600, path)
+        Hive::Screenote::SecureFile.write_json(path, data)
         data
       end
 

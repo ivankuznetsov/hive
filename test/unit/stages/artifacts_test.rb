@@ -89,6 +89,61 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_screenote_context_treats_oslevel_read_failure_as_disconnected
+    # CredentialStore#load only rescues JSON errors; an OS-level File.read
+    # failure (EACCES/EISDIR/TOCTOU ENOENT) escapes as SystemCallError and
+    # must degrade to disconnected, not hard-fail the 7-artifacts stage (A8).
+    fake_store = Object.new
+    fake_store.define_singleton_method(:load) { raise Errno::EACCES, "screenote.json" }
+
+    context = Hive::Stages::Artifacts.screenote_context(
+      { "screenote" => { "base_url" => "https://cfg.test" } },
+      credential_store: fake_store
+    )
+
+    refute context[:connected]
+    assert_match(/could not be read/, context[:reason])
+    assert_equal "https://cfg.test", context[:base_url]
+  end
+
+  def test_spawn_artifacts_agent_degrades_to_no_mcp_when_config_write_fails
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      captured = {}
+      original = Hive::Stages::Base.method(:spawn_claude_with_tmux_marker!)
+      Hive::Stages::Base.define_singleton_method(:spawn_claude_with_tmux_marker!) do |_task, _cfg, **kwargs|
+        captured[:path] = kwargs[:mcp_config_path]
+        captured[:allowed_tools] = kwargs.fetch(:allowed_tools)
+        captured[:strict] = kwargs.fetch(:strict_mcp_config)
+        { status: :complete }
+      end
+
+      failing = Object.new
+      failing.define_singleton_method(:write!) { raise Errno::EACCES, "cache" }
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::Screenote::McpConfig, :new, ->(credential:) { failing }) do
+          with_env("HIVE_HOME" => File.join(dir, "home")) do
+            Hive::Stages::Artifacts.spawn_artifacts_agent(
+              task,
+              {},
+              "collect",
+              Hive::AgentProfiles.lookup(:claude),
+              screenote: connected_screenote_context
+            )
+          end
+        end
+      end
+
+      assert_match(/without Screenote upload/, err)
+      assert_nil captured[:path], "a failed MCP-config write must skip injection, not crash"
+      refute_includes captured.fetch(:allowed_tools), "mcp__screenote__"
+      assert_equal false, captured.fetch(:strict)
+    ensure
+      Hive::Stages::Base.define_singleton_method(:spawn_claude_with_tmux_marker!, original) if original
+    end
+  end
+
   def test_spawn_artifacts_agent_injects_and_removes_screenote_mcp_config_for_claude
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -213,7 +268,7 @@ class StagesArtifactsTest < Minitest::Test
       end
 
       assert_equal({ commit: "artifacts_collected", status: :complete }, result)
-      assert_equal manifest, JSON.parse(File.read(Hive::Stages::Artifacts.media_manifest_path(task)))
+      assert_equal manifest, JSON.parse(File.read(media_manifest_path(task)))
     ensure
       Hive::Stages::Artifacts.define_singleton_method(:spawn_artifacts_agent, original_spawn)
     end
@@ -227,10 +282,14 @@ class StagesArtifactsTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
+  def media_manifest_path(task)
+    File.join(task.folder, "media", "manifest.json")
+  end
+
   def write_manifest(task, manifest)
     media_dir = File.join(task.folder, "media")
     FileUtils.mkdir_p(media_dir)
-    File.write(File.join(media_dir, "manifest.json"), "#{JSON.pretty_generate(manifest)}\n")
+    File.write(media_manifest_path(task), "#{JSON.pretty_generate(manifest)}\n")
   end
 
   def with_stubbed_artifacts_spawn

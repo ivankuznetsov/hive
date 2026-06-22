@@ -109,6 +109,85 @@ class DisconnectCommandTest < Minitest::Test
     end
   end
 
+  def test_disconnect_revokes_with_nil_client_id
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      store.save("access_token" => "access-123", "base_url" => "https://screenote.test")
+      oauth = FakeOAuth.new
+      output = StringIO.new
+
+      Hive::Commands::Disconnect.new(
+        "screenote",
+        json: true,
+        output: output,
+        credential_store: store,
+        oauth_client_factory: ->(_url) { oauth }
+      ).call
+
+      assert_equal [ [ "access-123", nil, "https://screenote.test/oauth/revoke" ] ], oauth.revoked
+      payload = JSON.parse(output.string)
+      assert_equal true, payload["revoked"]
+      refute store.present?
+    end
+  end
+
+  def test_disconnect_json_threads_revoke_failure_reason
+    with_tmp_global_config do |home|
+      store = store_in(home)
+      store.save("access_token" => "access-123", "client_id" => "client-123", "base_url" => "https://screenote.test")
+      output = StringIO.new
+      oauth = FakeOAuth.new(fail_revoke: true)
+
+      capture_io do
+        Hive::Commands::Disconnect.new(
+          "screenote",
+          json: true,
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth }
+        ).call
+      end
+
+      payload = JSON.parse(output.string)
+      assert_equal false, payload["revoked"]
+      assert_match(/already revoked/, payload["reason"])
+      refute store.present?
+    end
+  end
+
+  def test_disconnect_json_reports_no_token_reason
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      store.save("client_id" => "client-123")
+      output = StringIO.new
+
+      Hive::Commands::Disconnect.new("screenote", json: true, output: output, credential_store: store).call
+
+      payload = JSON.parse(output.string)
+      assert_equal false, payload["revoked"]
+      assert_equal "no_token", payload["reason"]
+      refute store.present?
+    end
+  end
+
+  def test_disconnect_clears_a_corrupt_credential_file
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      File.write(store.path, "{ not json")
+      output = StringIO.new
+
+      _out, err = capture_io do
+        Hive::Commands::Disconnect.new("screenote", json: true, output: output, credential_store: store).call
+      end
+
+      assert_match(/credential unreadable; clearing it anyway/, err)
+      payload = JSON.parse(output.string)
+      assert_equal true, payload["disconnected"]
+      assert_equal "unreadable_credential", payload["reason"]
+      refute store.present?
+    end
+  end
+
   def test_disconnect_rejects_unknown_service
     err = assert_raises(Hive::Error) { Hive::Commands::Disconnect.new("github", output: StringIO.new).call }
 

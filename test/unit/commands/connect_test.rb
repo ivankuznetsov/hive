@@ -1,4 +1,5 @@
 require "test_helper"
+require "net/http"
 require "hive/commands/connect"
 
 class ConnectCommandTest < Minitest::Test
@@ -142,10 +143,18 @@ class ConnectCommandTest < Minitest::Test
         project_picker: ->(projects) { projects.first }
       ).call
 
-      payload = JSON.parse(output.string)
+      lines = output.string.each_line.map { |line| JSON.parse(line) }
+      authorize, payload = lines
+      assert_equal "authorize", authorize["stage"]
+      assert_match(%r{https://screenote\.test/oauth/authorize}, authorize["authorize_url"])
+      assert_equal false, authorize["browser_opened"]
       assert_equal true, payload["ok"]
       assert_equal "client-existing", payload["client_id"]
       assert_equal "proj_2", payload["project_id"]
+      assert_equal "https://screenote.test", payload["issuer"]
+      assert_equal "https://screenote.test", payload["base_url"]
+      refute payload.key?("connected")
+      refute payload.key?("expires_at")
       assert_empty oauth.registered_redirects
       assert_equal "client-existing", store.load["client_id"]
       assert_equal "2027-01-01T00:00:00Z", store.load["expires_at"]
@@ -234,13 +243,160 @@ class ConnectCommandTest < Minitest::Test
     assert_equal({ out: File::NULL, err: File::NULL }, calls.first.last)
   end
 
-  def test_default_mcp_client_factory_builds_authenticated_client
-    command = Hive::Commands::Connect.new("screenote", output: StringIO.new)
-    factory = command.instance_variable_get(:@mcp_client_factory)
+  def test_default_mcp_client_factory_lists_projects_through_call
+    # Exercise the DEFAULT mcp_client_factory end-to-end (no factory
+    # injected) with an http seam, instead of reaching into the private
+    # @mcp_client_factory ivar.
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+      response = http_ok(JSON.generate("result" => { "projects" => [ { "id" => "proj_http", "name" => "HTTP Project" } ] }))
+      conn = Object.new
+      conn.define_singleton_method(:request) { |_req| response }
 
-    client = factory.call(resource: "https://screenote.test/mcp", access_token: "access-123")
+      with_replaced_singleton_method(Net::HTTP, :start, ->(_host, _port, **_opts, &blk) { blk.call(conn) }) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          browser_opener: ->(_url) { false },
+          project_picker: ->(projects) { projects.first }
+        ).call
+      end
 
-    assert_instance_of Hive::Screenote::McpClient, client
-    assert_equal URI("https://screenote.test/mcp"), client.resource
+      assert_equal "proj_http", store.load["project_id"]
+    end
+  end
+
+  def test_prompt_rejects_zero_and_out_of_range_numbers
+    [ "0\n", "2\n", "-1\n" ].each do |answer|
+      with_tmp_global_config do |home|
+        store = store_in(home)
+        oauth = FakeOAuth.new(token: token_payload)
+        err = assert_raises(Hive::Error) do
+          Hive::Commands::Connect.new(
+            "screenote",
+            output: StringIO.new,
+            input: StringIO.new(answer),
+            credential_store: store,
+            oauth_client_factory: ->(_url) { oauth },
+            loopback_factory: -> { FakeLoopback.new },
+            mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_only", "name" => "Only" } ]) },
+            browser_opener: ->(_url) { false }
+          ).call
+        end
+        assert_match(/selection is required/, err.message, "input #{answer.inspect} must not select a project")
+        refute store.present?
+      end
+    end
+  end
+
+  def test_prompt_accepts_a_literal_project_id_string
+    with_tmp_global_config do |home|
+      store = store_in(home)
+      oauth = FakeOAuth.new(token: token_payload)
+
+      Hive::Commands::Connect.new(
+        "screenote",
+        output: StringIO.new,
+        input: StringIO.new("proj_two\n"),
+        credential_store: store,
+        oauth_client_factory: ->(_url) { oauth },
+        loopback_factory: -> { FakeLoopback.new },
+        mcp_client_factory: ->(**) {
+          FakeMcp.new([ { "id" => "proj_one", "name" => "One" }, { "id" => "proj_two", "name" => "Two" } ])
+        },
+        browser_opener: ->(_url) { false }
+      ).call
+
+      assert_equal "proj_two", store.load["project_id"]
+    end
+  end
+
+  def test_prompt_rejects_a_nonmatching_id_string
+    with_tmp_global_config do |home|
+      store = store_in(home)
+      oauth = FakeOAuth.new(token: token_payload)
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          output: StringIO.new,
+          input: StringIO.new("nope\n"),
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_one", "name" => "One" } ]) },
+          browser_opener: ->(_url) { false }
+        ).call
+      end
+
+      assert_match(/selection is required/, err.message)
+      refute store.present?
+    end
+  end
+
+  def test_credential_payload_raises_typed_error_when_expiry_is_absent
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      # Token response with neither expires_at nor expires_in.
+      oauth = FakeOAuth.new(token: { "access_token" => "access-123", "token_type" => "Bearer" })
+
+      err = assert_raises(Hive::Error) do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          output: StringIO.new,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_1", "name" => "One" } ]) },
+          browser_opener: ->(_url) { false },
+          project_picker: ->(projects) { projects.first }
+        ).call
+      end
+
+      assert_match(/omitted both expires_at and expires_in/, err.message)
+      refute store.present?
+    end
+  end
+
+  def test_connect_recovers_from_a_corrupt_existing_credential
+    with_tmp_dir do |dir|
+      store = store_in(dir)
+      File.write(store.path, "{ not json")
+      oauth = FakeOAuth.new(token: token_payload)
+      output = StringIO.new
+
+      _out, err = capture_io do
+        Hive::Commands::Connect.new(
+          "screenote",
+          base_url: "https://screenote.test",
+          output: output,
+          credential_store: store,
+          oauth_client_factory: ->(_url) { oauth },
+          loopback_factory: -> { FakeLoopback.new },
+          mcp_client_factory: ->(**) { FakeMcp.new([ { "id" => "proj_1", "name" => "One" } ]) },
+          browser_opener: ->(_url) { false },
+          project_picker: ->(projects) { projects.first }
+        ).call
+      end
+
+      assert_match(/ignoring unreadable screenote credential/, err)
+      # A corrupt file did not register a client_id, so registration runs.
+      refute_empty oauth.registered_redirects
+      assert_equal "access-123", store.load["access_token"]
+    end
+  end
+
+  def http_ok(body)
+    res = Net::HTTPOK.new("1.1", "200", "OK")
+    res.instance_variable_set(:@read, true)
+    res.define_singleton_method(:body) { body }
+    res
   end
 end

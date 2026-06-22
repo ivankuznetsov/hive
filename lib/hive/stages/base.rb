@@ -423,8 +423,15 @@ module Hive
           warn_isolation_reduced(task, profile, add_dirs)
         end
 
+        # `cli_flags: nil` means "no explicit flags — derive model/effort
+        # (and permission_mode) from cfg". `cli_flags: []` means "explicitly
+        # none — do NOT derive" (a caller, e.g. the headless ClaudeLauncher
+        # path, already assembled the flags and must win over cfg; commit
+        # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
+        # distinct rather than collapsing both to "empty".
+        derive_flags_from_cfg = cli_flags.nil?
         cli_flags ||= []
-        if cli_flags.empty? && cfg && profile.name == :claude
+        if derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg)
         end

@@ -84,7 +84,10 @@ class ScreenoteMcpClientTest < Minitest::Test
     assert_equal [ { "id" => "text-hash" } ], client.list_projects
   end
 
-  def test_list_projects_returns_empty_for_missing_or_unparseable_text_content
+  def test_list_projects_returns_empty_for_non_jsonish_or_missing_content
+    # text that does not LOOK like JSON ("plain") is a legitimately-empty
+    # payload → []. structuredContent present but without a projects array
+    # falls through to the content branch, which is absent → [].
     client = Hive::Screenote::McpClient.new(
       resource: "https://screenote.test/mcp",
       access_token: "token",
@@ -95,9 +98,31 @@ class ScreenoteMcpClientTest < Minitest::Test
     client = Hive::Screenote::McpClient.new(
       resource: "https://screenote.test/mcp",
       access_token: "token",
-      http: FakeHttp.new(self.class.ok(JSON.generate("result" => { "content" => [ { "text" => "{" } ] })))
+      http: FakeHttp.new(self.class.ok(JSON.generate("result" => { "structuredContent" => { "count" => 0 } })))
     )
     assert_equal [], client.list_projects
+  end
+
+  def test_list_projects_raises_when_jsonish_text_payload_is_unparseable
+    # A text payload that LOOKED like JSON (started with `{`) but does not
+    # parse must raise — swallowing it to [] surfaced to the operator as
+    # the benign "create a project and reconnect" message (wrong remedy).
+    client = Hive::Screenote::McpClient.new(
+      resource: "https://screenote.test/mcp",
+      access_token: "token",
+      http: FakeHttp.new(self.class.ok(JSON.generate("result" => { "content" => [ { "text" => "{" } ] })))
+    )
+    assert_match(/unparseable projects payload/,
+                 assert_raises(Hive::Error) { client.list_projects }.message)
+  end
+
+  def test_call_tool_advertises_sse_accept_for_streamable_http
+    http = FakeHttp.new(self.class.ok(JSON.generate("result" => { "projects" => [] })))
+    client = Hive::Screenote::McpClient.new(resource: "https://screenote.test/mcp", access_token: "token", http: http)
+
+    client.list_projects
+
+    assert_equal "application/json, text/event-stream", http.requests.first.headers["accept"].first
   end
 
   def test_call_tool_surfaces_mcp_http_json_and_network_errors

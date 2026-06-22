@@ -34,7 +34,7 @@ module Hive
       def call
         ensure_screenote!
         base_url = resolved_base_url
-        existing = @credential_store.load || {}
+        existing = load_existing_credential
         oauth = @oauth_client_factory.call(base_url)
         metadata = oauth.discover
         loopback = @loopback_factory.call
@@ -83,6 +83,17 @@ module Hive
         raise Hive::Error, "unsupported connect service #{@service.inspect}; expected screenote"
       end
 
+      # A corrupt local screenote.json must not wedge `connect` (which would
+      # otherwise leave the operator unable to re-authorize via the CLI).
+      # Treat an unreadable file as "no existing credential": connect
+      # re-runs the full OAuth flow and `save` overwrites the bad file.
+      def load_existing_credential
+        @credential_store.load || {}
+      rescue Hive::ConfigError => e
+        warn "[hive] ignoring unreadable screenote credential (re-authorizing): #{e.message}"
+        {}
+      end
+
       def resolved_base_url
         configured = @base_url.to_s.strip
         return configured unless configured.empty?
@@ -92,8 +103,18 @@ module Hive
 
       def show_authorize_url(url)
         opened = @browser_opener.call(url)
-        @output.puts "Opening Screenote authorization in your browser..." if opened && !@json
-        @output.puts "Open this URL to connect Screenote:\n#{url}" unless @json
+        if @json
+          # Emit the authorize URL as a structured line BEFORE blocking on
+          # the loopback callback, so an operator/automation whose browser
+          # failed to auto-open still has the fallback URL under --json.
+          @output.puts JSON.generate(
+            "ok" => true, "service" => "screenote", "stage" => "authorize",
+            "authorize_url" => url, "browser_opened" => !opened.nil? && opened != false
+          )
+          return
+        end
+        @output.puts "Opening Screenote authorization in your browser..." if opened
+        @output.puts "Open this URL to connect Screenote:\n#{url}"
       end
 
       def choose_project(projects)
@@ -115,11 +136,20 @@ module Hive
         answer = @input.gets.to_s.strip
         return nil if answer.empty?
 
-        answer.match?(/\A\d+\z/) ? projects[answer.to_i - 1] : answer
+        return answer unless answer.match?(/\A\d+\z/)
+
+        # Reject out-of-range numbers (including "0") before indexing.
+        # `projects[answer.to_i - 1]` made "0" → projects[-1], silently
+        # connecting the LAST project — a typo/cancel became a wrong
+        # default. nil falls through to "selection is required".
+        index = answer.to_i
+        return nil unless index.between?(1, projects.size)
+
+        projects[index - 1]
       end
 
       def credential_payload(token, metadata:, client_id:, project:, base_url:)
-        expires_at = token["expires_at"] || (@clock.call + token.fetch("expires_in").to_i).utc.iso8601
+        expires_at = token["expires_at"] || computed_expires_at(token)
         credential = {
           "access_token" => token.fetch("access_token"),
           "expires_at" => expires_at,
@@ -133,6 +163,19 @@ module Hive
         }
         credential["refresh_token"] = token["refresh_token"] if token["refresh_token"]
         credential
+      end
+
+      # Derive expires_at from expires_in when the endpoint omits the
+      # absolute timestamp. A non-conformant token response that supplies
+      # neither used to crash `connect` with a bare KeyError from
+      # `token.fetch("expires_in")`; raise a typed Hive::Error instead.
+      def computed_expires_at(token)
+        expires_in = token["expires_in"]
+        if expires_in.nil?
+          raise Hive::Error, "Screenote token response omitted both expires_at and expires_in"
+        end
+
+        (@clock.call + expires_in.to_i).utc.iso8601
       end
 
       def emit_success(credential, project)
@@ -152,7 +195,8 @@ module Hive
       end
 
       def project_id(project)
-        project["id"].to_s.empty? ? project["project_id"].to_s : project["id"].to_s
+        id = project["id"].to_s
+        id.empty? ? project["project_id"].to_s : id
       end
 
       def project_label(project)

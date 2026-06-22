@@ -2,7 +2,7 @@ require "json"
 require "net/http"
 require "uri"
 require "hive"
-require "hive/screenote/oauth_client"
+require "hive/screenote/http"
 
 module Hive
   module Screenote
@@ -24,7 +24,9 @@ module Hive
       def call_tool(name, arguments = {})
         @request_id += 1
         req = Net::HTTP::Post.new(resource)
-        req["Accept"] = "application/json"
+        # MCP Streamable-HTTP servers may reply with either a JSON object or
+        # an SSE stream; the spec requires clients to advertise both on POST.
+        req["Accept"] = "application/json, text/event-stream"
         req["Authorization"] = "Bearer #{@access_token}"
         req["Content-Type"] = "application/json"
         req.body = JSON.generate(
@@ -43,12 +45,7 @@ module Hive
       private
 
       def request(req)
-        response = @http.start(resource.host, resource.port, **http_options) { |http| http.request(req) }
-        raise Hive::Error, "Screenote MCP request failed (HTTP #{response.code})" unless response.is_a?(Net::HTTPSuccess)
-
-        response
-      rescue *Hive::Screenote::OAuthClient::NETWORK_ERRORS => e
-        raise Hive::Error, "Screenote MCP request: could not reach Screenote (#{e.class}: #{e.message})"
+        Hive::Screenote::Http.request(http: @http, request: req, uri: resource, context: "Screenote MCP request")
       end
 
       def parse_response(response, context)
@@ -73,15 +70,11 @@ module Hive
         parsed = JSON.parse(content["text"])
         parsed.is_a?(Hash) ? Array(parsed["projects"]) : Array(parsed)
       rescue JSON::ParserError
-        []
-      end
-
-      def http_options
-        {
-          use_ssl: resource.scheme == "https",
-          open_timeout: Hive::Screenote::OAuthClient::OPEN_TIMEOUT_SEC,
-          read_timeout: Hive::Screenote::OAuthClient::READ_TIMEOUT_SEC
-        }
+        # The text payload LOOKED like JSON (started with `[`/`{`) but did
+        # not parse. Swallowing to `[]` here would surface to the operator
+        # as the benign "create a project and reconnect" message with the
+        # wrong remediation; raise so the real "unparseable" cause shows.
+        raise Hive::Error, "Screenote MCP list_projects returned an unparseable projects payload"
       end
     end
   end

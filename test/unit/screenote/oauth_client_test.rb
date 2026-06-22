@@ -1,5 +1,6 @@
 require "test_helper"
 require "net/http"
+require "hive/screenote/http"
 require "hive/screenote/oauth_client"
 
 class ScreenoteOAuthClientTest < Minitest::Test
@@ -83,7 +84,7 @@ class ScreenoteOAuthClientTest < Minitest::Test
     assert_equal [ "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource" ],
                  http.requests.map(&:path)
     assert_equal true, http.requests.first.options[:use_ssl]
-    assert_equal Hive::Screenote::OAuthClient::OPEN_TIMEOUT_SEC, http.requests.first.options[:open_timeout]
+    assert_equal Hive::Screenote::Http::OPEN_TIMEOUT_SEC, http.requests.first.options[:open_timeout]
   end
 
   def test_class_discover_uses_the_same_protocol
@@ -200,6 +201,15 @@ class ScreenoteOAuthClientTest < Minitest::Test
     body = http.requests.first.body
     assert_match(/token=access-123/, body)
     assert_match(/client_id=client-123/, body)
+  end
+
+  def test_revoke_omits_client_id_when_absent
+    client, http = build_client("/oauth/revoke" => self.class.no_content)
+
+    assert client.revoke(token: "access-123", client_id: nil, metadata: discovery)
+    body = http.requests.first.body
+    assert_match(/token=access-123/, body)
+    refute_match(/client_id/, body)
   end
 
   def test_http_status_json_and_network_errors_map_to_hive_error

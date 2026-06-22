@@ -129,11 +129,12 @@ module Hive
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
       cli_flags = cfg ? Hive::Config.claude_cli_flags(cfg) : []
-      mcp_flags = mcp_cli_flags(mcp_config_path, strict_mcp_config)
 
       if Hive::Config.claude_mode(cfg) == :headless
         require "hive/stages/base"
-        headless_flags = cli_flags + mcp_flags
+        # mcp_flags is only consumed on this headless branch — the tmux path
+        # recomputes them inside wrapper_command — so compute it here.
+        headless_flags = cli_flags + mcp_cli_flags(mcp_config_path, strict_mcp_config)
         headless_flags.concat([ "--allowedTools", allowed_tools ]) if mcp_config_path
         return Hive::Stages::Base.spawn_agent(
           task,
@@ -375,10 +376,13 @@ module Hive
         env: {
           "ANTHROPIC_API_KEY" => "",
           "CLAUDE_API_KEY" => "",
-          # Screenote's base URL is passed through prompt/MCP context for the
-          # artifacts stage, not through the child environment. The wrapper
-          # additionally unsets it; mirrors the headless scrub in
-          # Hive::Agent#spawn_and_wait.
+          # Screenote's base URL reaches claude through prompt/MCP context,
+          # not the child environment; blanking it here stops an operator's
+          # exported HIVE_SCREENOTE_BASE_URL from becoming a redundant,
+          # unvalidated second source that overrides hive's chosen base_url.
+          # The wrapper additionally `unset`s it, and Hive::Agent's
+          # SCRUBBED_CHILD_ENV mirrors this for the headless path — keep the
+          # three sibling scrub sites in step.
           "HIVE_SCREENOTE_BASE_URL" => "",
           "HIVE_TASK_STAGE_DIR" => task.folder
         },

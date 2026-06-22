@@ -3,6 +3,7 @@ require "json"
 require "securerandom"
 require "hive"
 require "hive/paths"
+require "hive/screenote/secure_file"
 
 module Hive
   module Screenote
@@ -43,11 +44,8 @@ module Hive
 
       def write!
         dir = File.join(Hive::Paths.cache_home, "mcp")
-        FileUtils.mkdir_p(dir)
         path = File.join(dir, "screenote-#{Process.pid}-#{SecureRandom.hex(8)}.json")
-        File.write(path, "#{JSON.pretty_generate(payload)}\n", mode: "w", perm: 0o600)
-        File.chmod(0o600, path)
-        path
+        Hive::Screenote::SecureFile.write_json(path, payload)
       end
 
       private

@@ -4,6 +4,7 @@ require "securerandom"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/paths"
+require "hive/screenote/oauth_client"
 
 module Hive
   module Config
@@ -361,9 +362,10 @@ module Hive
       },
       # Optional hosted screenshot publishing for 7-artifacts visual
       # manifests. OAuth credentials are stored by `hive connect screenote`;
-      # this block only selects the Screenote base URL.
+      # this block only selects the Screenote base URL. The default is the
+      # OAuth client's DEFAULT_BASE_URL so the two can't drift.
       "screenote" => {
-        "base_url" => "https://screenote.ai"
+        "base_url" => Hive::Screenote::OAuthClient::DEFAULT_BASE_URL
       },
       # Experimental PR babysitter. This is intentionally separate
       # from the pipeline daemon: it polls open GitHub PRs and asks a
@@ -1859,10 +1861,20 @@ module Hive
               "screenote.base_url in #{describe_source(source_path)} must be blank or an http(s) URL"
       end
 
-      return unless screenote.key?("api_token")
+      # Migration guard for the removed REST uploader. Only a NON-BLANK
+      # api_token is a real leftover worth failing on — a bare `api_token:`
+      # or `api_token: null` (which the old config.example.yml shipped) is
+      # inert. Raising on the mere presence of the key was a catch-22: the
+      # prescribed remedy `hive connect screenote` itself loads this config
+      # (commands/connect.rb#load_global_screenote), so every command —
+      # including the fix — died with ConfigError. Reword to instruct
+      # removing the key so connect stays reachable.
+      api_token = screenote["api_token"]
+      return if api_token.nil? || (api_token.is_a?(String) && api_token.strip.empty?)
 
       raise ConfigError,
-            "Screenote now connects via OAuth — run `hive connect screenote`."
+            "Screenote now connects via OAuth — remove `screenote.api_token` from " \
+            "#{describe_source(source_path)} and run `hive connect screenote`."
     end
 
     # R-02: `daemon.child_verb_timeouts` is an optional map of hive verb

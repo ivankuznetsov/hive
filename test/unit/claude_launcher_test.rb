@@ -40,6 +40,44 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_headless_mode_assembles_mcp_config_and_allowed_tools_flags
+    with_tmp_task do |task|
+      captured = nil
+      original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+      capture_unbound_method_on(Hive::Stages::Base, :spawn_agent, original) do
+        Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_spawn_task, **kwargs|
+          captured = kwargs
+          { status: :complete }
+        end
+
+        Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: { "claude" => { "mode" => "headless", "permission_mode" => "auto" } },
+          prompt: "prompt",
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 1,
+          log_label: "test",
+          session_name: "hive-test-session",
+          status_mode: :state_file_marker,
+          allowed_tools: "Read,mcp__screenote__list_projects",
+          mcp_config_path: "/tmp/screenote.mcp.json",
+          strict_mcp_config: true
+        )
+
+        # The headless branch appends mcp_cli_flags + --allowedTools after
+        # any cfg-derived flags; assert that trailing assembly (the branch
+        # under test) is present and ordered.
+        assert_equal(
+          %w[--mcp-config /tmp/screenote.mcp.json --strict-mcp-config
+             --allowedTools Read,mcp__screenote__list_projects],
+          captured.fetch(:cli_flags).last(5)
+        )
+      end
+    end
+  end
+
   def test_tmux_mode_delegates_configured_permission_mode_to_shared_session
     with_tmp_task do |task|
       captured = nil

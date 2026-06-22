@@ -218,6 +218,21 @@ module Hive
     end
 
     desc "connect SERVICE", "Connect an external service (screenote)"
+    long_desc <<~DESC
+      Runs the OAuth 2.1 setup flow for SERVICE (currently only `screenote`).
+      Discovers Screenote OAuth/MCP metadata, opens an authorize URL in the
+      browser via a loopback redirect + PKCE, lists Screenote projects over
+      MCP, prompts for a default project, and stores the credential at
+      `~/.config/hive/screenote.json` (mode 0600).
+
+      --base-url overrides the resolved Screenote base URL (config /
+      HIVE_SCREENOTE_BASE_URL / default https://screenote.ai).
+
+      --json streams structured lines: an `authorize` line carrying the
+      `authorize_url` (the fallback when the browser cannot auto-open),
+      followed by a success document with `issuer`, `client_id`,
+      `project_id`, `base_url`, and `credential_path`.
+    DESC
     option :base_url, type: :string, desc: "Screenote base URL (defaults to config or https://screenote.ai)"
     def connect(service)
       require "hive/commands/connect"
@@ -225,6 +240,17 @@ module Hive
     end
 
     desc "disconnect SERVICE", "Disconnect an external service (screenote)"
+    long_desc <<~DESC
+      Revokes the stored token for SERVICE (currently only `screenote`) when
+      possible and clears the local credential at
+      `~/.config/hive/screenote.json`. Missing credentials are an idempotent
+      no-op; a revoke failure (or unreachable endpoint) is warned about but
+      still clears the local file.
+
+      --json emits `{ "disconnected": ..., "revoked": ..., "reason": ... }`,
+      where `reason` distinguishes already-revoked / unreachable / no-token
+      when `revoked` is false.
+    DESC
     def disconnect(service)
       require "hive/commands/disconnect"
       Hive::Commands::Disconnect.new(service, json: options[:json]).call

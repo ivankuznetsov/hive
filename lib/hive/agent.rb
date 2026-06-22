@@ -13,10 +13,12 @@ module Hive
   class Agent
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
 
-    # Screenote's base URL is prompt/MCP-config context for the artifacts
-    # stage, not a child-environment input. nil unsets the var for the child.
-    # Mirrors the tmux path's blanking in Hive::ClaudeLauncher.build_runner /
-    # the wrapper.
+    # Screenote's base URL reaches the agent as prompt/MCP-config context,
+    # not as a child-environment input. nil unsets the var for the child so
+    # an operator's exported HIVE_SCREENOTE_BASE_URL can't become a
+    # redundant, unvalidated second source that overrides hive's chosen
+    # base_url. Mirrors the tmux path's blanking in
+    # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
     SCRUBBED_CHILD_ENV = {
       "HIVE_SCREENOTE_BASE_URL" => nil
     }.freeze

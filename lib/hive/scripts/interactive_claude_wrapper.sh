@@ -88,8 +88,12 @@ cd "$cwd"
 
 unset ANTHROPIC_API_KEY
 unset CLAUDE_API_KEY
-# Screenote connection context is passed explicitly by hive, not inherited from
-# the operator shell.
+# Threat model: hive passes the Screenote base_url to claude explicitly (and
+# the OAuth token rides a 0600 temp MCP config that's deleted right after the
+# run — it never enters this environment). Unsetting HIVE_SCREENOTE_BASE_URL
+# stops an operator's exported value from silently overriding hive's chosen
+# base_url for the child — a redundant, unvalidated second source. Do NOT
+# delete this `unset` thinking the explicit pass-through makes it a no-op.
 unset HIVE_SCREENOTE_BASE_URL
 
 exec "$bin" "$@"

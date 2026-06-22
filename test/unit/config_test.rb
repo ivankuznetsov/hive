@@ -2791,7 +2791,33 @@ class ConfigTest < Minitest::Test
           api_token: old-secret
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
-      assert_equal "Screenote now connects via OAuth — run `hive connect screenote`.", err.message
+      assert_match(/remove `screenote\.api_token`/, err.message)
+      assert_match(/hive connect screenote/, err.message)
+    end
+  end
+
+  def test_load_global_screenote_tolerates_blank_or_null_api_token_leftover
+    # A bare `api_token:` (null) or empty string is inert config the old
+    # config.example.yml shipped. Raising on it created a catch-22: the
+    # prescribed `hive connect screenote` itself loads this config, so the
+    # operator could never reach the fix. Only a non-blank token must fail.
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: https://screenote.example
+          api_token: null
+      YAML
+
+      cfg = Hive::Config.load_global_screenote
+      assert_equal "https://screenote.example", cfg["base_url"]
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          api_token: ""
+      YAML
+      assert Hive::Config.load_global_screenote
     end
   end
 
@@ -2804,7 +2830,8 @@ class ConfigTest < Minitest::Test
       YAML
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-      assert_equal "Screenote now connects via OAuth — run `hive connect screenote`.", err.message
+      assert_match(/remove `screenote\.api_token`/, err.message)
+      assert_match(/hive connect screenote/, err.message)
     end
   end
 

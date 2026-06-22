@@ -49,17 +49,25 @@ raise `Hive::ConfigError`.
    `issuer`, `mcp_resource`, `base_url`, `project_id`, and optional
    `refresh_token` through `Hive::Screenote::CredentialStore`.
 
-`--json` emits a small success document containing `ok`, `service`, `connected`,
-`base_url`, `project_id`, `credential_path`, and `expires_at`. Error handling
-uses the normal `Hive::Error` / `Hive::ConfigError` CLI path.
+Under `--json`, connect streams newline-delimited JSON: first an `authorize`
+line (`ok`, `service`, `stage: "authorize"`, `authorize_url`, `browser_opened`)
+emitted before the flow blocks on the loopback callback — the fallback URL when
+the browser cannot auto-open — then a success document containing `ok`,
+`service`, `base_url`, `issuer`, `client_id`, `project_id`, and
+`credential_path`. Error handling uses the normal `Hive::Error` /
+`Hive::ConfigError` CLI path.
 
 ## Disconnect Behavior
 
 `hive disconnect screenote` loads the stored credential, rediscovers Screenote
 metadata from the stored `base_url`, attempts token revocation through the
 metadata `revocation_endpoint`, then clears `screenote.json`. Missing credentials
-are treated as an idempotent no-op. Revocation failures are warned about but do
-not prevent local credential removal.
+are treated as an idempotent no-op; a present-but-corrupt file is still cleared.
+Revocation failures (including an unreachable endpoint) are warned about but do
+not prevent local credential removal. Under `--json`, the envelope carries
+`disconnected`, `revoked`, and — when `revoked` is false — a `reason`
+(`no_token`, `unreadable_credential`, or the revoke error) so automation can
+tell the cases apart.
 
 ## Runtime Use
 

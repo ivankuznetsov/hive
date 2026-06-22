@@ -2,18 +2,13 @@ require "json"
 require "net/http"
 require "uri"
 require "hive"
+require "hive/screenote/http"
 
 module Hive
   module Screenote
     class OAuthClient
       DEFAULT_BASE_URL = "https://screenote.ai".freeze
       SCOPE = "mcp_read mcp_write".freeze
-      OPEN_TIMEOUT_SEC = 5
-      READ_TIMEOUT_SEC = 10
-      NETWORK_ERRORS = [
-        Net::OpenTimeout, Net::ReadTimeout, SocketError,
-        Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH, IOError
-      ].freeze
 
       Discovery = Struct.new(
         :issuer, :authorization_endpoint, :token_endpoint, :registration_endpoint,
@@ -124,13 +119,7 @@ module Hive
       end
 
       def request(req, context)
-        uri = req.uri
-        response = @http.start(uri.host, uri.port, **http_options(uri)) { |http| http.request(req) }
-        raise Hive::Error, "#{context} failed (HTTP #{response.code})" unless response.is_a?(Net::HTTPSuccess)
-
-        response
-      rescue *NETWORK_ERRORS => e
-        raise Hive::Error, "#{context}: could not reach Screenote (#{e.class}: #{e.message})"
+        Hive::Screenote::Http.request(http: @http, request: req, uri: req.uri, context: context)
       end
 
       def parse_json_response(response, context)
@@ -157,10 +146,6 @@ module Hive
         return URI(text) if text.match?(%r{\Ahttps?://})
 
         URI("#{base_url}#{text.start_with?("/") ? text : "/#{text}"}")
-      end
-
-      def http_options(uri)
-        { use_ssl: uri.scheme == "https", open_timeout: OPEN_TIMEOUT_SEC, read_timeout: READ_TIMEOUT_SEC }
       end
     end
   end

@@ -25,8 +25,8 @@ Captured media is written under the task folder:
       "file": "01-home.png",
       "type": "still",
       "caption": "Home page after load",
-      "push_to_screenote": true,
-      "screenote_url": null
+      "screenote_url": "https://screenote.ai/...",
+      "screenote_skipped_reason": null
     }
   ]
 }
@@ -39,27 +39,31 @@ and still completes the stage. Pure backend/refactor/docs tasks write
 
 ## screenote
 
-After the agent completes, Hive uploads PNG/JPEG stills with
-`push_to_screenote: true` and writes the returned hosted URL back into
-`screenote_url`. The agent never receives the token.
+Screenote uploads go through OAuth + MCP, not a stored REST token. Run
+`hive connect screenote` once (see [[commands/screenote]] in the wiki for the
+full flow); it stores an OAuth credential at `~/.config/hive/screenote.json`
+(mode 0600). For a connected Claude-backed `7-artifacts` run, Hive injects an
+ephemeral strict MCP config and the agent itself calls the Screenote MCP tool
+`create_screenshot_upload`, PUTs the image bytes to the returned signed URL, and
+writes the hosted URL into that item's `screenote_url`. When an upload is
+skipped or fails, the agent leaves `screenote_url` as `null` and records a
+`screenote_skipped_reason`.
 
-Configure screenote in the global config or through environment variables:
+Only the Screenote base URL lives in config (or its env override); the OAuth
+token is never placed in YAML or the environment:
 
 ```yaml
 screenote:
   base_url: https://screenote.example
-  api_token: null
 ```
-
-Environment overrides:
 
 ```sh
 export HIVE_SCREENOTE_BASE_URL=https://screenote.example
-export HIVE_SCREENOTE_API_TOKEN=...
 ```
 
-Blank or missing tokens disable the upload; committed PNG/GIF files still render
-in hivebox.
+If the credential is missing, expired, incomplete, or invalid, no MCP server is
+injected: the run is fail-soft, committed PNG/GIF files still render in hivebox,
+and each still item records a `screenote_skipped_reason`.
 
 ## Capture tools
 

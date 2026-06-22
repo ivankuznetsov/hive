@@ -630,14 +630,31 @@ module Hive
 
       class TemplateBindings
         def initialize(values = {})
-          values.each do |k, v|
-            instance_variable_set("@#{k}", v)
-            self.class.send(:attr_reader, k) unless respond_to?(k)
-          end
+          values.each { |k, v| instance_variable_set("@#{k}", v) }
         end
 
         def binding_for_erb
           binding
+        end
+
+        # Prompt templates are shared across stages, but each binding sets only
+        # the keys its stage supplies. A template that references a key this
+        # instance wasn't given -- e.g. the generic runner's `instruction_body`
+        # on a coding binding -- must read as nil, not raise. Resolving every
+        # bare name to its ivar (nil when unset) also makes rendering
+        # independent of construction order: the previous design lazily defined
+        # an `attr_reader` on the SHARED class only when some instance passed
+        # that key, so a render against a binding that omitted the key crashed
+        # with NameError unless a key-bearing instance happened to be built
+        # first -- a seed-dependent flake across the suite.
+        def method_missing(name, *args)
+          return super unless args.empty? && name.match?(/\A\w+\z/)
+
+          instance_variable_get("@#{name}")
+        end
+
+        def respond_to_missing?(name, _include_private = false)
+          name.match?(/\A\w+\z/) || super
         end
       end
 

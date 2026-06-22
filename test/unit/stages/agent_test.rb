@@ -463,6 +463,37 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_constructing_binding_does_not_define_readers_on_the_shared_class
+    # Deterministic regression guard for the seed-dependent NameError flake.
+    # The old TemplateBindings lazily ran `attr_reader k` on the SHARED class
+    # for each passed key, so a shared template that referenced a key some
+    # binding omitted (e.g. agent_prompt.md.erb's `instruction_body`) only
+    # rendered if a key-bearing binding was constructed earlier in the suite.
+    # A unique sentinel key proves construction must NOT mutate the class —
+    # order-independent, so this catches a revert regardless of test ordering.
+    klass = Hive::Stages::Base::TemplateBindings
+    refute klass.method_defined?(:flake_regression_sentinel),
+           "precondition: the sentinel reader must not pre-exist on the class"
+
+    klass.new(flake_regression_sentinel: "x")
+
+    refute klass.method_defined?(:flake_regression_sentinel),
+           "TemplateBindings.new must not lazily define per-key readers on the shared class"
+  end
+
+  def test_shared_template_renders_when_binding_omits_a_referenced_key
+    # A binding that omits instruction_body must resolve it to nil and let the
+    # shared agent_prompt template (which references it) render without raising.
+    bindings = Hive::Stages::Base::TemplateBindings.new(
+      stage_name: "execute", output_file: "task.md",
+      user_supplied_tag: "U", prior_context: "", skill_invocation: nil
+    )
+
+    assert_respond_to bindings, :instruction_body
+    assert_nil bindings.instruction_body, "an unset binding key must read as nil"
+    assert_kind_of String, Hive::Stages::Base.render("agent_prompt.md.erb", bindings)
+  end
+
   private
 
     def instruction_workflow(instruction_path, permissions: nil)

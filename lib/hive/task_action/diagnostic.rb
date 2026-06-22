@@ -1,7 +1,9 @@
 require "digest"
+require "shellwords"
 require "time"
 require "yaml"
 require "hive/execute_waiting_action"
+require "hive/markers"
 require "hive/secret_patterns"
 
 module Hive
@@ -44,7 +46,7 @@ module Hive
                      incomplete_plan_artifact:, finalize_missing_pr_md:,
                      finalize_missing_pr_url:, finalize_pr_url_mismatch:,
                      legacy_execute_findings:, stale_agent_reason:,
-                     state_file_mtime: nil, agent_marker_grace_sec: nil,
+                     state_file_mtime: nil,
                      project_name: nil, project_count: 1)
         @task = task
         @marker = marker
@@ -57,7 +59,6 @@ module Hive
         @legacy_execute_findings = legacy_execute_findings
         @stale_agent_reason = stale_agent_reason
         @state_file_mtime = state_file_mtime
-        @agent_marker_grace_sec = agent_marker_grace_sec
         @project_name = project_name
         @project_count = project_count
       end
@@ -278,12 +279,8 @@ module Hive
         head.sort_by { |path| safe_mtime(path) || Time.at(0) }.last(3).reverse
       end
 
-      def log_dirs
-        [
-          (task.log_dir if task.respond_to?(:log_dir)),
-          File.join(task.folder, "logs")
-        ].compact.uniq
-      end
+      # Shared with the classifier so the artifact-root check can't drift from it.
+      def log_dirs = Hive::TaskAction.log_dirs(task)
 
       def glob_task_artifacts(*parts)
         Dir[task_artifact(*parts)]

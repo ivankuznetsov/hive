@@ -481,7 +481,6 @@ module Hive
         legacy_execute_findings: legacy_execute_findings?,
         stale_agent_reason: stale_agent_reason,
         state_file_mtime: @state_file_mtime,
-        agent_marker_grace_sec: @agent_marker_grace_sec,
         project_name: project_name,
         project_count: @project_count
       )
@@ -597,12 +596,16 @@ module Hive
       log_dirs.any? { |dir| Dir[File.join(dir, "plan-*.log")].any? }
     end
 
-    def log_dirs
+    # The task's log directories. A class method shared with
+    # TaskAction::Diagnostic so the two concerns can't drift on where logs live.
+    def self.log_dirs(task)
       [
         (task.log_dir if task.respond_to?(:log_dir)),
         File.join(task.folder, "logs")
       ].compact.uniq
     end
+
+    def log_dirs = self.class.log_dirs(task)
 
     # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for
     # the source-stage assertion; coding recovery verbs (findings/accept-

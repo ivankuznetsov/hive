@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_snapshot.rb, lib/hive/commands/status.rb, lib/hive/daemon/policy.rb, lib/hive/stages/execute.rb, lib/hive/stages/open_pr.rb
 created: 2026-06-18
-updated: 2026-06-18
+updated: 2026-06-22
 tags: [task, dependencies, status, daemon, worktree, pr]
 ---
 
@@ -69,9 +69,11 @@ The gate is daemon-only. Manual `hive run`, `hive approve`, and filesystem
 
 When a dependent reaches `4-execute`, `Hive::Dependencies.base_branch_for`
 returns the prerequisite slug as the intended base. `Hive::Worktree#create!`
-then tries to create the dependent branch from `origin/<prerequisite-slug>`.
-If the prerequisite branch is not available on origin, it warns and falls back
-to the freshest default branch.
+then tries to create the dependent branch from `origin/<prerequisite-slug>`,
+then local `refs/heads/<prerequisite-slug>`, then the freshest default branch.
+If a same-named dependent branch already exists, real committed work is
+preserved; only an empty placeholder branch with zero commits relative to the
+default branch is deleted and recreated on the stacked base.
 
 When the same dependent reaches `5-open-pr`, `OpenPr#render_prompt` includes
 `--base <prerequisite-slug>` in the `gh pr create` command only if the

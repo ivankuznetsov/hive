@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-06-22
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -44,11 +44,12 @@ If passed explicitly, that's used. Otherwise:
 
 1. `mkdir -p` the parent of `path`.
 2. Probe `git show-ref --verify refs/heads/<branch_name>`:
-   - If it exists, run `git worktree add <path> <branch_name>` (attach to existing branch).
+   - If it exists with no stacked `base_override`, run `git worktree add <path> <branch_name>` (attach to existing branch).
+   - If it exists with a stacked `base_override`, measure `git rev-list --count <default>..<branch_name>`. A non-zero count (or any git error) preserves the branch and attaches as-is. A zero count means the branch is an empty placeholder from the default branch; Hive deletes it with `git branch -D <branch_name>` and falls through to the normal first-creation path below. Delete failure raises `Hive::WorktreeError` naming the branch.
    - If not, resolve the base via `base_override` when present, otherwise `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
 3. On non-zero exit, raise `Hive::WorktreeError` with the captured stderr.
 
-This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history.
+This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history, while allowing dependency-stacked empty placeholders to be recreated on the intended prerequisite base.
 
 ### `freshest_base(default_branch)` — origin-first base resolution
 
@@ -68,7 +69,9 @@ Local `<default>` is never modified — any unpushed commits there are preserved
 enters `4-execute`. Hive tries to fetch and branch from
 `origin/<base_override>` so stacked tasks start from their prerequisite branch.
 If there is no origin, the fetch fails, or the remote branch is unavailable,
-`create!` warns and falls back through `freshest_base(default_branch)`.
+Hive next checks local `refs/heads/<base_override>` and stacks on that local
+branch when present. It warns and falls back through `freshest_base(default_branch)`
+only when neither the remote nor local prerequisite branch is available.
 
 ## `remove!`
 

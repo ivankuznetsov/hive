@@ -226,6 +226,7 @@
         "default_branch",
         "hive_state_path",
         "workflow",
+        "hints",
         "worktree_root",
         "answers",
         "planning_agent",
@@ -265,6 +266,31 @@
         },
         "workflow": {
           "type": "string"
+        },
+        "hints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "command",
+              "message"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "custom_workflow"
+                ]
+              },
+              "command": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
         },
         "worktree_root": {
           "type": "string"

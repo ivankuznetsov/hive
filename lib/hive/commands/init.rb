@@ -52,6 +52,8 @@ module Hive
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit).
       WorkflowChoice = Data.define(:descriptor, :source)
+      CUSTOM_WORKFLOW_HINT_COMMAND = "hive workflow new <id>".freeze
+      CUSTOM_WORKFLOW_HINT_MESSAGE = "custom workflows live in this project — author one with `#{CUSTOM_WORKFLOW_HINT_COMMAND}`".freeze
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
@@ -619,6 +621,7 @@ module Hive
           # on a fresh project can confirm the binding from JSON instead of
           # reading config.yml out of band.
           "workflow" => workflow.to_s,
+          "hints" => workflow_authoring_hints(entry.fetch("hive_state_path"), workflow),
           "worktree_root" => worktree_root,
           "answers" => answers,
           "planning_agent" => answers.fetch("planning_agent"),
@@ -641,6 +644,18 @@ module Hive
           Hive::Workflows::Loader.load_dir(File.join(hive_state_path, "workflows")).empty?
       end
 
+      def workflow_authoring_hints(hive_state_path, workflow)
+        return [] unless no_custom_workflow_yet?(hive_state_path, workflow)
+
+        [
+          {
+            "kind" => "custom_workflow",
+            "command" => CUSTOM_WORKFLOW_HINT_COMMAND,
+            "message" => CUSTOM_WORKFLOW_HINT_MESSAGE
+          }
+        ]
+      end
+
       def print_summary(entry:, ops:, answers:, workflow:)
         c = Palette.for($stdout)
         name = entry["name"]
@@ -661,7 +676,7 @@ module Hive
         $stdout.puts
         $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} hive new #{name} '<short task description>'"
         if no_custom_workflow_yet?(entry.fetch("hive_state_path"), workflow)
-          $stdout.puts "  #{c.dim('tip:')} custom workflows live in this project — author one with `hive workflow new <id>`"
+          $stdout.puts "  #{c.dim('tip:')} #{CUSTOM_WORKFLOW_HINT_MESSAGE}"
         end
       end
 

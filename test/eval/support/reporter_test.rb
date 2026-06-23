@@ -249,12 +249,13 @@ class HiveEvalReporterTest < Minitest::Test
 
       _out, err, status = Open3.capture3(
         { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report, "extra"
+        "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report, "extra", "bonus"
       )
 
       refute status.success?
       assert_equal 64, status.exitstatus
-      assert_match(/hive-eval: unexpected argument: extra/, err)
+      assert_match(/hive-eval: unexpected arguments: extra bonus/, err)
+      refute_match(/argument\(s\)/, err)
       refute File.exist?(report)
     end
   end

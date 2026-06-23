@@ -37,6 +37,11 @@ class InitTest < Minitest::Test
         assert_includes out, name
         assert_includes out, dir
         assert_includes out, "next: hive new #{name}"
+        assert_includes out, "→ next: hive new #{name} '<short task description>'"
+        # PR-562 writing-workflow dogfooding: a fresh coding-default project
+        # should teach that project-local workflow authoring exists.
+        assert_includes out,
+                        "tip: custom workflows live in this project — author one with `hive workflow new <id>`"
 
         # capture_io yields a non-tty StringIO; ANSI must be suppressed there
         # so piped/CI output stays clean. Load-bearing safety property of the
@@ -73,10 +78,15 @@ class InitTest < Minitest::Test
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          out, _err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
 
           config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
           assert_equal "content_fixture", config.fetch("default_workflow")
+
+          name = File.basename(dir)
+          assert_includes out, "→ next: hive new #{name} '<short task description>'"
+          refute_includes out, "hive workflow new",
+                          "non-coding defaults already prove workflow selection, so the authoring tip should not nag"
         end
       end
     end

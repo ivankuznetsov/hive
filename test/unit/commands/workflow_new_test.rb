@@ -33,6 +33,7 @@ class WorkflowNewTest < Minitest::Test
       assert_equal descriptor_path, payload.fetch("descriptor_path")
       assert_equal instruction_path, payload.fetch("instruction_path")
       assert_includes stdout.string, "hive: created workflow my-flow"
+      assert_includes stdout.string, "edit: #{instruction_path}"
       assert_includes stdout.string, "hive new #{File.basename(project_root)} --workflow my-flow"
 
       assert File.file?(descriptor_path)

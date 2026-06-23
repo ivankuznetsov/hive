@@ -265,6 +265,7 @@ module Hive
           @stdout.puts JSON.generate(payload)
         else
           @stdout.puts "hive: created workflow #{id} at #{paths.fetch(:descriptor)}"
+          @stdout.puts "edit: #{paths.fetch(:instruction)} (the `work` stage instruction — a placeholder until you define it)"
           @stdout.puts "next: #{payload.fetch("next")}"
         end
         payload

@@ -1,7 +1,7 @@
 ---
 title: hive workflow
 type: command
-source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/blank/
+source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
 updated: 2026-06-23
 tags: [command, workflow, authoring]
@@ -13,6 +13,7 @@ tags: [command, workflow, authoring]
 
 ```bash
 hive workflow new my-flow
+hive workflow new my-flow --template writing
 hive workflow new my-flow --json
 ```
 
@@ -77,6 +78,24 @@ The placeholder `work.md` says:
 ```text
 Edit this file to define what the `work` stage should do.
 ```
+
+## Templates
+
+`new` scaffolds the blank `inbox -> work -> done` stub by default. Pass
+`--template NAME` to seed from a curated sample workflow instead: the
+descriptor is rewritten to your `ID` and the sample's stage instructions are
+copied verbatim — real content, not a placeholder — into `<id>/`. Available
+templates are the directories under `templates/workflows/` that carry a
+`descriptor.yml.erb`:
+
+- `blank` (default) — `inbox -> work -> done`, one placeholder instruction.
+- `writing` — `inbox -> research -> draft -> edit -> done`.
+- `research` — `inbox -> gather -> synthesize -> report -> done`.
+
+A multi-stage template prints `edit: <id>/ (N stage instructions to fill in)`
+pointing at the directory of instructions to define (the single-stage blank
+still names its one `work.md`). An unknown `--template` is a USAGE error
+listing the available names; with `--json` they ride the `expected` array.
 
 ## Backlinks
 

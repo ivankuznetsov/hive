@@ -35,10 +35,9 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "digest" => { schema: "hive-digest", error_kind: "usage" },
-  # Bare `hive workflow` (no subcommand) with --json: a Thor-arity error must
-  # ride the same JSON envelope as the command's own UsageError, not plain
-  # stderr. (`hive workflow new` with no id is already enveloped by the
-  # command itself.)
+  # Residual workflow argv-shape errors raised by Thor before command dispatch
+  # (for example too many positionals) must ride the same JSON envelope as the
+  # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
   "pr" => {
     schema: "hive-stage-action",

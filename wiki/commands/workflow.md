@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/blank/
 created: 2026-06-21
-updated: 2026-06-21
+updated: 2026-06-22
 tags: [command, workflow, authoring]
 ---
 
@@ -41,6 +41,13 @@ With `--json`, success is an unversioned document containing `ok`, `id`,
 `descriptor_path`, `instruction_path`, and `next`. Typed usage/config/git
 errors emit an unversioned JSON error document with `ok: false`, `error_class`,
 `exit_code`, and `message`.
+
+A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
+uses the command prefix: `hive workflow: missing SUBCOMMAND (expected: new)` or
+`hive workflow: unknown workflow subcommand "X" (expected: new)`. With
+`--json`, those subcommand-shape errors carry a structured `expected` array
+such as `["new"]`; unknown subcommands also carry `value` with the rejected
+token.
 
 ## Generated Descriptor
 

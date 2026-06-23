@@ -77,14 +77,31 @@ module Hive
       # existing project) commits into the long-lived `.hive-state` worktree,
       # where a failed commit ALSO leaves these pathspecs STAGED; that caller is
       # responsible for resetting the index (Init#reset_hive_state_index) — this
-      # method intentionally leaves git untouched. rm_f/rm_rf swallow their own
-      # errors; warn_failed_scaffold_cleanup localizes the signal when a genuine
-      # cleanup failure leaves a leftover that would later trip refuse_overwrite!.
+      # method intentionally leaves git untouched. remove_scaffold_path tolerates
+      # an already-absent target (like rm_f/rm_rf's force) and continues to the
+      # next path on a fault, but CAPTURES the errno so warn_failed_scaffold_cleanup
+      # can tell the operator WHY a leftover survived rather than emitting a bare
+      # path list — a leftover would otherwise resurface as a confusing
+      # refuse_overwrite! "already exists" on the next attempt.
       def self.rollback_scaffold(paths)
-        FileUtils.rm_f(paths.fetch(:descriptor))
-        FileUtils.rm_rf(paths.fetch(:instruction_dir))
-        warn_failed_scaffold_cleanup(paths)
+        reasons = {}
+        remove_scaffold_path(paths.fetch(:descriptor), reasons)
+        remove_scaffold_path(paths.fetch(:instruction_dir), reasons)
+        warn_failed_scaffold_cleanup(paths, reasons)
       end
+
+      # Remove one scaffold path, recording the underlying errno when a genuine
+      # permission/busy fault keeps it on disk. The existence guard makes an
+      # already-absent target a no-op (matching rm_f/rm_rf's force: true) without
+      # swallowing the real fault the way the force variants do.
+      def self.remove_scaffold_path(path, reasons)
+        return unless File.exist?(path) || File.symlink?(path)
+
+        FileUtils.remove_entry(path)
+      rescue SystemCallError => e
+        reasons[path] = e
+      end
+      private_class_method :remove_scaffold_path
 
       def self.normalize_id(value)
         id = value.to_s.strip
@@ -151,15 +168,21 @@ module Hive
       end
       private_class_method :validate_descriptor!
 
-      # rollback_scaffold keeps its swallow-and-continue behavior (rm_f/rm_rf
-      # don't raise); this only localizes the signal when a permission/busy
-      # failure leaves the scaffold on disk, where it would otherwise resurface
-      # as a confusing refuse_overwrite! "already exists" on the next attempt.
-      def self.warn_failed_scaffold_cleanup(paths)
+      # Localizes the signal when a permission/busy failure leaves the scaffold
+      # on disk, where it would otherwise resurface as a confusing
+      # refuse_overwrite! "already exists" on the next attempt. `reasons` carries
+      # the errno remove_scaffold_path captured per leftover so the operator
+      # learns WHY cleanup failed (e.g. EACCES on a read-only parent) instead of
+      # a bare path list.
+      def self.warn_failed_scaffold_cleanup(paths, reasons = {})
         leftovers = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ].select { |path| File.exist?(path) }
         return if leftovers.empty?
 
-        warn "hive workflow: scaffold cleanup could not remove #{leftovers.join(', ')}; " \
+        described = leftovers.map do |path|
+          reason = reasons[path]
+          reason ? "#{path} (#{reason.class}: #{reason.message})" : path
+        end
+        warn "hive workflow: scaffold cleanup could not remove #{described.join(', ')}; " \
              "remove them manually before retrying --new-workflow"
       rescue Errno::EPIPE
         nil

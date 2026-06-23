@@ -118,6 +118,8 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
+# Thor stops parsing options at the first positional (PROJECT), so allow-listed
+# options appearing after PROJECT must be lifted ahead of it before dispatch.
 def lift_new_options!(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return unless cmd_idx && argv[cmd_idx] == "new"
@@ -135,9 +137,16 @@ def lift_new_options!(argv)
     elsif JSON_BOOLEAN_OPTIONS.include?(arg)
       lifted << arg
     elsif NEW_VALUE_OPTIONS.include?(arg)
-      lifted << arg
-      idx += 1
-      lifted << argv[idx] if idx < argv.length
+      # Only consume the next token as the value when it exists and is not
+      # option-like; otherwise the bare option stays literal text so a trailing
+      # or value-less `--workflow`/`--depends-on` cannot eat PROJECT on rebuild.
+      value = argv[idx + 1]
+      if value && !value.start_with?("-")
+        lifted << arg << value
+        idx += 1
+      else
+        rest << arg
+      end
     elsif NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
       lifted << arg
     else

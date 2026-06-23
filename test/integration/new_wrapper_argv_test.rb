@@ -80,6 +80,39 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
+  def test_trailing_valueless_value_option_stays_literal_text
+    with_cli_project do |home, project_root, project|
+      _out, err, status = run_hive(home, "new", project, "idea1 idea2", "--depends-on", chdir: project_root)
+
+      assert status.success?, "trailing value-less --depends-on must not eat PROJECT, stderr was: #{err}"
+      folder = only_task_folder(project_root)
+      assert_nil Hive::TaskMeta.read(folder)[:depends_on], "value-less --depends-on must not bind a dependency"
+      assert_includes File.read(File.join(folder, "idea.md")), "idea1 idea2 --depends-on"
+    end
+  end
+
+  def test_depends_on_equals_form_after_project_is_lifted
+    with_cli_project do |home, project_root, project|
+      _out, err, status = run_hive(home, "new", project, "--depends-on=42", "depends equals task", chdir: project_root)
+
+      assert status.success?, "--depends-on=42 should be lifted after project, stderr was: #{err}"
+      folder = only_task_folder(project_root)
+      assert_equal "42", Hive::TaskMeta.read(folder)[:depends_on]
+      refute_includes File.read(File.join(folder, "idea.md")), "--depends-on"
+    end
+  end
+
+  def test_literal_double_dash_keeps_following_options_as_text
+    with_cli_project do |home, project_root, project|
+      _out, err, status = run_hive(home, "new", project, "--", "--workflow", "id", "text", chdir: project_root)
+
+      assert status.success?, "literal -- should keep following tokens as task text, stderr was: #{err}"
+      folder = only_task_folder(project_root)
+      assert_nil Hive::TaskMeta.read(folder)[:workflow], "options after -- must not pin a workflow"
+      assert_includes File.read(File.join(folder, "idea.md")), "--workflow id text"
+    end
+  end
+
   def test_workflow_looking_substring_inside_one_text_argument_stays_literal
     with_cli_project do |home, project_root, project|
       _out, err, status = run_hive(home, "new", project, "fix the --workflow parsing bug", chdir: project_root)

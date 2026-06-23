@@ -21,3 +21,11 @@ Added `test/integration/new_wrapper_argv_test.rb`, which drives the real
 older wrapper test that previously asserted the swallowed-`--workflow` bug.
 Updated [[cli]], [[commands/new]], and [[testing]] to describe the new wrapper
 contract.
+
+Review follow-up: hardened the value-option branch so a trailing or value-less
+`--workflow`/`--depends-on` no longer consumes the next token. The value is only
+lifted when it exists and is not option-like; otherwise the bare option drops to
+the literal-text tail, fixing the regression where `hive new proj idea --depends-on`
+mis-bound PROJECT to the idea text. Added coverage for the trailing value-less
+case, the `--depends-on=42` equals form, and a literal `--` tail, and refreshed
+gap #29 in [[gaps]] to point at the lift-and-rebuild contract.

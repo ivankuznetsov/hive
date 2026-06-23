@@ -59,6 +59,14 @@ class TaskActionDispatchParityTest < Minitest::Test
 
         assert_value_equal legacy.key, kind.key, failure_label(scenario, "key")
         assert_value_equal legacy.label, kind.label, failure_label(scenario, "label")
+        # NOTE: this `command` column is NOT independent coverage of the unified
+        # `#command` builder. `LegacyCaseTaskAction` overrides only `#action`, so
+        # both sides compute `command` through the *same* production builder; a
+        # regression in the `generic_command`->unified-`command` refactor itself
+        # would change both columns identically and pass here. The builder's
+        # exact command strings are pinned in task_action_test.rb (coding) and
+        # task_action_generic_test.rb (generic) — this column only proves the two
+        # dispatch paths agree on which ACTIONS row to emit.
         assert_value_equal legacy.command, kind.command, failure_label(scenario, "command")
         assert_value_equal legacy.next_action, kind.next_action, failure_label(scenario, "next_action")
 

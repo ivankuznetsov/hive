@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/workflows/coding"
+require "hive/task_action"
 
 class WorkflowsCodingTest < Minitest::Test
   def test_descriptor_has_coding_id_and_ordered_stages
@@ -32,7 +33,7 @@ class WorkflowsCodingTest < Minitest::Test
     assert_equal 500, stages_by_name.fetch("execute").budget_usd
     assert_equal 14400, stages_by_name.fetch("execute").timeout_sec
     assert_equal :agent, stages_by_name.fetch("open-pr").kind
-    assert_equal :"review-council", stages_by_name.fetch("review").kind
+    assert_equal :review_council, stages_by_name.fetch("review").kind
     assert_nil stages_by_name.fetch("review").status_mode
     assert_equal :agent, stages_by_name.fetch("artifacts").kind
     assert_equal :finalize, stages_by_name.fetch("finalize").kind
@@ -66,5 +67,55 @@ class WorkflowsCodingTest < Minitest::Test
     assert_nil done.budget_usd
     assert_nil done.timeout_sec
     assert_nil done.capability
+  end
+
+  # U11 made Coding::ACTION_DISPATCH the source of truth for the user-facing
+  # action of every coding :agent/:inert stage. Pin each row's shape so a
+  # malformed or drifted entry fails here rather than as a runtime KeyError
+  # (config.fetch(:default)) or a silent generic fall-through on a live
+  # `hive status`/daemon tick.
+  def test_action_dispatch_rows_are_well_formed
+    stages_by_name = Hive::Workflows::Coding::DESCRIPTOR.stages.to_h { |stage| [ stage.name, stage ] }
+    task_action_methods = Hive::TaskAction.instance_methods(false) +
+                          Hive::TaskAction.private_instance_methods(false)
+
+    Hive::Workflows::Coding::ACTION_DISPATCH.each do |name, config|
+      stage = stages_by_name.fetch(name) do
+        flunk "ACTION_DISPATCH row #{name.inspect} has no matching descriptor stage"
+      end
+
+      assert config.key?(:kind), "ACTION_DISPATCH row #{name.inspect} must declare :kind"
+      assert_equal stage.kind, config.fetch(:kind),
+                   "ACTION_DISPATCH row #{name.inspect} :kind must match its descriptor stage kind"
+
+      assert config.key?(:handler) ^ config.key?(:default),
+             "ACTION_DISPATCH row #{name.inspect} must have exactly one of :handler or :default"
+
+      if config.key?(:handler)
+        assert_includes task_action_methods, config.fetch(:handler),
+                        "ACTION_DISPATCH row #{name.inspect} :handler must be a TaskAction method"
+      else
+        config.values_at(:default, :complete).compact.each do |action_key|
+          assert Hive::TaskAction::ACTIONS.key?(action_key),
+                 "ACTION_DISPATCH row #{name.inspect} references unknown ACTIONS key #{action_key.inspect}"
+        end
+      end
+    end
+  end
+
+  # Guard the "parity-wall" regression: a future coding :agent/:inert stage
+  # added without an ACTION_DISPATCH row would make coding_table_action return
+  # nil and silently fall through to generic_action, emitting generic
+  # run/approve commands the coding runner does not expect.
+  def test_action_dispatch_covers_every_coding_agent_or_inert_stage
+    table_stages = Hive::Workflows::Coding::ACTION_DISPATCH.keys
+    classified_stages = Hive::Workflows::Coding::DESCRIPTOR.stages
+                                                           .select { |stage| %i[agent inert].include?(stage.kind) }
+                                                           .map(&:name)
+
+    classified_stages.each do |name|
+      assert_includes table_stages, name,
+                      "coding :agent/:inert stage #{name.inspect} must have an ACTION_DISPATCH row"
+    end
   end
 end

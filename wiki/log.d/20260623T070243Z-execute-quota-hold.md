@@ -17,7 +17,9 @@ dependency `blocked_by`.
 **Tests:** Added execute unit coverage for quota detection via `error_message`
 and raw `limit_text`, plus the non-limit marker invariant. Added
 `AgentLimit` held-helper coverage, status text/JSON coverage, and TUI
-`ERROR` / `REVIEW_ERROR` held-label coverage. Re-ran
+`ERROR` / `REVIEW_ERROR` held-label coverage. Added status-schema coverage for
+the optional `held` object so `Snapshot::Row` and `hive-status.v4.json` stay
+aligned. Re-ran
 `test/unit/daemon/stale_agent_healer_test.rb`, whose existing terminal
 `limits_reached` tests cover `4-execute` cooldown hold/retry behavior.
 

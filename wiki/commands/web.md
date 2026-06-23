@@ -135,7 +135,13 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
-  notice when GitHub is unreachable or the grant was revoked). Clone runs call
+  notice when GitHub is unreachable or the grant was revoked). The setup form
+  mirrors `hive init`'s questionnaire and carries a select-only Workflow
+  control: fresh clone setup lists built-ins only (`coding`, `content`) with
+  `coding` preselected, while "Re-run setup" lists built-ins plus that
+  project's authored workflows and preselects the current `default_workflow`.
+  The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
+  it is intentionally outside the `prompts:` answers hash. Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
@@ -218,7 +224,9 @@ clone target refusal for non-directories, agent-login status rendering for
 binary PTY output and operator-ward poll flows, root favicon/icon assets,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
-rendering.
+rendering. Repos coverage pins the workflow select's built-in fresh list and
+that posting `settings[workflow]` writes the same real `default_workflow` that
+CLI init writes.
 `web/test/system/` runs Capybara +
 **capybara-playwright-driver**: login gate, composer image attach (upload
 button for real; clipboard paste via a synthetic DataTransfer event — the
@@ -228,8 +236,10 @@ project-rail filtering with URL sync, composer project sync, and
 scroll plus composer draft preservation across a live broadcast, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
-follow/pause/resume with node-preserving frame morph reloads, and artifact
-open-state preservation across pushed morphs with live content refresh, plus
+follow/pause/resume with node-preserving frame morph reloads, artifact
+open-state preservation across pushed morphs with live content refresh, and
+repo setup workflow selection (fresh `content` writes config, re-run lists a
+project-authored workflow and preselects the current default), plus
 browser-visible Demo gallery images and failed-capture banner states. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden

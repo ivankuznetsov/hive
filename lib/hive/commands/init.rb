@@ -10,6 +10,8 @@ require "hive/stages"
 require "hive/task_meta"
 require "hive/worktree"
 require "hive/workflow_selection"
+require "hive/workflows"
+require "hive/workflows/loader"
 require "hive/llm_wiki_bootstrap"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
@@ -95,7 +97,7 @@ module Hive
         if @json
           emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         else
-          print_summary(entry: entry, ops: ops, answers: answers)
+          print_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight!
@@ -634,7 +636,12 @@ module Hive
         }
       end
 
-      def print_summary(entry:, ops:, answers:)
+      def no_custom_workflow_yet?(hive_state_path, workflow)
+        Hive::Workflows.coding_id?(workflow) &&
+          Hive::Workflows::Loader.load_dir(File.join(hive_state_path, "workflows")).empty?
+      end
+
+      def print_summary(entry:, ops:, answers:, workflow:)
         c = Palette.for($stdout)
         name = entry["name"]
         rows = [
@@ -653,6 +660,9 @@ module Hive
         end
         $stdout.puts
         $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} hive new #{name} '<short task description>'"
+        if no_custom_workflow_yet?(entry.fetch("hive_state_path"), workflow)
+          $stdout.puts "  #{c.dim('tip:')} custom workflows live in this project — author one with `hive workflow new <id>`"
+        end
       end
 
       def collect_prompt_answers

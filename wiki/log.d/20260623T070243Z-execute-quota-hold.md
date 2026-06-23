@@ -1,7 +1,7 @@
 ## [2026-06-23T07:02:43Z] execute/status — quota walls now park on cooldown
 
 **Action:** `4-execute` now preserves provider quota walls as
-`ERROR reason=limits_reached provider=<execute-agent> retry_after=<iso8601>`
+`ERROR reason=limits_reached provider=<execute-agent> message="implementer hit a usage/credit limit" retry_after=<iso8601>`
 instead of collapsing them into `reason=implementer_failed`. The runner checks
 the implementation result's raw `limit_text` first and then the formatted
 `error_message`, writes the shared `Hive::AgentLimit.retry_after` cooldown stamp,

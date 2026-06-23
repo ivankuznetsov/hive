@@ -646,12 +646,18 @@ module Hive
         # The workflow-authoring hint is purely advisory and computed in
         # success_payload/print_summary, which run AFTER init has already
         # committed the hive/state branch and BEFORE register_daemon_service! /
-        # run_init_preflight!. A filesystem error from load_dir (an unlisted
-        # SystemCallError escaping File.directory?/Dir.glob, or an invalid-byte
-        # path) would otherwise bubble to call's `rescue StandardError →
-        # InternalError` and turn an already-committed init into a crash that
-        # skips those two best-effort steps. Degrade to "no hint" with a
-        # breadcrumb, mirroring their own rescue-and-warn guards.
+        # run_init_preflight!. This deliberately catches the whole StandardError
+        # surface, not only the filesystem faults it primarily guards against (an
+        # unlisted SystemCallError escaping File.directory?/Dir.glob, or an
+        # invalid-byte path raising ArgumentError/EncodingError): a genuine
+        # programming bug here too (a NoMethodError/KeyError/TypeError in the
+        # coding_id?/load_dir/DescriptorParser chain) would otherwise bubble to
+        # call's `rescue StandardError → InternalError` and turn an
+        # already-committed init into a crash that skips those two best-effort
+        # steps. Degrade to "no hint" with a breadcrumb — the same rescue-and-warn
+        # guard register_daemon_service! and run_init_preflight! apply to their
+        # own post-commit, best-effort work. (Hive::ConfigError still re-raises
+        # cleanly via call, since it is surfaced before this point.)
         write_warn("hive: skipped workflow-authoring hint (#{e.class}: #{e.message})")
         false
       end

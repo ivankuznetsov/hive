@@ -109,10 +109,14 @@ class WorkflowNewTest < Minitest::Test
   # Round-trip: hive-workflow-new is enveloped like every other hive-* command,
   # so BOTH arms must validate against the published schema. The usage arm
   # covers extras too: reserved-id errors carry `value`; missing-subcommand
-  # errors carry `expected`. The no-id ("missing workflow id") case also carries
-  # `value`, but is exercised only as a raised message via `new!`
-  # (test_rejects_reserved_and_invalid_ids) — its enveloped `value` shape is
-  # locked here by the reserved-id arm, not driven through the envelope separately.
+  # errors carry `expected`; unknown-subcommand errors carry both `value` and
+  # `expected` (the only shape exercising the combined payload). The
+  # "missing workflow id" case is exercised only as a raised message via
+  # `new!("")` (test_rejects_reserved_and_invalid_ids): an empty-string id
+  # raises with `value: ""` (kept), while an omitted id (nil) is stripped by
+  # error_extras so the envelope carries no `value` key. Either way its
+  # enveloped shape is locked here by the reserved-id arm's `value`, not driven
+  # through the envelope separately.
   def test_json_envelopes_validate_against_published_schema
     with_initialized_project do |project_root|
       schemer = JSONSchemer.schema(
@@ -146,6 +150,17 @@ class WorkflowNewTest < Minitest::Test
       assert_empty missing_errors,
                    "hive-workflow-new usage ErrorPayload (with `expected`) must validate " \
                    "against the published schema (errors: #{missing_errors.inspect})"
+
+      unknown_out, = with_captured_exit do
+        Hive::Commands::Workflow.new("bogus", nil, project_root: project_root, json: true).call
+      end
+      unknown_payload = JSON.parse(unknown_out)
+      assert_equal "bogus", unknown_payload.fetch("value")
+      assert_equal [ "new" ], unknown_payload.fetch("expected")
+      unknown_errors = schemer.validate(unknown_payload).map { |e| e["error"] }
+      assert_empty unknown_errors,
+                   "hive-workflow-new usage ErrorPayload (with `value` AND `expected`) must " \
+                   "validate against the published schema (errors: #{unknown_errors.inspect})"
     end
   end
 
@@ -299,6 +314,7 @@ class WorkflowNewTest < Minitest::Test
       assert_empty err
       payload = JSON.parse(out)
       assert_equal false, payload.fetch("ok")
+      assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
       assert_equal "missing SUBCOMMAND (expected: new)", payload.fetch("message")
@@ -316,7 +332,10 @@ class WorkflowNewTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty err
       payload = JSON.parse(out)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
+      assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
       assert_equal "unknown workflow subcommand \"bogus\" (expected: new)", payload.fetch("message")
       assert_equal "bogus", payload.fetch("value")
       assert_equal [ "new" ], payload.fetch("expected")

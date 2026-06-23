@@ -8,6 +8,17 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   HIVE_BIN = File.expand_path("../../bin/hive", __dir__)
 
+  # Thor's exact two-line arity error for `hive workflow a b c` (too many
+  # positionals), rejected before command dispatch. Shared by the --json and
+  # human-mode arity tests below so a Thor upgrade or a `desc "workflow
+  # SUBCOMMAND [ID]"` reword updates one literal, not two. Each call site keeps
+  # its own intentional pin: `.chomp` for the JSON `message` field, the trailing
+  # newline as-is for the human stderr stream.
+  THOR_WORKFLOW_ARITY_PROSE = <<~MSG.freeze
+    ERROR: "hive workflow" was called with arguments ["a", "b", "c"]
+    Usage: "hive workflow SUBCOMMAND [ID]"
+  MSG
+
   def run_hive(home, *args)
     Open3.capture3({ "HIVE_HOME" => home }, RbConfig.ruby, "-Ilib", HIVE_BIN, *args)
   end
@@ -100,10 +111,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "InvalidTaskPath", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal <<~MSG.chomp, payload["message"]
-        ERROR: "hive workflow" was called with arguments ["a", "b", "c"]
-        Usage: "hive workflow SUBCOMMAND [ID]"
-      MSG
+      assert_equal THOR_WORKFLOW_ARITY_PROSE.chomp, payload["message"]
       # Argv-shape (Thor) errors ride the envelope but never gain the
       # in-command UsageError discovery fields — those come only from the
       # command's own raise path (bare `hive workflow`), not the bin/hive
@@ -125,10 +133,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal <<~ERR, err
-        ERROR: "hive workflow" was called with arguments ["a", "b", "c"]
-        Usage: "hive workflow SUBCOMMAND [ID]"
-      ERR
+      assert_equal THOR_WORKFLOW_ARITY_PROSE, err
     end
   end
 

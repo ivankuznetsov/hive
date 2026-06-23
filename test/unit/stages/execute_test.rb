@@ -93,6 +93,79 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_marks_limits_reached_when_implementation_error_message_hits_quota
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error,
+        error_message: "limits reached for codex: quota exhausted, try again at Jun 24th"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
+      assert_equal "implementer hit a usage/credit limit", marker.attrs["message"]
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
+  def test_run_pass_marks_limits_reached_when_limit_text_hits_quota
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error,
+        limit_text: "rate limit reached",
+        error_message: "exit_code=1"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
+  def test_run_pass_preserves_non_limit_implementation_failure_marker
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = { status: :error, error_message: "exit_code=1 compile error" }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs["reason"]
+      assert_equal "error", marker.attrs["status"]
+      assert_equal "exit_code=1 compile error", marker.attrs["message"]
+      refute marker.attrs.key?("retry_after")
+      refute marker.attrs.key?("provider")
+    end
+  end
+
   def test_execute_baseline_head_returns_nil_when_git_head_fails
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -207,10 +280,14 @@ class HiveStagesExecuteTest < Minitest::Test
     File.write(task.worktree_yml_path, attrs.to_yaml)
   end
 
-  def with_fake_git_and_spawn(git, status:)
+  def execute_cfg(agent)
+    { "execute" => { "agent" => agent } }
+  end
+
+  def with_fake_git_and_spawn(git, status: :ok, result: nil)
     with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
       with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path|
-        { status: status }
+        result || { status: status }
       }) do
         yield
       end

@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "date"
 require "yaml"
+require "hive/agent_limit"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
@@ -137,11 +138,7 @@ module Hive
         end
 
         if agent_failed?(impl_result)
-          Hive::Markers.set(task.state_file, :error,
-                            reason: "implementer_failed",
-                            status: impl_result&.fetch(:status, nil),
-                            message: impl_result&.fetch(:error_message, nil))
-          return { commit: "implementer_failed", status: :error }
+          return mark_implementer_failure(task, cfg, impl_result)
         end
 
         worktree_state = inspect_worktree_state(task, worktree_git)
@@ -204,6 +201,36 @@ module Hive
         return true if result.nil?
 
         %i[error timeout].include?(result[:status])
+      end
+
+      def mark_implementer_failure(task, cfg, impl_result)
+        if implementer_hit_limit?(impl_result)
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "limits_reached",
+                            provider: execute_agent_name(cfg),
+                            message: "implementer hit a usage/credit limit",
+                            retry_after: Hive::AgentLimit.retry_after)
+          return { commit: "limits_reached", status: :error }
+        end
+
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "implementer_failed",
+                          status: impl_result&.fetch(:status, nil),
+                          message: impl_result&.fetch(:error_message, nil))
+        { commit: "implementer_failed", status: :error }
+      end
+
+      def implementer_hit_limit?(impl_result)
+        return false unless impl_result
+
+        Hive::AgentLimit.limit_reached?(impl_result[:limit_text].to_s) ||
+          Hive::AgentLimit.limit_reached?(impl_result[:error_message].to_s)
+      end
+
+      def execute_agent_name(cfg)
+        Hive::Stages::Base.stage_profile(cfg, "execute").name.to_s
+      rescue StandardError
+        nil
       end
 
       def spawn_implementation(task, cfg, worktree_path)

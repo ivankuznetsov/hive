@@ -67,8 +67,9 @@ class RunApproveTest < Minitest::Test
   # the daemon-dispatched `hive approve --from <inert> --force` must actually
   # move it forward, not dead-loop on approve's VALID_TERMINAL_MARKERS gate
   # (the markerless inert stage has no agent to stamp a terminal marker). Drives
-  # the real classifier → command → CLI approve chain so a regression in
-  # generic_command's --force or in validate_move! would fail here, not ship green.
+  # the real classifier → command → CLI approve chain so a regression in the
+  # unified TaskAction#command's --force or in validate_move! would fail here,
+  # not ship green.
   def test_inert_middle_stage_advances_end_to_end_through_dispatched_approve
     with_registered_workflow(agent_entry_workflow) do
       with_tmp_global_config do

@@ -192,6 +192,29 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_new_workflow_fresh_json_emits_paths_and_bound_workflow
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        out, _err = capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing", json: true).call }
+        payload = JSON.parse(out)
+        descriptor_path = File.join(dir, ".hive-state", "workflows", "writing.yml")
+        instruction_path = File.join(dir, ".hive-state", "workflows", "writing", "work.md")
+
+        assert_equal 1, out.lines.size
+        refute_includes out, "hive: initialized"
+        assert_equal "hive-init", payload.fetch("schema")
+        assert_equal true, payload.fetch("ok")
+        assert_equal "writing", payload.fetch("workflow")
+        assert_equal descriptor_path, payload.fetch("descriptor_path")
+        assert_equal instruction_path, payload.fetch("instruction_path")
+
+        schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+        errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
+        assert_empty errors, "hive init --new-workflow --json payload must validate: #{errors.inspect}"
+      end
+    end
+  end
+
   def test_init_new_workflow_existing_scaffolds_and_rebinds_in_one_commit
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -219,6 +242,32 @@ class InitTest < Minitest::Test
         assert_includes changed, "config.yml"
         assert_includes changed, "workflows/writing.yml"
         assert_includes changed, "workflows/writing/work.md"
+      end
+    end
+  end
+
+  def test_init_new_workflow_existing_json_emits_paths_and_bound_workflow
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        hive_state = File.join(dir, ".hive-state")
+
+        out, _err = capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing", json: true).call }
+        payload = JSON.parse(out)
+        descriptor_path = File.join(hive_state, "workflows", "writing.yml")
+        instruction_path = File.join(hive_state, "workflows", "writing", "work.md")
+
+        assert_equal 1, out.lines.size
+        refute_includes out, "hive: already initialized"
+        assert_equal "hive-init", payload.fetch("schema")
+        assert_equal true, payload.fetch("already_initialized")
+        assert_equal "writing", payload.fetch("workflow")
+        assert_equal descriptor_path, payload.fetch("descriptor_path")
+        assert_equal instruction_path, payload.fetch("instruction_path")
+
+        schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+        errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
+        assert_empty errors, "hive init --new-workflow --json existing payload must validate: #{errors.inspect}"
       end
     end
   end

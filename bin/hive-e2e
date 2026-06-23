@@ -158,7 +158,7 @@ module Hive
             exit_code: BinaryExit::CONFIG
           )
         end
-        unless File.file?(script) && File.executable?(script)
+        unless File.lstat(script).file? && File.executable?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} repro.sh is not executable (#{script})",
             error_kind: "unusable_repro",

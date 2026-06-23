@@ -236,6 +236,69 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_normalize_and_validate_id_reuses_workflow_new_errors
+    assert_equal "my-flow", Hive::Commands::Workflow.normalize_and_validate_id!(" my-flow ")
+
+    [ "coding", "content" ].each do |id|
+      error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.normalize_and_validate_id!(id)
+      end
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      assert_includes error.message, "workflow id #{id.inspect} is reserved by a built-in workflow"
+    end
+
+    missing = assert_raises(Hive::Commands::Workflow::UsageError) do
+      Hive::Commands::Workflow.normalize_and_validate_id!(" ")
+    end
+    assert_equal Hive::ExitCodes::USAGE, missing.exit_code
+    assert_includes missing.message, "missing workflow id"
+
+    invalid = assert_raises(Hive::Commands::Workflow::UsageError) do
+      Hive::Commands::Workflow.normalize_and_validate_id!("Bad_Id")
+    end
+    assert_equal Hive::ExitCodes::USAGE, invalid.exit_code
+    assert_includes invalid.message, "invalid workflow id"
+  end
+
+  def test_scaffold_files_writes_and_validates_without_committing
+    with_initialized_project do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      before_log = run!("git", "-C", hive_state, "rev-parse", "HEAD").strip
+
+      scaffold = Hive::Commands::Workflow.scaffold_files!("drafting", project_root: project_root)
+      paths = scaffold.fetch(:paths)
+
+      assert_equal "drafting", scaffold.fetch(:id)
+      assert File.file?(paths.fetch(:descriptor))
+      assert File.file?(paths.fetch(:instruction))
+      workflow = Hive::Workflows::DescriptorParser.parse_file(paths.fetch(:descriptor))
+      assert_equal :drafting, workflow.id
+      assert_equal before_log, run!("git", "-C", hive_state, "rev-parse", "HEAD").strip,
+                   "scaffold_files! must leave commit ownership to its caller"
+
+      Hive::Commands::Workflow.rollback_scaffold(paths)
+      refute File.exist?(paths.fetch(:descriptor))
+      refute File.exist?(paths.fetch(:instruction_dir))
+    end
+  end
+
+  def test_scaffold_files_rolls_back_when_generated_descriptor_fails_validation
+    with_initialized_project do |project_root|
+      error = Hive::ConfigError.new("boom")
+      with_replaced_singleton_method(Hive::Workflows::DescriptorParser, :parse_file, lambda { |_path|
+        raise error
+      }) do
+        raised = assert_raises(Hive::ConfigError) do
+          Hive::Commands::Workflow.scaffold_files!("broken-helper-flow", project_root: project_root)
+        end
+        assert_same error, raised
+      end
+
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "broken-helper-flow.yml"))
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "broken-helper-flow"))
+    end
+  end
+
   def test_rolls_back_files_when_generated_descriptor_fails_validation
     with_initialized_project do |project_root|
       error = Hive::ConfigError.new("boom")

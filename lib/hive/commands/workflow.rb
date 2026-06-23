@@ -36,6 +36,34 @@ module Hive
         new("new", id, project_root: project_root, json: json, stdout: stdout).call!
       end
 
+      def self.normalize_and_validate_id!(raw)
+        command = new("new", raw)
+        id = command.send(:normalize_id, raw)
+        command.send(:validate_id!, id)
+        id
+      end
+
+      def self.scaffold_files!(id_raw, project_root:)
+        command = new("new", id_raw, project_root: project_root)
+        id = command.send(:normalize_id, id_raw)
+        command.send(:validate_id!, id)
+        paths = command.send(:scaffold_paths, id)
+        command.send(:refuse_overwrite!, paths)
+        begin
+          command.send(:write_scaffold!, id, paths)
+          command.send(:validate_descriptor!, paths.fetch(:descriptor))
+          Hive::Workflows::Project.reset!
+        rescue StandardError
+          command.send(:rollback_scaffold, paths)
+          raise
+        end
+        { id: id, paths: paths }
+      end
+
+      def self.rollback_scaffold(paths)
+        new("new").send(:rollback_scaffold, paths)
+      end
+
       def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout)
         @subcommand = subcommand
         @id = id
@@ -71,21 +99,17 @@ module Hive
           raise UsageError.new("unknown workflow subcommand #{@subcommand.inspect} (expected: new)", value: @subcommand)
         end
 
-        id = normalize_id(@id)
-        validate_id!(id)
-        paths = scaffold_paths(id)
-        refuse_overwrite!(paths)
+        scaffold = self.class.scaffold_files!(@id, project_root: @project_root)
+        id = scaffold.fetch(:id)
+        paths = scaffold.fetch(:paths)
         begin
-          write_scaffold!(id, paths)
-          validate_descriptor!(paths.fetch(:descriptor))
-          Hive::Workflows::Project.reset!
           # commit_scaffold! is INSIDE the rollback protection: a commit failure
           # (GitError / ConcurrentRunError) would otherwise leave orphan
           # descriptor + instruction files on disk that make the next retry fail
           # in refuse_overwrite!, turning a retryable command into a stuck one.
           commit_scaffold!(id, paths)
         rescue StandardError
-          rollback_scaffold(paths)
+          self.class.rollback_scaffold(paths)
           raise
         end
 

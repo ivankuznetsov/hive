@@ -164,6 +164,73 @@ class DropCommandIntegrationTest < Minitest::Test
     end
   end
 
+  # `drop <id> --from STAGE` forwards the stage as a TaskResolver filter. A
+  # matching stage resolves and drops; a mismatched (but otherwise valid) stage
+  # narrows the id scan to a folder that doesn't hold the id, so it resolves to
+  # nothing and refuses with invalid_task_path (NOT wrong_stage — that exit-4
+  # contract is slug-only; see wiki/commands/drop.md).
+  def test_bin_hive_drop_id_with_from_stage_mismatch_refuses_then_match_drops
+    with_cli_project do |home, dir, project|
+      slug = "id-from-260622-aaaa"
+      folder = create_task_with_id(dir, "2-brainstorm", slug, 7449)
+
+      out, _err, status = run_hive(home, "drop", "7449", "--project", project, "--from", "3-plan", "--json")
+
+      refute status.success?, "id drop with a mismatched --from must not succeed"
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_equal "invalid_task_path", JSON.parse(out)["error_kind"]
+      assert File.directory?(folder), "task folder must survive a mismatched --from"
+
+      out, err, status = run_hive(home, "drop", "7449", "--project", project, "--from", "2-brainstorm", "--json")
+
+      assert status.success?, err
+      payload = JSON.parse(out)
+      assert_equal slug, payload["slug"]
+      assert_equal [ "2-brainstorm" ], payload["from_stages"]
+      refute File.directory?(folder), "task folder must be removed when --from matches"
+    end
+  end
+
+  # The id path reaches archived tasks through its own empty-active fallback
+  # (drop.rb resolve_path_context), a distinct branch from the slug path's
+  # guard. Dropping a 9-done task by id must still refuse with already_archived
+  # and leave the folder intact — never hard-delete a completed task by id.
+  def test_bin_hive_drop_archived_numeric_id_exits_usage_and_preserves_task
+    with_cli_project do |home, dir, project|
+      slug = "id-done-260622-aaaa"
+      folder = create_task_with_id(dir, "9-done", slug, 7450)
+
+      out, _err, status = run_hive(home, "drop", "7450", "--project", project, "--json")
+
+      refute status.success?, "dropping an archived task by id must not succeed"
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_equal "already_archived", JSON.parse(out)["error_kind"]
+      assert File.directory?(folder), "archived task folder must survive drop by id"
+    end
+  end
+
+  # Same id in two stages of ONE project hits the single-project
+  # id_ambiguity_message branch (distinct from the cross-project label). Drop
+  # must refuse with ambiguous_slug and leave both folders intact.
+  def test_bin_hive_drop_duplicate_numeric_id_within_one_project_is_ambiguous
+    with_cli_project do |home, dir, project|
+      slug1 = "dup-one-stage-260622-aaaa"
+      slug2 = "dup-two-stage-260622-aaaa"
+      folder1 = create_task_with_id(dir, "2-brainstorm", slug1, 7451)
+      folder2 = create_task_with_id(dir, "3-plan", slug2, 7451)
+
+      out, _err, status = run_hive(home, "drop", "7451", "--project", project, "--json")
+
+      refute status.success?, "a duplicate id within one project must not drop"
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "ambiguous_slug", payload["error_kind"]
+      assert_includes payload["message"], "task id 7451 is duplicated"
+      assert File.directory?(folder1), "first duplicate folder must survive"
+      assert File.directory?(folder2), "second duplicate folder must survive"
+    end
+  end
+
   def test_bin_hive_drop_duplicate_numeric_id_requires_project_and_then_drops_selected_project
     with_two_cli_projects do |home, dir1, project1, dir2, _project2|
       slug1 = "duplicate-id-one-260622-aaaa"

@@ -37,7 +37,7 @@ EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non
 
 ## Action map (`Hive::TaskAction::ACTIONS`)
 
-Entries are keyed by an internal symbol that's resolved via `(stage_name, marker_name)` lookup. Each value carries `key` (TaskActionKind constant), `label` (human prose), and `command` (verb name string, or nil).
+Entries are keyed by an internal symbol resolved by routing on the descriptor stage's `kind` (see the "Kind-Routed Classification" section below): coding `:agent`/`:inert` stages map through `Hive::Workflows::Coding::ACTION_DISPATCH`, the coding runtime kinds (`:execute`/`:review_council`/`:finalize`) select their helpers directly, and non-coding stages fall through to the descriptor-generic classifier — the older `(stage_name, marker_name)` case lookup is retired. Each value carries `key` (TaskActionKind constant), `label` (human prose), and `command` (verb name string, or nil).
 
 | Internal key | TaskActionKind | Label | Verb |
 |---|---|---|---|

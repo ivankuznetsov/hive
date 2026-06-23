@@ -102,6 +102,7 @@ class DropCommandIntegrationTest < Minitest::Test
     with_cli_project do |home, dir, project|
       slug = "id-drop-260622-aaaa"
       folder = create_task_with_id(dir, "2-brainstorm", slug, 7448)
+      assert File.directory?(folder), "task folder must exist before drop"
 
       out, err, status = run_hive(home, "drop", "7448", "--project", project, "--json")
 
@@ -188,6 +189,20 @@ class DropCommandIntegrationTest < Minitest::Test
       assert_equal slug, payload["slug"]
       assert_equal [ "2-brainstorm" ], payload["from_stages"]
       refute File.directory?(folder), "task folder must be removed when --from matches"
+
+      # A SHORT --from ref (`brainstorm`) must canonicalize to the same
+      # 2-brainstorm dir and route through the resolver stage_filter, so a fresh
+      # id drops by short ref exactly as the long-form ref above did.
+      slug_short = "id-from-short-260622-aaaa"
+      folder_short = create_task_with_id(dir, "2-brainstorm", slug_short, 7452)
+
+      out, err, status = run_hive(home, "drop", "7452", "--project", project, "--from", "brainstorm", "--json")
+
+      assert status.success?, err
+      payload = JSON.parse(out)
+      assert_equal slug_short, payload["slug"]
+      assert_equal [ "2-brainstorm" ], payload["from_stages"]
+      refute File.directory?(folder_short), "task folder must be removed when a short --from matches"
     end
   end
 
@@ -209,9 +224,10 @@ class DropCommandIntegrationTest < Minitest::Test
     end
   end
 
-  # Same id in two stages of ONE project hits the single-project
-  # id_ambiguity_message branch (distinct from the cross-project label). Drop
-  # must refuse with ambiguous_slug and leave both folders intact.
+  # Same id in two stages of ONE project routes through id_ambiguity_message,
+  # which — unlike the slug-side ambiguity_message — emits one fixed "task id <n>
+  # is duplicated" string regardless of project count. Drop must refuse with
+  # ambiguous_slug and leave both folders intact.
   def test_bin_hive_drop_duplicate_numeric_id_within_one_project_is_ambiguous
     with_cli_project do |home, dir, project|
       slug1 = "dup-one-stage-260622-aaaa"

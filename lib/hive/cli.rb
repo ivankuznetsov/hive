@@ -82,6 +82,20 @@ module Hive
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
+      When used with --new-workflow, the payload also includes
+      descriptor_path and instruction_path.
+
+      To bootstrap a new custom workflow in one pass, use:
+
+        hive init --new-workflow writing ~/Dev/writing
+
+      This scaffolds `.hive-state/workflows/writing.yml` plus
+      `.hive-state/workflows/writing/work.md`, binds
+      `default_workflow: writing`, and prints the paths to edit before
+      running `hive new` without --workflow. `--new-workflow` is mutually
+      exclusive with `--workflow`, reuses `hive workflow new`'s reserved-id
+      checks, and on an already-initialized project scaffolds the workflow
+      and rebinds the default in one hive-state commit.
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`

@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/blank/
 created: 2026-06-21
-updated: 2026-06-21
+updated: 2026-06-23
 tags: [command, workflow, authoring]
 ---
 
@@ -15,6 +15,12 @@ tags: [command, workflow, authoring]
 hive workflow new my-flow
 hive workflow new my-flow --json
 ```
+
+For a fresh project that should default to the custom workflow immediately,
+prefer `hive init --new-workflow my-flow [PROJECT_PATH]`; it performs init,
+scaffolds the same descriptor/instruction files, and binds `default_workflow`
+in one flow. Use `hive workflow new` when the project is already initialized
+and you do not want to rebind the default.
 
 The command is project-root local. It reads the current project's
 `hive_state_path` from `.hive-state/config.yml` (default `.hive-state`) and
@@ -68,5 +74,6 @@ Edit this file to define what the `work` stage should do.
 ## Backlinks
 
 - [[cli]]
+- [[commands/init]]
 - [[modules/workflows]]
 - [[commands/new]]

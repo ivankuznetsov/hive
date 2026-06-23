@@ -64,6 +64,13 @@ def normalize_leading_json_options!(argv)
   argv.insert(cmd_idx + 1, *leading)
 end
 
+# True for an allow-listed value option in `--name=VALUE` form (e.g.
+# `--workflow=content`). Single-sources the predicate shared by
+# new_text_start_index and lift_new_options!.
+def new_value_assignment?(arg)
+  NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+end
+
 def new_text_start_index(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
@@ -77,10 +84,19 @@ def new_text_start_index(argv)
       next
     end
     if NEW_VALUE_OPTIONS.include?(arg)
+      # Boundary scan only: advance past the value unconditionally. This
+      # intentionally diverges from lift_new_options!, which keeps a
+      # trailing/option-like value option as literal text (the
+      # `!value.start_with?("-")` guard). The two only differ for the
+      # out-of-scope "value option before PROJECT with a missing/option-like
+      # value" case, and the sole consumer of this index
+      # (reject_unsupported_json_assignments!) runs first and inspects only
+      # `--json=` tokens, so the divergence is harmless. Keep both guards in
+      # sync if a future edit changes the allow-list or that consumer.
       idx += 2
       next
     end
-    if NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+    if new_value_assignment?(arg)
       idx += 1
       next
     end
@@ -142,6 +158,9 @@ def lift_new_options!(argv)
       # Only consume the next token as the value when it exists and does not
       # begin with `-`; otherwise the bare option stays literal text so a trailing
       # or value-less `--workflow`/`--depends-on` cannot eat PROJECT on rebuild.
+      # (new_text_start_index's boundary scan intentionally advances past the
+      # value unconditionally — see the note there for why the divergence is
+      # harmless.)
       value = argv[idx + 1]
       if value && !value.start_with?("-")
         lifted << arg << value
@@ -149,7 +168,7 @@ def lift_new_options!(argv)
       else
         rest << arg
       end
-    elsif NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+    elsif new_value_assignment?(arg)
       lifted << arg
     else
       rest << arg
@@ -160,9 +179,8 @@ def lift_new_options!(argv)
   project = rest.shift
   return unless project
 
-  rebuilt = argv[0...cmd_idx] + [ "new" ] + lifted + [ project ]
-  rebuilt.concat([ "--", *rest ]) unless rest.empty?
-  argv.replace(rebuilt)
+  tail = rest.empty? ? [] : [ "--", *rest ]
+  argv.replace(argv[0...cmd_idx] + [ "new" ] + lifted + [ project ] + tail)
 end
 
 def json_requested?(argv)

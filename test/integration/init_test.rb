@@ -22,6 +22,23 @@ class InitTest < Minitest::Test
     end
   end
 
+  # Writes a real, parseable workflow descriptor under <state_path>/workflows —
+  # the on-disk dir that Loader.load_dir actually reads. (with_registered_workflow
+  # only fills the in-memory Registry, so it can't exercise load_dir's .empty?
+  # term.) A single terminal stage is the minimal descriptor the parser accepts.
+  def write_custom_workflow_descriptor(state_path)
+    workflows_dir = File.join(state_path, "workflows")
+    FileUtils.mkdir_p(workflows_dir)
+    File.write(File.join(workflows_dir, "mine.yml"), <<~YAML)
+      id: mine
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+    YAML
+    workflows_dir
+  end
+
   def test_initializes_project_with_orphan_branch_and_global_registration
     # `with_tmp_global_config` overrides HOME alongside HIVE_HOME so
     # ServiceInstaller (which writes launchd/systemd units under the
@@ -505,6 +522,76 @@ class InitTest < Minitest::Test
           assert_empty errors, "hive init --workflow --json payload must validate: #{errors.inspect}"
         end
       end
+    end
+  end
+
+  # The OTHER half of no_custom_workflow_yet? — the `load_dir(...).empty?` term.
+  # Every suppression test above feeds a NON-coding default, which short-circuits
+  # on coding_id? before load_dir ever runs. Here the default IS coding, but the
+  # workflows dir already holds a parseable descriptor, so the JSON hint must be
+  # empty: deleting or inverting the `&& ...empty?` term (the predicate's whole
+  # reason to exist) would otherwise ship green.
+  def test_init_json_suppresses_workflow_authoring_hints_when_custom_workflow_authored
+    Dir.mktmpdir("hive-init-hints") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      write_custom_workflow_descriptor(state_path)
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      payload = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+
+      assert_equal [], payload.fetch("hints"),
+                   "a coding default whose workflows dir already holds a descriptor must emit no authoring hint"
+    end
+  end
+
+  # Same on-disk-descriptor arm, human path: the `tip:` line must be suppressed
+  # while the rest of the summary still renders.
+  def test_print_summary_suppresses_workflow_authoring_tip_when_custom_workflow_authored
+    Dir.mktmpdir("hive-init-tip") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      write_custom_workflow_descriptor(state_path)
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+
+      out, _err = capture_io do
+        Hive::Commands::Init.new(dir, json: false).send(
+          :print_summary, entry: entry, ops: ops, answers: answers, workflow: :coding
+        )
+      end
+
+      assert_includes out, "hive: initialized",
+                      "the summary must still render — only the authoring tip is suppressed"
+      refute_includes out, "tip: custom workflows live in this project",
+                       "a coding default with an authored custom workflow must not nag with the authoring tip"
+      refute_includes out, "hive workflow new"
+    end
+  end
+
+  # Direct 2×2 truth table over no_custom_workflow_yet? — {coding, non-coding} ×
+  # {empty, populated dir}. Only coding+empty applies the hint; the populated arm
+  # (the term untested by the suppression cases above) and both non-coding arms
+  # (short-circuited on coding_id?) suppress it.
+  def test_no_custom_workflow_yet_truth_table
+    Dir.mktmpdir("hive-no-custom") do |dir|
+      empty_state = File.join(dir, "empty", ".hive-state")
+      FileUtils.mkdir_p(File.join(empty_state, "workflows"))
+      populated_state = File.join(dir, "populated", ".hive-state")
+      write_custom_workflow_descriptor(populated_state)
+
+      cmd = Hive::Commands::Init.new(dir)
+
+      assert cmd.send(:no_custom_workflow_yet?, empty_state, :coding),
+             "coding default + empty workflows dir → authoring hint applies"
+      refute cmd.send(:no_custom_workflow_yet?, populated_state, :coding),
+             "coding default + on-disk descriptor → authoring hint suppressed (the untested arm)"
+      refute cmd.send(:no_custom_workflow_yet?, empty_state, :content_fixture),
+             "non-coding default short-circuits on coding_id? even with an empty dir"
+      refute cmd.send(:no_custom_workflow_yet?, populated_state, :content_fixture),
+             "non-coding default short-circuits on coding_id? regardless of dir contents"
     end
   end
 

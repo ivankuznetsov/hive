@@ -31,7 +31,11 @@ module Hive
       # Thread project_root through so the valid-names list includes THIS
       # project's owner-authored workflows — a bare valid_names (project_root:
       # nil) skips loading them and could omit the very workflow the user named.
-      names = valid_names(project_root: project_root)
+      # Hold the overlay stable across this load!→Registry.ids read with the same
+      # reentrant Monitor as the happy path above, so the "valid workflows: …"
+      # list a concurrent Puma request can't swap mid-read to another project's
+      # overlay (cosmetic error-message staleness only, but cheaply closed).
+      names = Hive::Workflows::Project.synchronize { valid_names(project_root: project_root) }
       raise Hive::Workflows::UnknownWorkflow.new(
         "unknown workflow #{name.inspect}; valid workflows: #{names.join(', ')}",
         value: name,

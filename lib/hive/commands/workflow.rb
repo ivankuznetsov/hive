@@ -69,8 +69,11 @@ module Hive
       # Inline-author pre-check for `hive init`: does scaffolding `id` clash with
       # files already on disk? A pure predicate — pass an id that
       # normalize_and_validate_id! has ALREADY accepted (the inline author
-      # normalizes in prompt_new_workflow_id before calling this), so it never
-      # raises and the `?` name holds. The inline author always scaffolds from
+      # normalizes in prompt_new_workflow_id before calling this), so on a
+      # pre-validated id it never raises and the `?` name holds. (It can still
+      # raise on a corrupt project config — workflow_dir → Config.load →
+      # ConfigError — but that is a real fault, not an id-shape rejection.) The
+      # inline author always scaffolds from
       # the default (`blank`) template, so the pre-check resolves paths against
       # `blank` too. That is not truly template-independent — scaffold_collisions
       # also walks the template-dependent per-stage instruction files — but those

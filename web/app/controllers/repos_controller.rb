@@ -23,8 +23,10 @@ class ReposController < ApplicationController
   def new
     @url = params[:url].to_s.strip
     raw_project = params[:project].to_s.strip
-    # File.basename strips path segments so a crafted `project` param can't walk
-    # out of the registered-projects lookup below — mirrors create's hardening.
+    # File.basename normalizes a crafted `project` param (strips path segments)
+    # for parity with create's hardening — defense in depth, not load-bearing
+    # here: the lookup below is a string-equality find on entry["name"], so a
+    # `../`-laden name simply wouldn't match anyway.
     @project_name = raw_project.present? ? File.basename(raw_project) : nil
     @suggested_name = params[:name].to_s.strip.presence ||
                       (@project_name || File.basename(@url).delete_suffix(".git") if @url.present? || @project_name)

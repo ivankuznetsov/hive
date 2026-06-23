@@ -68,6 +68,17 @@ class ReposTest < ActionDispatch::IntegrationTest
     system("git", "-C", dir, "add", ".", exception: true)
     system("git", "-C", dir, "-c", "user.email=t@e.c", "-c", "user.name=T", "commit", "-qm", "i", exception: true)
 
+    # Spy on Init.new to prove the web path hands the workflow over as a FLAG —
+    # the interactive workflow prompt is bypassed entirely. The on-disk
+    # default_workflow assertion below can't by itself tell a flag bind from a
+    # prompt bind; the system test covers the prompt-skip only implicitly.
+    captured_workflow = :unset
+    original_init_new = Hive::Commands::Init.method(:new)
+    Hive::Commands::Init.define_singleton_method(:new) do |*args, **kwargs|
+      captured_workflow = kwargs[:workflow]
+      original_init_new.call(*args, **kwargs)
+    end
+
     with_repos_root(File.dirname(dir)) do
       post "/repos", params: {
         url: "ivankuznetsov/configured-app", name: "configured-app",
@@ -82,11 +93,15 @@ class ReposTest < ActionDispatch::IntegrationTest
     end
 
     assert_redirected_to "/repos"
+    assert_equal "content", captured_workflow,
+                 "the web path must supply the workflow as an Init flag, bypassing the interactive prompt"
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
     assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")
     assert_equal "content", YAML.safe_load(config).fetch("default_workflow"),
                  "the chosen workflow must land in the project config through Init.new(workflow:)"
+  ensure
+    Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end
 
   test "rerun setup rebinds the project default workflow on disk" do

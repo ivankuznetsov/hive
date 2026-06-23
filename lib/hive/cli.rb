@@ -332,7 +332,7 @@ module Hive
     long_desc <<~DESC
       Create a new task in PROJECT from the free-text TEXT. By default, the task
       uses the project's default workflow; pass --workflow to pin a registered
-      workflow for this task.
+      workflow for this task. (Options may also follow the text.)
 
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
@@ -342,8 +342,11 @@ module Hive
 
       Examples:
 
-        hive new myproj "add export button" --depends-on 42
-        hive new myproj "wire up export API" --depends-on add-export-endpoint-260618-ab12
+        hive new myproj --workflow content "write the launch post"
+
+        hive new myproj --depends-on 42 "add export button"
+
+        hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
     DESC
     option :depends_on, type: :string,
                         desc: "stack on a prerequisite task id or slug; hold daemon " \

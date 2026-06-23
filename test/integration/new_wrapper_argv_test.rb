@@ -68,6 +68,35 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
+  def test_workflow_then_depends_on_after_project_are_both_lifted
+    with_workflow_project do |home, project_root, project|
+      _out, err, status = run_hive(home, "new", project, "--workflow", WORKFLOW_ID, "--depends-on", "42",
+                                   "reverse order task", chdir: project_root)
+
+      assert status.success?, "reversed --workflow/--depends-on ordering should both lift, stderr was: #{err}"
+      folder = only_task_folder(project_root)
+      assert_pinned_to_my_flow(folder)
+      assert_equal "42", Hive::TaskMeta.read(folder)[:depends_on]
+    end
+  end
+
+  def test_value_option_followed_by_option_like_token_stays_literal_text
+    with_cli_project do |home, project_root, project|
+      _out, err, status = run_hive(home, "new", project, "--workflow", "--depends-on", "42", "text",
+                                   chdir: project_root)
+
+      # `--workflow`'s next token is the option-like `--depends-on`, so `--workflow`
+      # must demote to literal text (the `!value.start_with?("-")` guard) while
+      # `--depends-on 42` still lifts. Dropping the guard would let `--workflow`
+      # swallow `--depends-on` as its value and pin an invalid workflow instead.
+      assert status.success?, "option-like value must demote --workflow to text, stderr was: #{err}"
+      folder = only_task_folder(project_root)
+      assert_nil Hive::TaskMeta.read(folder)[:workflow], "demoted --workflow must not pin a workflow"
+      assert_equal "42", Hive::TaskMeta.read(folder)[:depends_on], "--depends-on 42 must still lift"
+      assert_includes File.read(File.join(folder, "idea.md")), "--workflow text"
+    end
+  end
+
   def test_trailing_workflow_option_after_text_is_lifted
     with_workflow_project do |home, project_root, project|
       _out, err, status = run_hive(home, "new", project, "trailing option task", "--workflow", WORKFLOW_ID,
@@ -86,6 +115,11 @@ class NewWrapperArgvTest < Minitest::Test
 
       assert status.success?, "trailing value-less --depends-on must not eat PROJECT, stderr was: #{err}"
       folder = only_task_folder(project_root)
+      # The slug derives from the idea text (new.rb derive_slug), so a slug rooted
+      # in "idea1 idea2" directly proves PROJECT bound to the real project and the
+      # idea was not mis-bound as PROJECT (which would have failed find_project).
+      assert_match(/\Aidea1-idea2-/, File.basename(folder),
+                   "slug must derive from the idea text, proving #{project} bound as PROJECT not the idea")
       assert_nil Hive::TaskMeta.read(folder)[:depends_on], "value-less --depends-on must not bind a dependency"
       assert_includes File.read(File.join(folder, "idea.md")), "idea1 idea2 --depends-on"
     end

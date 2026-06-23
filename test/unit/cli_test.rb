@@ -148,6 +148,17 @@ class HiveCliTest < Minitest::Test
     # built-ins at class load). Register a fixture into the runtime overlay and
     # assert its id never leaks into `help new`.
     with_registered_workflow(content_workflow) do
+      # Direct helper-level guard: assert the contract at its source, not only
+      # after Thor renders the option desc. A future rewrite of
+      # `workflow_option_desc` to dynamically enumerate `Registry.ids` would
+      # leave the frozen, class-load option desc unchanged, so the rendered
+      # check below would stay green while the helper silently became
+      # project-dependent. Calling the helper inside the runtime overlay catches
+      # that regression directly. (A deliberate dynamic upgrade would update
+      # this assertion on purpose.)
+      refute_includes Hive::CLI.workflow_option_desc, content_workflow.id.to_s,
+                      "workflow_option_desc must stay built-ins-only, independent of the registered project workflow"
+
       new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
       refute_includes new_out, content_workflow.id.to_s,
                       "--workflow help must list built-ins only, never active-project workflows"
@@ -172,7 +183,12 @@ class HiveCliTest < Minitest::Test
     assert_includes init_out, desc
 
     cli_source = File.read(File.expand_path("../../lib/hive/cli.rb", __dir__))
-    refute_match(/["']coding, content/, cli_source,
+    # Match the bare built-in names regardless of a leading prefix: the prior
+    # `/["']coding, content/` only caught a quote-hugging literal, so it would
+    # have missed the most-likely regression — the pre-PR prefixed form
+    # `"valid: coding, content"`. The names never appear verbatim in cli.rb;
+    # they must come from the registry.
+    refute_match(/coding, content/, cli_source,
                  "built-in workflow names must come from the registry")
   end
 

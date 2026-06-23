@@ -1,5 +1,5 @@
 ---
-date: 2026-06-23
+date: 2026-06-22
 slug: drop-numeric-id
 pages: [commands/drop, modules/task_resolver]
 ---

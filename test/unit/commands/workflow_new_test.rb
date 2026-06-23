@@ -266,7 +266,7 @@ class WorkflowNewTest < Minitest::Test
   end
 
   def test_call_reports_unknown_subcommand_as_usage
-    with_initialized_project do |project_root|
+    with_tmp_dir do |project_root|
       out, err, status = with_captured_exit do
         Hive::Commands::Workflow.new("save", "my-flow", project_root: project_root).call
       end

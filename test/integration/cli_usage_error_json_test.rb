@@ -100,6 +100,35 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "InvalidTaskPath", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_equal <<~MSG.chomp, payload["message"]
+        ERROR: "hive workflow" was called with arguments ["a", "b", "c"]
+        Usage: "hive workflow SUBCOMMAND [ID]"
+      MSG
+      # Argv-shape (Thor) errors ride the envelope but never gain the
+      # in-command UsageError discovery fields — those come only from the
+      # command's own raise path (bare `hive workflow`), not the bin/hive
+      # contract that wraps Thor's arity error.
+      refute payload.key?("expected"), "Thor arity errors must not carry `expected`"
+      refute payload.key?("value"), "Thor arity errors must not carry `value`"
+    end
+  end
+
+  # Human-mode (non-`--json`) sibling of the case above. bin/hive branches its
+  # stderr prefix on whether a JSON envelope was emitted (`hive: ...` only when
+  # JSON rode out); without --json the raw Thor arity prose must surface on
+  # stderr with empty stdout (exit 64). Guards that prefix branch and the Thor
+  # arity message against a silent regression.
+  def test_too_many_positionals_workflow_human_usage_error_emits_thor_arity_prose
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "workflow", "a", "b", "c")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_empty out
+      assert_equal <<~ERR, err
+        ERROR: "hive workflow" was called with arguments ["a", "b", "c"]
+        Usage: "hive workflow SUBCOMMAND [ID]"
+      ERR
     end
   end
 

@@ -101,13 +101,16 @@ module Hive
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     option :workflow, type: :string,
                       desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
+    option :new_workflow, type: :string,
+                          desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
       Hive::Commands::Init.new(
         project_path,
         force: options[:force],
         json: options[:json],
-        workflow: options[:workflow]
+        workflow: options[:workflow],
+        new_workflow: options[:new_workflow]
       ).call
     end
 

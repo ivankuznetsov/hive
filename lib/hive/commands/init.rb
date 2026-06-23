@@ -1,6 +1,7 @@
 require "open3"
 require "fileutils"
 require "json"
+require "pathname"
 require "shellwords"
 require "stringio"
 require "hive/config"
@@ -11,6 +12,7 @@ require "hive/task_meta"
 require "hive/worktree"
 require "hive/workflow_selection"
 require "hive/llm_wiki_bootstrap"
+require "hive/commands/workflow"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
 require "hive/commands/daemon/service_installer"
@@ -50,13 +52,15 @@ module Hive
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit).
       WorkflowChoice = Data.define(:descriptor, :source)
+      WorkflowDescriptorRef = Data.define(:id)
 
       def initialize(project_path, force: false, json: false, prompts: nil,
-                     workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
+                     workflow: nil, new_workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
         @workflow_name = workflow
+        @new_workflow = new_workflow
         @workflow_input = workflow_input
         @workflow_output = workflow_output
         # Optional Prompts instance for testability. Tests inject a
@@ -73,6 +77,14 @@ module Hive
         validate_clean_tree! unless @force
 
         ops = Hive::GitOps.new(@project_path)
+        if @workflow_name && @new_workflow
+          raise Hive::Commands::Workflow::UsageError, "--workflow and --new-workflow are mutually exclusive"
+        end
+        if @new_workflow
+          init_with_new_workflow(ops)
+          return
+        end
+
         workflow_choice = resolve_workflow_choice(ops)
         if ops.hive_state_branch_exists?
           if workflow_choice.source == :implicit
@@ -113,6 +125,94 @@ module Hive
         raise Hive::InternalError, "init failed: #{e.class}: #{e.message}"
       end
 
+      def init_with_new_workflow(ops)
+        id = Hive::Commands::Workflow.normalize_and_validate_id!(@new_workflow)
+        if ops.hive_state_branch_exists?
+          scaffold_and_bind_existing(ops, id)
+        else
+          scaffold_and_bind_fresh(ops, id)
+        end
+      end
+
+      def scaffold_and_bind_fresh(ops, id)
+        answers = collect_prompt_answers
+        project_config_content = render_project_config(ops, answers: answers, default_workflow: id)
+        scaffold = nil
+        entry = initialize_project_state(ops, content: project_config_content) do
+          scaffold = scaffold_descriptor_commit!(ops, id)
+        end
+
+        if @json
+          emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: id,
+                            extra: scaffold_payload(scaffold.fetch(:paths)))
+        else
+          print_summary(entry: entry, ops: ops, answers: answers, workflow: id, scaffold_paths: scaffold.fetch(:paths))
+        end
+        register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
+        run_init_preflight!
+      end
+
+      def scaffold_descriptor_commit!(ops, id)
+        scaffold = nil
+        begin
+          scaffold = Hive::Commands::Workflow.scaffold_files!(id, project_root: @project_path)
+          paths = scaffold.fetch(:paths)
+          Hive::Lock.with_commit_lock(ops.hive_state_path) do
+            ops.hive_commit(
+              stage_name: "workflows",
+              slug: id,
+              action: "created",
+              pathspecs: [
+                relative_to_hive_state(paths.fetch(:descriptor), ops),
+                relative_to_hive_state(paths.fetch(:instruction_dir), ops)
+              ]
+            )
+          end
+          scaffold
+        rescue StandardError
+          Hive::Commands::Workflow.rollback_scaffold(scaffold.fetch(:paths)) if scaffold
+          raise
+        end
+      end
+
+      def scaffold_and_bind_existing(ops, id)
+        ops.ensure_hive_state_worktree_attached
+        scaffold = Hive::Commands::Workflow.scaffold_files!(id, project_root: @project_path)
+        paths = scaffold.fetch(:paths)
+        cfg_path = File.join(ops.hive_state_path, "config.yml")
+        before = :not_captured
+        begin
+          Hive::Lock.with_commit_lock(ops.hive_state_path) do
+            current, corrupt = current_default_workflow_with_status(ops)
+            warn_on_fieldless_tasks_rebinding(ops, from: current, to: id) unless current == id && !corrupt
+            before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
+            write_default_workflow!(cfg_path, id)
+            ops.hive_commit(
+              stage_name: "workflows",
+              slug: id,
+              action: "created",
+              pathspecs: [
+                relative_to_hive_state(paths.fetch(:descriptor), ops),
+                relative_to_hive_state(paths.fetch(:instruction_dir), ops),
+                "config.yml"
+              ]
+            )
+          end
+        rescue StandardError
+          restore_config_snapshot(cfg_path, before) unless before == :not_captured
+          Hive::Commands::Workflow.rollback_scaffold(paths)
+          raise
+        end
+
+        Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+        workflow_choice = WorkflowChoice.new(descriptor: WorkflowDescriptorRef.new(id.to_sym), source: :flag)
+        if @json
+          emit_existing_json_summary(ops, workflow_choice: workflow_choice, extra: scaffold_payload(paths))
+        else
+          write_existing_summary(ops, workflow_choice: workflow_choice, scaffold_paths: paths)
+        end
+      end
+
       def handle_existing_project(ops, workflow_choice:)
         ops.ensure_hive_state_worktree_attached
         # `:implicit` re-init already raised AlreadyInitialized in `call` before
@@ -127,9 +227,14 @@ module Hive
         end
       end
 
-      def write_existing_summary(_ops, workflow_choice:)
+      def write_existing_summary(_ops, workflow_choice:, scaffold_paths: nil)
         $stdout.puts "hive: already initialized #{File.basename(@project_path)}"
         $stdout.puts "workflow: #{workflow_choice.descriptor.id}"
+        if scaffold_paths
+          $stdout.puts "descriptor: #{scaffold_paths.fetch(:descriptor)}"
+          $stdout.puts "edit: #{scaffold_paths.fetch(:instruction)}"
+          $stdout.puts "next: edit the descriptor above, then hive new #{File.basename(@project_path)} '<idea>'"
+        end
       rescue Errno::EPIPE
         nil
       end
@@ -138,8 +243,14 @@ module Hive
       # project would otherwise get exit 0 with EMPTY stdout — no confirmation
       # of the re-bind. Emit a minimal `already_initialized` hive-init payload
       # (a distinct oneOf arm from the fresh SuccessPayload in the schema).
-      def emit_existing_json_summary(ops, workflow_choice:)
-        puts JSON.generate(
+      def emit_existing_json_summary(ops, workflow_choice:, extra: {})
+        puts JSON.generate(existing_payload(ops, workflow_choice: workflow_choice).merge(extra))
+      rescue Errno::EPIPE
+        nil
+      end
+
+      def existing_payload(ops, workflow_choice:)
+        {
           "schema" => "hive-init",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init"),
           "ok" => true,
@@ -148,9 +259,7 @@ module Hive
           "path" => @project_path,
           "hive_state_path" => ops.hive_state_path,
           "workflow" => workflow_choice.descriptor.id.to_s
-        )
-      rescue Errno::EPIPE
-        nil
+        }
       end
 
       def update_existing_default_workflow!(ops, workflow_id)
@@ -300,7 +409,7 @@ module Hive
         end
       end
 
-      def initialize_project_state(ops, content:)
+      def initialize_project_state(ops, content:, &after_bootstrap)
         rollback_on_failure = false
         side_effect_snapshot = capture_init_side_effect_snapshot
         begin
@@ -313,7 +422,9 @@ module Hive
           ops.commit_llm_wiki_bootstrap!
           Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
 
-          Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+          entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+          after_bootstrap&.call
+          entry
         rescue StandardError
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
           raise
@@ -597,8 +708,8 @@ module Hive
         Hive::InvokedBinary.path
       end
 
-      def emit_json_summary(entry:, ops:, answers:, workflow:)
-        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers, workflow: workflow))
+      def emit_json_summary(entry:, ops:, answers:, workflow:, extra: {})
+        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers, workflow: workflow).merge(extra))
       rescue Errno::EPIPE
         nil
       end
@@ -634,7 +745,14 @@ module Hive
         }
       end
 
-      def print_summary(entry:, ops:, answers:)
+      def scaffold_payload(paths)
+        {
+          "descriptor_path" => paths.fetch(:descriptor),
+          "instruction_path" => paths.fetch(:instruction)
+        }
+      end
+
+      def print_summary(entry:, ops:, answers:, workflow: nil, scaffold_paths: nil)
         c = Palette.for($stdout)
         name = entry["name"]
         rows = [
@@ -645,6 +763,13 @@ module Hive
           [ "daemon",         answers.fetch("daemon_enabled", true) ? "enabled" : "disabled" ],
           [ "babysitter",     answers.fetch("babysitter_enabled", true) ? "enabled" : "disabled" ]
         ]
+        if scaffold_paths
+          rows += [
+            [ "workflow",   workflow ],
+            [ "descriptor", scaffold_paths.fetch(:descriptor) ],
+            [ "edit",       scaffold_paths.fetch(:instruction) ]
+          ]
+        end
         label_width = rows.map { |k, _| k.length }.max
 
         $stdout.puts "#{c.green('✔')} #{c.bold('hive: initialized')} #{c.bold_cyan(name)}"
@@ -652,7 +777,13 @@ module Hive
           $stdout.puts "  #{c.dim(label.ljust(label_width))}  #{value}"
         end
         $stdout.puts
-        $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} hive new #{name} '<short task description>'"
+        next_step =
+          if scaffold_paths
+            "edit the descriptor above, then hive new #{name} '<idea>'"
+          else
+            "hive new #{name} '<short task description>'"
+          end
+        $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} #{next_step}"
       end
 
       def collect_prompt_answers
@@ -776,6 +907,10 @@ module Hive
 
         match = ids.find { |id| id.casecmp(value).zero? }
         match && Hive::WorkflowSelection.fetch!(match, project_root: @project_path)
+      end
+
+      def relative_to_hive_state(path, ops)
+        Pathname.new(path).relative_path_from(Pathname.new(ops.hive_state_path)).to_s
       end
 
       # Minimal ANSI palette for one-shot CLI summaries. Honors

@@ -2,10 +2,14 @@ require "test_helper"
 require "json"
 require "stringio"
 require "json_schemer"
+require "hive/commands/approve"
 require "hive/commands/init"
+require "hive/commands/new"
 require "hive/llm_wiki_bootstrap"
 require "hive/reviewers/agent"
+require "hive/task"
 require "hive/task_meta"
+require "hive/workflows/descriptor_parser"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
@@ -153,6 +157,214 @@ class InitTest < Minitest::Test
           assert_includes err, "content_fixture"
           refute File.exist?(File.join(dir, ".hive-state"))
         end
+      end
+    end
+  end
+
+  def test_init_new_workflow_fresh_scaffolds_and_binds_default
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        out, _err = capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+
+        descriptor_path = File.join(dir, ".hive-state", "workflows", "writing.yml")
+        instruction_path = File.join(dir, ".hive-state", "workflows", "writing", "work.md")
+        config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        assert_equal "writing", config.fetch("default_workflow")
+        assert File.file?(descriptor_path)
+        assert File.file?(instruction_path)
+        assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
+
+        workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+        assert_equal :writing, workflow.id
+        assert_equal %w[inbox work done], workflow.stage_names
+        assert_equal :inert, workflow.stages.first.kind
+
+        assert_includes out, "workflow"
+        assert_includes out, "writing"
+        assert_includes out, descriptor_path
+        assert_includes out, instruction_path
+        assert_includes out, "edit the descriptor above, then hive new #{File.basename(dir)} '<idea>'"
+
+        log = run!("git", "-C", File.join(dir, ".hive-state"), "log", "--format=%s").lines.map(&:chomp)
+        assert_includes log, "hive: workflows/writing created"
+        assert Hive::Config.registered_projects.any? { |project| project["path"] == File.expand_path(dir) }
+      end
+    end
+  end
+
+  def test_init_new_workflow_existing_scaffolds_and_rebinds_in_one_commit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        hive_state = File.join(dir, ".hive-state")
+        before_count = run!("git", "-C", hive_state, "rev-list", "--count", "HEAD").to_i
+
+        out, _err = capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+
+        descriptor_path = File.join(hive_state, "workflows", "writing.yml")
+        instruction_path = File.join(hive_state, "workflows", "writing", "work.md")
+        config = YAML.safe_load(File.read(File.join(hive_state, "config.yml")))
+        assert_equal "writing", config.fetch("default_workflow")
+        assert File.file?(descriptor_path)
+        assert File.file?(instruction_path)
+        assert_includes out, "hive: already initialized"
+        assert_includes out, "workflow: writing"
+        assert_includes out, descriptor_path
+        assert_includes out, instruction_path
+
+        assert_equal before_count + 1, run!("git", "-C", hive_state, "rev-list", "--count", "HEAD").to_i
+        assert_equal "hive: workflows/writing created",
+                     run!("git", "-C", hive_state, "log", "--format=%s", "-1").strip
+        changed = run!("git", "-C", hive_state, "show", "--name-only", "--format=", "HEAD")
+        assert_includes changed, "config.yml"
+        assert_includes changed, "workflows/writing.yml"
+        assert_includes changed, "workflows/writing/work.md"
+      end
+    end
+  end
+
+  def test_init_new_workflow_default_routes_flagless_new_through_scaffolded_workflow
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+        Hive::Workflows::Project.reset!
+
+        capture_io { Hive::Commands::New.new(project, "custom default task").call }
+
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "custom-default-task-*")].first
+        assert inbox, "flag-less hive new should create a task in the custom workflow entry stage"
+        assert_equal "writing", Hive::TaskMeta.read(inbox)[:workflow]
+        assert_equal :writing, Hive::Task.new(inbox).workflow.id
+        assert_includes File.read(File.join(inbox, "idea.md")), "<!-- COMPLETE -->"
+
+        Hive::Workflows::Project.reset!
+        capture_io { Hive::Commands::Approve.new(File.basename(inbox), project: project, from: "1-inbox").call }
+        work = Dir[File.join(dir, ".hive-state", "stages", "2-work", "custom-default-task-*")].first
+        assert work, "approving the custom workflow entry stage should advance to 2-work"
+        assert_equal "writing", Hive::TaskMeta.read(work)[:workflow]
+      end
+    end
+  end
+
+  def test_init_new_workflow_rejects_reserved_id_before_writing_state
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Init.new(dir, new_workflow: "coding").call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "workflow id \"coding\" is reserved by a built-in workflow"
+        refute File.exist?(File.join(dir, ".hive-state"))
+        assert_empty run!("git", "-C", dir, "branch", "--list", "hive/state").strip
+        refute Hive::Config.find_project(File.basename(dir))
+      end
+    end
+  end
+
+  def test_init_new_workflow_rejects_workflow_flag_mutual_exclusivity_before_writing_state
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Init.new(dir, workflow: "content", new_workflow: "writing").call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "--workflow and --new-workflow are mutually exclusive"
+        refute File.exist?(File.join(dir, ".hive-state"))
+        assert_empty run!("git", "-C", dir, "branch", "--list", "hive/state").strip
+        refute Hive::Config.find_project(File.basename(dir))
+      end
+    end
+  end
+
+  def test_init_new_workflow_fresh_rolls_back_when_scaffold_commit_fails
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        with_replaced_singleton_method(Hive::Commands::Workflow, :scaffold_files!, lambda { |_id, project_root:|
+          paths = {
+            descriptor: File.join(project_root, ".hive-state", "workflows", "writing.yml"),
+            instruction_dir: File.join(project_root, ".hive-state", "workflows", "writing"),
+            instruction: File.join(project_root, ".hive-state", "workflows", "writing", "work.md")
+          }
+          FileUtils.mkdir_p(paths.fetch(:instruction_dir))
+          File.write(paths.fetch(:descriptor), "id: writing\n")
+          File.write(paths.fetch(:instruction), "work\n")
+          raise Hive::GitError, "scaffold boom"
+        }) do
+          _out, err = capture_io do
+            error = assert_raises(Hive::GitError) do
+              Hive::Commands::Init.new(dir, new_workflow: "writing").call
+            end
+            assert_includes error.message, "scaffold boom"
+          end
+          assert_includes err, "partial init failed; rolled back"
+        end
+
+        assert_clean_failed_init(dir)
+        refute File.exist?(File.join(dir, ".hive-state", "workflows", "writing.yml"))
+      end
+    end
+  end
+
+  def test_init_new_workflow_existing_restores_config_and_scaffold_on_commit_failure
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        hive_state = File.join(dir, ".hive-state")
+        cfg_path = File.join(hive_state, "config.yml")
+        before_config = File.binread(cfg_path)
+        original_new = Hive::GitOps.method(:new)
+
+        with_replaced_singleton_method(Hive::GitOps, :new, lambda { |path|
+          ops = original_new.call(path)
+          original_commit = ops.method(:hive_commit)
+          ops.define_singleton_method(:hive_commit) do |**kwargs|
+            if kwargs[:stage_name] == "workflows" && kwargs[:slug] == "writing"
+              raise Hive::GitError, "commit boom"
+            end
+            original_commit.call(**kwargs)
+          end
+          ops
+        }) do
+          error = assert_raises(Hive::GitError) do
+            capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+          end
+          assert_includes error.message, "commit boom"
+        end
+
+        assert_equal before_config, File.binread(cfg_path)
+        refute File.exist?(File.join(hive_state, "workflows", "writing.yml"))
+        refute File.exist?(File.join(hive_state, "workflows", "writing"))
+        assert File.directory?(hive_state), "pre-existing hive state must remain attached"
+        assert Hive::Config.find_project(File.basename(dir)), "existing project registration should remain intact"
+      end
+    end
+  end
+
+  def test_init_new_workflow_existing_collision_leaves_descriptor_and_config_unchanged
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        hive_state = File.join(dir, ".hive-state")
+        cfg_path = File.join(hive_state, "config.yml")
+        before_config = File.binread(cfg_path)
+        descriptor_path = File.join(hive_state, "workflows", "writing.yml")
+        instruction_dir = File.join(hive_state, "workflows", "writing")
+        FileUtils.mkdir_p(instruction_dir)
+        File.write(descriptor_path, "custom descriptor\n")
+        File.write(File.join(instruction_dir, "work.md"), "custom work\n")
+
+        error = assert_raises(Hive::Commands::Workflow::UsageError) do
+          capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+        assert_includes error.message, "workflow scaffold already exists"
+        assert_equal before_config, File.binread(cfg_path)
+        assert_equal "custom descriptor\n", File.read(descriptor_path)
+        assert_equal "custom work\n", File.read(File.join(instruction_dir, "work.md"))
       end
     end
   end

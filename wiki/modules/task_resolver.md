@@ -3,7 +3,7 @@ title: Hive::TaskResolver
 type: module
 source: lib/hive/task_resolver.rb
 created: 2026-04-25
-updated: 2026-06-03
+updated: 2026-06-23
 tags: [module, resolver, slug, task-id]
 ---
 
@@ -46,6 +46,7 @@ When the caller passes both an absolute folder path AND `--project NAME`, the pa
 |------|-----|
 | `lib/hive/commands/run.rb` | Resolves slug, numeric id, or folder targets before dispatching stage runners. |
 | `lib/hive/commands/stage_action.rb` | Resolves workflow-verb targets, using `--from` as stage filter when present. |
+| `lib/hive/commands/drop.rb` | Resolves path-shaped and numeric-id targets before Drop snapshots active/archive stage dirs for deletion/refusal. |
 | `lib/hive/commands/approve.rb` | Resolves approve targets; `--from` can disambiguate same-slug stages while preserving idempotency checks. |
 | `lib/hive/commands/generate_name.rb` | Resolves task targets before display-name generation. |
 | `lib/hive/commands/findings.rb` | Resolves findings targets, with optional `--stage`. |

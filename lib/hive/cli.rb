@@ -82,6 +82,23 @@ module Hive
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
+      When used with --new-workflow, the payload also includes
+      descriptor_path and instruction_path.
+
+      To bootstrap a new custom workflow in one pass, use:
+
+        hive init --new-workflow writing ~/Dev/writing
+
+      This scaffolds `.hive-state/workflows/writing.yml` plus
+      `.hive-state/workflows/writing/work.md`, binds
+      `default_workflow: "writing"`, and prints the paths to edit before
+      running `hive new` without --workflow. The descriptor and the
+      `config.yml` binding are committed together on `hive/state` on both the
+      fresh and already-initialized paths, so the bound default survives a
+      hive-state reset. `--new-workflow` is mutually exclusive with
+      `--workflow`, reuses `hive workflow new`'s reserved-id checks, and on an
+      already-initialized project scaffolds the workflow and rebinds the
+      default in one hive-state commit.
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
@@ -101,13 +118,16 @@ module Hive
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     option :workflow, type: :string,
                       desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
+    option :new_workflow, type: :string,
+                          desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
       Hive::Commands::Init.new(
         project_path,
         force: options[:force],
         json: options[:json],
-        workflow: options[:workflow]
+        workflow: options[:workflow],
+        new_workflow: options[:new_workflow]
       ).call
     end
 
@@ -332,7 +352,7 @@ module Hive
     long_desc <<~DESC
       Create a new task in PROJECT from the free-text TEXT. By default, the task
       uses the project's default workflow; pass --workflow to pin a registered
-      workflow for this task.
+      workflow for this task. (Options may also follow the text.)
 
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
@@ -342,8 +362,11 @@ module Hive
 
       Examples:
 
-        hive new myproj "add export button" --depends-on 42
-        hive new myproj "wire up export API" --depends-on add-export-endpoint-260618-ab12
+        hive new myproj --workflow content "write the launch post"
+
+        hive new myproj --depends-on 42 "add export button"
+
+        hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
     DESC
     option :depends_on, type: :string,
                         desc: "stack on a prerequisite task id or slug; hold daemon " \

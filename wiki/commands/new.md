@@ -12,19 +12,27 @@ tags: [command, capture, slug, task-id, commit-lock, workflow]
 ## Usage
 
 ```
-hive new [--workflow NAME] PROJECT TEXT...
+hive new PROJECT [--workflow NAME] [--depends-on ID_OR_SLUG] TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
 
-After `PROJECT`, the executable wrapper treats the rest of argv as task text
-even when tokens look like wrapper controls. `hive new PROJECT add --help docs`
-captures `add --help docs` instead of rendering help, and
+The executable wrapper lifts standalone allow-listed `new` options from anywhere
+outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`,
+`--depends-on VALUE`, `--depends-on=VALUE`, and Thor-style JSON booleans. The
+first remaining positional is `PROJECT`; the rest remains literal task text
+behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
+`hive new PROJECT --workflow my-flow "<your idea>"` pins the task instead of
+capturing `--workflow my-flow` in `idea.md`. `--json` is lifted too, but `new`
+still emits the plain text surface below.
+
+Only the closed allow-list is lifted. `hive new PROJECT add --help docs`
+captures `add --help docs` instead of rendering help,
 `hive new PROJECT literal --json=yes text` captures the malformed-looking JSON
-assignment literally instead of failing the wrapper boolean grammar. Wrapper
-options before the project boundary are still parsed normally, including
-`--workflow NAME`; this special case applies only to the text tail after the
-registered project argument.
+assignment literally instead of failing the wrapper boolean grammar, and
+`hive new PROJECT --foo idea` captures `--foo idea` rather than treating `--foo`
+as a command option. A `--workflow` substring inside one quoted argv element
+also remains literal task text.
 
 The human stdout surface is still plain text:
 
@@ -95,6 +103,7 @@ display_name:
 ## Tests
 
 - `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, `meta.yml` capture, `--workflow` overrides/default pinning, non-coding entry markers, counter-lock fallback, the per-project commit-lock wrapper, display-name subprocess spawning, and the captured commit.
+- `test/integration/new_wrapper_argv_test.rb` drives the real `bin/hive` subprocess and pins wrapper-only argv behavior: canonical `PROJECT --workflow ID "text"`, before-project and trailing options, `--workflow=ID`, combined dependency/workflow flags, literal `--workflow` substrings, lifted-but-plain `--json`, missing text after lifted options, and unrecognized options as task text.
 - `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
 
 ## Backlinks

@@ -86,6 +86,13 @@ module Hive
 
       # An all-digits target is unambiguously a task id: Stages::SLUG_RE
       # requires a leading lowercase letter, so no slug can be all digits.
+      #
+      # This /\A\d+\z/ predicate is duplicated, deliberately, in
+      # TaskResolver#numeric_target? and the two MUST stay in lockstep: Drop
+      # uses it to route a target onto the resolver path *before* it can build
+      # the resolver, so a shared instance method isn't reachable here. If the
+      # rule ever changes (signs, base, width caps), change BOTH — otherwise a
+      # target routes one way here and resolves the other way there.
       def numeric_target?
         @target.to_s.match?(/\A\d+\z/)
       end
@@ -111,10 +118,14 @@ module Hive
           [ active_stage_dirs, archive_stage_dirs ]
         end
         folders = collect_stage_folders(task.hive_state_path, task.slug, active_dirs)
-        # Mirror resolve_slug_context: if the path/id target landed on the
-        # archive stage (no active folders, but the archive folder exists)
-        # surface the archive match so guard_archived! refuses cleanly
-        # instead of silently dropping nothing.
+        # Same outcome as resolve_slug_context, inverted mechanism: if the
+        # path/id target landed on the archive stage (no active folders, but the
+        # archive folder exists) surface the archive match so guard_archived!
+        # refuses cleanly instead of silently dropping nothing. Here that's an
+        # explicit empty-active fallback (collect against archive_dirs only when
+        # `folders` came back empty); resolve_slug_context reaches the same end
+        # by *not rejecting* the archive folders when no active ones remain
+        # (see 189-192).
         if folders.empty?
           archived = collect_stage_folders(task.hive_state_path, task.slug, archive_dirs)
           folders = archived unless archived.empty?

@@ -34,7 +34,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 | Generic failure (uncategorised) | 1 | `error` |
 | `--from` does not match the resolved active stage | 4 | `wrong_stage` |
 | Unknown slug/path/id | 64 | `invalid_task_path` |
-| Ambiguous slug across projects | 64 | `ambiguous_slug` |
+| Ambiguous slug/id across projects | 64 | `ambiguous_slug` |
 | Task is already in `9-done` | 64 | `already_archived` |
 | Git operation failed (e.g. `branch -D`) | 70 | `git` |
 | Worktree operation failed (e.g. `worktree remove`) | 70 | `worktree` |

@@ -67,6 +67,9 @@ module Hive
       @target.include?("/") || @target.start_with?("~", ".")
     end
 
+    # Mirrors Hive::Commands::Drop#numeric_target? — keep this /\A\d+\z/ rule in
+    # lockstep with that one (Drop routes onto the resolver path before it can
+    # reach this method, so the predicate is duplicated rather than shared).
     def numeric_target?
       @target.to_s.match?(/\A\d+\z/)
     end

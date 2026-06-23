@@ -206,7 +206,7 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])
 
       assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
-      assert_equal({ project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ project_root: Dir.pwd, json: true, template: nil }, calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
   end

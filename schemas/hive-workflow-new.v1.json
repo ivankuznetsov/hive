@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-new.v1.json",
   "title": "hive workflow new output (v1)",
-  "description": "Stable contract emitted by `hive workflow new ID --json`. Scaffolds a blank per-project workflow descriptor (inbox -> work -> done) under <hive_state_path>/workflows/ID.yml plus a placeholder instruction at <hive_state_path>/workflows/ID/work.md, then records a hive/state commit. The error arm routes through Hive::Schemas::ErrorEnvelope so its keys match every other hive-* command's error envelope; the success arm builds its hash directly. A missing/invalid/reserved id or a missing/unknown subcommand is a USAGE error (64); commit-lock contention is a retryable TEMPFAIL (75).",
+  "description": "Stable contract emitted by `hive workflow new ID --json`. Scaffolds a per-project workflow descriptor under <hive_state_path>/workflows/ID.yml plus its stage instruction(s) under <hive_state_path>/workflows/ID/, then records a hive/state commit. Defaults to the blank inbox -> work -> done stub; `--template NAME` seeds from a richer sample workflow instead (the payload shape is identical). The error arm routes through Hive::Schemas::ErrorEnvelope so its keys match every other hive-* command's error envelope; the success arm builds its hash directly. A missing/invalid/reserved id or a missing/unknown subcommand is a USAGE error (64); commit-lock contention is a retryable TEMPFAIL (75).",
   "oneOf": [
     {
       "$ref": "#/$defs/SuccessPayload"
@@ -44,7 +44,7 @@
         },
         "instruction_path": {
           "type": "string",
-          "description": "Absolute path to the written placeholder instruction (<id>/work.md)."
+          "description": "Absolute path to the primary (first stage's) scaffolded instruction under <id>/. For the blank default this is <id>/work.md; a --template seed names its first agent stage's instruction. Multi-stage templates scaffold additional instructions alongside it in the same <id>/ directory (see the descriptor)."
         },
         "next": {
           "type": "string",

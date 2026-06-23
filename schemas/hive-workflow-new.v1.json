@@ -107,6 +107,13 @@
           "type": "string",
           "description": "Present only for usage errors: the rejected/colliding workflow id (or unknown subcommand) echoed verbatim so an agent recovers it from a structured field instead of regexing `message`."
         },
+        "expected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Present only for missing/unknown subcommand usage errors: the valid subcommand verbs (e.g. [\"new\"]), so an agent discovers them without regexing `message`."
+        },
         "holder": {
           "type": "object",
           "description": "Present only for concurrent_run: metadata about the lock holder.",

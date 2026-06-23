@@ -45,9 +45,9 @@ class CliUsageErrorJsonTest < Minitest::Test
   end
 
   # Bare `hive workflow` (no subcommand) with --json must ride the
-  # hive-workflow-new envelope (error_kind "usage"), not plain stderr — the
-  # "workflow" entry in JSON_USAGE_ERROR_CONTRACTS. `hive workflow new` with no
-  # id is enveloped separately by the command's own UsageError.
+  # hive-workflow-new envelope (error_kind "usage"), not Thor's generic arity
+  # prose. `hive workflow new` with no id is enveloped separately by the
+  # command's own UsageError.
   def test_bare_workflow_json_usage_error_uses_workflow_new_envelope
     with_tmp_global_config do |home|
       out, _err, status = run_hive(home, "workflow", "--json")
@@ -58,9 +58,22 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-workflow-new", payload["schema"]
       assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-workflow-new"), payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_equal "missing SUBCOMMAND (expected: new)", payload["message"]
+      assert_equal [ "new" ], payload["expected"]
+    end
+  end
+
+  def test_bare_workflow_human_usage_error_names_expected_subcommand
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "workflow")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_empty out
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
     end
   end
 

@@ -654,11 +654,21 @@ module Hive
         # coding_id?/load_dir/DescriptorParser chain) would otherwise bubble to
         # call's `rescue StandardError → InternalError` and turn an
         # already-committed init into a crash that skips those two best-effort
-        # steps. Degrade to "no hint" with a breadcrumb — the same rescue-and-warn
-        # guard register_daemon_service! and run_init_preflight! apply to their
-        # own post-commit, best-effort work. (Hive::ConfigError still re-raises
-        # cleanly via call, since it is surfaced before this point.)
-        write_warn("hive: skipped workflow-authoring hint (#{e.class}: #{e.message})")
+        # steps. Degrade to "no hint" with a breadcrumb (carrying the same
+        # bug-report pointer as the sibling register_daemon_service! /
+        # run_init_preflight! guards, since the arm also catches genuine
+        # programming bugs) — the same rescue-and-warn guard those two apply to
+        # their own post-commit, best-effort work. (No Hive::ConfigError can reach
+        # this arm: coding_id? is pure and Loader.load_dir swallows per-file
+        # ConfigError internally, never calling Config.load. But since
+        # Hive::ConfigError < StandardError this rescue WOULD swallow one if a
+        # future config read were added here — it offers no re-raise guarantee, so
+        # surface such a read's failure deliberately rather than trusting this net.)
+        write_warn(
+          "hive: skipped workflow-authoring hint (#{e.class}: #{e.message}) " \
+          "(this may be a hive bug, please report at " \
+          "https://github.com/ivankuznetsov/hive/issues)"
+        )
         false
       end
 

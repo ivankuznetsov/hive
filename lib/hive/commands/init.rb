@@ -57,17 +57,20 @@ module Hive
       # non-nil resolved Hive::Workflow and source is one of the three known
       # provenances — so a malformed choice fails here, not at a far-away read.
       WorkflowChoice = Data.define(:descriptor, :source) do
-        SOURCES = %i[flag prompt implicit].freeze
-
         def initialize(descriptor:, source:)
           raise ArgumentError, "WorkflowChoice descriptor must be a resolved workflow, got nil" if descriptor.nil?
-          unless SOURCES.include?(source)
-            raise ArgumentError, "WorkflowChoice source must be one of #{SOURCES.join(', ')} (got #{source.inspect})"
+          unless self.class::SOURCES.include?(source)
+            raise ArgumentError, "WorkflowChoice source must be one of #{self.class::SOURCES.join(', ')} (got #{source.inspect})"
           end
 
           super
         end
       end
+      # The closed set of provenances a WorkflowChoice may carry. Defined on the
+      # value object itself (not the bare lexical Init::SOURCES an in-block
+      # assignment would bind) so it reads as WorkflowChoice::SOURCES; the
+      # initialize guard reaches it through self.class::SOURCES.
+      WorkflowChoice::SOURCES = %i[flag prompt implicit].freeze
       CUSTOM_WORKFLOW_HINT_COMMAND = "hive workflow new <id>".freeze
       CUSTOM_WORKFLOW_HINT_MESSAGE = "custom workflows live in this project — author one with `#{CUSTOM_WORKFLOW_HINT_COMMAND}`".freeze
 
@@ -1017,7 +1020,7 @@ module Hive
 
           value = answer.strip
           return Hive::WorkflowSelection.fetch!(current_default, project_root: @project_path) if value.empty?
-          if value.match?(/\A\d+\z/) && value.to_i == author_index
+          if numeric_choice(value) == author_index
             @new_workflow = prompt_new_workflow_id
             return nil
           end
@@ -1050,8 +1053,8 @@ module Hive
       end
 
       def resolve_workflow_answer(value, ids)
-        if value.match?(/\A\d+\z/)
-          index = value.to_i
+        index = numeric_choice(value)
+        if index
           return Hive::WorkflowSelection.fetch!(ids[index - 1], project_root: @project_path) if index.between?(1, ids.size)
 
           return nil
@@ -1059,6 +1062,14 @@ module Hive
 
         match = ids.find { |id| id.casecmp(value).zero? }
         match && Hive::WorkflowSelection.fetch!(match, project_root: @project_path)
+      end
+
+      # Parse a workflow-prompt answer as a 1-based menu index, or nil when it is
+      # not a bare integer (so a workflow *named* like a number, or any
+      # non-numeric pick, falls through to name matching). Base 10 is pinned so a
+      # leading-zero answer like "010" reads as 10, not octal 8.
+      def numeric_choice(value)
+        Integer(value, 10, exception: false)
       end
 
       def relative_to_hive_state(path, ops)

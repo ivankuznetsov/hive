@@ -91,7 +91,7 @@ module Hive
 
       This scaffolds `.hive-state/workflows/writing.yml` plus
       `.hive-state/workflows/writing/work.md`, binds
-      `default_workflow: writing`, and prints the paths to edit before
+      `default_workflow: "writing"`, and prints the paths to edit before
       running `hive new` without --workflow. The descriptor and the
       `config.yml` binding are committed together on `hive/state` on both the
       fresh and already-initialized paths, so the bound default survives a

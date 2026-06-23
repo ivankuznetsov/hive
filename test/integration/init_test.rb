@@ -26,6 +26,46 @@ class InitTest < Minitest::Test
     end
   end
 
+  # Writes a real, parseable workflow descriptor under <state_path>/workflows —
+  # the on-disk dir that Loader.load_dir actually reads. (with_registered_workflow
+  # only fills the in-memory Registry, so it can't exercise load_dir's .empty?
+  # term.) A single terminal stage is the minimal descriptor the parser accepts.
+  def write_custom_workflow_descriptor(state_path)
+    workflows_dir = File.join(state_path, "workflows")
+    FileUtils.mkdir_p(workflows_dir)
+    File.write(File.join(workflows_dir, "mine.yml"), <<~YAML)
+      id: mine
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+    YAML
+    workflows_dir
+  end
+
+  # Replace Loader.load_dir with a raising singleton method for the block, then
+  # restore it (minitest/mock isn't bundled — same singleton-override pattern as
+  # the reviewer/digest tests). Lets us drive no_custom_workflow_yet?'s rescue
+  # arm without an exotic on-disk fault. Pass `only_under:` to raise only for
+  # load_dir calls whose path sits under that directory (e.g. the new project's
+  # .hive-state); other loads delegate to the real implementation, so a full
+  # Init#call's advisory hint load can fail while unrelated loads still resolve.
+  def with_load_dir_raising(error, only_under: nil)
+    original = Hive::Workflows::Loader.method(:load_dir)
+    scope = only_under && File.expand_path(only_under)
+    Hive::Workflows::Loader.define_singleton_method(:load_dir) do |dir = nil, *rest|
+      raise error if scope.nil? || (dir && File.expand_path(dir.to_s).start_with?(scope))
+
+      original.call(dir, *rest)
+    end
+    begin
+      yield
+    ensure
+      Hive::Workflows::Loader.singleton_class.send(:remove_method, :load_dir)
+      Hive::Workflows::Loader.define_singleton_method(:load_dir, &original)
+    end
+  end
+
   def test_initializes_project_with_orphan_branch_and_global_registration
     # `with_tmp_global_config` overrides HOME alongside HIVE_HOME so
     # ServiceInstaller (which writes launchd/systemd units under the
@@ -41,6 +81,24 @@ class InitTest < Minitest::Test
         assert_includes out, name
         assert_includes out, dir
         assert_includes out, "next: hive new #{name}"
+        assert_includes out, "→ next: hive new #{name} '<short task description>'"
+        # PR-562 writing-workflow dogfooding: a fresh coding-default project
+        # should teach that project-local workflow authoring exists.
+        assert_includes out,
+                        "tip: custom workflows live in this project — author one with `hive workflow new <id>`"
+        # Pin count + ordering (plan Requirements Trace: "exactly one extra tip
+        # line below next:"): the authoring tip must appear exactly once, and
+        # strictly below the `→ next:` line — never duplicated or hoisted above it.
+        lines = out.lines.map(&:chomp)
+        next_idx = lines.index { |l| l.include?("→ next: hive new #{name}") }
+        tip_indices = lines.each_index.select do |i|
+          lines[i].include?("tip: custom workflows live in this project")
+        end
+        assert next_idx, "the `→ next:` line must be present"
+        assert_equal 1, tip_indices.size,
+                     "the workflow-authoring tip must appear exactly once, not duplicated"
+        assert_operator tip_indices.first, :>, next_idx,
+                        "the authoring tip must render below the `→ next:` line"
 
         # capture_io yields a non-tty StringIO; ANSI must be suppressed there
         # so piped/CI output stays clean. Load-bearing safety property of the
@@ -77,10 +135,15 @@ class InitTest < Minitest::Test
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          out, _err = capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
 
           config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
           assert_equal "content_fixture", config.fetch("default_workflow")
+
+          name = File.basename(dir)
+          assert_includes out, "→ next: hive new #{name} '<short task description>'"
+          refute_includes out, "hive workflow new",
+                          "non-coding defaults already prove workflow selection, so the authoring tip should not nag"
         end
       end
     end
@@ -919,6 +982,12 @@ class InitTest < Minitest::Test
         assert_equal File.join(dir, ".hive-state"), payload.fetch("hive_state_path")
         assert_equal "coding", payload.fetch("workflow"),
                      "a fresh init must report the bound default workflow in JSON"
+        hints = payload.fetch("hints")
+        assert_equal 1, hints.length
+        assert_equal "custom_workflow", hints.first.fetch("kind")
+        assert_equal "hive workflow new <id>", hints.first.fetch("command")
+        assert_equal "custom workflows live in this project — author one with `hive workflow new <id>`",
+                     hints.first.fetch("message")
         assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
         assert_equal "medium", payload.fetch("answers").fetch("patrol_mode")
         assert_equal "medium", payload.fetch("patrol_mode")
@@ -928,6 +997,160 @@ class InitTest < Minitest::Test
         schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
         errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
         assert_empty errors, "hive init --json payload must validate: #{errors.inspect}"
+      end
+    end
+  end
+
+  def test_init_json_suppresses_workflow_authoring_hints_for_non_coding_default
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          out, _err = capture_io { Hive::Commands::Init.new(dir, json: true, workflow: "content_fixture").call }
+          payload = JSON.parse(out)
+
+          assert_equal 1, out.lines.size
+          assert_equal "content_fixture", payload.fetch("workflow")
+          assert_equal [], payload.fetch("hints")
+
+          schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+          errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
+          assert_empty errors, "hive init --workflow --json payload must validate: #{errors.inspect}"
+        end
+      end
+    end
+  end
+
+  # The OTHER half of no_custom_workflow_yet? — the `load_dir(...).empty?` term.
+  # Every suppression test above feeds a NON-coding default, which short-circuits
+  # on coding_id? before load_dir ever runs. Here the default IS coding, but the
+  # workflows dir already holds a parseable descriptor, so the JSON hint must be
+  # empty: deleting or inverting the `&& ...empty?` term (the predicate's whole
+  # reason to exist) would otherwise ship green.
+  def test_init_json_suppresses_workflow_authoring_hints_when_custom_workflow_authored
+    Dir.mktmpdir("hive-init-hints") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      write_custom_workflow_descriptor(state_path)
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      payload = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+
+      assert_equal [], payload.fetch("hints"),
+                   "a coding default whose workflows dir already holds a descriptor must emit no authoring hint"
+    end
+  end
+
+  # Same on-disk-descriptor arm, human path: the `tip:` line must be suppressed
+  # while the rest of the summary still renders.
+  def test_print_summary_suppresses_workflow_authoring_tip_when_custom_workflow_authored
+    Dir.mktmpdir("hive-init-tip") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      write_custom_workflow_descriptor(state_path)
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+
+      out, _err = capture_io do
+        Hive::Commands::Init.new(dir, json: false).send(
+          :print_summary, entry: entry, ops: ops, answers: answers, workflow: :coding
+        )
+      end
+
+      assert_includes out, "hive: initialized",
+                      "the summary must still render — only the authoring tip is suppressed"
+      refute_includes out, "tip: custom workflows live in this project",
+                       "a coding default with an authored custom workflow must not nag with the authoring tip"
+      refute_includes out, "hive workflow new"
+    end
+  end
+
+  # Direct 2×2 truth table over no_custom_workflow_yet? — {coding, non-coding} ×
+  # {empty, populated dir}. Only coding+empty applies the hint; the populated arm
+  # (exercised only at the payload/summary level by the suppression cases above,
+  # pinned here at the predicate level) and both non-coding arms
+  # (short-circuited on coding_id?) suppress it.
+  def test_no_custom_workflow_yet_truth_table
+    Dir.mktmpdir("hive-no-custom") do |dir|
+      empty_state = File.join(dir, "empty", ".hive-state")
+      FileUtils.mkdir_p(File.join(empty_state, "workflows"))
+      populated_state = File.join(dir, "populated", ".hive-state")
+      write_custom_workflow_descriptor(populated_state)
+
+      cmd = Hive::Commands::Init.new(dir)
+
+      assert cmd.send(:no_custom_workflow_yet?, empty_state, :coding),
+             "coding default + empty workflows dir → authoring hint applies"
+      refute cmd.send(:no_custom_workflow_yet?, populated_state, :coding),
+             "coding default + on-disk descriptor → authoring hint suppressed " \
+             "(predicate-level pin of the payload/summary suppression cases above)"
+      refute cmd.send(:no_custom_workflow_yet?, empty_state, :content_fixture),
+             "non-coding default short-circuits on coding_id? even with an empty dir"
+      refute cmd.send(:no_custom_workflow_yet?, populated_state, :content_fixture),
+             "non-coding default short-circuits on coding_id? regardless of dir contents"
+    end
+  end
+
+  # The `rescue StandardError` arm of no_custom_workflow_yet? (added by 78a9ce50):
+  # an error escaping Loader.load_dir — a filesystem fault OR a genuine
+  # programming bug in the coding_id?/load_dir/parser chain — must degrade the
+  # advisory hint to "no hint" with a stderr breadcrumb rather than crash an
+  # already-committed init. The on-disk truth-table cases above never hit this
+  # path (load_dir succeeds), so without this the rescue's two lines stay
+  # uncovered and the project's 100% line-coverage gate fails.
+  def test_no_custom_workflow_yet_degrades_when_load_dir_raises
+    Dir.mktmpdir("hive-no-custom-raise") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(File.join(state_path, "workflows"))
+      cmd = Hive::Commands::Init.new(dir)
+
+      predicate = nil
+      hints = nil
+      _out, err = capture_io do
+        with_load_dir_raising(RuntimeError.new("boom from load_dir")) do
+          predicate = cmd.send(:no_custom_workflow_yet?, state_path, :coding)
+          hints = cmd.send(:workflow_authoring_hints, state_path, :coding)
+        end
+      end
+
+      refute predicate,
+             "a coding default whose load_dir raises must degrade to false, not crash"
+      assert_equal [], hints,
+                   "a raised load_dir must suppress the authoring hint entirely"
+      assert_includes err, "hive: skipped workflow-authoring hint",
+                      "the degrade must leave a stderr breadcrumb for the operator"
+      assert_includes err, "RuntimeError: boom from load_dir",
+                      "the breadcrumb must name the swallowed exception class and message"
+    end
+  end
+
+  # End-to-end companion to the predicate-level degrade test above: drives a
+  # FULL Init#call with the new project's workflow load raising, and pins the
+  # load-bearing no-crash property the rescue exists for — an already-committed
+  # init still finishes (no InternalError), prints its summary, leaves the
+  # degrade breadcrumb, and still reaches register_daemon_service!. The predicate
+  # test proves the rescue degrades to false+warn; this proves that degrade does
+  # not abort the post-commit best-effort steps. `only_under:` scopes the raise
+  # to the new project's .hive-state so it lands at the post-commit hint load.
+  def test_init_completes_when_workflow_hint_load_raises
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |dir|
+        out, err = capture_io do
+          with_load_dir_raising(RuntimeError.new("boom from load_dir"),
+                                only_under: File.join(dir, ".hive-state")) do
+            Hive::Commands::Init.new(dir).call
+          end
+        end
+
+        assert_includes out, "hive: initialized",
+                        "the success summary must still render after the hint load degrades"
+        assert_includes err, "hive: skipped workflow-authoring hint",
+                        "the degrade must leave its breadcrumb on the full path too"
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox")),
+               "the hive/state branch must still be committed despite the degraded hint"
+        assert File.exist?(File.join(home, ".config/systemd/user/hive-daemon.service")),
+               "register_daemon_service! must still run after the degraded hint, not be skipped by a crash"
       end
     end
   end

@@ -1028,33 +1028,50 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     expected = %w[
       answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
-      default_branch development_agent enabled_reviewers hive_state_path ok path patrol_mode patrol_reviewers planning_agent
+      default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
       project schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
                  "schema/producer required-key drift in hive-init.v1.json"
 
-    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
-    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
-    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
-    producer = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
-    )
-    assert_equal schema_required, producer.keys.sort,
-                 "Init#success_payload must emit exactly the schema's required keys"
+    # Sandbox the project root: success_payload now drives load_dir against
+    # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
+    # world-shared path. Mirror the twin test_hive_init_success_payload_validates.
+    Dir.mktmpdir("hive-init-keys") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      producer = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+      assert_equal schema_required, producer.keys.sort,
+                   "Init#success_payload must emit exactly the schema's required keys"
+    end
   end
 
   def test_hive_init_success_payload_validates
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
-    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
-    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
-    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
-    payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
-    )
+    Dir.mktmpdir("hive-init-schema") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      payload = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
 
-    errors = schemer.validate(payload).map { |e| e["error"] }
-    assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
+      assert_equal [
+        {
+          "kind" => "custom_workflow",
+          "command" => "hive workflow new <id>",
+          "message" => "custom workflows live in this project — author one with `hive workflow new <id>`"
+        }
+      ], payload.fetch("hints")
+
+      errors = schemer.validate(payload).map { |e| e["error"] }
+      assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
+    end
   end
 
   def test_hive_init_new_workflow_success_payload_validates_with_scaffold_paths

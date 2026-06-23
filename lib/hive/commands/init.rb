@@ -11,6 +11,8 @@ require "hive/stages"
 require "hive/task_meta"
 require "hive/worktree"
 require "hive/workflow_selection"
+require "hive/workflows"
+require "hive/workflows/loader"
 require "hive/llm_wiki_bootstrap"
 require "hive/commands/workflow"
 require "hive/commands/init/prompts"
@@ -52,6 +54,8 @@ module Hive
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit).
       WorkflowChoice = Data.define(:descriptor, :source)
+      CUSTOM_WORKFLOW_HINT_COMMAND = "hive workflow new <id>".freeze
+      CUSTOM_WORKFLOW_HINT_MESSAGE = "custom workflows live in this project — author one with `#{CUSTOM_WORKFLOW_HINT_COMMAND}`".freeze
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, new_workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
@@ -109,7 +113,7 @@ module Hive
         if @json
           emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         else
-          print_summary(entry: entry, ops: ops, answers: answers)
+          print_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight!
@@ -764,6 +768,7 @@ module Hive
           # on a fresh project can confirm the binding from JSON instead of
           # reading config.yml out of band.
           "workflow" => workflow.to_s,
+          "hints" => workflow_authoring_hints(entry.fetch("hive_state_path"), workflow),
           "worktree_root" => worktree_root,
           "answers" => answers,
           "planning_agent" => answers.fetch("planning_agent"),
@@ -779,6 +784,51 @@ module Hive
           "babysitter_enabled" => answers.fetch("babysitter_enabled", true),
           "daemon_autostart_requested" => answers.fetch("daemon_autostart", false)
         }
+      end
+
+      def no_custom_workflow_yet?(hive_state_path, workflow)
+        Hive::Workflows.coding_id?(workflow) &&
+          Hive::Workflows::Loader.load_dir(File.join(hive_state_path, "workflows")).empty?
+      rescue StandardError => e
+        # The workflow-authoring hint is purely advisory and computed in
+        # success_payload/print_summary, which run AFTER init has already
+        # committed the hive/state branch and BEFORE register_daemon_service! /
+        # run_init_preflight!. This deliberately catches the whole StandardError
+        # surface, not only the filesystem faults it primarily guards against (an
+        # unlisted SystemCallError escaping File.directory?/Dir.glob, or an
+        # invalid-byte path raising ArgumentError/EncodingError): a genuine
+        # programming bug here too (a NoMethodError/KeyError/TypeError in the
+        # coding_id?/load_dir/DescriptorParser chain) would otherwise bubble to
+        # call's `rescue StandardError → InternalError` and turn an
+        # already-committed init into a crash that skips those two best-effort
+        # steps. Degrade to "no hint" with a breadcrumb (carrying the same
+        # bug-report pointer as the sibling register_daemon_service! /
+        # run_init_preflight! guards, since the arm also catches genuine
+        # programming bugs) — the same rescue-and-warn guard those two apply to
+        # their own post-commit, best-effort work. (No Hive::ConfigError can reach
+        # this arm: coding_id? is pure and Loader.load_dir swallows per-file
+        # ConfigError internally, never calling Config.load. But since
+        # Hive::ConfigError < StandardError this rescue WOULD swallow one if a
+        # future config read were added here — it offers no re-raise guarantee, so
+        # surface such a read's failure deliberately rather than trusting this net.)
+        write_warn(
+          "hive: skipped workflow-authoring hint (#{e.class}: #{e.message}) " \
+          "(this may be a hive bug, please report at " \
+          "https://github.com/ivankuznetsov/hive/issues)"
+        )
+        false
+      end
+
+      def workflow_authoring_hints(hive_state_path, workflow)
+        return [] unless no_custom_workflow_yet?(hive_state_path, workflow)
+
+        [
+          {
+            "kind" => "custom_workflow",
+            "command" => CUSTOM_WORKFLOW_HINT_COMMAND,
+            "message" => CUSTOM_WORKFLOW_HINT_MESSAGE
+          }
+        ]
       end
 
       def scaffold_payload(paths)
@@ -821,6 +871,9 @@ module Hive
             "hive new #{safe_name} '<short task description>'"
           end
         $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} #{next_step}"
+        if no_custom_workflow_yet?(entry.fetch("hive_state_path"), workflow)
+          $stdout.puts "  #{c.dim('tip:')} #{CUSTOM_WORKFLOW_HINT_MESSAGE}"
+        end
       end
 
       def collect_prompt_answers

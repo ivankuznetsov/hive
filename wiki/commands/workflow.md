@@ -37,10 +37,10 @@ the workflow files on `hive/state`, and prints the next command:
 hive new <project> --workflow my-flow "<your idea>"
 ```
 
-With `--json`, success is an unversioned document containing `ok`, `id`,
-`descriptor_path`, `instruction_path`, and `next`. Typed usage/config/git
-errors emit an unversioned JSON error document with `ok: false`, `error_class`,
-`exit_code`, and `message`.
+With `--json`, success is a `hive-workflow-new` (schema_version 1) document
+containing `ok`, `id`, `descriptor_path`, `instruction_path`, and `next`. Typed
+usage/config/git errors emit a `hive-workflow-new` (schema_version 1) JSON error
+document with `ok: false`, `error_class`, `exit_code`, and `message`.
 
 A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
 uses the command prefix: `hive workflow: missing SUBCOMMAND (expected: new)` or

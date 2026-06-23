@@ -109,7 +109,10 @@ class WorkflowNewTest < Minitest::Test
   # Round-trip: hive-workflow-new is enveloped like every other hive-* command,
   # so BOTH arms must validate against the published schema. The usage arm
   # covers extras too: reserved-id errors carry `value`; missing-subcommand
-  # errors carry `expected`.
+  # errors carry `expected`. The no-id ("missing workflow id") case also carries
+  # `value`, but is exercised only as a raised message via `new!`
+  # (test_rejects_reserved_and_invalid_ids) — its enveloped `value` shape is
+  # locked here by the reserved-id arm, not driven through the envelope separately.
   def test_json_envelopes_validate_against_published_schema
     with_initialized_project do |project_root|
       schemer = JSONSchemer.schema(
@@ -264,12 +267,13 @@ class WorkflowNewTest < Minitest::Test
 
   def test_call_reports_unknown_subcommand_as_usage
     with_initialized_project do |project_root|
-      _out, err, status = with_captured_exit do
+      out, err, status = with_captured_exit do
         Hive::Commands::Workflow.new("save", "my-flow", project_root: project_root).call
       end
 
       assert_equal Hive::ExitCodes::USAGE, status
-      assert_includes err, "unknown workflow subcommand"
+      assert_empty out
+      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new)\n", err
     end
   end
 

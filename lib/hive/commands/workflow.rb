@@ -237,7 +237,7 @@ module Hive
       def error_extras(error)
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
-        extras["expected"] = error.expected if error.respond_to?(:expected) && error.expected
+        extras["expected"] = error.expected if error.respond_to?(:expected) && !error.expected.nil?
 
         extras
       end

@@ -96,8 +96,7 @@ class StagesResolverTest < Minitest::Test
         Hive::Workflow::Stage.new(
           name: "research",
           index: 1,
-          state_file: "research.md",
-          kind: :marker
+          state_file: "research.md"
         )
       ]
     )

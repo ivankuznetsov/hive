@@ -99,7 +99,7 @@ class CliVersionTest < Minitest::Test
 
       assert status.success?, "hive new should parse --workflow before PROJECT, stderr was: #{err}"
       assert_includes out, "hive: captured"
-      folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "workflow-flag-*")].first
+      folder = only_inbox_folder(dir, "workflow-flag-*")
       assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
     end
   end
@@ -110,7 +110,7 @@ class CliVersionTest < Minitest::Test
 
       assert status.success?, "hive new should parse --workflow after PROJECT, stderr was: #{err}"
       assert_includes out, "hive: captured"
-      folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "literal-*")].first
+      folder = only_inbox_folder(dir, "literal-*")
       assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
       refute_includes File.read(File.join(folder, "idea.md")), "--workflow"
     end
@@ -138,6 +138,12 @@ class CliVersionTest < Minitest::Test
     idea_paths = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*", "idea.md")]
     assert_equal 1, idea_paths.size, "expected one captured idea, got #{idea_paths.inspect}"
     assert_includes File.read(idea_paths.first), text
+  end
+
+  def only_inbox_folder(dir, glob)
+    folders = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", glob)]
+    assert_equal 1, folders.size, "expected one task folder for #{glob.inspect}, got #{folders.inspect}"
+    folders.first
   end
 
   def without_generated_at(payload)

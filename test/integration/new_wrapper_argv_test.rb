@@ -31,8 +31,10 @@ class NewWrapperArgvTest < Minitest::Test
       assert_includes out, "hive: captured"
       folder = only_task_folder(project_root)
       assert_pinned_to_my_flow(folder)
-      refute_includes File.read(File.join(folder, "idea.md")), "--workflow",
-                      "lifted --workflow must not be swallowed into idea.md"
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "--workflow", "lifted --workflow must not be swallowed into idea.md"
+      assert_includes idea, "custom workflow task",
+                      "task text must survive when --workflow is lifted out of it"
     end
   end
 
@@ -105,7 +107,9 @@ class NewWrapperArgvTest < Minitest::Test
       assert status.success?, "trailing --workflow should lift out of text, stderr was: #{err}"
       folder = only_task_folder(project_root)
       assert_pinned_to_my_flow(folder)
-      refute_includes File.read(File.join(folder, "idea.md")), "--workflow"
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "--workflow"
+      assert_includes idea, "trailing option task", "task text must survive after the trailing option is lifted"
     end
   end
 
@@ -132,7 +136,9 @@ class NewWrapperArgvTest < Minitest::Test
       assert status.success?, "--depends-on=42 should be lifted after project, stderr was: #{err}"
       folder = only_task_folder(project_root)
       assert_equal "42", Hive::TaskMeta.read(folder)[:depends_on]
-      refute_includes File.read(File.join(folder, "idea.md")), "--depends-on"
+      idea = File.read(File.join(folder, "idea.md"))
+      refute_includes idea, "--depends-on"
+      assert_includes idea, "depends equals task", "task text must survive after --depends-on=42 is lifted"
     end
   end
 
@@ -190,6 +196,20 @@ class NewWrapperArgvTest < Minitest::Test
       folder = only_task_folder(project_root)
       assert_nil Hive::TaskMeta.read(folder)[:workflow]
       assert_includes File.read(File.join(folder, "idea.md")), "--foo idea"
+    end
+  end
+
+  def test_help_new_documents_option_before_text_example
+    with_cli_project do |home, project_root, _project|
+      out, err, status = run_hive(home, "help", "new", chdir: project_root)
+
+      assert status.success?, "hive help new should succeed, stderr was: #{err}"
+      assert_includes out, %(hive new myproj --workflow content "write the launch post"),
+                      "help must document the canonical option-before-text ordering"
+      option_idx = out.index("--workflow content")
+      text_idx = out.index(%("write the launch post"))
+      assert option_idx && text_idx && option_idx < text_idx,
+             "the --workflow option must render before the quoted task text (guards against a trailing-form regression)"
     end
   end
 

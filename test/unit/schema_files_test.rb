@@ -358,6 +358,20 @@ class SchemaFilesTest < Minitest::Test
     status = Hive::Commands::Status.new
     task_with_pr = status.task_payload(base_row.merge(pr_url: "https://github.com/example/repo/pull/561"))
     task_without_pr = status.task_payload(base_row.merge(slug: "early-task", pr_url: nil))
+    retry_after = "2026-06-24T23:20:00Z"
+    held_task = status.task_payload(base_row.merge(
+                                      slug: "quota-task",
+                                      pr_url: nil,
+                                      marker_name: :error,
+                                      marker_attrs: {
+                                        "reason" => "limits_reached",
+                                        "provider" => "codex",
+                                        "retry_after" => retry_after
+                                      },
+                                      action_key: Hive::Schemas::TaskActionKind::ERROR,
+                                      action_label: "Error",
+                                      suggested_command: nil
+                                    ))
 
     payload = {
       "schema" => "hive-status",
@@ -369,7 +383,7 @@ class SchemaFilesTest < Minitest::Test
           "name" => "demo",
           "path" => "/tmp/demo",
           "hive_state_path" => "/tmp/demo/.hive-state",
-          "tasks" => [ task_with_pr, task_without_pr ],
+          "tasks" => [ task_with_pr, task_without_pr, held_task ],
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -381,6 +395,11 @@ class SchemaFilesTest < Minitest::Test
                  "(errors: #{errors.inspect})"
     assert_equal "https://github.com/example/repo/pull/561", task_with_pr["pr_url"]
     assert_nil task_without_pr["pr_url"]
+    assert_equal({
+      "reason" => "quota",
+      "provider" => "codex",
+      "retry_after" => retry_after
+    }, held_task["held"])
   end
 
   # `legacy_migrate_command` accepts either "hive migrate" (when

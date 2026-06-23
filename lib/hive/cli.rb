@@ -316,7 +316,7 @@ module Hive
       The blank workflow is inbox -> work -> done and is immediately usable
       with `hive new PROJECT --workflow ID "<your idea>"`.
     DESC
-    def workflow(subcommand, id = nil)
+    def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
         subcommand,

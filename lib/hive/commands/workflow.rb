@@ -18,13 +18,20 @@ module Hive
       TEMPLATE_ROOT = File.expand_path("../../../templates/workflows/blank", __dir__)
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
+      SUBCOMMANDS = %w[new].freeze
 
       class UsageError < Hive::Error
-        attr_reader :value
+        attr_reader :value, :expected
 
-        def initialize(message, value: nil)
+        # Closed set of usage-error shapes (which structured field each carries):
+        #   missing subcommand        -> expected only
+        #   unknown subcommand        -> value (the rejected verb) + expected
+        #   bad/missing/reserved id / -> value (the rejected/colliding token) only
+        #   scaffold collision
+        def initialize(message, value: nil, expected: nil)
           super(message)
           @value = value
+          @expected = expected
         end
 
         def exit_code
@@ -223,8 +230,20 @@ module Hive
       end
 
       def call!
+        expected_list = SUBCOMMANDS.join(", ")
+        if @subcommand.nil?
+          raise UsageError.new(
+            "missing SUBCOMMAND (expected: #{expected_list})",
+            expected: SUBCOMMANDS
+          )
+        end
+
         unless @subcommand == "new"
-          raise UsageError.new("unknown workflow subcommand #{@subcommand.inspect} (expected: new)", value: @subcommand)
+          raise UsageError.new(
+            "unknown workflow subcommand #{@subcommand.inspect} (expected: #{expected_list})",
+            value: @subcommand,
+            expected: SUBCOMMANDS
+          )
         end
 
         scaffold = self.class.scaffold_files!(@id, project_root: @project_root)
@@ -295,15 +314,15 @@ module Hive
         )
       end
 
-      # Surface the rejected/colliding id (UsageError#value) into the --json
-      # payload so an agent recovers the bad id from a structured field instead
-      # of regexing `message`. Passed via the local `extras` seam to avoid
-      # changing the gem-wide ErrorEnvelope.build; non-UsageError producers
-      # (ConfigError/GitError/…) carry no `value` and add no key.
+      # Surface command-specific UsageError details through structured extras so
+      # agents do not need to regex `message`. Passed through the local seam to
+      # avoid changing the gem-wide ErrorEnvelope.build.
       def error_extras(error)
-        return {} unless error.respond_to?(:value) && !error.value.nil?
+        extras = {}
+        extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
+        extras["expected"] = error.expected if error.respond_to?(:expected) && !error.expected.nil?
 
-        { "value" => error.value }
+        extras
       end
 
       def error_kind_for(error)

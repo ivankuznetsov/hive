@@ -181,6 +181,30 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_non_tty_workflow_input_skips_prompt_and_keeps_coding_fieldless
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("3\n")
+          workflow_output = StringIO.new
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          assert_empty workflow_output.string, "non-TTY workflow input must not render the workflow prompt"
+          assert_equal "3", workflow_input.gets&.chomp, "non-TTY workflow input must not be consumed"
+          refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:",
+                          "implicit non-TTY coding default should keep config.yml fieldless"
+        end
+      end
+    end
+  end
+
   def test_init_workflow_prompt_default_keeps_coding_config_fieldless
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
@@ -199,6 +223,126 @@ class InitTest < Minitest::Test
 
           refute_includes File.read(File.join(dir, ".hive-state", "config.yml")), "default_workflow:"
         end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_author_entry_scaffolds_binds_and_runs_questionnaire
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("4\nwriting\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "" ] +
+                          ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+                          [ "", "", "", "" ]).join("\n") + "\n"
+          prompts = make_tty_prompts(setup_inputs)
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              prompts: prompts,
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          hive_state = File.join(dir, ".hive-state")
+          descriptor_path = File.join(hive_state, "workflows", "writing.yml")
+          instruction_path = File.join(hive_state, "workflows", "writing", "work.md")
+          config = YAML.safe_load(File.read(File.join(hive_state, "config.yml")))
+          assert_includes workflow_output.string, "Workflow:"
+          assert_includes workflow_output.string, "4) author a new workflow"
+          assert_equal "writing", config.fetch("default_workflow"),
+                       "inline authoring must bind the newly scaffolded workflow as the project default"
+          assert File.file?(descriptor_path), "inline authoring must create the workflow descriptor"
+          assert File.file?(instruction_path), "inline authoring must create the workflow instruction"
+          assert_equal "codex", Hive::Config.load(dir).dig("brainstorm", "agent"),
+                       "inline authoring must continue through the full setup questionnaire"
+          assert Hive::Config.registered_projects.any? { |project| project["path"] == File.expand_path(dir) },
+                 "inline authoring must still register the initialized project"
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_author_reprompts_on_reserved_id
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("4\ncoding\nwriting\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              prompts: make_tty_prompts(default_setup_prompt_input),
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          assert_includes workflow_output.string, "workflow id \"coding\" is reserved by a built-in workflow"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "writing", config.fetch("default_workflow"),
+                       "reserved inline author ids must re-prompt and accept the next valid id"
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_author_reprompts_on_invalid_format
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("4\nBad Id!\nwriting\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              prompts: make_tty_prompts(default_setup_prompt_input),
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          assert_includes workflow_output.string, "invalid workflow id \"Bad Id!\""
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "writing", config.fetch("default_workflow"),
+                       "invalid inline author ids must re-prompt and accept the next valid id"
+        end
+      end
+    end
+  end
+
+  def test_rerun_init_workflow_prompt_author_reprompts_on_scaffold_collision
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        scaffold = Hive::Commands::Workflow.scaffold_files!("writing", project_root: dir)
+        workflow_input = StringIO.new("4\nwriting\nwriting2\n")
+        workflow_input.define_singleton_method(:tty?) { true }
+        workflow_output = StringIO.new
+
+        capture_io do
+          Hive::Commands::Init.new(
+            dir,
+            workflow_input: workflow_input,
+            workflow_output: workflow_output
+          ).call
+        end
+
+        assert_includes workflow_output.string, "workflow scaffold already exists for \"writing\""
+        config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        assert_equal "writing2", config.fetch("default_workflow"),
+                     "colliding inline author ids must re-prompt and bind the next valid free id"
+        assert File.file?(File.join(dir, ".hive-state", "workflows", "writing2.yml")),
+               "the accepted post-collision id must be scaffolded"
+        Hive::Commands::Workflow.rollback_scaffold(scaffold.fetch(:paths))
       end
     end
   end
@@ -1682,6 +1826,11 @@ class InitTest < Minitest::Test
       output: StringIO.new,
       summary_io: StringIO.new
     )
+  end
+
+  def default_setup_prompt_input
+    (([ "" ] * 10) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+      [ "", "", "", "" ]).join("\n") + "\n"
   end
 
   def make_incomplete_prompts(missing_key)

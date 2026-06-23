@@ -64,6 +64,12 @@ module Hive
         { id: id, paths: paths }
       end
 
+      def self.scaffold_collision?(id_raw, project_root:)
+        id = normalize_and_validate_id!(id_raw)
+        paths = scaffold_paths(id, project_root: project_root)
+        scaffold_collisions(paths).any?
+      end
+
       # Shared scaffold-commit contract: hive init --new-workflow (fresh and
       # existing) and `hive workflow new` all commit a scaffolded descriptor
       # (plus, for init, the config.yml rebind) under the same
@@ -151,14 +157,19 @@ module Hive
       private_class_method :workflow_dir
 
       def self.refuse_overwrite!(paths)
-        collisions = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir), paths.fetch(:instruction) ].select do |path|
-          File.exist?(path)
-        end
+        collisions = scaffold_collisions(paths)
         return if collisions.empty?
 
         raise UsageError.new("workflow scaffold already exists at #{collisions.join(', ')}", value: collisions.first)
       end
       private_class_method :refuse_overwrite!
+
+      def self.scaffold_collisions(paths)
+        [ paths.fetch(:descriptor), paths.fetch(:instruction_dir), paths.fetch(:instruction) ].select do |path|
+          File.exist?(path)
+        end
+      end
+      private_class_method :scaffold_collisions
 
       def self.write_scaffold!(id, paths)
         FileUtils.mkdir_p(paths.fetch(:instruction_dir))

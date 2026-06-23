@@ -92,6 +92,13 @@ module Hive
         end
 
         workflow_choice = resolve_workflow_choice(ops)
+        if @new_workflow
+          # Inline authoring deliberately routes through the same path as
+          # --new-workflow: the descriptor does not exist yet, so there is no
+          # resolved Hive::Workflow to put in WorkflowChoice.
+          init_with_new_workflow(ops)
+          return
+        end
         if ops.hive_state_branch_exists?
           if workflow_choice.source == :implicit
             raise Hive::AlreadyInitialized,
@@ -970,7 +977,11 @@ module Hive
 
       def prompt_workflow(current_default = Hive::Workflows::CODING_ID.to_s)
         ids = Hive::WorkflowSelection.valid_names(project_root: @project_path)
-        @workflow_output.puts "Workflows: #{ids.each_with_index.map { |name, index| "#{index + 1}) #{name}" }.join('  ')}"
+        author_index = ids.size + 1
+        choices = ids.each_with_index.map { |name, index| "#{index + 1}) #{name}" }
+        choices << "#{author_index}) author a new workflow"
+        @workflow_output.puts "Workflow:"
+        @workflow_output.puts "  #{choices.join('  ')}"
         loop do
           @workflow_output.print "Default workflow [#{current_default}]: "
           @workflow_output.flush
@@ -979,11 +990,35 @@ module Hive
 
           value = answer.strip
           return Hive::WorkflowSelection.fetch!(current_default, project_root: @project_path) if value.empty?
+          if value.match?(/\A\d+\z/) && value.to_i == author_index
+            @new_workflow = prompt_new_workflow_id
+            return nil
+          end
 
           resolved = resolve_workflow_answer(value, ids)
           return resolved if resolved
 
-          @workflow_output.puts "  unknown workflow #{value.inspect}; pick a name (#{ids.join(', ')}) or 1..#{ids.size}"
+          @workflow_output.puts "  unknown workflow #{value.inspect}; pick a name (#{ids.join(', ')}) " \
+                                "or 1..#{author_index}"
+        end
+      end
+
+      def prompt_new_workflow_id
+        loop do
+          @workflow_output.print "New workflow id: "
+          @workflow_output.flush
+          answer = @workflow_input.gets
+          raise Hive::Commands::Init::Prompts::Aborted, "input closed" if answer.nil?
+
+          id = Hive::Commands::Workflow.normalize_and_validate_id!(answer)
+          if Hive::Commands::Workflow.scaffold_collision?(id, project_root: @project_path)
+            @workflow_output.puts "  workflow scaffold already exists for #{id.inspect}"
+            next
+          end
+
+          return id
+        rescue Hive::Commands::Workflow::UsageError => e
+          @workflow_output.puts "  #{e.message}"
         end
       end
 

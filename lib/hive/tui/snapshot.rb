@@ -57,6 +57,12 @@ module Hive
         :pr_url,
         :marker,
         :attrs,
+        # Carried verbatim from the JSON `held` object for payload↔Row
+        # schema-correspondence only (schema_correspondence_test). The
+        # renderer does NOT read this — it derives the hold label from
+        # `attrs` via `Hive::AgentLimit.held_label` (tasks_pane.rb). Asymmetric
+        # with `blocked`, which IS consumed by the renderer; do not "fix" a
+        # hold-label bug by editing `row.held`.
         :held,
         :mtime,
         :folder_mtime,

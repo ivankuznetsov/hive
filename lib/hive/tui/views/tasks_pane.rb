@@ -256,6 +256,9 @@ module Hive
           value.empty? ? row.slug.to_s : value
         end
 
+        # A detected provider quota wall short-circuits to the shared
+        # `held_label` first; everything below is the exit_code/reason
+        # fallback chain for non-held recovery markers.
         # Operator-supplied marker reasons (stdout-tail snippets,
         # exception messages stored in REVIEW_ERROR's `reason` attr)
         # can carry control characters or ANSI CSI escapes that would
@@ -290,6 +293,9 @@ module Hive
           marker.empty? ? row.action_label.to_s : marker
         end
 
+        # A detected provider quota wall short-circuits to the shared
+        # `held_label` first; the exit_code/reason fallback chain below
+        # runs only for non-held error markers.
         # `error` action rows carry the failure context in `attrs`
         # (`reason=exit_code exit_code=1` for typical agent failures);
         # surfacing it in the status column tells the operator WHY a

@@ -37,32 +37,134 @@ module Hive
       end
 
       def self.normalize_and_validate_id!(raw)
-        command = new("new", raw)
-        id = command.send(:normalize_id, raw)
-        command.send(:validate_id!, id)
+        id = normalize_id(raw)
+        validate_id!(id)
         id
       end
 
       def self.scaffold_files!(id_raw, project_root:)
-        command = new("new", id_raw, project_root: project_root)
-        id = command.send(:normalize_id, id_raw)
-        command.send(:validate_id!, id)
-        paths = command.send(:scaffold_paths, id)
-        command.send(:refuse_overwrite!, paths)
+        id = normalize_and_validate_id!(id_raw)
+        paths = scaffold_paths(id, project_root: project_root)
+        refuse_overwrite!(paths)
         begin
-          command.send(:write_scaffold!, id, paths)
-          command.send(:validate_descriptor!, paths.fetch(:descriptor))
+          write_scaffold!(id, paths)
+          validate_descriptor!(paths.fetch(:descriptor))
           Hive::Workflows::Project.reset!
         rescue StandardError
-          command.send(:rollback_scaffold, paths)
+          rollback_scaffold(paths)
           raise
         end
         { id: id, paths: paths }
       end
 
-      def self.rollback_scaffold(paths)
-        new("new").send(:rollback_scaffold, paths)
+      # Shared scaffold-commit contract: hive init --new-workflow (fresh and
+      # existing) and `hive workflow new` all commit a scaffolded descriptor
+      # (plus, for init, the config.yml rebind) under the same
+      # "workflows/<slug> created" message. Callers own the commit lock and the
+      # pathspec relative-path mapping; this centralizes the stage/action
+      # contract so the magic strings live in one place.
+      def self.commit_workflow_scaffold(ops, slug:, pathspecs:)
+        ops.hive_commit(stage_name: "workflows", slug: slug, action: "created", pathspecs: pathspecs)
       end
+
+      # Filesystem-only rollback: unwinds the working-tree files write_scaffold!
+      # created, NOT any git side-effects of a partially-run commit. hive_commit
+      # stages by explicit pathspec, so a same-command retry re-stages exactly
+      # these paths and refuse_overwrite! re-checks them — removing the files is
+      # all a retry needs.
+      #
+      # NOTE: the shared-worktree caller (hive init --new-workflow on an
+      # existing project) commits into the long-lived `.hive-state` worktree,
+      # where a failed commit ALSO leaves these pathspecs STAGED; that caller is
+      # responsible for resetting the index (Init#reset_hive_state_index) — this
+      # method intentionally leaves git untouched. rm_f/rm_rf swallow their own
+      # errors; warn_failed_scaffold_cleanup localizes the signal when a genuine
+      # cleanup failure leaves a leftover that would later trip refuse_overwrite!.
+      def self.rollback_scaffold(paths)
+        FileUtils.rm_f(paths.fetch(:descriptor))
+        FileUtils.rm_rf(paths.fetch(:instruction_dir))
+        warn_failed_scaffold_cleanup(paths)
+      end
+
+      def self.normalize_id(value)
+        id = value.to_s.strip
+        return id unless id.empty?
+
+        raise UsageError.new("missing workflow id", value: value)
+      end
+      private_class_method :normalize_id
+
+      def self.validate_id!(id)
+        unless WORKFLOW_ID_RE.match?(id)
+          raise UsageError.new("invalid workflow id #{id.inspect} (must match #{WORKFLOW_ID_RE.source})", value: id)
+        end
+        return unless Hive::Workflows::Registry::WORKFLOWS.key?(id.to_sym)
+
+        raise UsageError.new("workflow id #{id.inspect} is reserved by a built-in workflow", value: id)
+      end
+      private_class_method :validate_id!
+
+      def self.scaffold_paths(id, project_root:)
+        workflows_dir = workflow_dir(project_root)
+        {
+          workflows_dir: workflows_dir,
+          descriptor: File.join(workflows_dir, "#{id}.yml"),
+          instruction_dir: File.join(workflows_dir, id),
+          instruction: File.join(workflows_dir, id, "work.md")
+        }
+      end
+      private_class_method :scaffold_paths
+
+      # Single source of "<hive_state_path>/workflows" — the scaffolder needs the
+      # raw config error to surface (no fallback), which Loader.workflow_dir
+      # provides; Project#workflow_dir_for is the fallback-wrapping variant.
+      def self.workflow_dir(project_root)
+        Hive::Workflows::Loader.workflow_dir(project_root)
+      end
+      private_class_method :workflow_dir
+
+      def self.refuse_overwrite!(paths)
+        collisions = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir), paths.fetch(:instruction) ].select do |path|
+          File.exist?(path)
+        end
+        return if collisions.empty?
+
+        raise UsageError.new("workflow scaffold already exists at #{collisions.join(', ')}", value: collisions.first)
+      end
+      private_class_method :refuse_overwrite!
+
+      def self.write_scaffold!(id, paths)
+        FileUtils.mkdir_p(paths.fetch(:instruction_dir))
+        File.write(paths.fetch(:descriptor), render_descriptor(id))
+        File.write(paths.fetch(:instruction), File.read(File.join(TEMPLATE_ROOT, "work.md")))
+      end
+      private_class_method :write_scaffold!
+
+      def self.render_descriptor(id)
+        template = File.read(File.join(TEMPLATE_ROOT, "descriptor.yml.erb"))
+        ERB.new(template, trim_mode: "-").result_with_hash(id: id)
+      end
+      private_class_method :render_descriptor
+
+      def self.validate_descriptor!(path)
+        Hive::Workflows::DescriptorParser.parse_file(path)
+      end
+      private_class_method :validate_descriptor!
+
+      # rollback_scaffold keeps its swallow-and-continue behavior (rm_f/rm_rf
+      # don't raise); this only localizes the signal when a permission/busy
+      # failure leaves the scaffold on disk, where it would otherwise resurface
+      # as a confusing refuse_overwrite! "already exists" on the next attempt.
+      def self.warn_failed_scaffold_cleanup(paths)
+        leftovers = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ].select { |path| File.exist?(path) }
+        return if leftovers.empty?
+
+        warn "hive workflow: scaffold cleanup could not remove #{leftovers.join(', ')}; " \
+             "remove them manually before retrying --new-workflow"
+      rescue Errno::EPIPE
+        nil
+      end
+      private_class_method :warn_failed_scaffold_cleanup
 
       def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout)
         @subcommand = subcommand
@@ -125,75 +227,13 @@ module Hive
 
       private
 
-      def normalize_id(value)
-        id = value.to_s.strip
-        return id unless id.empty?
-
-        raise UsageError.new("missing workflow id", value: value)
-      end
-
-      def validate_id!(id)
-        unless WORKFLOW_ID_RE.match?(id)
-          raise UsageError.new("invalid workflow id #{id.inspect} (must match #{WORKFLOW_ID_RE.source})", value: id)
-        end
-        return unless Hive::Workflows::Registry::WORKFLOWS.key?(id.to_sym)
-
-        raise UsageError.new("workflow id #{id.inspect} is reserved by a built-in workflow", value: id)
-      end
-
-      def scaffold_paths(id)
-        workflows_dir = workflow_dir
-        {
-          workflows_dir: workflows_dir,
-          descriptor: File.join(workflows_dir, "#{id}.yml"),
-          instruction_dir: File.join(workflows_dir, id),
-          instruction: File.join(workflows_dir, id, "work.md")
-        }
-      end
-
-      def workflow_dir
-        # Single source of "<hive_state_path>/workflows" — the scaffolder needs
-        # the raw config error to surface (no fallback), which Loader.workflow_dir
-        # provides; Project#workflow_dir_for is the fallback-wrapping variant.
-        Hive::Workflows::Loader.workflow_dir(@project_root)
-      end
-
-      def refuse_overwrite!(paths)
-        collisions = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir), paths.fetch(:instruction) ].select do |path|
-          File.exist?(path)
-        end
-        return if collisions.empty?
-
-        raise UsageError.new("workflow scaffold already exists at #{collisions.join(', ')}", value: collisions.first)
-      end
-
-      def write_scaffold!(id, paths)
-        FileUtils.mkdir_p(paths.fetch(:instruction_dir))
-        File.write(paths.fetch(:descriptor), render_descriptor(id))
-        File.write(paths.fetch(:instruction), File.read(File.join(TEMPLATE_ROOT, "work.md")))
-      end
-
-      def render_descriptor(id)
-        template = File.read(File.join(TEMPLATE_ROOT, "descriptor.yml.erb"))
-        ERB.new(template, trim_mode: "-").result_with_hash(id: id)
-      end
-
-      def validate_descriptor!(path)
-        Hive::Workflows::DescriptorParser.parse_file(path)
-      end
-
       def commit_scaffold!(id, paths)
         ops = Hive::GitOps.new(@project_root)
         Hive::Lock.with_commit_lock(hive_state_path) do
-          ops.hive_commit(
-            stage_name: "workflows",
-            slug: id,
-            action: "created",
-            pathspecs: [
-              relative_to_workflows_root(paths.fetch(:descriptor)),
-              relative_to_workflows_root(paths.fetch(:instruction_dir))
-            ]
-          )
+          self.class.commit_workflow_scaffold(ops, slug: id, pathspecs: [
+            relative_to_workflows_root(paths.fetch(:descriptor)),
+            relative_to_workflows_root(paths.fetch(:instruction_dir))
+          ])
         end
       end
 
@@ -203,19 +243,6 @@ module Hive
 
       def hive_state_path
         @hive_state_path ||= File.expand_path(Hive::Config.load(@project_root).fetch("hive_state_path"), @project_root)
-      end
-
-      # Filesystem-only rollback: it unwinds the working-tree files write_scaffold!
-      # created, NOT any git side-effects of a partially-run commit_scaffold!.
-      # That is sufficient because hive_commit stages by explicit pathspec (so a
-      # later retry re-stages exactly these paths) and the retry's
-      # refuse_overwrite! re-checks the same paths — removing them here is all a
-      # retry needs to succeed. rm_f/rm_rf swallow their own errors; a failure to
-      # clean up at worst trips refuse_overwrite! on the next attempt with a clear
-      # "already exists" message.
-      def rollback_scaffold(paths)
-        FileUtils.rm_f(paths.fetch(:descriptor))
-        FileUtils.rm_rf(paths.fetch(:instruction_dir))
       end
 
       def success_payload(id, paths)

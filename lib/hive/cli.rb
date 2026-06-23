@@ -16,11 +16,20 @@ module Hive
     # no literal stage dirs in source, so it stays in sync with a renumber.
     STAGE_VOCABULARY = "stages: #{Hive::Stages::DIRS.join(', ')}".freeze
 
-    # Registered workflow names embedded in the `--workflow` option help so an
-    # agent reading `hive help init|new` discovers valid workflows from
-    # `--help` instead of via a failed call — the STAGE_VOCABULARY pattern,
-    # applied to workflows.
-    WORKFLOW_VOCABULARY = "valid: #{Hive::Workflows::Registry.ids.join(', ')}".freeze
+    # Built-in workflow names embedded in the `--workflow` help on both `init`
+    # and `new`. Frozen at class load, when only built-ins are registered;
+    # project workflows load later via Workflows::Project.load!, so this stays
+    # built-ins-only by design. The static tail in .workflow_option_desc covers
+    # project-authored workflows; making the list project-aware later means
+    # editing only that one method.
+    WORKFLOW_VOCABULARY = Hive::Workflows::Registry.ids.join(", ").freeze
+
+    # The one place the `--workflow` help is composed, shared by `init` and
+    # `new` so they stay symmetric.
+    def self.workflow_option_desc
+      "#{WORKFLOW_VOCABULARY}, or any project-authored workflow " \
+        "(author one with `hive workflow new ID`)"
+    end
 
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, and the workflow verbs
@@ -116,8 +125,7 @@ module Hive
       See `wiki/commands/init.md` for the full prompt flow and ADR-023.
     DESC
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
-    option :workflow, type: :string,
-                      desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
+    option :workflow, type: :string, desc: workflow_option_desc
     option :new_workflow, type: :string,
                           desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
     def init(project_path = Dir.pwd)
@@ -372,8 +380,7 @@ module Hive
                         desc: "stack on a prerequisite task id or slug; hold daemon " \
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
-    option :workflow, type: :string,
-                      desc: "pin this task to a registered workflow (#{WORKFLOW_VOCABULARY})"
+    option :workflow, type: :string, desc: workflow_option_desc
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")

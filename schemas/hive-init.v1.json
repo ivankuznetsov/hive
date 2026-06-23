@@ -47,6 +47,12 @@
         "hive_state_path": {
           "type": "string"
         },
+        "descriptor_path": {
+          "type": "string"
+        },
+        "instruction_path": {
+          "type": "string"
+        },
         "workflow": {
           "type": "string"
         }
@@ -261,6 +267,12 @@
           "type": "string"
         },
         "hive_state_path": {
+          "type": "string"
+        },
+        "descriptor_path": {
+          "type": "string"
+        },
+        "instruction_path": {
           "type": "string"
         },
         "workflow": {

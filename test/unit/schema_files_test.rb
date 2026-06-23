@@ -1057,6 +1057,46 @@ class SchemaFilesTest < Minitest::Test
     assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
   end
 
+  def test_hive_init_new_workflow_success_payload_validates_with_scaffold_paths
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
+    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
+    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+    payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
+      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :writing
+    ).merge(
+      "descriptor_path" => "/tmp/demo/.hive-state/workflows/writing.yml",
+      "instruction_path" => "/tmp/demo/.hive-state/workflows/writing/work.md"
+    )
+
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "hive-init --new-workflow SuccessPayload must validate (errors: #{errors.inspect})"
+    assert_equal "writing", payload.fetch("workflow")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing.yml", payload.fetch("descriptor_path")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing/work.md", payload.fetch("instruction_path")
+  end
+
+  def test_hive_init_new_workflow_already_initialized_payload_validates_with_scaffold_paths
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    ops = Struct.new(:hive_state_path).new("/tmp/demo/.hive-state")
+    descriptor = Struct.new(:id).new(:writing)
+    workflow_choice = Hive::Commands::Init::WorkflowChoice.new(descriptor: descriptor, source: :flag)
+    payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
+      :existing_payload, ops, workflow_choice: workflow_choice
+    ).merge(
+      "descriptor_path" => "/tmp/demo/.hive-state/workflows/writing.yml",
+      "instruction_path" => "/tmp/demo/.hive-state/workflows/writing/work.md"
+    )
+
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "hive-init --new-workflow AlreadyInitializedPayload must validate (errors: #{errors.inspect})"
+    assert_equal true, payload.fetch("already_initialized")
+    assert_equal "writing", payload.fetch("workflow")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing.yml", payload.fetch("descriptor_path")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing/work.md", payload.fetch("instruction_path")
+  end
+
   # ── hive-forget ────────────────────────────────────────────────────────
 
   def test_hive_forget_schema_file_exists_and_is_valid_json

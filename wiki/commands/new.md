@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-06-20
+updated: 2026-06-23
 tags: [command, capture, slug, task-id, commit-lock, workflow]
 ---
 
@@ -12,19 +12,23 @@ tags: [command, capture, slug, task-id, commit-lock, workflow]
 ## Usage
 
 ```
-hive new [--workflow NAME] PROJECT TEXT...
+hive new [--workflow NAME] [--depends-on ID_OR_SLUG] PROJECT TEXT...
 ```
 
-`PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
+`PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names. `--depends-on ID_OR_SLUG` writes `depends_on:` into `meta.yml` after validating the prerequisite selector shape.
 
-After `PROJECT`, the executable wrapper treats the rest of argv as task text
-even when tokens look like wrapper controls. `hive new PROJECT add --help docs`
-captures `add --help docs` instead of rendering help, and
-`hive new PROJECT literal --json=yes text` captures the malformed-looking JSON
-assignment literally instead of failing the wrapper boolean grammar. Wrapper
-options before the project boundary are still parsed normally, including
-`--workflow NAME`; this special case applies only to the text tail after the
-registered project argument.
+After `PROJECT`, the executable wrapper still protects free text from generic
+wrapper controls: `hive new PROJECT add --help docs` captures `add --help docs`
+instead of rendering help, and `hive new PROJECT literal --json=yes text`
+captures the malformed-looking JSON assignment literally instead of failing the
+wrapper boolean grammar. Recognized `hive new` value options are the exception:
+`--workflow`, `--depends-on`, and their `--name=value` forms are normalized
+before the text terminator whether they appear before or after the text, so the
+documented `hive new PROJECT --workflow NAME TEXT...` and
+`hive new PROJECT TEXT... --depends-on ID_OR_SLUG` forms update `meta.yml`
+instead of being swallowed into `idea.md`. Put an explicit `--` immediately
+after `PROJECT` to capture a literal recognized option at the start of the task
+text.
 
 The human stdout surface is still plain text:
 

@@ -64,36 +64,100 @@ def normalize_leading_json_options!(argv)
   argv.insert(cmd_idx + 1, *leading)
 end
 
-def new_text_start_index(argv)
+def new_value_option?(arg)
+  NEW_VALUE_OPTIONS.include?(arg)
+end
+
+def new_value_assignment?(arg)
+  NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+end
+
+def new_project_index(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
 
   idx = cmd_idx + 1
-  project_idx = nil
   while idx < argv.length
     arg = argv[idx]
     if JSON_BOOLEAN_OPTIONS.include?(arg)
       idx += 1
       next
     end
-    if NEW_VALUE_OPTIONS.include?(arg)
+    if new_value_option?(arg)
       idx += 2
       next
     end
-    if NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+    if new_value_assignment?(arg)
       idx += 1
       next
     end
-    unless arg.start_with?("-")
-      project_idx = idx
-      break
-    end
+    return idx unless arg.start_with?("-")
 
     idx += 1
   end
+
+  nil
+end
+
+def new_text_start_index(argv)
+  project_idx = new_project_index(argv)
   return nil unless project_idx
 
-  project_idx + 1
+  idx = project_idx + 1
+  while idx < argv.length
+    arg = argv[idx]
+    return idx if arg == "--"
+
+    if new_value_option?(arg)
+      idx += 2
+      next
+    end
+    if new_value_assignment?(arg)
+      idx += 1
+      next
+    end
+
+    return idx
+  end
+
+  nil
+end
+
+def normalize_new_value_options!(argv)
+  project_idx = new_project_index(argv)
+  return unless project_idx
+
+  tail = argv[(project_idx + 1)..] || []
+  explicit_stop_idx = tail.index("--") || tail.length
+  scan_tail = tail[0...explicit_stop_idx]
+  literal_tail = tail[explicit_stop_idx..] || []
+  option_tail = []
+  text_tail = []
+  idx = 0
+
+  while idx < scan_tail.length
+    arg = scan_tail[idx]
+    if new_value_assignment?(arg)
+      option_tail << arg
+      idx += 1
+      next
+    end
+    if new_value_option?(arg)
+      unless idx + 1 < scan_tail.length
+        raise Thor::MalformattedArgumentError, "No value provided for option '#{arg}'"
+      end
+
+      option_tail << arg << scan_tail[idx + 1]
+      idx += 2
+      next
+    end
+
+    text_tail << arg
+    idx += 1
+  end
+  return if option_tail.empty?
+
+  argv.replace(argv[0..project_idx] + option_tail + text_tail + literal_tail)
 end
 
 # Thor only honours `--help` *before* the subcommand name (`hive help approve`);
@@ -184,6 +248,7 @@ end
 begin
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_json_options!(ARGV)
+  normalize_new_value_options!(ARGV)
   rewrite_help_flag!(ARGV)
   terminate_new_text_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)

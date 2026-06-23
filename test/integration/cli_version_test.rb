@@ -100,17 +100,33 @@ class CliVersionTest < Minitest::Test
       assert status.success?, "hive new should parse --workflow before PROJECT, stderr was: #{err}"
       assert_includes out, "hive: captured"
       folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "workflow-flag-*")].first
+      assert folder, "expected workflow-flag task to be created"
       assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
     end
   end
 
-  def test_bin_hive_new_treats_workflow_option_as_task_text_after_project
+  def test_bin_hive_new_accepts_workflow_option_after_project_before_text
     with_cli_project do |dir, project|
-      out, err, status = run_bin_hive("new", project, "literal", "--workflow", "coding")
+      out, err, status = run_bin_hive("new", project, "--workflow", "coding", "workflow", "flag")
 
-      assert status.success?, "hive new should capture --workflow as text after PROJECT, stderr was: #{err}"
+      assert status.success?, "hive new should parse --workflow after PROJECT, stderr was: #{err}"
       assert_includes out, "hive: captured"
-      assert_new_idea_includes(dir, "literal --workflow coding")
+      folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "workflow-flag-*")].first
+      assert folder, "expected workflow-flag task to be created"
+      assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
+    end
+  end
+
+  def test_bin_hive_new_accepts_depends_on_option_after_text
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", project, "add", "export", "button", "--depends-on", "42")
+
+      assert status.success?, "hive new should parse --depends-on after TEXT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "add-export-button-*")].first
+      assert folder, "expected add-export-button task to be created"
+      assert_equal "42", Hive::TaskMeta.read(folder)[:depends_on]
+      refute_includes File.read(File.join(folder, "idea.md")), "--depends-on"
     end
   end
 

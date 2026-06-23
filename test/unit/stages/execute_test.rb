@@ -166,6 +166,59 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  # `agent_failed?` is true for :timeout as well as :error, and the
+  # non-limit branch records `status: impl_result[:status]` verbatim — so a
+  # timeout (e.g. the exit_code_only "stop hook did not signal completion"
+  # drain) must attribute as `implementer_failed status=timeout`.
+  def test_run_pass_records_timeout_status_for_non_limit_implementation_timeout
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = { status: :timeout, error_message: "claude stop hook did not signal completion" }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs["reason"]
+      assert_equal "timeout", marker.attrs["status"]
+      assert_equal "claude stop hook did not signal completion", marker.attrs["message"]
+      refute marker.attrs.key?("retry_after")
+      refute marker.attrs.key?("provider")
+    end
+  end
+
+  # When the execute agent name can't be resolved (unregistered profile),
+  # `execute_agent_name` rescues to nil rather than letting the exception
+  # escape; the limits_reached marker is still written, just with provider
+  # dropped (markers compact nil attrs away).
+  def test_run_pass_marks_limits_reached_with_no_provider_when_execute_agent_unresolvable
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = { status: :error, limit_text: "rate limit reached", error_message: "exit_code=1" }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("nonexistent-agent"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      refute marker.attrs.key?("provider"),
+             "an unresolvable execute agent must drop provider, not crash"
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
   def test_execute_baseline_head_returns_nil_when_git_head_fails
     with_tmp_dir do |dir|
       task = build_task(dir)

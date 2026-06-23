@@ -357,8 +357,10 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     row = snap.projects.first.rows.first
 
-    assert_equal "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
-                 "top up or switch execute agent",
+    # Assert the renderer output equals the shared contract it delegates to,
+    # so this test verifies the no-divergence invariant rather than re-pinning
+    # the literal (the canonical literal pin lives in agent_limit_test.rb).
+    assert_equal Hive::AgentLimit.held_label(row.attrs),
                  Hive::Tui::Views::TasksPane.status_label(row)
   end
 
@@ -591,8 +593,10 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     row = snap.projects.first.rows.first
 
-    assert_equal "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
-                 "top up or switch execute agent",
+    # Assert against the shared contract the renderer delegates to (the
+    # canonical literal pin lives in agent_limit_test.rb) so a label tweak
+    # is a one-line edit there, and this test stays a divergence guard.
+    assert_equal Hive::AgentLimit.held_label(row.attrs),
                  Hive::Tui::Views::TasksPane.status_label(row)
   end
 

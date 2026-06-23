@@ -192,6 +192,25 @@ class AgentLimitTest < Minitest::Test
     }, Hive::AgentLimit.held_field(attrs))
   end
 
+  # The null variant the helper really emits for message-only / attr-less
+  # legacy markers and garbled timestamps: schema declares provider /
+  # retry_after nullable precisely for this shape (hive-status.v4.json#held).
+  def test_held_field_emits_null_provider_and_retry_for_attr_less_marker
+    assert_equal({
+      "reason" => "quota",
+      "provider" => nil,
+      "retry_after" => nil
+    }, Hive::AgentLimit.held_field("reason" => "limits_reached"))
+
+    # A garbled retry_after must null out rather than raise / leak.
+    assert_equal({
+      "reason" => "quota",
+      "provider" => nil,
+      "retry_after" => nil
+    }, Hive::AgentLimit.held_field("reason" => "limits_reached",
+                                   "retry_after" => "not-a-timestamp"))
+  end
+
   private
 
   def with_env(values)

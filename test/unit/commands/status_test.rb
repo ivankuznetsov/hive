@@ -385,8 +385,10 @@ class CommandsStatusTest < Minitest::Test
         Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
       end
 
-      assert_includes out, "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
-                           "top up or switch execute agent"
+      # Assert against the shared contract this renderer delegates to rather
+      # than re-pinning the literal (the one canonical literal pin lives in
+      # agent_limit_test.rb) — this directly tests the no-divergence invariant.
+      assert_includes out, Hive::AgentLimit.held_label("provider" => "codex", "retry_after" => retry_after)
       refute_includes out, "reason=limits_reached",
                       "held quota rows must render the shared label instead of a raw attr dump"
     end

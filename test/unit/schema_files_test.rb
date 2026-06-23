@@ -372,6 +372,20 @@ class SchemaFilesTest < Minitest::Test
                                       action_label: "Error",
                                       suggested_command: nil
                                     ))
+    # The null variant: an attr-less legacy limit marker emits
+    # `held: {reason: quota, provider: null, retry_after: null}` — the exact
+    # shape the schema declares provider/retry_after nullable for. Validating
+    # it here catches a schema-tightening or a nil→"" producer regression
+    # that the fully-populated case above would pass through green.
+    held_task_null = status.task_payload(base_row.merge(
+                                           slug: "quota-task-bare",
+                                           pr_url: nil,
+                                           marker_name: :error,
+                                           marker_attrs: { "reason" => "limits_reached" },
+                                           action_key: Hive::Schemas::TaskActionKind::ERROR,
+                                           action_label: "Error",
+                                           suggested_command: nil
+                                         ))
 
     payload = {
       "schema" => "hive-status",
@@ -383,7 +397,7 @@ class SchemaFilesTest < Minitest::Test
           "name" => "demo",
           "path" => "/tmp/demo",
           "hive_state_path" => "/tmp/demo/.hive-state",
-          "tasks" => [ task_with_pr, task_without_pr, held_task ],
+          "tasks" => [ task_with_pr, task_without_pr, held_task, held_task_null ],
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -391,8 +405,8 @@ class SchemaFilesTest < Minitest::Test
     }
     errors = schemer.validate(payload).map { |e| e["error"] }
     assert_empty errors,
-                 "populated tasks (dependency fields plus pr_url string + null) must validate against the schema " \
-                 "(errors: #{errors.inspect})"
+                 "populated tasks (dependency fields plus pr_url string + null, held populated + null) " \
+                 "must validate against the schema (errors: #{errors.inspect})"
     assert_equal "https://github.com/example/repo/pull/561", task_with_pr["pr_url"]
     assert_nil task_without_pr["pr_url"]
     assert_equal({
@@ -400,6 +414,11 @@ class SchemaFilesTest < Minitest::Test
       "provider" => "codex",
       "retry_after" => retry_after
     }, held_task["held"])
+    assert_equal({
+      "reason" => "quota",
+      "provider" => nil,
+      "retry_after" => nil
+    }, held_task_null["held"])
   end
 
   # `legacy_migrate_command` accepts either "hive migrate" (when

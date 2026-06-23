@@ -127,6 +127,38 @@ class HiveCliTest < Minitest::Test
     assert_match(/missing task text/, err)
   end
 
+  def test_workflow_option_help_advertises_project_authored_workflows
+    new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+    init_out, _init_err = capture_io { Hive::CLI.start([ "help", "init" ]) }
+
+    [ new_out, init_out ].each do |out|
+      assert_match(/or any project-authored workflow/, out,
+                   "--workflow help must say project-authored workflows are valid")
+      assert_match(/hive workflow new/, out,
+                   "--workflow help must point at the authoring command")
+      assert_match(/coding/, out)
+      assert_match(/content/, out)
+    end
+  end
+
+  def test_workflow_option_desc_is_symmetric_and_dry
+    desc = Hive::CLI.workflow_option_desc
+    built_ins = Hive::Workflows::Registry.ids.join(", ")
+
+    assert_includes desc, built_ins
+    assert_includes desc, "or any project-authored workflow"
+    assert_includes desc, "hive workflow new ID"
+
+    new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+    init_out, _init_err = capture_io { Hive::CLI.start([ "help", "init" ]) }
+    assert_includes new_out, desc
+    assert_includes init_out, desc
+
+    cli_source = File.read(File.expand_path("../../lib/hive/cli.rb", __dir__))
+    refute_match(/["']coding, content/, cli_source,
+                 "built-in workflow names must come from the registry")
+  end
+
   def test_workflow_new_dispatches_to_command_with_json
     with_command_new_stub(Hive::Commands::Workflow) do |calls|
       Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])

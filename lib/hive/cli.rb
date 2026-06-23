@@ -62,6 +62,7 @@ module Hive
       On a TTY, init asks the operator the following questions before
       writing anything to disk:
 
+        0. Workflow (when >1 workflow is registered)             — default coding
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
         2. Claude launch mode (project-global, tmux/headless)    — default tmux
         3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
@@ -78,6 +79,15 @@ module Hive
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
       the final confirmation to abort with no disk side effects.
+
+      The Workflow step (item 0) is shown only when the project has more
+      than one workflow registered; it lists the workflow ids plus an
+      `author a new workflow` entry. A bare Enter keeps the current
+      default — `coding` on a fresh init, the project's existing
+      `default_workflow` on a re-init — so it never silently downgrades a
+      non-coding default. Choosing the author entry prompts for a new id
+      and scaffolds it through the same path as `--new-workflow` (below)
+      before the remaining questions resume.
 
       On non-TTY (CI, pipes, scripted callers) the prompts are skipped
       and a one-line summary is emitted to stdout so the caller can see

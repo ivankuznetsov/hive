@@ -383,6 +383,19 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_scaffold_collision_reports_existing_scaffold_paths
+    with_initialized_project do |project_root|
+      refute Hive::Commands::Workflow.scaffold_collision?("drafting", project_root: project_root),
+             "a free workflow id should not report a scaffold collision"
+
+      scaffold = Hive::Commands::Workflow.scaffold_files!("drafting", project_root: project_root)
+
+      assert Hive::Commands::Workflow.scaffold_collision?("drafting", project_root: project_root),
+             "an existing descriptor/instruction scaffold should report a collision"
+      Hive::Commands::Workflow.rollback_scaffold(scaffold.fetch(:paths))
+    end
+  end
+
   def test_scaffold_files_rolls_back_when_generated_descriptor_fails_validation
     with_initialized_project do |project_root|
       error = Hive::ConfigError.new("boom")

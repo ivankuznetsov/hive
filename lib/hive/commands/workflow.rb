@@ -66,6 +66,25 @@ module Hive
         { id: id, paths: paths }
       end
 
+      # Inline-author pre-check for `hive init`: does scaffolding `id` clash with
+      # files already on disk? A pure predicate — pass an id that
+      # normalize_and_validate_id! has ALREADY accepted (the inline author
+      # normalizes in prompt_new_workflow_id before calling this), so on a
+      # pre-validated id it never raises and the `?` name holds. (It can still
+      # raise on a corrupt project config — workflow_dir → Config.load →
+      # ConfigError — but that is a real fault, not an id-shape rejection.) The
+      # inline author always scaffolds from
+      # the default (`blank`) template, so the pre-check resolves paths against
+      # `blank` too. That is not truly template-independent — scaffold_collisions
+      # also walks the template-dependent per-stage instruction files — but those
+      # instructions all live under the `<id>/` dir this already checks, so the
+      # descriptor + dir collision set a different template would produce is the
+      # same.
+      def self.scaffold_collision?(id, project_root:)
+        paths = scaffold_paths(id, project_root: project_root, template_dir: template_dir!(DEFAULT_TEMPLATE))
+        scaffold_collisions(paths).any?
+      end
+
       # Sample templates ship as directories under `templates/workflows/` (the
       # bare `blank` stub plus richer multi-stage samples). A template dir holds
       # `descriptor.yml.erb` (rendered with the new id) and one `.md` instruction
@@ -191,14 +210,23 @@ module Hive
       private_class_method :workflow_dir
 
       def self.refuse_overwrite!(paths)
-        collisions = ([ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ] + paths.fetch(:instructions)).select do |path|
-          File.exist?(path)
-        end
+        collisions = scaffold_collisions(paths)
         return if collisions.empty?
 
         raise UsageError.new("workflow scaffold already exists at #{collisions.join(', ')}", value: collisions.first)
       end
       private_class_method :refuse_overwrite!
+
+      # One source of truth for "what would this scaffold overwrite?" — shared by
+      # refuse_overwrite! (the scaffold_files! guard) and scaffold_collision?
+      # (init's inline-author pre-check). Checks the descriptor, the instruction
+      # dir, and every per-stage instruction file the template would write.
+      def self.scaffold_collisions(paths)
+        ([ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ] + paths.fetch(:instructions)).select do |path|
+          File.exist?(path)
+        end
+      end
+      private_class_method :scaffold_collisions
 
       def self.write_scaffold!(id, paths, template_dir)
         FileUtils.mkdir_p(paths.fetch(:instruction_dir))

@@ -52,8 +52,25 @@ module Hive
 
       # Immutable value object (Data.define, matching the Workflow/Stage/
       # AdvanceVerb convention) carrying the resolved descriptor and the
-      # provenance of the choice (:flag | :prompt | :implicit).
-      WorkflowChoice = Data.define(:descriptor, :source)
+      # provenance of the choice (:flag | :prompt | :implicit). The initialize
+      # guard enforces the documented invariant at construction — descriptor is a
+      # non-nil resolved Hive::Workflow and source is one of the three known
+      # provenances — so a malformed choice fails here, not at a far-away read.
+      WorkflowChoice = Data.define(:descriptor, :source) do
+        def initialize(descriptor:, source:)
+          raise ArgumentError, "WorkflowChoice descriptor must be a resolved workflow, got nil" if descriptor.nil?
+          unless self.class::SOURCES.include?(source)
+            raise ArgumentError, "WorkflowChoice source must be one of #{self.class::SOURCES.join(', ')} (got #{source.inspect})"
+          end
+
+          super
+        end
+      end
+      # The closed set of provenances a WorkflowChoice may carry. Defined on the
+      # value object itself (not the bare lexical Init::SOURCES an in-block
+      # assignment would bind) so it reads as WorkflowChoice::SOURCES; the
+      # initialize guard reaches it through self.class::SOURCES.
+      WorkflowChoice::SOURCES = %i[flag prompt implicit].freeze
       CUSTOM_WORKFLOW_HINT_COMMAND = "hive workflow new <id>".freeze
       CUSTOM_WORKFLOW_HINT_MESSAGE = "custom workflows live in this project — author one with `#{CUSTOM_WORKFLOW_HINT_COMMAND}`".freeze
 
@@ -92,6 +109,17 @@ module Hive
         end
 
         workflow_choice = resolve_workflow_choice(ops)
+        if workflow_choice.nil?
+          # nil (not a WorkflowChoice) is resolve_workflow_choice's signal that the
+          # interactive prompt's "author a new workflow" entry was chosen: deep
+          # inside it, prompt_workflow set @new_workflow as a side effect.
+          # Inline authoring deliberately routes through the same scaffolder as
+          # --new-workflow — the descriptor does not exist yet, so there is no
+          # resolved Hive::Workflow to carry in a WorkflowChoice. Keying off the
+          # return value (not a re-read of @new_workflow) keeps routing data-driven.
+          init_with_new_workflow(ops)
+          return
+        end
         if ops.hive_state_branch_exists?
           if workflow_choice.source == :implicit
             raise Hive::AlreadyInitialized,
@@ -962,7 +990,16 @@ module Hive
           # never silently reset a non-coding default back to coding and rebind
           # every field-less in-flight task. A fresh init defaults to coding.
           current = ops.hive_state_branch_exists? ? current_default_workflow(ops) : Hive::Workflows::CODING_ID.to_s
-          return WorkflowChoice.new(descriptor: prompt_workflow(current), source: :prompt)
+          descriptor = prompt_workflow(current)
+          # A nil descriptor means the operator picked "author a new workflow":
+          # prompt_workflow set @new_workflow as a side effect and no resolved
+          # Hive::Workflow exists yet. Return nil so `call` routes to the
+          # scaffolder, rather than building a WorkflowChoice(descriptor: nil)
+          # that would violate the type's "descriptor is a fully resolved
+          # Hive::Workflow" invariant and rely on a downstream re-read of the flag.
+          return if descriptor.nil?
+
+          return WorkflowChoice.new(descriptor: descriptor, source: :prompt)
         end
 
         WorkflowChoice.new(descriptor: Hive::Workflows::Registry.default, source: :implicit)
@@ -970,7 +1007,11 @@ module Hive
 
       def prompt_workflow(current_default = Hive::Workflows::CODING_ID.to_s)
         ids = Hive::WorkflowSelection.valid_names(project_root: @project_path)
-        @workflow_output.puts "Workflows: #{ids.each_with_index.map { |name, index| "#{index + 1}) #{name}" }.join('  ')}"
+        author_index = ids.size + 1
+        choices = ids.each_with_index.map { |name, index| "#{index + 1}) #{name}" }
+        choices << "#{author_index}) author a new workflow"
+        @workflow_output.puts "Workflow:"
+        @workflow_output.puts "  #{choices.join('  ')}"
         loop do
           @workflow_output.print "Default workflow [#{current_default}]: "
           @workflow_output.flush
@@ -979,17 +1020,41 @@ module Hive
 
           value = answer.strip
           return Hive::WorkflowSelection.fetch!(current_default, project_root: @project_path) if value.empty?
+          if numeric_choice(value) == author_index
+            @new_workflow = prompt_new_workflow_id
+            return nil
+          end
 
           resolved = resolve_workflow_answer(value, ids)
           return resolved if resolved
 
-          @workflow_output.puts "  unknown workflow #{value.inspect}; pick a name (#{ids.join(', ')}) or 1..#{ids.size}"
+          @workflow_output.puts "  unknown workflow #{value.inspect}; pick a name (#{ids.join(', ')}) " \
+                                "or 1..#{author_index}"
+        end
+      end
+
+      def prompt_new_workflow_id
+        loop do
+          @workflow_output.print "New workflow id: "
+          @workflow_output.flush
+          answer = @workflow_input.gets
+          raise Hive::Commands::Init::Prompts::Aborted, "input closed" if answer.nil?
+
+          id = Hive::Commands::Workflow.normalize_and_validate_id!(answer)
+          if Hive::Commands::Workflow.scaffold_collision?(id, project_root: @project_path)
+            @workflow_output.puts "  workflow scaffold already exists for #{id.inspect}"
+            next
+          end
+
+          return id
+        rescue Hive::Commands::Workflow::UsageError => e
+          @workflow_output.puts "  #{e.message}"
         end
       end
 
       def resolve_workflow_answer(value, ids)
-        if value.match?(/\A\d+\z/)
-          index = value.to_i
+        index = numeric_choice(value)
+        if index
           return Hive::WorkflowSelection.fetch!(ids[index - 1], project_root: @project_path) if index.between?(1, ids.size)
 
           return nil
@@ -997,6 +1062,14 @@ module Hive
 
         match = ids.find { |id| id.casecmp(value).zero? }
         match && Hive::WorkflowSelection.fetch!(match, project_root: @project_path)
+      end
+
+      # Parse a workflow-prompt answer as a 1-based menu index, or nil when it is
+      # not a bare integer (so a workflow *named* like a number, or any
+      # non-numeric pick, falls through to name matching). Base 10 is pinned so a
+      # leading-zero answer like "010" reads as 10, not octal 8.
+      def numeric_choice(value)
+        Integer(value, 10, exception: false)
       end
 
       def relative_to_hive_state(path, ops)

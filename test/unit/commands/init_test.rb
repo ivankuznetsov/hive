@@ -148,6 +148,22 @@ class HiveCommandsInitTest < Minitest::Test
     assert_nil cmd.send(:emit_existing_json_summary, ops, workflow_choice: choice)
   end
 
+  def test_workflow_choice_rejects_nil_descriptor
+    # The construction-time invariant: a WorkflowChoice must carry a resolved
+    # descriptor, so a nil slips through neither :flag nor any other source.
+    assert_raises(ArgumentError) do
+      Hive::Commands::Init::WorkflowChoice.new(descriptor: nil, source: :flag)
+    end
+  end
+
+  def test_workflow_choice_rejects_unknown_source
+    # source is a closed set (WorkflowChoice::SOURCES); an unlisted provenance
+    # must fail at construction, not at a far-away read.
+    assert_raises(ArgumentError) do
+      Hive::Commands::Init::WorkflowChoice.new(descriptor: content_workflow, source: :bogus)
+    end
+  end
+
   def test_current_default_workflow_falls_back_to_coding_on_unreadable_config
     Dir.mktmpdir("hive-init-unit") do |dir|
       state = File.join(dir, ".hive-state")

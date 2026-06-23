@@ -39,6 +39,21 @@ class InitTest < Minitest::Test
     workflows_dir
   end
 
+  # Replace Loader.load_dir with a raising singleton method for the block, then
+  # restore it (minitest/mock isn't bundled — same singleton-override pattern as
+  # the reviewer/digest tests). Lets us drive no_custom_workflow_yet?'s rescue
+  # arm without an exotic on-disk fault.
+  def with_load_dir_raising(error)
+    original = Hive::Workflows::Loader.method(:load_dir)
+    Hive::Workflows::Loader.define_singleton_method(:load_dir) { |*| raise error }
+    begin
+      yield
+    ensure
+      Hive::Workflows::Loader.singleton_class.send(:remove_method, :load_dir)
+      Hive::Workflows::Loader.define_singleton_method(:load_dir, &original)
+    end
+  end
+
   def test_initializes_project_with_orphan_branch_and_global_registration
     # `with_tmp_global_config` overrides HOME alongside HIVE_HOME so
     # ServiceInstaller (which writes launchd/systemd units under the
@@ -592,6 +607,39 @@ class InitTest < Minitest::Test
              "non-coding default short-circuits on coding_id? even with an empty dir"
       refute cmd.send(:no_custom_workflow_yet?, populated_state, :content_fixture),
              "non-coding default short-circuits on coding_id? regardless of dir contents"
+    end
+  end
+
+  # The `rescue StandardError` arm of no_custom_workflow_yet? (added by 78a9ce50):
+  # an error escaping Loader.load_dir — a filesystem fault OR a genuine
+  # programming bug in the coding_id?/load_dir/parser chain — must degrade the
+  # advisory hint to "no hint" with a stderr breadcrumb rather than crash an
+  # already-committed init. The on-disk truth-table cases above never hit this
+  # path (load_dir succeeds), so without this the rescue's two lines stay
+  # uncovered and the project's 100% line-coverage gate fails.
+  def test_no_custom_workflow_yet_degrades_when_load_dir_raises
+    Dir.mktmpdir("hive-no-custom-raise") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(File.join(state_path, "workflows"))
+      cmd = Hive::Commands::Init.new(dir)
+
+      predicate = nil
+      hints = nil
+      _out, err = capture_io do
+        with_load_dir_raising(RuntimeError.new("boom from load_dir")) do
+          predicate = cmd.send(:no_custom_workflow_yet?, state_path, :coding)
+          hints = cmd.send(:workflow_authoring_hints, state_path, :coding)
+        end
+      end
+
+      refute predicate,
+             "a coding default whose load_dir raises must degrade to false, not crash"
+      assert_equal [], hints,
+                   "a raised load_dir must suppress the authoring hint entirely"
+      assert_includes err, "hive: skipped workflow-authoring hint",
+                      "the degrade must leave a stderr breadcrumb for the operator"
+      assert_includes err, "RuntimeError: boom from load_dir",
+                      "the breadcrumb must name the swallowed exception class and message"
     end
   end
 

@@ -74,16 +74,17 @@ module Hive
       end
 
       def call!
+        expected_list = SUBCOMMANDS.join(", ")
         if @subcommand.nil?
           raise UsageError.new(
-            "missing SUBCOMMAND (expected: #{SUBCOMMANDS.join(', ')})",
+            "missing SUBCOMMAND (expected: #{expected_list})",
             expected: SUBCOMMANDS
           )
         end
 
         unless @subcommand == "new"
           raise UsageError.new(
-            "unknown workflow subcommand #{@subcommand.inspect} (expected: #{SUBCOMMANDS.join(', ')})",
+            "unknown workflow subcommand #{@subcommand.inspect} (expected: #{expected_list})",
             value: @subcommand,
             expected: SUBCOMMANDS
           )

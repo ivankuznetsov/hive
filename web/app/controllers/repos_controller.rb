@@ -23,20 +23,20 @@ class ReposController < ApplicationController
   def new
     @url = params[:url].to_s.strip
     raw_project = params[:project].to_s.strip
+    # File.basename strips path segments so a crafted `project` param can't walk
+    # out of the registered-projects lookup below — mirrors create's hardening.
     @project_name = raw_project.present? ? File.basename(raw_project) : nil
     @suggested_name = params[:name].to_s.strip.presence ||
                       (@project_name || File.basename(@url).delete_suffix(".git") if @url.present? || @project_name)
     @defaults = InitSetup.defaults
     @workflows = InitSetup.workflows
     @current_workflow = Hive::Workflows::CODING_ID.to_s
-    if @project_name
-      project = registered_projects.find { |entry| entry["name"] == @project_name }
-      if project
-        @workflows = InitSetup.workflows(project["path"])
-        @current_workflow = Hive::Config.load(project["path"])["default_workflow"].presence ||
-                            Hive::Workflows::CODING_ID.to_s
-      end
-    end
+
+    project = @project_name && registered_projects.find { |entry| entry["name"] == @project_name }
+    return unless project
+
+    @workflows = InitSetup.workflows(project["path"])
+    @current_workflow = persisted_default_workflow(project) || @current_workflow
   end
 
   def create
@@ -80,6 +80,22 @@ class ReposController < ApplicationController
   end
 
   private
+
+  # The persisted `default_workflow` for a registered project's re-run form, or
+  # nil when none is set. A corrupt/unreadable config.yml degrades to nil (the
+  # caller then falls back to coding) — matching the InitSetup.workflows list
+  # rendered just above, which already survives the same broken file via its own
+  # fallback — rather than letting an unrescued Psych::Exception 500 the very
+  # form an operator opens to repair the project. Mirrors
+  # tasks_controller#project_daemon_enabled?'s rescue-and-degrade pattern;
+  # Config.load (lib/hive/config.rb) does not rescue Psych and
+  # ApplicationController only rescues Hive::Error/ParameterMissing.
+  def persisted_default_workflow(project)
+    Hive::Config.load(project["path"])["default_workflow"].presence
+  rescue StandardError => e
+    Rails.logger.warn("default_workflow unreadable for #{project["name"]}: #{e.class}: #{e.message}")
+    nil
+  end
 
   # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
   # indistinguishable from an interactive `hive init`.

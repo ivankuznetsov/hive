@@ -30,7 +30,7 @@ class RepoSetupFlowTest < ApplicationSystemTestCase
                  "the browser-selected workflow should be written by the real Init path"
   end
 
-  test "rerun setup lists project workflows and preselects current default" do
+  test "rerun setup form renders project workflows with current default preselected" do
     root = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos-system-workflow-rerun")
     name = "workflow-web-rerun"
     dir = create_git_repo!(root, name)

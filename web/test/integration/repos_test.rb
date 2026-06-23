@@ -86,6 +86,46 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "the chosen workflow must land in the project config through Init.new(workflow:)"
   end
 
+  test "rerun setup rebinds the project default workflow on disk" do
+    # The re-run branch (params[:project] present) routes through
+    # handle_existing_project — a different bind path than a fresh clone init.
+    # Assert the rebound default_workflow actually reaches config.yml on disk so
+    # dropping `workflow:` from the re-run reinit! call can't stay green.
+    name = create_hive_project!("rerun-rebind-app")
+    sign_in!
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
+
+    post "/repos", params: { project: name, settings: { workflow: "content" } }
+
+    assert_redirected_to "/repos"
+    config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+    assert_equal "content", config.fetch("default_workflow"),
+                 "the re-run rebind must persist default_workflow through handle_existing_project"
+  end
+
+  test "rerun setup keeps an unloadable persisted default selected instead of downgrading to coding" do
+    name = create_hive_project!("rerun-orphan-app")
+    sign_in!
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
+    capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing", force: true).call }
+    # Drop the descriptor so valid_names no longer lists `writing`, leaving
+    # config.yml's `default_workflow: writing` pointing at a now-gone workflow —
+    # the exact state where the old select silently rebound a bare Apply to coding.
+    FileUtils.rm_rf(File.join(dir, ".hive-state", "workflows", "writing.yml"))
+    FileUtils.rm_rf(File.join(dir, ".hive-state", "workflows", "writing"))
+    # The per-root workflow overlay is process-memoized; force a fresh disk read
+    # so the controller's valid_names reflects the deleted descriptor.
+    Hive::Workflows::Project.reset!
+
+    get "/repos/new", params: { project: name }
+
+    assert_response :success
+    assert_select "select[name='settings[workflow]'] option[value='writing'][selected]",
+                  "writing", "the unloadable persisted default must stay selected, not silently fall back to coding"
+    assert_select "select[name='settings[workflow]'] option[value='coding'][selected]", false,
+                  "coding must not be auto-selected when a non-coding default is still persisted"
+  end
+
   test "an out-of-range setting is a readable 422, not a silent default" do
     sign_in!
     post "/repos", params: { url: "ivankuznetsov/x", settings: { claude_mode: "yolo" } }

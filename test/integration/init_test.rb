@@ -181,6 +181,136 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_workflow_prompt_pick_selects_the_named_index
+    # Discriminator against a "selection ignored, always writes the one
+    # registered non-coding default" regression: with BOTH content (built-in,
+    # index 2) and content_fixture (index 3) on the menu, picking "2" must bind
+    # content — not whatever single non-coding default a broken loop might emit.
+    # The sibling test above pins "3" → content_fixture, so the two together
+    # prove the chosen index actually drives the on-disk default.
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("2\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          prompts = Hive::Commands::Init::Prompts.new(
+            input: StringIO.new,
+            output: StringIO.new,
+            summary_io: StringIO.new
+          )
+
+          capture_io do
+            Hive::Commands::Init.new(dir, prompts: prompts, workflow_input: workflow_input).call
+          end
+
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content", config.fetch("default_workflow"),
+                       "picking index 2 must bind content, not the index-3 content_fixture"
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_accepts_case_insensitive_name
+    # resolve_workflow_answer's name branch matches case-insensitively, so a
+    # name typed with different casing still resolves to its descriptor.
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          workflow_input = StringIO.new("Content_Fixture\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          prompts = Hive::Commands::Init::Prompts.new(
+            input: StringIO.new,
+            output: StringIO.new,
+            summary_io: StringIO.new
+          )
+
+          capture_io do
+            Hive::Commands::Init.new(dir, prompts: prompts, workflow_input: workflow_input).call
+          end
+
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content_fixture", config.fetch("default_workflow"),
+                       "a workflow name must resolve regardless of case"
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_reprompts_on_unknown_name
+    # The selection loop's unknown-input branch: an answer that is neither the
+    # author entry, an in-range index, nor a known name must re-prompt with the
+    # "unknown workflow … pick a name … or 1..N" hint, then accept the follow-up.
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          author_index = Hive::WorkflowSelection.valid_names(project_root: dir).size + 1
+          workflow_input = StringIO.new("nonexistent\n2\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+          prompts = Hive::Commands::Init::Prompts.new(
+            input: StringIO.new,
+            output: StringIO.new,
+            summary_io: StringIO.new
+          )
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              prompts: prompts,
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          assert_includes workflow_output.string, "unknown workflow \"nonexistent\""
+          assert_includes workflow_output.string, "1..#{author_index}",
+                          "the re-prompt hint must show the selectable 1..N range"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content", config.fetch("default_workflow"),
+                       "the selection loop must accept a valid pick after re-prompting"
+        end
+      end
+    end
+  end
+
+  def test_init_workflow_prompt_reprompts_on_out_of_range_index
+    # resolve_workflow_answer's numeric-but-out-of-range branch returns nil
+    # (rather than indexing past the menu), so the loop re-prompts the same way
+    # an unknown name does, then accepts the follow-up pick.
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          author_index = Hive::WorkflowSelection.valid_names(project_root: dir).size + 1
+          out_of_range = author_index + 5
+          workflow_input = StringIO.new("#{out_of_range}\n2\n")
+          workflow_input.define_singleton_method(:tty?) { true }
+          workflow_output = StringIO.new
+          prompts = Hive::Commands::Init::Prompts.new(
+            input: StringIO.new,
+            output: StringIO.new,
+            summary_io: StringIO.new
+          )
+
+          capture_io do
+            Hive::Commands::Init.new(
+              dir,
+              prompts: prompts,
+              workflow_input: workflow_input,
+              workflow_output: workflow_output
+            ).call
+          end
+
+          assert_includes workflow_output.string, "unknown workflow #{out_of_range.to_s.inspect}",
+                          "an out-of-range index must re-prompt, not index past the menu"
+          config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+          assert_equal "content", config.fetch("default_workflow"),
+                       "the loop must accept a valid pick after an out-of-range index"
+        end
+      end
+    end
+  end
+
   def test_init_non_tty_workflow_input_skips_prompt_and_keeps_coding_fieldless
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

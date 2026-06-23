@@ -80,6 +80,55 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_scaffolds_from_a_named_template
+    with_initialized_project do |project_root|
+      stdout = StringIO.new
+
+      payload = Hive::Commands::Workflow.new!(
+        "article", project_root: project_root, stdout: stdout, template: "writing"
+      )
+
+      workflows = File.join(project_root, ".hive-state", "workflows")
+      assert_equal "article", payload.fetch("id")
+
+      # The descriptor carries the SAMPLE's multi-stage shape, renamed to the id.
+      workflow = Hive::Workflows::DescriptorParser.parse_file(File.join(workflows, "article.yml"))
+      assert_equal %w[inbox research draft edit done], workflow.stage_names
+      assert_equal %i[inert agent agent agent inert], workflow.stages.map(&:kind)
+
+      # Every stage instruction is copied verbatim from the sample — real
+      # content, not the blank placeholder — and named per stage.
+      %w[research draft edit].each do |stage|
+        path = File.join(workflows, "article", "#{stage}.md")
+        assert File.file?(path), "#{stage}.md should be scaffolded"
+        refute_includes File.read(path), "Edit this file",
+                        "#{stage}.md must be the sample instruction, not the blank stub"
+      end
+      assert_equal File.join(workflows, "article", "research.md"),
+                   workflow.stages.find { |s| s.name == "research" }.instruction
+
+      # A multi-stage template points the operator at the directory of stage
+      # instructions to fill in, not a single file.
+      assert_includes stdout.string, "edit: #{File.join(workflows, 'article')}/"
+      assert_includes stdout.string, "3 stage instructions"
+    end
+  end
+
+  def test_unknown_template_is_a_usage_error_listing_available
+    with_initialized_project do |project_root|
+      error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new!("x", project_root: project_root, stdout: StringIO.new, template: "bogus")
+      end
+
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      assert_includes error.message, %(unknown workflow template "bogus")
+      assert_includes error.expected, "blank"
+      assert_includes error.expected, "writing"
+      # An invalid template is rejected before any scaffold is written.
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "x.yml"))
+    end
+  end
+
   def test_json_success_payload
     with_initialized_project do |project_root|
       out, err, status = with_captured_exit do

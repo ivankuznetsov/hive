@@ -317,20 +317,25 @@ module Hive
     desc "workflow SUBCOMMAND [ID]", "Manage per-project workflow descriptors"
     long_desc <<~DESC
       Subcommands:
-        new ID    Scaffold a blank per-project workflow descriptor under
-                  <hive_state_path>/workflows/ID.yml, plus a placeholder
-                  instruction at <hive_state_path>/workflows/ID/work.md.
+        new ID    Scaffold a per-project workflow descriptor under
+                  <hive_state_path>/workflows/ID.yml plus its stage
+                  instruction(s) under <hive_state_path>/workflows/ID/.
 
-      The blank workflow is inbox -> work -> done and is immediately usable
-      with `hive new PROJECT --workflow ID "<your idea>"`.
+      By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
+      `--template NAME` to seed from a richer sample workflow instead (e.g.
+      writing, research). Either way: edit the scaffolded stage instruction(s),
+      then run `hive new PROJECT --workflow ID "<your idea>"`.
     DESC
+    option :template, type: :string,
+                      desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
         subcommand,
         id,
         project_root: Dir.pwd,
-        json: options[:json]
+        json: options[:json],
+        template: options[:template]
       ).call
     end
 

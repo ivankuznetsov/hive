@@ -15,7 +15,8 @@ require "hive/workflows/registry"
 module Hive
   module Commands
     class Workflow
-      TEMPLATE_ROOT = File.expand_path("../../../templates/workflows/blank", __dir__)
+      TEMPLATES_DIR = File.expand_path("../../../templates/workflows", __dir__)
+      DEFAULT_TEMPLATE = "blank".freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
       SUBCOMMANDS = %w[new].freeze
@@ -39,8 +40,8 @@ module Hive
         end
       end
 
-      def self.new!(id, project_root: Dir.pwd, json: false, stdout: $stdout)
-        new("new", id, project_root: project_root, json: json, stdout: stdout).call!
+      def self.new!(id, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE)
+        new("new", id, project_root: project_root, json: json, stdout: stdout, template: template).call!
       end
 
       def self.normalize_and_validate_id!(raw)
@@ -49,12 +50,13 @@ module Hive
         id
       end
 
-      def self.scaffold_files!(id_raw, project_root:)
+      def self.scaffold_files!(id_raw, project_root:, template: DEFAULT_TEMPLATE)
         id = normalize_and_validate_id!(id_raw)
-        paths = scaffold_paths(id, project_root: project_root)
+        template_dir = template_dir!(template)
+        paths = scaffold_paths(id, project_root: project_root, template_dir: template_dir)
         refuse_overwrite!(paths)
         begin
-          write_scaffold!(id, paths)
+          write_scaffold!(id, paths, template_dir)
           validate_descriptor!(paths.fetch(:descriptor))
           Hive::Workflows::Project.reset!
         rescue StandardError
@@ -63,6 +65,31 @@ module Hive
         end
         { id: id, paths: paths }
       end
+
+      # Sample templates ship as directories under `templates/workflows/` (the
+      # bare `blank` stub plus richer multi-stage samples). A template dir holds
+      # `descriptor.yml.erb` (rendered with the new id) and one `.md` instruction
+      # per agent stage. Only dirs carrying a `descriptor.yml.erb` count, so a
+      # stray file under the templates root is never offered as a template.
+      def self.available_templates
+        Dir.children(TEMPLATES_DIR).select do |name|
+          File.file?(File.join(TEMPLATES_DIR, name, "descriptor.yml.erb"))
+        end.sort
+      end
+
+      def self.template_dir!(template)
+        name = template.to_s.strip
+        name = DEFAULT_TEMPLATE if name.empty?
+        dir = File.join(TEMPLATES_DIR, name)
+        return dir if File.file?(File.join(dir, "descriptor.yml.erb"))
+
+        raise UsageError.new(
+          "unknown workflow template #{name.inspect} (available: #{available_templates.join(', ')})",
+          value: name,
+          expected: available_templates
+        )
+      end
+      private_class_method :template_dir!
 
       # Shared scaffold-commit contract: hive init --new-workflow (fresh and
       # existing) and `hive workflow new` all commit a scaffolded descriptor
@@ -132,15 +159,28 @@ module Hive
       end
       private_class_method :validate_id!
 
-      def self.scaffold_paths(id, project_root:)
+      def self.scaffold_paths(id, project_root:, template_dir:)
         workflows_dir = workflow_dir(project_root)
+        instruction_dir = File.join(workflows_dir, id)
+        instructions = template_instruction_files(template_dir).map { |file| File.join(instruction_dir, file) }
         {
           descriptor: File.join(workflows_dir, "#{id}.yml"),
-          instruction_dir: File.join(workflows_dir, id),
-          instruction: File.join(workflows_dir, id, "work.md")
+          instruction_dir: instruction_dir,
+          instructions: instructions,
+          # The primary instruction (first stage's). Keeps the `instruction_path`
+          # JSON field single-valued for the strict hive-workflow-new schema; the
+          # human output points at the dir when a template has several.
+          instruction: instructions.first
         }
       end
       private_class_method :scaffold_paths
+
+      # Sorted so the copy order — and the `instruction_path`/`next` the payload
+      # reports — are deterministic across runs (golden-output tests).
+      def self.template_instruction_files(template_dir)
+        Dir.children(template_dir).select { |file| file.end_with?(".md") }.sort
+      end
+      private_class_method :template_instruction_files
 
       # Single source of "<hive_state_path>/workflows" — the scaffolder needs the
       # raw config error to surface (no fallback), which Loader.workflow_dir
@@ -151,7 +191,7 @@ module Hive
       private_class_method :workflow_dir
 
       def self.refuse_overwrite!(paths)
-        collisions = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir), paths.fetch(:instruction) ].select do |path|
+        collisions = ([ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ] + paths.fetch(:instructions)).select do |path|
           File.exist?(path)
         end
         return if collisions.empty?
@@ -160,15 +200,17 @@ module Hive
       end
       private_class_method :refuse_overwrite!
 
-      def self.write_scaffold!(id, paths)
+      def self.write_scaffold!(id, paths, template_dir)
         FileUtils.mkdir_p(paths.fetch(:instruction_dir))
-        File.write(paths.fetch(:descriptor), render_descriptor(id))
-        File.write(paths.fetch(:instruction), File.read(File.join(TEMPLATE_ROOT, "work.md")))
+        File.write(paths.fetch(:descriptor), render_descriptor(id, template_dir))
+        template_instruction_files(template_dir).each do |file|
+          File.write(File.join(paths.fetch(:instruction_dir), file), File.read(File.join(template_dir, file)))
+        end
       end
       private_class_method :write_scaffold!
 
-      def self.render_descriptor(id)
-        template = File.read(File.join(TEMPLATE_ROOT, "descriptor.yml.erb"))
+      def self.render_descriptor(id, template_dir)
+        template = File.read(File.join(template_dir, "descriptor.yml.erb"))
         ERB.new(template, trim_mode: "-").result_with_hash(id: id)
       end
       private_class_method :render_descriptor
@@ -199,12 +241,13 @@ module Hive
       end
       private_class_method :warn_failed_scaffold_cleanup
 
-      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout)
+      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE)
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
         @json = json
         @stdout = stdout
+        @template = template
       end
 
       def call
@@ -246,7 +289,7 @@ module Hive
           )
         end
 
-        scaffold = self.class.scaffold_files!(@id, project_root: @project_root)
+        scaffold = self.class.scaffold_files!(@id, project_root: @project_root, template: @template)
         id = scaffold.fetch(:id)
         paths = scaffold.fetch(:paths)
         begin
@@ -265,7 +308,11 @@ module Hive
           @stdout.puts JSON.generate(payload)
         else
           @stdout.puts "hive: created workflow #{id} at #{paths.fetch(:descriptor)}"
-          @stdout.puts "edit: #{paths.fetch(:instruction)} (the `work` stage instruction — a placeholder until you define it)"
+          if paths.fetch(:instructions).size > 1
+            @stdout.puts "edit: #{paths.fetch(:instruction_dir)}/ (#{paths.fetch(:instructions).size} stage instructions to fill in)"
+          else
+            @stdout.puts "edit: #{paths.fetch(:instruction)} (the `work` stage instruction — a placeholder until you define it)"
+          end
           @stdout.puts "next: #{payload.fetch("next")}"
         end
         payload

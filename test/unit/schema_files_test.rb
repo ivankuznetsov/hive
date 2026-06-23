@@ -1034,14 +1034,20 @@ class SchemaFilesTest < Minitest::Test
     assert_equal expected, schema_required,
                  "schema/producer required-key drift in hive-init.v1.json"
 
-    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
-    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
-    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
-    producer = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
-    )
-    assert_equal schema_required, producer.keys.sort,
-                 "Init#success_payload must emit exactly the schema's required keys"
+    # Sandbox the project root: success_payload now drives load_dir against
+    # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
+    # world-shared path. Mirror the twin test_hive_init_success_payload_validates.
+    Dir.mktmpdir("hive-init-keys") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      producer = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+      assert_equal schema_required, producer.keys.sort,
+                   "Init#success_payload must emit exactly the schema's required keys"
+    end
   end
 
   def test_hive_init_success_payload_validates

@@ -172,6 +172,9 @@ module Hive
           end
           scaffold
         rescue StandardError
+          # Re-derive paths from `scaffold` rather than the local `paths` (bound
+          # just above): if scaffold_files! raised before its assignment, the
+          # local is unset — the `if scaffold` guard makes this the only safe read.
           Hive::Commands::Workflow.rollback_scaffold(scaffold.fetch(:paths)) if scaffold
           raise
         end

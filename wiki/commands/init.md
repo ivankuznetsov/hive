@@ -36,7 +36,7 @@ hive init --new-workflow ID [PROJECT_PATH]
    - Operator answers `n` at the final confirmation prompt.
    - Input stream closes mid-flow (Ctrl-D / EOF / disconnected pipe). `Prompts#read_line` distinguishes `nil` (closed stream) from `""` (blank line for default) and raises `Aborted`. Treating EOF as a blank confirmation would silently write disk state with whatever was already collected.
 5. **Validate/render config content in memory** from `templates/project_config.yml.erb`, threading the answers hash from step 4 through `ProjectConfigBinding` before any disk side effects. `ProjectConfigBinding` bare-fetches every key from `Prompts#collect` (`planning_agent`, `claude_mode`, `claude_permission_mode`, `claude_model`, `claude_effort`, `development_agent`, `enabled_reviewers`, `patrol_reviewers`, `patrol_mode`, `triage_bias`, `budgets`, `timeouts`, `daemon_enabled`, `babysitter_enabled`, `daemon_autostart`) and every nested budget/timeout `LIMIT_KEYS` entry so prompt-refactor drift fails fast instead of leaving a partial `.hive-state` worktree. The rendered config includes `default_workflow: "NAME"` (quoted so YAML.safe_load cannot coerce keyword-like ids such as `yes`/`on`/`null` to booleans/nil) only when the selected default is non-coding; coding defaults stay field-less for byte-identical init output.
-6. **Create orphan worktree** via `Hive::GitOps#hive_state_init` (`lib/hive/git_ops.rb:34`):
+6. **Create orphan worktree** via `Hive::GitOps#hive_state_init` (`lib/hive/git_ops.rb:65`):
    - `git worktree add --no-checkout --detach <path>/.hive-state <default_branch>`
    - `git -C .hive-state checkout --orphan hive/state`
    - `git rm -rf .` plus glob cleanup of any leftover dotfiles (preserving `.git`).
@@ -102,7 +102,7 @@ Limit prompts accept `<budget>,<timeout>` pairs. Blank input keeps both defaults
 
 ## Default-branch detection
 
-`GitOps#detect_default_branch` (`lib/hive/git_ops.rb:92`) tries:
+`GitOps#detect_default_branch` (`lib/hive/git_ops.rb:269`) tries:
 
 1. `git symbolic-ref refs/remotes/origin/HEAD` → strip `refs/remotes/origin/` prefix.
 2. Fallback: `git rev-parse --abbrev-ref HEAD` (if not detached).

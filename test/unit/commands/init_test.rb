@@ -216,6 +216,36 @@ class HiveCommandsInitTest < Minitest::Test
     end
   end
 
+  def test_fresh_render_and_rebind_emit_byte_identical_default_workflow_quoting
+    # The quoting invariant lives in TWO render paths — the fresh template
+    # (templates/project_config.yml.erb) and the rebind (Init#default_workflow_line) —
+    # kept aligned only by a "keep the two in sync" comment. Pin that they emit a
+    # BYTE-IDENTICAL `default_workflow:` line for a keyword-like id so a future
+    # divergence in quote style cannot slip through (each path's own correctness
+    # test would still pass while the two silently desynced).
+    keyword_like_id = "no"
+
+    fresh_line = render_fresh_config(keyword_like_id).lines.find { |line| line.start_with?("default_workflow:") }
+    rebind_line = command.send(:default_workflow_line, keyword_like_id)
+
+    assert_equal %(default_workflow: "no"\n), rebind_line
+    assert_equal rebind_line, fresh_line,
+                 "fresh-render and rebind paths must emit byte-identical default_workflow quoting"
+  end
+
+  def render_fresh_config(default_workflow)
+    require "erb"
+    template = File.read(File.expand_path("../../../templates/project_config.yml.erb", __dir__))
+    binding_object = Hive::Commands::Init::ProjectConfigBinding.new(
+      project_name: "example",
+      default_branch: "main",
+      worktree_root: "/tmp/example.worktrees",
+      answers: project_config_answers,
+      default_workflow: default_workflow
+    )
+    ERB.new(template, trim_mode: "-").result(binding_object.binding_for_erb)
+  end
+
   def test_restore_config_snapshot_removes_config_when_original_was_absent
     Dir.mktmpdir("hive-init-unit") do |dir|
       cfg = File.join(dir, "config.yml")

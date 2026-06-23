@@ -611,6 +611,31 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_new_workflow_existing_warns_about_fieldless_in_flight_tasks
+    # The --new-workflow existing-project rebind (scaffold_and_bind_existing) emits
+    # the SAME fieldless-task guard as the --workflow path, but on its own code
+    # path (init.rb warn_on_fieldless_tasks_rebinding call). The --workflow tests
+    # drive update_existing_default_workflow!, so without this a regression that
+    # dropped/mis-warned the in-flight rebind on `hive init --new-workflow X` over
+    # an existing project — the one guard against silent task-load failures after
+    # a default change — would go uncaught.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        task_dir = File.join(dir, ".hive-state", "stages", "1-inbox", "fieldless-task-260620-abcd")
+        FileUtils.mkdir_p(task_dir)
+        File.write(File.join(task_dir, "idea.md"), "fieldless\n")
+
+        _out, err = capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+
+        assert_includes err, "changing default_workflow from coding to writing"
+        assert_includes err, "1-inbox/fieldless-task-260620-abcd"
+        config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        assert_equal "writing", config.fetch("default_workflow")
+      end
+    end
+  end
+
   def test_rerun_init_with_workflow_skips_warning_when_tasks_are_pinned
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

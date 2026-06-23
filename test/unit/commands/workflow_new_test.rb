@@ -55,6 +55,30 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_scaffolds_keyword_like_id_with_quoted_descriptor_so_it_parses
+    # `no`/`yes`/`off` are valid SAFE_SLUG ids that YAML.safe_load coerces to
+    # booleans when the descriptor's `id:` is emitted unquoted, failing
+    # DescriptorParser's required-string check. The descriptor template quotes
+    # `id:` to prevent that — pin it directly at the command that owns the
+    # template, not only transitively through the init path.
+    with_initialized_project do |project_root|
+      payload = Hive::Commands::Workflow.new!("no", project_root: project_root, stdout: StringIO.new)
+
+      assert_equal "no", payload.fetch("id")
+      descriptor_path = File.join(project_root, ".hive-state", "workflows", "no.yml")
+
+      # The raw descriptor quotes the id, so YAML round-trips it as the String.
+      assert_includes File.read(descriptor_path), %(id: "no")
+      assert_equal "no", YAML.safe_load(File.read(descriptor_path)).fetch("id"),
+                   "a keyword-like id must survive YAML.safe_load as a String, not coerce to false"
+
+      # And the descriptor parses, resolving its id back to the symbol form.
+      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+      assert_equal :no, workflow.id
+      assert_equal :no, Hive::WorkflowSelection.fetch!("no", project_root: project_root).id
+    end
+  end
+
   def test_json_success_payload
     with_initialized_project do |project_root|
       out, err, status = with_captured_exit do

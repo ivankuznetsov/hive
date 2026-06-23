@@ -73,11 +73,15 @@ module Hive
       # these paths and refuse_overwrite! re-checks them — removing the files is
       # all a retry needs.
       #
-      # NOTE: the shared-worktree caller (hive init --new-workflow on an
-      # existing project) commits into the long-lived `.hive-state` worktree,
-      # where a failed commit ALSO leaves these pathspecs STAGED; that caller is
-      # responsible for resetting the index (Init#reset_hive_state_index) — this
-      # method intentionally leaves git untouched. remove_scaffold_path tolerates
+      # NOTE: the shared-worktree callers commit into the long-lived
+      # `.hive-state` worktree, where a failed commit ALSO leaves these pathspecs
+      # STAGED. `hive init --new-workflow` on an existing project resets the index
+      # for them (Init#reset_hive_state_index); `hive workflow new`'s own
+      # commit_scaffold! (below) shares the SAME pre-existing exposure but
+      # currently relies on this filesystem-only rollback alone — out of scope to
+      # fix here, but `workflow new` is NOT index-safe just because init now is.
+      # Either way this method intentionally leaves git untouched.
+      # remove_scaffold_path tolerates
       # an already-absent target (like rm_f/rm_rf's force) and continues to the
       # next path on a fault, but CAPTURES the errno so warn_failed_scaffold_cleanup
       # can tell the operator WHY a leftover survived rather than emitting a bare
@@ -124,7 +128,6 @@ module Hive
       def self.scaffold_paths(id, project_root:)
         workflows_dir = workflow_dir(project_root)
         {
-          workflows_dir: workflows_dir,
           descriptor: File.join(workflows_dir, "#{id}.yml"),
           instruction_dir: File.join(workflows_dir, id),
           instruction: File.join(workflows_dir, id, "work.md")

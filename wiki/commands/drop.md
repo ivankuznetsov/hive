@@ -13,6 +13,7 @@ tags: [command, task, cleanup, json, tui, web]
 
 ```
 hive drop my-task-260522-abcd
+hive drop 7448
 hive drop 7448 --project demo
 hive drop my-task-260522-abcd --project demo --from 4-execute
 hive drop /path/to/.hive-state/stages/4-execute/my-task-260522-abcd --json
@@ -43,6 +44,8 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
 
+The exit-4 `wrong_stage` contract is **slug-only**. For numeric-id (and path) targets, `--from` flows through [[modules/task_resolver]] as a stage *filter*, so a mismatched stage means the id resolves to no task there: drop reports `invalid_task_path` (exit 64), not `wrong_stage` (exit 4). This keeps id targets consistent with their `run`/`approve`/`findings` siblings, which share the same resolver.
+
 When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
 
 ## Steps Performed
@@ -55,7 +58,7 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 4. Close `pr_url` from `pr.md` frontmatter with `gh pr close <url> --comment "task dropped"` best-effort.
 5. Remove the task worktree from `worktree.yml` or the derived path, retrying with force when needed, then prune stale git worktree metadata.
 6. Delete the task branch (`branch name == slug`) best-effort.
-7. Remove every active-stage folder matching the slug under `1-inbox` through `8-finalize`.
+7. Remove the task folder from each active stage it was found in (`from_stages`), not a fixed `1-inbox`–`8-finalize` coding range — generic workflows have their own active stages.
 8. Remove `.hive-state/logs/<slug>/`.
 9. Commit an audit record on `hive/state` as `hive: dropped/<slug> dropped`.
 

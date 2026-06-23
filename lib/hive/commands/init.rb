@@ -642,6 +642,18 @@ module Hive
       def no_custom_workflow_yet?(hive_state_path, workflow)
         Hive::Workflows.coding_id?(workflow) &&
           Hive::Workflows::Loader.load_dir(File.join(hive_state_path, "workflows")).empty?
+      rescue StandardError => e
+        # The workflow-authoring hint is purely advisory and computed in
+        # success_payload/print_summary, which run AFTER init has already
+        # committed the hive/state branch and BEFORE register_daemon_service! /
+        # run_init_preflight!. A filesystem error from load_dir (an unlisted
+        # SystemCallError escaping File.directory?/Dir.glob, or an invalid-byte
+        # path) would otherwise bubble to call's `rescue StandardError →
+        # InternalError` and turn an already-committed init into a crash that
+        # skips those two best-effort steps. Degrade to "no hint" with a
+        # breadcrumb, mirroring their own rescue-and-warn guards.
+        write_warn("hive: skipped workflow-authoring hint (#{e.class}: #{e.message})")
+        false
       end
 
       def workflow_authoring_hints(hive_state_path, workflow)

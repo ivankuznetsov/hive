@@ -27,6 +27,10 @@ class WorkflowTest < Minitest::Test
     assert_includes Hive::Workflow::KNOWN_KINDS, :execute
     assert_includes Hive::Workflow::KNOWN_KINDS, :review_council
     assert_includes Hive::Workflow::KNOWN_KINDS, :finalize
+    # The actual behavior change: `:marker` was retired (the
+    # workflow_helpers.rb / resolver_test.rb edits exist precisely because the
+    # kind no longer exists). Pin its absence so a re-introduction is caught.
+    refute_includes Hive::Workflow::KNOWN_KINDS, :marker
   end
 
   def test_stage_carries_user_descriptor_instruction_and_permissions

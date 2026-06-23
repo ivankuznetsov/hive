@@ -159,6 +159,11 @@ class TaskActionDispatchParityTest < Minitest::Test
 
     def review_scenarios
       [
+        # Fall-through marker: exercises the `else -> review_ready`
+        # (READY_FOR_REVIEW) arm of `review_action`, the one coding
+        # (stage x marker) cell the rest of this matrix never compares across
+        # the two dispatch paths (independently pinned in task_action_test.rb).
+        { name: "review ready", stage: "review", marker: :none },
         { name: "review working", stage: "review", marker: :review_working, attrs: { "phase" => "reviewers" } },
         { name: "review waiting", stage: "review", marker: :review_waiting, attrs: { "pass" => "1" } },
         { name: "review complete", stage: "review", marker: :review_complete },

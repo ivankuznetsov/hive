@@ -52,7 +52,6 @@ module Hive
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit).
       WorkflowChoice = Data.define(:descriptor, :source)
-      WorkflowDescriptorRef = Data.define(:id)
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, new_workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
@@ -74,12 +73,15 @@ module Hive
 
       def call
         validate_git_repo!
-        validate_clean_tree! unless @force
-
-        ops = Hive::GitOps.new(@project_path)
+        # Argument-level mutual exclusivity is checked before validate_clean_tree!
+        # so a dirty repo passing both flags gets the clearer usage error instead
+        # of the clean-tree complaint (both still exit non-zero).
         if @workflow_name && @new_workflow
           raise Hive::Commands::Workflow::UsageError, "--workflow and --new-workflow are mutually exclusive"
         end
+        validate_clean_tree! unless @force
+
+        ops = Hive::GitOps.new(@project_path)
         if @new_workflow
           init_with_new_workflow(ops)
           return
@@ -158,14 +160,13 @@ module Hive
           scaffold = Hive::Commands::Workflow.scaffold_files!(id, project_root: @project_path)
           paths = scaffold.fetch(:paths)
           Hive::Lock.with_commit_lock(ops.hive_state_path) do
-            ops.hive_commit(
-              stage_name: "workflows",
-              slug: id,
-              action: "created",
-              pathspecs: [
-                relative_to_hive_state(paths.fetch(:descriptor), ops),
-                relative_to_hive_state(paths.fetch(:instruction_dir), ops)
-              ]
+            # Commit config.yml alongside the descriptor so the fresh
+            # `default_workflow: <id>` binding is durable against a hive-state
+            # `git reset --hard`/`clean` — symmetric with the existing-project
+            # path. A commit failure here tears the whole worktree down via
+            # rollback_partial_init, so no staged index can leak.
+            Hive::Commands::Workflow.commit_workflow_scaffold(
+              ops, slug: id, pathspecs: scaffold_commit_pathspecs(paths, ops)
             )
           end
           scaffold
@@ -180,6 +181,7 @@ module Hive
         scaffold = Hive::Commands::Workflow.scaffold_files!(id, project_root: @project_path)
         paths = scaffold.fetch(:paths)
         cfg_path = File.join(ops.hive_state_path, "config.yml")
+        pathspecs = scaffold_commit_pathspecs(paths, ops)
         before = :not_captured
         begin
           Hive::Lock.with_commit_lock(ops.hive_state_path) do
@@ -187,25 +189,28 @@ module Hive
             warn_on_fieldless_tasks_rebinding(ops, from: current, to: id) unless current == id && !corrupt
             before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
             write_default_workflow!(cfg_path, id)
-            ops.hive_commit(
-              stage_name: "workflows",
-              slug: id,
-              action: "created",
-              pathspecs: [
-                relative_to_hive_state(paths.fetch(:descriptor), ops),
-                relative_to_hive_state(paths.fetch(:instruction_dir), ops),
-                "config.yml"
-              ]
-            )
+            Hive::Commands::Workflow.commit_workflow_scaffold(ops, slug: id, pathspecs: pathspecs)
           end
         rescue StandardError
+          # hive_commit stages config.yml + descriptor + instruction dir via
+          # `git add -A` before it runs; a failure AFTER staging leaves those
+          # entries in the long-lived .hive-state index, where the next bare
+          # `git commit` would sweep the half-rolled-back default_workflow rebind
+          # (and a phantom descriptor) into an unrelated commit. Reset the index
+          # for exactly those pathspecs — before restoring the working tree — so
+          # the rollback is total.
+          reset_hive_state_index(ops, pathspecs)
           restore_config_snapshot(cfg_path, before) unless before == :not_captured
           Hive::Commands::Workflow.rollback_scaffold(paths)
           raise
         end
 
         Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
-        workflow_choice = WorkflowChoice.new(descriptor: WorkflowDescriptorRef.new(id.to_sym), source: :flag)
+        # Carry the real, now-on-disk descriptor (like handle_existing_project)
+        # instead of a one-field stand-in, so WorkflowChoice's "descriptor is a
+        # fully resolved Hive::Workflow" invariant holds on this path too.
+        descriptor = Hive::WorkflowSelection.fetch!(id.to_s, project_root: @project_path)
+        workflow_choice = WorkflowChoice.new(descriptor: descriptor, source: :flag)
         if @json
           emit_existing_json_summary(ops, workflow_choice: workflow_choice, extra: scaffold_payload(paths))
         else
@@ -233,7 +238,7 @@ module Hive
         if scaffold_paths
           $stdout.puts "descriptor: #{scaffold_paths.fetch(:descriptor)}"
           $stdout.puts "edit: #{scaffold_paths.fetch(:instruction)}"
-          $stdout.puts "next: edit the descriptor above, then hive new #{File.basename(@project_path)} '<idea>'"
+          $stdout.puts "next: edit the descriptor above, then hive new #{Shellwords.escape(File.basename(@project_path))} '<idea>'"
         end
       rescue Errno::EPIPE
         nil
@@ -348,12 +353,21 @@ module Hive
         if Hive::Workflows.coding_id?(workflow_id)
           lines.delete_at(existing) if existing
         elsif existing
-          lines[existing] = "default_workflow: #{workflow_id}\n"
+          lines[existing] = default_workflow_line(workflow_id)
         else
-          lines.insert(default_workflow_insert_index(lines), "default_workflow: #{workflow_id}\n")
+          lines.insert(default_workflow_insert_index(lines), default_workflow_line(workflow_id))
         end
 
         atomic_write(cfg_path, lines.join)
+      end
+
+      # Quote the emitted scalar: YAML.safe_load coerces bare keyword-like ids
+      # (yes/on/no/off/null/true/false — all valid SAFE_SLUG workflow ids) to
+      # booleans/nil, so a flag-less `hive new` would then fail to resolve them.
+      # The id is a validated SAFE_SLUG (alnum + hyphen), so double-quoting never
+      # needs escaping.
+      def default_workflow_line(workflow_id)
+        %(default_workflow: "#{workflow_id}"\n)
       end
 
       # Place the new `default_workflow:` line right after `hive_state_path:`
@@ -777,11 +791,12 @@ module Hive
           $stdout.puts "  #{c.dim(label.ljust(label_width))}  #{value}"
         end
         $stdout.puts
+        safe_name = Shellwords.escape(name)
         next_step =
           if scaffold_paths
-            "edit the descriptor above, then hive new #{name} '<idea>'"
+            "edit the descriptor above, then hive new #{safe_name} '<idea>'"
           else
-            "hive new #{name} '<short task description>'"
+            "hive new #{safe_name} '<short task description>'"
           end
         $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} #{next_step}"
       end
@@ -911,6 +926,33 @@ module Hive
 
       def relative_to_hive_state(path, ops)
         Pathname.new(path).relative_path_from(Pathname.new(ops.hive_state_path)).to_s
+      end
+
+      # The descriptor + instruction dir + config.yml pathspecs every
+      # --new-workflow scaffold commit pins. Both the fresh and existing-project
+      # paths bind default_workflow in config.yml, committed atomically with the
+      # descriptor so the binding is durable against a hive-state reset/clean.
+      def scaffold_commit_pathspecs(paths, ops)
+        [
+          relative_to_hive_state(paths.fetch(:descriptor), ops),
+          relative_to_hive_state(paths.fetch(:instruction_dir), ops),
+          "config.yml"
+        ]
+      end
+
+      # Unstage the scaffold pathspecs from the long-lived .hive-state index
+      # after a failed --new-workflow commit, so a half-rolled-back rebind can't
+      # ride the next unrelated `git commit`. Best-effort: a reset failure is
+      # surfaced but never masks the original commit error the caller re-raises.
+      def reset_hive_state_index(ops, pathspecs)
+        _out, err, status = Open3.capture3(
+          "git", "-C", ops.hive_state_path, "reset", "-q", "--", *pathspecs
+        )
+        return if status.success?
+
+        write_warn("hive: could not unstage #{pathspecs.join(', ')} after a failed " \
+                   "--new-workflow commit (#{err.to_s.strip.lines.first&.chomp}); inspect " \
+                   "`git -C #{ops.hive_state_path} status` before the next hive commit")
       end
 
       # Minimal ANSI palette for one-shot CLI summaries. Honors

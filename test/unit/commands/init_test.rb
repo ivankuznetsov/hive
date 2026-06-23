@@ -171,7 +171,8 @@ class HiveCommandsInitTest < Minitest::Test
 
       body = File.read(cfg)
       assert_match(/\A---\n/, body)
-      assert_includes body, "default_workflow: content_fixture"
+      # Quoted so YAML.safe_load cannot coerce keyword-like ids to booleans/nil.
+      assert_includes body, %(default_workflow: "content_fixture")
     end
   end
 
@@ -185,7 +186,7 @@ class HiveCommandsInitTest < Minitest::Test
       lines = File.read(cfg).lines
       assert_equal "---\n", lines.first
       # Inserted right after the leading marker, not mid-document or appended.
-      assert_equal "default_workflow: content_fixture\n", lines[1]
+      assert_equal %(default_workflow: "content_fixture"\n), lines[1]
       assert_includes lines, "project_name: demo\n"
     end
   end
@@ -208,7 +209,7 @@ class HiveCommandsInitTest < Minitest::Test
       File.write(cfg, "---\nproject_name: demo\ndefault_workflow: old\n")
 
       command.send(:write_default_workflow!, cfg, "content_fixture")
-      assert_includes File.read(cfg), "default_workflow: content_fixture"
+      assert_includes File.read(cfg), %(default_workflow: "content_fixture")
 
       command.send(:write_default_workflow!, cfg, "coding")
       refute_includes File.read(cfg), "default_workflow:"

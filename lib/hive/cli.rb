@@ -92,10 +92,13 @@ module Hive
       This scaffolds `.hive-state/workflows/writing.yml` plus
       `.hive-state/workflows/writing/work.md`, binds
       `default_workflow: writing`, and prints the paths to edit before
-      running `hive new` without --workflow. `--new-workflow` is mutually
-      exclusive with `--workflow`, reuses `hive workflow new`'s reserved-id
-      checks, and on an already-initialized project scaffolds the workflow
-      and rebinds the default in one hive-state commit.
+      running `hive new` without --workflow. The descriptor and the
+      `config.yml` binding are committed together on `hive/state` on both the
+      fresh and already-initialized paths, so the bound default survives a
+      hive-state reset. `--new-workflow` is mutually exclusive with
+      `--workflow`, reuses `hive workflow new`'s reserved-id checks, and on an
+      already-initialized project scaffolds the workflow and rebinds the
+      default in one hive-state commit.
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`

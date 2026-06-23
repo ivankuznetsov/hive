@@ -4,7 +4,8 @@ default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
 <% unless Hive::Workflows.coding_id?(default_workflow) -%>
-default_workflow: <%= default_workflow %>
+<%# Quoted: YAML.safe_load coerces bare keyword-like ids (yes/on/null/...) -%>
+default_workflow: "<%= default_workflow %>"
 <% end -%>
 
 claude:

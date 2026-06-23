@@ -187,6 +187,14 @@ class InitTest < Minitest::Test
 
         log = run!("git", "-C", File.join(dir, ".hive-state"), "log", "--format=%s").lines.map(&:chomp)
         assert_includes log, "hive: workflows/writing created"
+
+        # The scaffold commit must include config.yml so the fresh
+        # `default_workflow: writing` binding is durable against a hive-state
+        # reset/clean (symmetric with the existing-project path).
+        changed = run!("git", "-C", File.join(dir, ".hive-state"), "show", "--name-only", "--format=", "HEAD")
+        assert_includes changed, "config.yml"
+        assert_includes changed, "workflows/writing.yml"
+
         assert Hive::Config.registered_projects.any? { |project| project["path"] == File.expand_path(dir) }
       end
     end
@@ -357,37 +365,84 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_init_new_workflow_existing_restores_config_and_scaffold_on_commit_failure
+  def test_init_new_workflow_existing_restores_config_and_resets_index_on_commit_failure
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         hive_state = File.join(dir, ".hive-state")
         cfg_path = File.join(hive_state, "config.yml")
         before_config = File.binread(cfg_path)
-        original_new = Hive::GitOps.method(:new)
 
-        with_replaced_singleton_method(Hive::GitOps, :new, lambda { |path|
-          ops = original_new.call(path)
-          original_commit = ops.method(:hive_commit)
-          ops.define_singleton_method(:hive_commit) do |**kwargs|
-            if kwargs[:stage_name] == "workflows" && kwargs[:slug] == "writing"
-              raise Hive::GitError, "commit boom"
-            end
-            original_commit.call(**kwargs)
-          end
-          ops
-        }) do
-          error = assert_raises(Hive::GitError) do
+        # Fail at the git layer (a rejecting pre-commit hook) so hive_commit's
+        # `git add -A` staging runs FIRST and the .hive-state index is genuinely
+        # polluted — unlike a stub that raises before staging ever runs. Only
+        # this ordering exercises the index-reset half of the rollback.
+        hook = File.join(dir, ".git", "hooks", "pre-commit")
+        File.write(hook, "#!/bin/sh\nexit 1\n")
+        FileUtils.chmod(0o755, hook)
+        begin
+          assert_raises(Hive::GitError) do
             capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
           end
-          assert_includes error.message, "commit boom"
+        ensure
+          FileUtils.rm_f(hook)
         end
 
+        # Working tree fully unwound.
         assert_equal before_config, File.binread(cfg_path)
         refute File.exist?(File.join(hive_state, "workflows", "writing.yml"))
         refute File.exist?(File.join(hive_state, "workflows", "writing"))
+
+        # The leak-catcher: a failed commit that left config.yml + descriptor
+        # STAGED would otherwise ride the next bare `git commit` in this
+        # long-lived worktree and silently re-bind default_workflow. The rescue
+        # must reset the index for those pathspecs.
+        _out, _err, cached = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
+        assert cached.success?,
+               "a failed --new-workflow commit must leave the .hive-state index clean, but staged: " \
+               "#{run!('git', '-C', hive_state, 'diff', '--cached', '--name-only')}"
+
         assert File.directory?(hive_state), "pre-existing hive state must remain attached"
         assert Hive::Config.find_project(File.basename(dir)), "existing project registration should remain intact"
+      end
+    end
+  end
+
+  def test_init_new_workflow_existing_surfaces_commit_error_when_config_restore_fails
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        hive_state = File.join(dir, ".hive-state")
+        cfg_path = File.join(hive_state, "config.yml")
+
+        # Fail the workflow commit at the git layer...
+        hook = File.join(dir, ".git", "hooks", "pre-commit")
+        File.write(hook, "#!/bin/sh\nexit 1\n")
+        FileUtils.chmod(0o755, hook)
+
+        # ...AND make the config.yml working-tree restore fail inside the
+        # rollback. The rescue-within-rescue must warn without masking the
+        # original GitError the caller re-raises.
+        original_binwrite = File.method(:binwrite)
+        warnings = []
+        begin
+          with_replaced_singleton_method(File, :binwrite, lambda { |path, *args|
+            raise Errno::EACCES, path.to_s if path == cfg_path
+
+            original_binwrite.call(path, *args)
+          }) do
+            init = Hive::Commands::Init.new(dir, new_workflow: "writing")
+            init.define_singleton_method(:write_warn) { |line| warnings << line }
+            assert_raises(Hive::GitError) do
+              capture_io { init.call }
+            end
+          end
+        ensure
+          FileUtils.rm_f(hook)
+        end
+
+        assert(warnings.any? { |w| w.include?("could not restore config.yml after a failed default_workflow commit") },
+               "a failed config restore must warn, not silently swallow: #{warnings.inspect}")
       end
     end
   end
@@ -688,7 +743,7 @@ class InitTest < Minitest::Test
       File.write(cfg, "---\nfoo: bar\n")
       Hive::Commands::Init.new(dir).send(:write_default_workflow!, cfg, "content_fixture")
 
-      assert_equal "default_workflow: content_fixture\n", File.read(cfg).lines[1],
+      assert_equal %(default_workflow: "content_fixture"\n), File.read(cfg).lines[1],
                    "with no hive_state_path: line, the default_workflow line lands right after the --- marker"
     end
   end
@@ -699,7 +754,7 @@ class InitTest < Minitest::Test
       File.write(cfg, "foo: bar\n")
       Hive::Commands::Init.new(dir).send(:write_default_workflow!, cfg, "content_fixture")
 
-      assert_equal "default_workflow: content_fixture\n", File.read(cfg).lines.first,
+      assert_equal %(default_workflow: "content_fixture"\n), File.read(cfg).lines.first,
                    "a marker-less file gets the default_workflow line at the top"
     end
   end

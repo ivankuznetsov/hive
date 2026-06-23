@@ -20,7 +20,8 @@ module Hive
     # and `new`. Frozen at class load, when only built-ins are registered;
     # project workflows load later via Workflows::Project.load!, so this stays
     # built-ins-only by design. The static tail in .workflow_option_desc covers
-    # project-authored workflows; a dynamic list changes that one method.
+    # project-authored workflows; making the list project-aware later means
+    # editing only that one method.
     WORKFLOW_VOCABULARY = Hive::Workflows::Registry.ids.join(", ").freeze
 
     # The one place the `--workflow` help is composed, shared by `init` and

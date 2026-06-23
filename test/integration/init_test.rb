@@ -470,6 +470,12 @@ class InitTest < Minitest::Test
         assert_equal File.join(dir, ".hive-state"), payload.fetch("hive_state_path")
         assert_equal "coding", payload.fetch("workflow"),
                      "a fresh init must report the bound default workflow in JSON"
+        hints = payload.fetch("hints")
+        assert_equal 1, hints.length
+        assert_equal "custom_workflow", hints.first.fetch("kind")
+        assert_equal "hive workflow new <id>", hints.first.fetch("command")
+        assert_equal "custom workflows live in this project — author one with `hive workflow new <id>`",
+                     hints.first.fetch("message")
         assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
         assert_equal "medium", payload.fetch("answers").fetch("patrol_mode")
         assert_equal "medium", payload.fetch("patrol_mode")
@@ -479,6 +485,25 @@ class InitTest < Minitest::Test
         schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
         errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
         assert_empty errors, "hive init --json payload must validate: #{errors.inspect}"
+      end
+    end
+  end
+
+  def test_init_json_suppresses_workflow_authoring_hints_for_non_coding_default
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          out, _err = capture_io { Hive::Commands::Init.new(dir, json: true, workflow: "content_fixture").call }
+          payload = JSON.parse(out)
+
+          assert_equal 1, out.lines.size
+          assert_equal "content_fixture", payload.fetch("workflow")
+          assert_equal [], payload.fetch("hints")
+
+          schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+          errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
+          assert_empty errors, "hive init --workflow --json payload must validate: #{errors.inspect}"
+        end
       end
     end
   end

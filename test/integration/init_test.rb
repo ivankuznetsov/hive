@@ -358,6 +358,65 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_rerun_init_workflow_prompt_author_scaffolds_binds_and_warns_in_one_commit
+    # The inline-author re-init happy path (operator picks "author a new
+    # workflow" at the prompt on an already-initialized project) routes through
+    # scaffold_and_bind_existing — the same path as `hive init --new-workflow X`,
+    # but reached via the prompt rather than the flag. The flag path is covered
+    # by test_init_new_workflow_existing_scaffolds_and_rebinds_in_one_commit; this
+    # pins the prompt-driven entry against the SAME contract: a single commit that
+    # scaffolds + rebinds, a preserved project registration, and the field-less
+    # in-flight-task rebind warning.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        hive_state = File.join(dir, ".hive-state")
+        before_count = run!("git", "-C", hive_state, "rev-list", "--count", "HEAD").to_i
+        # A field-less in-flight task so the rebind must emit the guard.
+        task_dir = File.join(hive_state, "stages", "1-inbox", "fieldless-task-260620-abcd")
+        FileUtils.mkdir_p(task_dir)
+        File.write(File.join(task_dir, "idea.md"), "fieldless\n")
+
+        author_index = Hive::WorkflowSelection.valid_names(project_root: dir).size + 1
+        workflow_input = StringIO.new("#{author_index}\nwriting\n")
+        workflow_input.define_singleton_method(:tty?) { true }
+        workflow_output = StringIO.new
+        _out, err = capture_io do
+          Hive::Commands::Init.new(
+            dir,
+            workflow_input: workflow_input,
+            workflow_output: workflow_output
+          ).call
+        end
+
+        descriptor_path = File.join(hive_state, "workflows", "writing.yml")
+        instruction_path = File.join(hive_state, "workflows", "writing", "work.md")
+        config = YAML.safe_load(File.read(File.join(hive_state, "config.yml")))
+        assert_equal "writing", config.fetch("default_workflow"),
+                     "the inline-author re-init must rebind default_workflow on disk"
+        assert File.file?(descriptor_path), "the inline-authored descriptor must be scaffolded"
+        assert File.file?(instruction_path), "the inline-authored instruction stub must be scaffolded"
+
+        # Single commit: scaffold + config rebind land together, like the flag path.
+        assert_equal before_count + 1, run!("git", "-C", hive_state, "rev-list", "--count", "HEAD").to_i,
+                     "scaffold + rebind must be exactly one commit"
+        assert_equal "hive: workflows/writing created",
+                     run!("git", "-C", hive_state, "log", "--format=%s", "-1").strip
+        changed = run!("git", "-C", hive_state, "show", "--name-only", "--format=", "HEAD")
+        assert_includes changed, "config.yml"
+        assert_includes changed, "workflows/writing.yml"
+
+        # The field-less in-flight task triggers the same rebind warning the flag path emits.
+        assert_includes err, "changing default_workflow from coding to writing"
+        assert_includes err, "1-inbox/fieldless-task-260620-abcd"
+
+        # Registration survives the re-init.
+        assert Hive::Config.registered_projects.any? { |project| project["path"] == File.expand_path(dir) },
+               "the inline-author re-init must keep the project registered"
+      end
+    end
+  end
+
   def test_init_unknown_workflow_fails_before_writing_state
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

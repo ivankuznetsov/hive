@@ -52,8 +52,22 @@ module Hive
 
       # Immutable value object (Data.define, matching the Workflow/Stage/
       # AdvanceVerb convention) carrying the resolved descriptor and the
-      # provenance of the choice (:flag | :prompt | :implicit).
-      WorkflowChoice = Data.define(:descriptor, :source)
+      # provenance of the choice (:flag | :prompt | :implicit). The initialize
+      # guard enforces the documented invariant at construction — descriptor is a
+      # non-nil resolved Hive::Workflow and source is one of the three known
+      # provenances — so a malformed choice fails here, not at a far-away read.
+      WorkflowChoice = Data.define(:descriptor, :source) do
+        SOURCES = %i[flag prompt implicit].freeze
+
+        def initialize(descriptor:, source:)
+          raise ArgumentError, "WorkflowChoice descriptor must be a resolved workflow, got nil" if descriptor.nil?
+          unless SOURCES.include?(source)
+            raise ArgumentError, "WorkflowChoice source must be one of #{SOURCES.join(', ')} (got #{source.inspect})"
+          end
+
+          super
+        end
+      end
       CUSTOM_WORKFLOW_HINT_COMMAND = "hive workflow new <id>".freeze
       CUSTOM_WORKFLOW_HINT_MESSAGE = "custom workflows live in this project — author one with `#{CUSTOM_WORKFLOW_HINT_COMMAND}`".freeze
 
@@ -95,7 +109,7 @@ module Hive
         if workflow_choice.nil?
           # nil (not a WorkflowChoice) is resolve_workflow_choice's signal that the
           # interactive prompt's "author a new workflow" entry was chosen: deep
-          # inside it, prompt_new_workflow_id set @new_workflow as a side effect.
+          # inside it, prompt_workflow set @new_workflow as a side effect.
           # Inline authoring deliberately routes through the same scaffolder as
           # --new-workflow — the descriptor does not exist yet, so there is no
           # resolved Hive::Workflow to carry in a WorkflowChoice. Keying off the

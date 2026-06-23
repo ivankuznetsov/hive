@@ -66,15 +66,18 @@ module Hive
         { id: id, paths: paths }
       end
 
-      # Inline-author pre-check for `hive init`: does scaffolding `id_raw` clash
-      # with files already on disk? NOT a pure boolean — it first runs
-      # normalize_and_validate_id!, so it RAISES UsageError on a malformed,
-      # reserved, or empty id (the caller rescues it). Collisions are template-
-      # independent — `<id>.yml` and the `<id>/` dir clash identically whatever
-      # template later fills the dir — so the pre-check resolves paths against the
-      # default (`blank`) template the inline author always scaffolds from.
-      def self.scaffold_collision?(id_raw, project_root:)
-        id = normalize_and_validate_id!(id_raw)
+      # Inline-author pre-check for `hive init`: does scaffolding `id` clash with
+      # files already on disk? A pure predicate — pass an id that
+      # normalize_and_validate_id! has ALREADY accepted (the inline author
+      # normalizes in prompt_new_workflow_id before calling this), so it never
+      # raises and the `?` name holds. The inline author always scaffolds from
+      # the default (`blank`) template, so the pre-check resolves paths against
+      # `blank` too. That is not truly template-independent — scaffold_collisions
+      # also walks the template-dependent per-stage instruction files — but those
+      # instructions all live under the `<id>/` dir this already checks, so the
+      # descriptor + dir collision set a different template would produce is the
+      # same.
+      def self.scaffold_collision?(id, project_root:)
         paths = scaffold_paths(id, project_root: project_root, template_dir: template_dir!(DEFAULT_TEMPLATE))
         scaffold_collisions(paths).any?
       end

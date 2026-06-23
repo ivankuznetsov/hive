@@ -40,7 +40,7 @@ class ReposController < ApplicationController
   end
 
   def create
-    selected_workflow = params.dig(:settings, :workflow).presence
+    selected_workflow = validated_workflow_param
     if params[:project].present?
       # Re-run setup for an already-registered project (no clone).
       project = find_project!(File.basename(params[:project].to_s.strip))
@@ -81,18 +81,36 @@ class ReposController < ApplicationController
 
   private
 
+  # The web-supplied workflow id flows into Init → WorkflowSelection.fetch! →
+  # File.join(workflow_dir, "#{id}.yml"); a crafted `../…` would walk that join
+  # into File.file?/parse_file (and leak the resolved path through the
+  # ConfigError). The CLI scaffold path validates against SAFE_SLUG before any
+  # path use — do the same here before handing web input to Init. A nil/blank
+  # selection passes through to the implicit-coding default unchanged; an
+  # unknown-but-well-formed slug still becomes a readable 422 downstream via
+  # WorkflowSelection's UnknownWorkflow handling.
+  def validated_workflow_param
+    workflow = params.dig(:settings, :workflow).presence
+    return if workflow.nil?
+    return workflow if Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(workflow)
+
+    raise Hive::Error, "invalid workflow id"
+  end
+
   # The persisted `default_workflow` for a registered project's re-run form, or
   # nil when none is set. A corrupt/unreadable config.yml degrades to nil (the
   # caller then falls back to coding) — matching the InitSetup.workflows list
   # rendered just above, which already survives the same broken file via its own
   # fallback — rather than letting an unrescued Psych::Exception 500 the very
-  # form an operator opens to repair the project. Mirrors
-  # tasks_controller#project_daemon_enabled?'s rescue-and-degrade pattern;
-  # Config.load (lib/hive/config.rb) does not rescue Psych and
+  # form an operator opens to repair the project. The rescue is narrowed to the
+  # corrupt/unreadable-config classes (the same set Project#workflow_dir_for
+  # degrades on) so a real bug — a NoMethodError, or a Hive::Error other than
+  # ConfigError — still surfaces instead of masquerading as a benign "fell back
+  # to coding". Config.load (lib/hive/config.rb) does not rescue Psych and
   # ApplicationController only rescues Hive::Error/ParameterMissing.
   def persisted_default_workflow(project)
     Hive::Config.load(project["path"])["default_workflow"].presence
-  rescue StandardError => e
+  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
     Rails.logger.warn("default_workflow unreadable for #{project["name"]}: #{e.class}: #{e.message}")
     nil
   end

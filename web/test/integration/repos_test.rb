@@ -44,11 +44,14 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "select[name='settings[planning_agent]']", 1
     assert_select "select[name='settings[workflow]']", 1
-    assert_select "select[name='settings[workflow]'] option", 2
+    # Assert coding-first + content present rather than an exact option count, so
+    # adding a third built-in workflow doesn't break this test with no behavior
+    # regression (plan U7: coding first, content offered, no project-only ids).
+    workflow_options = css_select("select[name='settings[workflow]'] option").map { |o| o["value"] }
+    assert_equal "coding", workflow_options.first, "fresh setup must list the coding workflow first"
+    assert_includes workflow_options, "content", "fresh setup must offer built-in content workflow"
     assert_select "select[name='settings[workflow]'] option[value='coding'][selected]",
                   "coding", "fresh setup must preselect the coding workflow"
-    assert_select "select[name='settings[workflow]'] option[value='content']",
-                  "content", "fresh setup must offer built-in content workflow"
     assert_select "input[name='settings[enabled_reviewers][]']", { minimum: 2 },
                   "the reviewer multi-select must offer the same set the TTY prompt does"
     assert_select "input[name='settings[budgets][brainstorm]']", 1
@@ -101,6 +104,83 @@ class ReposTest < ActionDispatch::IntegrationTest
     config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
     assert_equal "content", config.fetch("default_workflow"),
                  "the re-run rebind must persist default_workflow through handle_existing_project"
+  end
+
+  test "rerun setup rebinds the workflow but discards non-workflow answers" do
+    # handle_existing_project rebinds ONLY default_workflow — it never consumes
+    # the prompts: answers — so a re-run drops changed agent/mode/reviewer/budget
+    # settings. Pin that real on-disk outcome (the workflow lands, the rest do
+    # not) so the discard is explicit, not an accidental impression the form
+    # re-applies everything. Whether re-run SHOULD re-apply is the open re-run-
+    # semantics escalation, deliberately out of this PR's scope.
+    name = create_hive_project!("rerun-nonworkflow-app")
+    sign_in!
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
+    # The fresh init used CLI defaults: claude.mode=tmux, review.triage.bias=courageous.
+
+    post "/repos", params: {
+      project: name,
+      settings: { workflow: "content", claude_mode: "headless", triage_bias: "safetyist" }
+    }
+
+    assert_redirected_to "/repos"
+    config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+    assert_equal "content", config.fetch("default_workflow"),
+                 "the re-run must rebind default_workflow on disk"
+    assert_equal "tmux", config.dig("claude", "mode"),
+                 "re-init does not consume prompts: answers — claude.mode must stay the original default"
+    assert_equal "courageous", config.dig("review", "triage", "bias"),
+                 "re-init does not consume prompts: answers — triage bias must stay the original default"
+  end
+
+  test "a path-traversal workflow id is rejected before it reaches path resolution" do
+    # The web workflow value flows into File.join(workflow_dir, "#{id}.yml"); a
+    # crafted `../…` must be refused at the controller (SAFE_SLUG) rather than
+    # walking that join in WorkflowSelection.
+    name = create_hive_project!("rerun-traversal-app")
+    sign_in!
+
+    post "/repos", params: { project: name, settings: { workflow: "../../etc/passwd" } }
+
+    assert_response :unprocessable_entity
+    assert_match "invalid workflow id", response.body
+  end
+
+  test "rerun setup omitting the workflow param is a 422, not a silent coding rebind" do
+    # The browser always submits settings[workflow], but a scripted/curl caller
+    # might omit it. With no workflow the re-run resolves :implicit on an
+    # already-initialized project → AlreadyInitialized → 422; pin that contract.
+    name = create_hive_project!("rerun-bare-app")
+    sign_in!
+
+    post "/repos", params: { project: name }
+
+    assert_response :unprocessable_entity
+  end
+
+  test "rerun form survives a corrupt project config instead of 500ing" do
+    # persisted_default_workflow degrades a corrupt/unreadable config.yml to nil
+    # (falling back to coding) so the very form an operator opens to REPAIR a
+    # broken project still renders the workflow select rather than 500ing.
+    name = create_hive_project!("rerun-corrupt-config-app")
+    sign_in!
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
+    config_path = File.join(dir, ".hive-state", "config.yml")
+    valid_config = File.read(config_path)
+    File.write(config_path, "default_workflow: [unterminated\n")
+    # The per-root workflow overlay is process-memoized; force a fresh disk read.
+    Hive::Workflows::Project.reset!
+
+    get "/repos/new", params: { project: name }
+
+    assert_response :success
+    assert_select "select[name='settings[workflow]']", 1,
+                  "the repair form must still render the workflow select over a corrupt config"
+  ensure
+    # Restore the readable config so this project doesn't flood the shared
+    # process-wide sandbox with status warnings in later tests.
+    File.write(config_path, valid_config) if config_path && valid_config
+    Hive::Workflows::Project.reset!
   end
 
   test "rerun setup keeps an unloadable persisted default selected instead of downgrading to coding" do

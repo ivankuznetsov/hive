@@ -11,10 +11,20 @@ class RepoSetupFlowTest < ApplicationSystemTestCase
       visit "/repos/new?url=ivankuznetsov/#{name}&name=#{name}"
 
       assert_selector "label", text: "Workflow", wait: 5
-      assert_equal %w[coding content], workflow_option_values,
-                   "fresh setup should list only built-in workflows with coding first"
+      # coding-first + content present rather than an exact set, so a third
+      # built-in workflow doesn't break this with no behavior regression
+      # (plan U7; mirrors the rerun test's soft assertions below).
+      values = workflow_option_values
+      assert_equal "coding", values.first,
+                   "fresh setup should list the coding workflow first"
+      assert_includes values, "content",
+                      "fresh setup should offer the built-in content workflow"
       assert_equal "coding", workflow_select.value,
                    "fresh setup should preselect coding"
+      # The options are already materialized by the waited assertions above
+      # (the Workflow label render + workflow_option_values' own wait: 5), so
+      # this wait: 0 is a deliberate true-negative check, not a latent race
+      # (CLAUDE.md E2E rule 6).
       assert_no_selector "select[name='settings[workflow]'] option[value='writing']",
                          wait: 0
 

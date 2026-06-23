@@ -92,10 +92,14 @@ module Hive
         end
 
         workflow_choice = resolve_workflow_choice(ops)
-        if @new_workflow
-          # Inline authoring deliberately routes through the same path as
-          # --new-workflow: the descriptor does not exist yet, so there is no
-          # resolved Hive::Workflow to put in WorkflowChoice.
+        if workflow_choice.nil?
+          # nil (not a WorkflowChoice) is resolve_workflow_choice's signal that the
+          # interactive prompt's "author a new workflow" entry was chosen: deep
+          # inside it, prompt_new_workflow_id set @new_workflow as a side effect.
+          # Inline authoring deliberately routes through the same scaffolder as
+          # --new-workflow — the descriptor does not exist yet, so there is no
+          # resolved Hive::Workflow to carry in a WorkflowChoice. Keying off the
+          # return value (not a re-read of @new_workflow) keeps routing data-driven.
           init_with_new_workflow(ops)
           return
         end
@@ -969,7 +973,16 @@ module Hive
           # never silently reset a non-coding default back to coding and rebind
           # every field-less in-flight task. A fresh init defaults to coding.
           current = ops.hive_state_branch_exists? ? current_default_workflow(ops) : Hive::Workflows::CODING_ID.to_s
-          return WorkflowChoice.new(descriptor: prompt_workflow(current), source: :prompt)
+          descriptor = prompt_workflow(current)
+          # A nil descriptor means the operator picked "author a new workflow":
+          # prompt_workflow set @new_workflow as a side effect and no resolved
+          # Hive::Workflow exists yet. Return nil so `call` routes to the
+          # scaffolder, rather than building a WorkflowChoice(descriptor: nil)
+          # that would violate the type's "descriptor is a fully resolved
+          # Hive::Workflow" invariant and rely on a downstream re-read of the flag.
+          return if descriptor.nil?
+
+          return WorkflowChoice.new(descriptor: descriptor, source: :prompt)
         end
 
         WorkflowChoice.new(descriptor: Hive::Workflows::Registry.default, source: :implicit)

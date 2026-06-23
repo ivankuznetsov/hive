@@ -118,4 +118,44 @@ class WorkflowsCodingTest < Minitest::Test
                       "coding :agent/:inert stage #{name.inspect} must have an ACTION_DISPATCH row"
     end
   end
+
+  # task_action.rb's kind_action routes :execute/:review_council/:finalize straight
+  # to the coding-hardcoded helpers (execute_action/review_action/finalize_action)
+  # with NO coding_id? guard — unlike the :agent/:inert arm, which gates on
+  # coding_id? via coding_table_action. That asymmetry is safe ONLY because no
+  # non-coding descriptor declares those runtime kinds: parse_kind rejects them for
+  # YAML descriptors (descriptor_parser_test pins the exact strings) and only
+  # Workflows::Coding declares them via Stage.new. Pin the Ruby half of that
+  # invariant across EVERY registered descriptor so a future Ruby-constructed
+  # non-coding workflow carrying a coding runtime kind fails here, not by silently
+  # misrouting to a coding helper on a live status/daemon tick.
+  def test_no_non_coding_descriptor_declares_a_coding_runtime_kind
+    coding_runtime_kinds = %i[execute review_council finalize]
+
+    Hive::Workflows::Registry.all.reject { |descriptor| Hive::Workflows.coding_id?(descriptor.id) }.each do |descriptor|
+      offending = descriptor.stages.select { |stage| coding_runtime_kinds.include?(stage.kind) }.map(&:name)
+
+      assert_empty offending,
+                   "non-coding descriptor #{descriptor.id.inspect} declares coding-only runtime kind(s) on " \
+                   "stage(s) #{offending.inspect}; kind_action would misroute them to coding-hardcoded helpers"
+    end
+  end
+
+  # Completeness pin for the OTHER half of the same asymmetry: kind_action has
+  # explicit `when` arms only for :execute/:review_council/:finalize/:agent/:inert;
+  # every other kind (including a future nil) drops to the generic `else` and emits
+  # generic run/approve commands the coding runner never expects. Pin that every
+  # kind the coding descriptor actually declares is covered by an explicit arm, so
+  # a new coding stage with an unhandled kind fails here rather than silently
+  # falling through to generic_action. The arm list mirrors kind_action's case.
+  def test_every_coding_stage_kind_hits_an_explicit_kind_action_arm
+    explicit_kind_action_arms = %i[execute review_council finalize agent inert]
+    declared_kinds = Hive::Workflows::Coding::DESCRIPTOR.stages.map(&:kind).uniq
+
+    unhandled = declared_kinds - explicit_kind_action_arms
+
+    assert_empty unhandled,
+                 "coding descriptor declares kind(s) #{unhandled.inspect} with no explicit kind_action arm; " \
+                 "they would fall through to generic_action instead of a coding helper"
+  end
 end

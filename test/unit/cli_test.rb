@@ -136,14 +136,31 @@ class HiveCliTest < Minitest::Test
                    "--workflow help must say project-authored workflows are valid")
       assert_match(/hive workflow new/, out,
                    "--workflow help must point at the authoring command")
-      assert_match(/coding/, out)
-      assert_match(/content/, out)
+      assert_includes out, Hive::CLI::WORKFLOW_VOCABULARY,
+                      "--workflow help must advertise the built-in workflows (#{Hive::CLI::WORKFLOW_VOCABULARY})"
+    end
+  end
+
+  def test_workflow_option_help_does_not_enumerate_project_workflows
+    # Plan-central contract: `--workflow` help lists built-ins only and never
+    # enumerates active-project descriptors, so the rendered string stays static
+    # regardless of which project is registered (WORKFLOW_VOCABULARY is frozen to
+    # built-ins at class load). Register a fixture into the runtime overlay and
+    # assert its id never leaks into `help new`.
+    with_registered_workflow(content_workflow) do
+      new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+      refute_includes new_out, content_workflow.id.to_s,
+                      "--workflow help must list built-ins only, never active-project workflows"
     end
   end
 
   def test_workflow_option_desc_is_symmetric_and_dry
     desc = Hive::CLI.workflow_option_desc
-    built_ins = Hive::Workflows::Registry.ids.join(", ")
+    # Anchor on the frozen constant the helper actually interpolates, not a live
+    # Registry.ids recomputation: WORKFLOW_VOCABULARY is built-ins-only at class
+    # load, so a sibling test that registers a project/runtime workflow (even
+    # under Minitest's randomized order) can't make this diverge and flake.
+    built_ins = Hive::CLI::WORKFLOW_VOCABULARY
 
     assert_includes desc, built_ins
     assert_includes desc, "or any project-authored workflow"

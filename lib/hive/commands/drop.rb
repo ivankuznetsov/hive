@@ -125,7 +125,7 @@ module Hive
         # explicit empty-active fallback (collect against archive_dirs only when
         # `folders` came back empty); resolve_slug_context reaches the same end
         # by *not rejecting* the archive folders when no active ones remain
-        # (see 189-192).
+        # (the `@stage_filter.nil?` keep-archive branch in resolve_slug_context).
         if folders.empty?
           archived = collect_stage_folders(task.hive_state_path, task.slug, archive_dirs)
           folders = archived unless archived.empty?

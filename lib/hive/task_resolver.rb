@@ -6,10 +6,11 @@ require "hive/workflows"
 require "hive/workflows/project"
 
 module Hive
-  # Resolve a CLI TARGET (folder path or bare slug) to a `Hive::Task`.
-  # Shared between the agent-callable commands (`approve`, `findings`,
-  # `accept-finding`, `reject-finding`) so the slug-lookup, ambiguity,
-  # realpath, and `--project` mismatch rules are defined in one place.
+  # Resolve a CLI TARGET (folder path, bare slug, or numeric task id) to a
+  # `Hive::Task`. Shared between the agent-callable commands (`approve`,
+  # `findings`, `accept-finding`, `reject-finding`, and `drop` for its numeric-id
+  # targets) so the slug-lookup, numeric-id, ambiguity, realpath, and `--project`
+  # mismatch rules are defined in one place.
   #
   # Resolution rules:
   #   - path-shaped (`/`, `~/`, `./`) → expanded + realpath'd; refused if

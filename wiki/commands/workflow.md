@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/blank/
 created: 2026-06-21
-updated: 2026-06-22
+updated: 2026-06-23
 tags: [command, workflow, authoring]
 ---
 

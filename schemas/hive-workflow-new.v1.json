@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-new.v1.json",
   "title": "hive workflow new output (v1)",
-  "description": "Stable contract emitted by `hive workflow new ID --json`. Scaffolds a blank per-project workflow descriptor (inbox -> work -> done) under <hive_state_path>/workflows/ID.yml plus a placeholder instruction at <hive_state_path>/workflows/ID/work.md, then records a hive/state commit. Both the success and error arms route through Hive::Schemas::ErrorEnvelope so the keys match every other hive-* command. A missing/invalid/reserved id or a missing/unknown subcommand is a USAGE error (64); commit-lock contention is a retryable TEMPFAIL (75).",
+  "description": "Stable contract emitted by `hive workflow new ID --json`. Scaffolds a blank per-project workflow descriptor (inbox -> work -> done) under <hive_state_path>/workflows/ID.yml plus a placeholder instruction at <hive_state_path>/workflows/ID/work.md, then records a hive/state commit. The error arm routes through Hive::Schemas::ErrorEnvelope so its keys match every other hive-* command's error envelope; the success arm builds its hash directly. A missing/invalid/reserved id or a missing/unknown subcommand is a USAGE error (64); commit-lock contention is a retryable TEMPFAIL (75).",
   "oneOf": [
     {
       "$ref": "#/$defs/SuccessPayload"

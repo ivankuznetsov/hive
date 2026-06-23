@@ -3,6 +3,11 @@ require "hive/workflow"
 module Hive
   module Workflows
     module Coding
+      # Per-stage user-facing action keys for coding's `:agent`/`:inert`
+      # descriptor stages, consumed by `TaskAction#coding_table_action`. This
+      # table covers ONLY those stages — coding's runtime-kind stages
+      # (`:execute`, `:review_council`, `:finalize`) are classified by their
+      # own helpers in `task_action.rb` and are deliberately absent here.
       ACTION_DISPATCH = {
         "inbox" => {
           kind: :inert,
@@ -88,7 +93,7 @@ module Hive
             index: 6,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "review"),
-            kind: :"review-council"
+            kind: :review_council
           ),
           Hive::Workflow::Stage.new(
             name: "artifacts",

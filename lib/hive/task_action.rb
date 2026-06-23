@@ -96,8 +96,10 @@ module Hive
       # Used by TWO call sites that today happen to want identical
       # "re-run finalize" semantics:
       #
-      #   1. `artifacts_action` for a real task at 7-artifacts with
-      #      `:complete` — its artifact run is done, finalize is next.
+      #   1. `Coding::ACTION_DISPATCH["artifacts"][:complete]` for a real task
+      #      at 7-artifacts with `:complete` — its artifact run is done,
+      #      finalize is next. (The live route is the table; the legacy
+      #      `artifacts_action` method is now reached only by the parity harness.)
       #   2. `finalize_complete_action` as the fallback when finalize
       #      ran but left the PR as a draft (is_draft != "false") —
       #      operator should re-run finalize.
@@ -289,7 +291,7 @@ module Hive
       case stage.kind
       when :execute
         execute_action
-      when :"review-council"
+      when :review_council
         review_action
       when :finalize
         finalize_action
@@ -421,6 +423,11 @@ module Hive
 
     # Markerless 7-artifacts rows still need their stage runner to write
     # artifact.md and the terminal marker before finalize is allowed.
+    #
+    # Production-dead: 7-artifacts now routes through
+    # `Coding::ACTION_DISPATCH["artifacts"]` (complete/default), not this
+    # method. Retained solely for the parity harness's `LegacyCaseTaskAction`,
+    # which still exercises the old stage-name case path.
     def artifacts_action
       marker.name == :complete ? ACTIONS.fetch(:artifacts_complete) : ACTIONS.fetch(:artifacts_ready)
     end
@@ -615,6 +622,12 @@ module Hive
     end
 
     def command_stage_dir(stage)
+      # For a real coding Task the `"#{index}-#{name}"` string form is provably
+      # equal to `stage.dir`: `validate_workflow_stage!` (task.rb) pins the
+      # task's stage_index/stage_name to the descriptor stage at construction.
+      # The string form is kept on the coding branch so the command echoes the
+      # task's own on-disk stage dir rather than re-deriving it from the
+      # descriptor.
       return "#{task.stage_index}-#{task.stage_name}" if Hive::Workflows.coding_id?(task_workflow.id)
 
       stage.dir

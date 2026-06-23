@@ -6,7 +6,7 @@ pages: [modules/task_action, modules/workflows]
 
 Retired the production `TaskAction` coding stage-name case. Coding status
 classification now routes through descriptor `kind:` values: execute,
-review-council, and finalize use their runtime helpers directly, while coding
+review_council, and finalize use their runtime helpers directly, while coding
 agent/inert stages read `Hive::Workflows::Coding::ACTION_DISPATCH` for the
 stage-specific user-facing action keys that generic workflows do not share.
 

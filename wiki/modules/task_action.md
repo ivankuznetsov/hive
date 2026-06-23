@@ -77,7 +77,7 @@ to `Hive::Schemas::TaskActionKind` and is mirrored by `hive-status` and
 `TaskAction#action` first applies the workflow-agnostic short-circuits
 (`live_task_lock`, `AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`), then routes
 through the resolved descriptor stage's `kind`. Coding no longer has a
-production `case task.stage_name` branch: `:execute`, `:"review-council"`, and
+production `case task.stage_name` branch: `:execute`, `:review_council`, and
 `:finalize` select the coding runtime-specific helpers directly, while coding
 `:agent`/`:inert` stages consult `Hive::Workflows::Coding::ACTION_DISPATCH` for
 their per-stage user-facing action keys. Non-coding `:agent`/`:inert`/nil

@@ -14,9 +14,10 @@ module Hive
     include Enumerable
 
     # :agent selects the agent runner, :inert auto-advances with no runner,
-    # :execute/:review-council/:finalize select coding runtime primitives, and
-    # nil is the unspecified default.
-    KNOWN_KINDS = [ nil, :agent, :inert, :execute, :"review-council", :finalize ].freeze
+    # :execute/:review_council/:finalize drive coding status/action
+    # classification (the coding runners are selected by name, not kind — see
+    # Stages::Resolver), and nil is the unspecified default.
+    KNOWN_KINDS = [ nil, :agent, :inert, :execute, :review_council, :finalize ].freeze
 
     def each(&) = stages.each(&)
 

@@ -942,7 +942,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  # ── Generic-workflow heal paths (cover the coding_workflow? gates) ─────────
+  # ── Generic-workflow heal paths (cover the coding-id gates) ────────────────
 
   def test_generic_finalize_unpushed_commits_does_not_auto_recover
     # The 8-finalize + unpushed_commits auto-recovery is a coding-only branch

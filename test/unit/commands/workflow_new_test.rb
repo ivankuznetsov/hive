@@ -55,6 +55,30 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_scaffolds_keyword_like_id_with_quoted_descriptor_so_it_parses
+    # `no`/`yes`/`off` are valid SAFE_SLUG ids that YAML.safe_load coerces to
+    # booleans when the descriptor's `id:` is emitted unquoted, failing
+    # DescriptorParser's required-string check. The descriptor template quotes
+    # `id:` to prevent that — pin it directly at the command that owns the
+    # template, not only transitively through the init path.
+    with_initialized_project do |project_root|
+      payload = Hive::Commands::Workflow.new!("no", project_root: project_root, stdout: StringIO.new)
+
+      assert_equal "no", payload.fetch("id")
+      descriptor_path = File.join(project_root, ".hive-state", "workflows", "no.yml")
+
+      # The raw descriptor quotes the id, so YAML round-trips it as the String.
+      assert_includes File.read(descriptor_path), %(id: "no")
+      assert_equal "no", YAML.safe_load(File.read(descriptor_path)).fetch("id"),
+                   "a keyword-like id must survive YAML.safe_load as a String, not coerce to false"
+
+      # And the descriptor parses, resolving its id back to the symbol form.
+      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+      assert_equal :no, workflow.id
+      assert_equal :no, Hive::WorkflowSelection.fetch!("no", project_root: project_root).id
+    end
+  end
+
   def test_json_success_payload
     with_initialized_project do |project_root|
       out, err, status = with_captured_exit do
@@ -108,9 +132,15 @@ class WorkflowNewTest < Minitest::Test
 
   # Round-trip: hive-workflow-new is enveloped like every other hive-* command,
   # so BOTH arms must validate against the published schema. The usage arm
-  # carries the `value` extra (the b80907fa regression added it to the producer
-  # without declaring it in the schema's ErrorPayload, whose
-  # additionalProperties:false then rejected every UsageError envelope).
+  # covers extras too: reserved-id errors carry `value`; missing-subcommand
+  # errors carry `expected`; unknown-subcommand errors carry both `value` and
+  # `expected` (the only shape exercising the combined payload). The
+  # "missing workflow id" case is exercised only as a raised message via
+  # `new!("")` (test_rejects_reserved_and_invalid_ids): an empty-string id
+  # raises with `value: ""` (kept), while an omitted id (nil) is stripped by
+  # error_extras so the envelope carries no `value` key. Either way its
+  # enveloped shape is locked here by the reserved-id arm's `value`, not driven
+  # through the envelope separately.
   def test_json_envelopes_validate_against_published_schema
     with_initialized_project do |project_root|
       schemer = JSONSchemer.schema(
@@ -134,6 +164,27 @@ class WorkflowNewTest < Minitest::Test
       assert_empty err_errors,
                    "hive-workflow-new usage ErrorPayload (with `value`) must validate " \
                    "against the published schema (errors: #{err_errors.inspect})"
+
+      missing_out, = with_captured_exit do
+        Hive::Commands::Workflow.new(nil, nil, project_root: project_root, json: true).call
+      end
+      missing_payload = JSON.parse(missing_out)
+      assert_equal [ "new" ], missing_payload.fetch("expected")
+      missing_errors = schemer.validate(missing_payload).map { |e| e["error"] }
+      assert_empty missing_errors,
+                   "hive-workflow-new usage ErrorPayload (with `expected`) must validate " \
+                   "against the published schema (errors: #{missing_errors.inspect})"
+
+      unknown_out, = with_captured_exit do
+        Hive::Commands::Workflow.new("bogus", nil, project_root: project_root, json: true).call
+      end
+      unknown_payload = JSON.parse(unknown_out)
+      assert_equal "bogus", unknown_payload.fetch("value")
+      assert_equal [ "new" ], unknown_payload.fetch("expected")
+      unknown_errors = schemer.validate(unknown_payload).map { |e| e["error"] }
+      assert_empty unknown_errors,
+                   "hive-workflow-new usage ErrorPayload (with `value` AND `expected`) must " \
+                   "validate against the published schema (errors: #{unknown_errors.inspect})"
     end
   end
 
@@ -236,6 +287,69 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_normalize_and_validate_id_reuses_workflow_new_errors
+    assert_equal "my-flow", Hive::Commands::Workflow.normalize_and_validate_id!(" my-flow ")
+
+    [ "coding", "content" ].each do |id|
+      error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.normalize_and_validate_id!(id)
+      end
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      assert_includes error.message, "workflow id #{id.inspect} is reserved by a built-in workflow"
+    end
+
+    missing = assert_raises(Hive::Commands::Workflow::UsageError) do
+      Hive::Commands::Workflow.normalize_and_validate_id!(" ")
+    end
+    assert_equal Hive::ExitCodes::USAGE, missing.exit_code
+    assert_includes missing.message, "missing workflow id"
+
+    invalid = assert_raises(Hive::Commands::Workflow::UsageError) do
+      Hive::Commands::Workflow.normalize_and_validate_id!("Bad_Id")
+    end
+    assert_equal Hive::ExitCodes::USAGE, invalid.exit_code
+    assert_includes invalid.message, "invalid workflow id"
+  end
+
+  def test_scaffold_files_writes_and_validates_without_committing
+    with_initialized_project do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      before_log = run!("git", "-C", hive_state, "rev-parse", "HEAD").strip
+
+      scaffold = Hive::Commands::Workflow.scaffold_files!("drafting", project_root: project_root)
+      paths = scaffold.fetch(:paths)
+
+      assert_equal "drafting", scaffold.fetch(:id)
+      assert File.file?(paths.fetch(:descriptor))
+      assert File.file?(paths.fetch(:instruction))
+      workflow = Hive::Workflows::DescriptorParser.parse_file(paths.fetch(:descriptor))
+      assert_equal :drafting, workflow.id
+      assert_equal before_log, run!("git", "-C", hive_state, "rev-parse", "HEAD").strip,
+                   "scaffold_files! must leave commit ownership to its caller"
+
+      Hive::Commands::Workflow.rollback_scaffold(paths)
+      refute File.exist?(paths.fetch(:descriptor))
+      refute File.exist?(paths.fetch(:instruction_dir))
+    end
+  end
+
+  def test_scaffold_files_rolls_back_when_generated_descriptor_fails_validation
+    with_initialized_project do |project_root|
+      error = Hive::ConfigError.new("boom")
+      with_replaced_singleton_method(Hive::Workflows::DescriptorParser, :parse_file, lambda { |_path|
+        raise error
+      }) do
+        raised = assert_raises(Hive::ConfigError) do
+          Hive::Commands::Workflow.scaffold_files!("broken-helper-flow", project_root: project_root)
+        end
+        assert_same error, raised
+      end
+
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "broken-helper-flow.yml"))
+      refute File.exist?(File.join(project_root, ".hive-state", "workflows", "broken-helper-flow"))
+    end
+  end
+
   def test_rolls_back_files_when_generated_descriptor_fails_validation
     with_initialized_project do |project_root|
       error = Hive::ConfigError.new("boom")
@@ -254,13 +368,121 @@ class WorkflowNewTest < Minitest::Test
   end
 
   def test_call_reports_unknown_subcommand_as_usage
-    with_initialized_project do |project_root|
-      _out, err, status = with_captured_exit do
+    with_tmp_dir do |project_root|
+      out, err, status = with_captured_exit do
         Hive::Commands::Workflow.new("save", "my-flow", project_root: project_root).call
       end
 
       assert_equal Hive::ExitCodes::USAGE, status
-      assert_includes err, "unknown workflow subcommand"
+      assert_empty out
+      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new)\n", err
+    end
+  end
+
+  def test_call_reports_missing_subcommand_as_usage
+    with_tmp_dir do |project_root|
+      out, err, status = with_captured_exit do
+        Hive::Commands::Workflow.new(nil, nil, project_root: project_root).call
+      end
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_empty out
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
+    end
+  end
+
+  def test_json_reports_missing_subcommand_with_expected_values
+    with_tmp_dir do |project_root|
+      out, err, status = with_captured_exit do
+        Hive::Commands::Workflow.new(nil, nil, project_root: project_root, json: true).call
+      end
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "UsageError", payload.fetch("error_class")
+      assert_equal "usage", payload.fetch("error_kind")
+      assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
+      assert_equal "missing SUBCOMMAND (expected: new)", payload.fetch("message")
+      assert_equal [ "new" ], payload.fetch("expected")
+      refute payload.key?("value")
+    end
+  end
+
+  def test_json_reports_unknown_subcommand_with_value_and_expected_values
+    with_tmp_dir do |project_root|
+      out, err, status = with_captured_exit do
+        Hive::Commands::Workflow.new("bogus", nil, project_root: project_root, json: true).call
+      end
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "UsageError", payload.fetch("error_class")
+      assert_equal "usage", payload.fetch("error_kind")
+      assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
+      assert_equal "unknown workflow subcommand \"bogus\" (expected: new)", payload.fetch("message")
+      assert_equal "bogus", payload.fetch("value")
+      assert_equal [ "new" ], payload.fetch("expected")
+    end
+  end
+
+  def test_rollback_scaffold_warns_with_errno_when_a_leftover_cannot_be_removed
+    with_initialized_project do |project_root|
+      scaffold = Hive::Commands::Workflow.scaffold_files!("stuck-flow", project_root: project_root)
+      paths = scaffold.fetch(:paths)
+
+      # Force the removal to fault (EACCES) so the files genuinely survive
+      # cleanup; the warning must then name each leftover AND its captured errno,
+      # not a bare path list.
+      with_replaced_singleton_method(FileUtils, :remove_entry, lambda { |path, *_args|
+        raise Errno::EACCES, path.to_s
+      }) do
+        _out, err = capture_io { Hive::Commands::Workflow.rollback_scaffold(paths) }
+
+        assert_includes err, "scaffold cleanup could not remove"
+        assert_includes err, paths.fetch(:descriptor)
+        assert_includes err, paths.fetch(:instruction_dir)
+        assert_includes err, "Errno::EACCES",
+                         "the cleanup warning must surface the underlying errno, not just the path"
+      end
+
+      # The stub blocked removal (remove_entry is restored now); tidy up.
+      FileUtils.rm_f(paths.fetch(:descriptor))
+      FileUtils.rm_rf(paths.fetch(:instruction_dir))
+    end
+  end
+
+  def test_rollback_scaffold_swallows_epipe_from_the_cleanup_warning
+    with_initialized_project do |project_root|
+      scaffold = Hive::Commands::Workflow.scaffold_files!("epipe-flow", project_root: project_root)
+      paths = scaffold.fetch(:paths)
+
+      broken = Object.new
+      broken.define_singleton_method(:write) { |*| raise Errno::EPIPE }
+      broken.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+      broken.define_singleton_method(:flush) { nil }
+
+      with_replaced_singleton_method(FileUtils, :remove_entry, lambda { |path, *_args|
+        raise Errno::EACCES, path.to_s
+      }) do
+        real_stderr = $stderr
+        $stderr = broken
+        begin
+          # A broken-pipe stderr during the leftover warning must not crash the
+          # rollback — warn_failed_scaffold_cleanup's `rescue Errno::EPIPE`
+          # swallows it.
+          result = Hive::Commands::Workflow.rollback_scaffold(paths)
+          assert_nil result, "an EPIPE while warning must be swallowed, leaving rollback a no-op return"
+        ensure
+          $stderr = real_stderr
+        end
+      end
+
+      FileUtils.rm_f(paths.fetch(:descriptor))
+      FileUtils.rm_rf(paths.fetch(:instruction_dir))
     end
   end
 

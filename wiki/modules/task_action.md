@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-06-20
+updated: 2026-06-23
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -37,7 +37,7 @@ EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non
 
 ## Action map (`Hive::TaskAction::ACTIONS`)
 
-Entries are keyed by an internal symbol that's resolved via `(stage_name, marker_name)` lookup. Each value carries `key` (TaskActionKind constant), `label` (human prose), and `command` (verb name string, or nil).
+Entries are keyed by an internal symbol resolved by routing on the descriptor stage's `kind` (see the "Kind-Routed Classification" section below): coding `:agent`/`:inert` stages map through `Hive::Workflows::Coding::ACTION_DISPATCH`, the coding runtime kinds (`:execute`/`:review_council`/`:finalize`) select their helpers directly, and non-coding stages fall through to the descriptor-generic classifier — the older `(stage_name, marker_name)` case lookup is retired. Each value carries `key` (TaskActionKind constant), `label` (human prose), and `command` (verb name string, or nil).
 
 | Internal key | TaskActionKind | Label | Verb |
 |---|---|---|---|
@@ -72,15 +72,16 @@ Markerless generic stages emit `READY_TO_RUN` so the daemon can dispatch
 to `Hive::Schemas::TaskActionKind` and is mirrored by `hive-status` and
 `hive-stage-action` schemas.
 
-## Workflow-aware branch
+## Kind-Routed Classification
 
-`TaskAction#action` keeps the coding workflow on the existing hand-tuned
-stage-name `case` after the workflow-agnostic short-circuits (`live_task_lock`,
-`AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`). Routing is decided by
-`coding_workflow?`: a resolved `task.workflow.id == :coding` — and also a nil
-workflow, reachable only from test doubles — stays on the coding path. Tasks
-whose resolved `task.workflow.id` is any other value use a descriptor-positioned
-generic classifier instead:
+`TaskAction#action` first applies the workflow-agnostic short-circuits
+(`live_task_lock`, `AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`), then routes
+through the resolved descriptor stage's `kind`. Coding no longer has a
+production `case task.stage_name` branch: `:execute`, `:review_council`, and
+`:finalize` select the coding runtime-specific helpers directly, while coding
+`:agent`/`:inert` stages consult `Hive::Workflows::Coding::ACTION_DISPATCH` for
+their per-stage user-facing action keys. Non-coding `:agent`/`:inert`/nil
+stages fall through to the descriptor-generic classifier:
 
 - `COMPLETE` at the terminal descriptor stage -> `archived`.
 - `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
@@ -90,19 +91,21 @@ generic classifier instead:
   entry-only restriction was intentionally dropped so an inert MIDDLE stage
   advances rather than stranding (`Resolver.resolve` raises `StageError` for
   `kind: :inert`, so it can neither run nor advance otherwise).
-- markerless stage of any non-inert kind (`:agent`, `:marker`, or `nil`), or a
+- markerless stage of any non-inert kind (`:agent`, coding runtime kinds, or
+  `nil`), or a
   terminal inert stage (degenerate single-stage workflow, entry == terminal) ->
   `generic_ready_to_run` with label "Ready to run".
 
-This keeps coding behavior byte-stable while letting registered non-coding
-workflows surface non-error status rows once a task has resolved to its
-descriptor. `Commands::Approve` and `Commands::Run` resolve generic advance
-destinations through the task's descriptor, the CLI accepts runtime-registered
-stage refs for `--from`/`--to`/`--stage`, `Status#collect_rows` scans
-`Hive::Workflows.all_stage_dirs`, and `TaskResolver` can find generic-only
-stage dirs by bare slug. U6's integration test proves a registered generic task
-advancing through status -> policy -> `hive run`/`hive approve` for two stage
-hops.
+This keeps coding behavior byte-stable while moving the classifier onto
+descriptor `kind:` routing. A test-only parity harness compares the retired
+stage-name case against the production kind path across coding markers,
+diagnostics, and command strings. `Commands::Approve` and `Commands::Run`
+resolve generic advance destinations through the task's descriptor, the CLI
+accepts runtime-registered stage refs for `--from`/`--to`/`--stage`,
+`Status#collect_rows` scans `Hive::Workflows.all_stage_dirs`, and `TaskResolver`
+can find generic-only stage dirs by bare slug. U6's integration test proves a
+registered generic task advancing through status -> policy -> `hive run`/`hive
+approve` for two stage hops.
 
 ## Marker carve-outs
 

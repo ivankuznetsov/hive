@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/blank/
 created: 2026-06-21
-updated: 2026-06-21
+updated: 2026-06-23
 tags: [command, workflow, authoring]
 ---
 
@@ -15,6 +15,12 @@ tags: [command, workflow, authoring]
 hive workflow new my-flow
 hive workflow new my-flow --json
 ```
+
+For a fresh project that should default to the custom workflow immediately,
+prefer `hive init --new-workflow my-flow [PROJECT_PATH]`; it performs init,
+scaffolds the same descriptor/instruction files, and binds `default_workflow`
+in one flow. Use `hive workflow new` when the project is already initialized
+and you do not want to rebind the default.
 
 The command is project-root local. It reads the current project's
 `hive_state_path` from `.hive-state/config.yml` (default `.hive-state`) and
@@ -37,10 +43,17 @@ the workflow files on `hive/state`, and prints the next command:
 hive new <project> --workflow my-flow "<your idea>"
 ```
 
-With `--json`, success is an unversioned document containing `ok`, `id`,
-`descriptor_path`, `instruction_path`, and `next`. Typed usage/config/git
-errors emit an unversioned JSON error document with `ok: false`, `error_class`,
-`exit_code`, and `message`.
+With `--json`, success is a `hive-workflow-new` (schema_version 1) document
+containing `ok`, `id`, `descriptor_path`, `instruction_path`, and `next`. Typed
+usage/config/git errors emit a `hive-workflow-new` (schema_version 1) JSON error
+document with `ok: false`, `error_class`, `exit_code`, and `message`.
+
+A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
+uses the command prefix: `hive workflow: missing SUBCOMMAND (expected: new)` or
+`hive workflow: unknown workflow subcommand "X" (expected: new)`. With
+`--json`, those subcommand-shape errors carry a structured `expected` array
+such as `["new"]`; unknown subcommands also carry `value` with the rejected
+token.
 
 ## Generated Descriptor
 
@@ -68,5 +81,6 @@ Edit this file to define what the `work` stage should do.
 ## Backlinks
 
 - [[cli]]
+- [[commands/init]]
 - [[modules/workflows]]
 - [[commands/new]]

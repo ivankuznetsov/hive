@@ -37,9 +37,10 @@ module Hive
       "hive-patrol" => 1,
       "hive-patrol-finding" => 1,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
-      # --json`). Both arms route through Hive::Schemas::ErrorEnvelope so the
-      # output carries the same schema/schema_version/error_kind keys as every
-      # other agent-callable command.
+      # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
+      # its output carries the same schema/schema_version/error_kind keys as
+      # every other agent-callable command's error envelope; the success arm
+      # builds its hash directly.
       "hive-workflow-new" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard

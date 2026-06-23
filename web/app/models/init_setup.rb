@@ -22,6 +22,13 @@ class InitSetup
     def patrol_reviewer_names = Prompts::PATROL_REVIEWER_NAMES
     def patrol_modes = Prompts::PATROL_MODE_CHOICES
     def limit_keys = Prompts::LIMIT_KEYS
+    def workflows(project_root = nil)
+      return Hive::Workflows::Registry::WORKFLOWS.keys.map(&:to_s) unless project_root
+
+      Hive::Workflows::Project.synchronize do
+        Hive::WorkflowSelection.valid_names(project_root: project_root)
+      end
+    end
 
     def defaults
       {

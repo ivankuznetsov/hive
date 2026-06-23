@@ -35,6 +35,10 @@
         <%= select_tag "settings[development_agent]", options_for_select(InitSetup.agents, @defaults["development_agent"]) %>
       </div>
       <div class="form-row">
+        <%= label_tag "settings_workflow", "Workflow" %>
+        <%= select_tag "settings[workflow]", options_for_select(@workflows, @current_workflow) %>
+      </div>
+      <div class="form-row">
         <%= label_tag "settings_claude_mode", "Claude launch mode" %>
         <%= select_tag "settings[claude_mode]", options_for_select(InitSetup.claude_modes, @defaults["claude_mode"]) %>
       </div>

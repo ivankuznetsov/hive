@@ -43,6 +43,12 @@ class ReposTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "select[name='settings[planning_agent]']", 1
+    assert_select "select[name='settings[workflow]']", 1
+    assert_select "select[name='settings[workflow]'] option", 2
+    assert_select "select[name='settings[workflow]'] option[value='coding'][selected]",
+                  "coding", "fresh setup must preselect the coding workflow"
+    assert_select "select[name='settings[workflow]'] option[value='content']",
+                  "content", "fresh setup must offer built-in content workflow"
     assert_select "input[name='settings[enabled_reviewers][]']", { minimum: 2 },
                   "the reviewer multi-select must offer the same set the TTY prompt does"
     assert_select "input[name='settings[budgets][brainstorm]']", 1
@@ -63,6 +69,7 @@ class ReposTest < ActionDispatch::IntegrationTest
       post "/repos", params: {
         url: "ivankuznetsov/configured-app", name: "configured-app",
         settings: {
+          workflow: "content",
           claude_mode: "headless", triage_bias: "safetyist", patrol_mode: "off",
           enabled_reviewers_submitted: "1", enabled_reviewers: [ "claude-ce-code-review" ],
           daemon_enabled: "0", babysitter_enabled: "0",
@@ -75,6 +82,8 @@ class ReposTest < ActionDispatch::IntegrationTest
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
     assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")
+    assert_equal "content", YAML.safe_load(config).fetch("default_workflow"),
+                 "the chosen workflow must land in the project config through Init.new(workflow:)"
   end
 
   test "an out-of-range setting is a readable 422, not a silent default" do

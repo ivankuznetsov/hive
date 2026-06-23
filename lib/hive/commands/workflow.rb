@@ -23,6 +23,11 @@ module Hive
       class UsageError < Hive::Error
         attr_reader :value, :expected
 
+        # Closed set of usage-error shapes (which structured field each carries):
+        #   missing subcommand        -> expected only
+        #   unknown subcommand        -> value (the rejected verb) + expected
+        #   bad/missing/reserved id / -> value (the rejected/colliding token) only
+        #   scaffold collision
         def initialize(message, value: nil, expected: nil)
           super(message)
           @value = value

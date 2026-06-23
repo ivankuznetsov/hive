@@ -289,6 +289,16 @@ module Hive
       return ACTIONS.fetch(:error) unless stage
 
       case stage.kind
+      # `:execute`/`:review_council`/`:finalize` route straight to the coding
+      # runtime helpers with NO `coding_id?` guard — unlike the `:agent`/`:inert`
+      # arm below, which gates on `coding_id?` via `coding_table_action`. That
+      # asymmetry is deliberate and safe: these three kinds are coding-only by
+      # construction. `DescriptorParser#parse_kind` rejects them for YAML
+      # descriptors, and only `Workflows::Coding` declares them via `Stage.new`,
+      # so no non-coding workflow can carry one. The helpers hardcode coding
+      # semantics (`finalize`/`plan`/`execute` stage names, coding markers); the
+      # guarantee that they only ever see a coding task lives in the kind space
+      # itself, not in a runtime id check here.
       when :execute
         execute_action
       when :review_council
@@ -296,6 +306,13 @@ module Hive
       when :finalize
         finalize_action
       when :agent, :inert
+        # `|| generic_action(stage)` is the LIVE path for NON-coding
+        # `:agent`/`:inert` workflows: `coding_table_action` returns nil for any
+        # non-coding id. It is dead-for-coding — `coding_test.rb` pins every
+        # coding `:agent`/`:inert` stage to a matching-`:kind` ACTION_DISPATCH
+        # row, so the table always resolves for the only id that reaches it.
+        # Coding `done`/`artifacts` behavior must therefore be edited in
+        # `Coding::ACTION_DISPATCH`/the coding helpers, NOT in `generic_action`.
         coding_table_action(stage) || generic_action(stage)
       else
         generic_action(stage)

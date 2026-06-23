@@ -1,6 +1,7 @@
 require "open3"
 require "fileutils"
 require "json"
+require "pathname"
 require "shellwords"
 require "stringio"
 require "hive/config"
@@ -11,6 +12,7 @@ require "hive/task_meta"
 require "hive/worktree"
 require "hive/workflow_selection"
 require "hive/llm_wiki_bootstrap"
+require "hive/commands/workflow"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
 require "hive/commands/daemon/service_installer"
@@ -52,11 +54,12 @@ module Hive
       WorkflowChoice = Data.define(:descriptor, :source)
 
       def initialize(project_path, force: false, json: false, prompts: nil,
-                     workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
+                     workflow: nil, new_workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
         @workflow_name = workflow
+        @new_workflow = new_workflow
         @workflow_input = workflow_input
         @workflow_output = workflow_output
         # Optional Prompts instance for testability. Tests inject a
@@ -70,9 +73,20 @@ module Hive
 
       def call
         validate_git_repo!
+        # Argument-level mutual exclusivity is checked before validate_clean_tree!
+        # so a dirty repo passing both flags gets the clearer usage error instead
+        # of the clean-tree complaint (both still exit non-zero).
+        if @workflow_name && @new_workflow
+          raise Hive::Commands::Workflow::UsageError, "--workflow and --new-workflow are mutually exclusive"
+        end
         validate_clean_tree! unless @force
 
         ops = Hive::GitOps.new(@project_path)
+        if @new_workflow
+          init_with_new_workflow(ops)
+          return
+        end
+
         workflow_choice = resolve_workflow_choice(ops)
         if ops.hive_state_branch_exists?
           if workflow_choice.source == :implicit
@@ -113,6 +127,111 @@ module Hive
         raise Hive::InternalError, "init failed: #{e.class}: #{e.message}"
       end
 
+      def init_with_new_workflow(ops)
+        id = Hive::Commands::Workflow.normalize_and_validate_id!(@new_workflow)
+        if ops.hive_state_branch_exists?
+          scaffold_and_bind_existing(ops, id)
+        else
+          scaffold_and_bind_fresh(ops, id)
+        end
+      end
+
+      def scaffold_and_bind_fresh(ops, id)
+        answers = collect_prompt_answers
+        project_config_content = render_project_config(ops, answers: answers, default_workflow: id)
+        scaffold = nil
+        entry = initialize_project_state(ops, content: project_config_content) do
+          scaffold = scaffold_descriptor_commit!(ops, id)
+        end
+
+        paths = scaffold.fetch(:paths)
+        if @json
+          emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: id,
+                            extra: scaffold_payload(paths))
+        else
+          print_summary(entry: entry, ops: ops, answers: answers, workflow: id, scaffold_paths: paths)
+        end
+        register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
+        run_init_preflight!
+      end
+
+      def scaffold_descriptor_commit!(ops, id)
+        scaffold = nil
+        begin
+          scaffold = Hive::Commands::Workflow.scaffold_files!(id, project_root: @project_path)
+          paths = scaffold.fetch(:paths)
+          Hive::Lock.with_commit_lock(ops.hive_state_path) do
+            # Commit config.yml alongside the descriptor so the fresh
+            # `default_workflow: <id>` binding is durable against a hive-state
+            # `git reset --hard`/`clean` — symmetric with the existing-project
+            # path. A commit failure here tears the whole worktree down via
+            # rollback_partial_init, so no staged index can leak.
+            Hive::Commands::Workflow.commit_workflow_scaffold(
+              ops, slug: id, pathspecs: scaffold_commit_pathspecs(paths, ops)
+            )
+          end
+          scaffold
+        rescue StandardError
+          # Re-derive paths from `scaffold` rather than the local `paths` (bound
+          # just above): if scaffold_files! raised before its assignment, the
+          # local is unset — the `if scaffold` guard makes this the only safe read.
+          Hive::Commands::Workflow.rollback_scaffold(scaffold.fetch(:paths)) if scaffold
+          raise
+        end
+      end
+
+      def scaffold_and_bind_existing(ops, id)
+        ops.ensure_hive_state_worktree_attached
+        scaffold = Hive::Commands::Workflow.scaffold_files!(id, project_root: @project_path)
+        paths = scaffold.fetch(:paths)
+        cfg_path = File.join(ops.hive_state_path, "config.yml")
+        pathspecs = scaffold_commit_pathspecs(paths, ops)
+        begin
+          Hive::Lock.with_commit_lock(ops.hive_state_path) do
+            current, corrupt = current_default_workflow_with_status(ops)
+            warn_on_fieldless_tasks_rebinding(ops, from: current, to: id) unless current == id && !corrupt
+            before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
+            write_default_workflow!(cfg_path, id)
+            begin
+              Hive::Commands::Workflow.commit_workflow_scaffold(ops, slug: id, pathspecs: pathspecs)
+            rescue StandardError
+              # hive_commit stages config.yml + descriptor + instruction dir via
+              # a per-pathspec `git add -A -- <path>` before it runs; a failure
+              # AFTER staging leaves those entries in the long-lived .hive-state
+              # index, where the next bare `git commit` would sweep the
+              # half-rolled-back default_workflow rebind (and a phantom
+              # descriptor) into an unrelated commit. Reset the index for those
+              # pathspecs and restore config.yml INSIDE the commit lock —
+              # mirroring update_existing_default_workflow! — so a concurrent
+              # committer (e.g. the daemon committing a task) cannot acquire the
+              # lock between the failed commit and the reset and ride the
+              # still-staged rebind into a foreign commit.
+              reset_hive_state_index(ops, pathspecs)
+              restore_config_snapshot(cfg_path, before)
+              raise
+            end
+          end
+        rescue StandardError
+          # Filesystem-only scaffold teardown stays outside the lock: it removes
+          # working-tree files, not index entries, so it cannot be swept into a
+          # concurrent commit.
+          Hive::Commands::Workflow.rollback_scaffold(paths)
+          raise
+        end
+
+        Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+        # Carry the real, now-on-disk descriptor (like handle_existing_project)
+        # instead of a one-field stand-in, so WorkflowChoice's "descriptor is a
+        # fully resolved Hive::Workflow" invariant holds on this path too.
+        descriptor = Hive::WorkflowSelection.fetch!(id.to_s, project_root: @project_path)
+        workflow_choice = WorkflowChoice.new(descriptor: descriptor, source: :flag)
+        if @json
+          emit_existing_json_summary(ops, workflow_choice: workflow_choice, extra: scaffold_payload(paths))
+        else
+          write_existing_summary(ops, workflow_choice: workflow_choice, scaffold_paths: paths)
+        end
+      end
+
       def handle_existing_project(ops, workflow_choice:)
         ops.ensure_hive_state_worktree_attached
         # `:implicit` re-init already raised AlreadyInitialized in `call` before
@@ -127,9 +246,16 @@ module Hive
         end
       end
 
-      def write_existing_summary(_ops, workflow_choice:)
-        $stdout.puts "hive: already initialized #{File.basename(@project_path)}"
+      def write_existing_summary(_ops, workflow_choice:, scaffold_paths: nil)
+        name = File.basename(@project_path)
+        $stdout.puts "hive: already initialized #{name}"
         $stdout.puts "workflow: #{workflow_choice.descriptor.id}"
+        if scaffold_paths
+          safe_name = Shellwords.escape(name)
+          $stdout.puts "descriptor: #{scaffold_paths.fetch(:descriptor)}"
+          $stdout.puts "edit: #{scaffold_paths.fetch(:instruction)}"
+          $stdout.puts "next: edit the descriptor above, then hive new #{safe_name} '<idea>'"
+        end
       rescue Errno::EPIPE
         nil
       end
@@ -138,8 +264,14 @@ module Hive
       # project would otherwise get exit 0 with EMPTY stdout — no confirmation
       # of the re-bind. Emit a minimal `already_initialized` hive-init payload
       # (a distinct oneOf arm from the fresh SuccessPayload in the schema).
-      def emit_existing_json_summary(ops, workflow_choice:)
-        puts JSON.generate(
+      def emit_existing_json_summary(ops, workflow_choice:, extra: {})
+        puts JSON.generate(existing_payload(ops, workflow_choice: workflow_choice).merge(extra))
+      rescue Errno::EPIPE
+        nil
+      end
+
+      def existing_payload(ops, workflow_choice:)
+        {
           "schema" => "hive-init",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init"),
           "ok" => true,
@@ -148,9 +280,7 @@ module Hive
           "path" => @project_path,
           "hive_state_path" => ops.hive_state_path,
           "workflow" => workflow_choice.descriptor.id.to_s
-        )
-      rescue Errno::EPIPE
-        nil
+        }
       end
 
       def update_existing_default_workflow!(ops, workflow_id)
@@ -239,12 +369,27 @@ module Hive
         if Hive::Workflows.coding_id?(workflow_id)
           lines.delete_at(existing) if existing
         elsif existing
-          lines[existing] = "default_workflow: #{workflow_id}\n"
+          lines[existing] = default_workflow_line(workflow_id)
         else
-          lines.insert(default_workflow_insert_index(lines), "default_workflow: #{workflow_id}\n")
+          lines.insert(default_workflow_insert_index(lines), default_workflow_line(workflow_id))
         end
 
         atomic_write(cfg_path, lines.join)
+      end
+
+      # Quote the emitted scalar: YAML.safe_load coerces bare keyword-like ids
+      # (yes/on/no/off/null/true/false — all valid SAFE_SLUG workflow ids) to
+      # booleans/nil, so a flag-less `hive new` would then fail to resolve them.
+      # The id is a validated SAFE_SLUG (alnum + hyphen), so double-quoting never
+      # needs escaping.
+      #
+      # This is the REBIND path. The fresh-render path encodes the SAME quoting
+      # invariant in templates/project_config.yml.erb (its `default_workflow:`
+      # line). Keep the two in sync — a change to one (different quote style,
+      # YAML-escaping, …) must be mirrored in the other so the paths cannot
+      # silently desync.
+      def default_workflow_line(workflow_id)
+        %(default_workflow: "#{workflow_id}"\n)
       end
 
       # Place the new `default_workflow:` line right after `hive_state_path:`
@@ -300,7 +445,7 @@ module Hive
         end
       end
 
-      def initialize_project_state(ops, content:)
+      def initialize_project_state(ops, content:, &after_bootstrap)
         rollback_on_failure = false
         side_effect_snapshot = capture_init_side_effect_snapshot
         begin
@@ -313,7 +458,9 @@ module Hive
           ops.commit_llm_wiki_bootstrap!
           Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
 
-          Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+          entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+          after_bootstrap&.call
+          entry
         rescue StandardError
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
           raise
@@ -597,8 +744,8 @@ module Hive
         Hive::InvokedBinary.path
       end
 
-      def emit_json_summary(entry:, ops:, answers:, workflow:)
-        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers, workflow: workflow))
+      def emit_json_summary(entry:, ops:, answers:, workflow:, extra: {})
+        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers, workflow: workflow).merge(extra))
       rescue Errno::EPIPE
         nil
       end
@@ -634,7 +781,14 @@ module Hive
         }
       end
 
-      def print_summary(entry:, ops:, answers:)
+      def scaffold_payload(paths)
+        {
+          "descriptor_path" => paths.fetch(:descriptor),
+          "instruction_path" => paths.fetch(:instruction)
+        }
+      end
+
+      def print_summary(entry:, ops:, answers:, workflow: nil, scaffold_paths: nil)
         c = Palette.for($stdout)
         name = entry["name"]
         rows = [
@@ -645,6 +799,13 @@ module Hive
           [ "daemon",         answers.fetch("daemon_enabled", true) ? "enabled" : "disabled" ],
           [ "babysitter",     answers.fetch("babysitter_enabled", true) ? "enabled" : "disabled" ]
         ]
+        if scaffold_paths
+          rows += [
+            [ "workflow",   workflow ],
+            [ "descriptor", scaffold_paths.fetch(:descriptor) ],
+            [ "edit",       scaffold_paths.fetch(:instruction) ]
+          ]
+        end
         label_width = rows.map { |k, _| k.length }.max
 
         $stdout.puts "#{c.green('✔')} #{c.bold('hive: initialized')} #{c.bold_cyan(name)}"
@@ -652,7 +813,14 @@ module Hive
           $stdout.puts "  #{c.dim(label.ljust(label_width))}  #{value}"
         end
         $stdout.puts
-        $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} hive new #{name} '<short task description>'"
+        safe_name = Shellwords.escape(name)
+        next_step =
+          if scaffold_paths
+            "edit the descriptor above, then hive new #{safe_name} '<idea>'"
+          else
+            "hive new #{safe_name} '<short task description>'"
+          end
+        $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} #{next_step}"
       end
 
       def collect_prompt_answers
@@ -776,6 +944,42 @@ module Hive
 
         match = ids.find { |id| id.casecmp(value).zero? }
         match && Hive::WorkflowSelection.fetch!(match, project_root: @project_path)
+      end
+
+      def relative_to_hive_state(path, ops)
+        Pathname.new(path).relative_path_from(Pathname.new(ops.hive_state_path)).to_s
+      end
+
+      # The descriptor + instruction dir + config.yml pathspecs every
+      # --new-workflow scaffold commit pins. Both the fresh and existing-project
+      # paths bind default_workflow in config.yml, committed atomically with the
+      # descriptor so the binding is durable against a hive-state reset/clean.
+      def scaffold_commit_pathspecs(paths, ops)
+        [
+          relative_to_hive_state(paths.fetch(:descriptor), ops),
+          relative_to_hive_state(paths.fetch(:instruction_dir), ops),
+          "config.yml"
+        ]
+      end
+
+      # Unstage the scaffold pathspecs from the long-lived .hive-state index
+      # after a failed --new-workflow commit, so a half-rolled-back rebind can't
+      # ride the next unrelated `git commit`. Best-effort: a reset failure is
+      # surfaced but never masks the original commit error the caller re-raises.
+      def reset_hive_state_index(ops, pathspecs)
+        _out, err, status = Open3.capture3(
+          "git", "-C", ops.hive_state_path, "reset", "-q", "--", *pathspecs
+        )
+        return if status.success?
+
+        # Surface git's FULL stderr (newlines flattened to one warn line): the
+        # actionable detail — e.g. index.lock contention — often lands on a line
+        # AFTER the first, so truncating to `lines.first` could drop exactly the
+        # part the operator needs to act on.
+        detail = err.to_s.strip.gsub(/\s*\n+\s*/, "; ")
+        write_warn("hive: could not unstage #{pathspecs.join(', ')} after a failed " \
+                   "--new-workflow commit (#{detail}); inspect " \
+                   "`git -C #{ops.hive_state_path} status` before the next hive commit")
       end
 
       # Minimal ANSI palette for one-shot CLI summaries. Honors

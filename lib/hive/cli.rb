@@ -82,6 +82,23 @@ module Hive
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
+      When used with --new-workflow, the payload also includes
+      descriptor_path and instruction_path.
+
+      To bootstrap a new custom workflow in one pass, use:
+
+        hive init --new-workflow writing ~/Dev/writing
+
+      This scaffolds `.hive-state/workflows/writing.yml` plus
+      `.hive-state/workflows/writing/work.md`, binds
+      `default_workflow: "writing"`, and prints the paths to edit before
+      running `hive new` without --workflow. The descriptor and the
+      `config.yml` binding are committed together on `hive/state` on both the
+      fresh and already-initialized paths, so the bound default survives a
+      hive-state reset. `--new-workflow` is mutually exclusive with
+      `--workflow`, reuses `hive workflow new`'s reserved-id checks, and on an
+      already-initialized project scaffolds the workflow and rebinds the
+      default in one hive-state commit.
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
@@ -101,13 +118,16 @@ module Hive
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     option :workflow, type: :string,
                       desc: "set this project's default workflow (#{WORKFLOW_VOCABULARY})"
+    option :new_workflow, type: :string,
+                          desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
       Hive::Commands::Init.new(
         project_path,
         force: options[:force],
         json: options[:json],
-        workflow: options[:workflow]
+        workflow: options[:workflow],
+        new_workflow: options[:new_workflow]
       ).call
     end
 

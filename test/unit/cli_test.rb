@@ -57,7 +57,16 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-      assert_equal({ force: true, json: true, workflow: "content_fixture" }, calls.first.fetch(:kwargs))
+      assert_equal({ force: true, json: true, workflow: "content_fixture", new_workflow: nil },
+                   calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Init) do |calls|
+      Hive::CLI.start([ "init", "/tmp/project", "--new-workflow", "writing" ])
+      assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
+      assert_equal({ force: false, json: false, workflow: nil, new_workflow: "writing" },
+                   calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
 

@@ -473,6 +473,124 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_new_workflow_quotes_keyword_like_id_so_flagless_new_resolves
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        # `no` is a SAFE_SLUG workflow id that YAML.safe_load coerces to `false`
+        # when written unquoted — the exact regression the quoting in BOTH
+        # config.yml (default_workflow) and the descriptor (id) prevents. Without
+        # quoting, this init would either bind `false` or fail descriptor parse.
+        capture_io { Hive::Commands::Init.new(dir, new_workflow: "no").call }
+        hive_state = File.join(dir, ".hive-state")
+        cfg_path = File.join(hive_state, "config.yml")
+
+        # The config.yml line is quoted, so YAML round-trips it as the String.
+        assert_includes File.read(cfg_path), %(default_workflow: "no")
+        config = YAML.safe_load(File.read(cfg_path))
+        assert_equal "no", config.fetch("default_workflow"),
+                     "a keyword-like id must survive YAML.safe_load as a String, not coerce to false"
+
+        # The descriptor parses and its id resolves back to the String id.
+        descriptor = Hive::Workflows::DescriptorParser.parse_file(File.join(hive_state, "workflows", "no.yml"))
+        assert_equal :no, descriptor.id
+
+        # And a flag-less `hive new` resolves the bound default to the scaffolded
+        # workflow rather than failing to find `false`.
+        Hive::Workflows::Project.reset!
+        capture_io { Hive::Commands::New.new(project, "coercion default task").call }
+        inbox = Dir[File.join(hive_state, "stages", "1-inbox", "coercion-default-task-*")].first
+        assert inbox, "flag-less hive new must route through the quoted keyword-like default workflow"
+        assert_equal "no", Hive::TaskMeta.read(inbox)[:workflow]
+        assert_equal :no, Hive::Task.new(inbox).workflow.id
+      end
+    end
+  end
+
+  def test_init_new_workflow_fresh_binding_survives_hive_state_reset_and_clean
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir, new_workflow: "writing").call }
+        hive_state = File.join(dir, ".hive-state")
+        cfg_path = File.join(hive_state, "config.yml")
+
+        # Behaviorally simulate a destructive hive-state reset: clobber the
+        # binding in the working tree, drop the descriptor, then restore the
+        # committed tree with `reset --hard` + `clean`. Because the fresh path
+        # commits config.yml alongside the descriptor, both must come back.
+        File.write(cfg_path, "---\nhive_state_path: .hive-state\n")
+        FileUtils.rm_rf(File.join(hive_state, "workflows"))
+        run!("git", "-C", hive_state, "reset", "--hard", "HEAD")
+        run!("git", "-C", hive_state, "clean", "-fd")
+
+        config = YAML.safe_load(File.read(cfg_path))
+        assert_equal "writing", config.fetch("default_workflow"),
+                     "the committed fresh-path binding must survive a hive-state reset --hard/clean"
+        assert File.file?(File.join(hive_state, "workflows", "writing.yml")),
+               "the committed descriptor must also be restored by the reset"
+
+        Hive::Workflows::Project.reset!
+        assert_equal :writing,
+                     Hive::WorkflowSelection.fetch!(config.fetch("default_workflow"), project_root: dir).id,
+                     "the restored binding must still resolve under flag-less hive new"
+      end
+    end
+  end
+
+  def test_init_new_workflow_fresh_inline_rollback_scaffold_runs_on_commit_failure
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        rolled_back = []
+        original_rollback = Hive::Commands::Workflow.method(:rollback_scaffold)
+        # Fail the scaffold commit AFTER scaffold_files! has written the files,
+        # so the unwind goes through scaffold_descriptor_commit!'s OWN inline
+        # rescue (rollback_scaffold) — not rollback_partial_init's whole-worktree
+        # teardown. A regression in that specific rescue would otherwise be
+        # masked by the partial-init rollback.
+        with_replaced_singleton_method(Hive::Commands::Workflow, :commit_workflow_scaffold,
+                                       lambda { |_ops, slug:, pathspecs:| raise Hive::GitError, "commit boom" }) do
+          with_replaced_singleton_method(Hive::Commands::Workflow, :rollback_scaffold, lambda { |paths|
+            rolled_back << paths
+            original_rollback.call(paths)
+          }) do
+            capture_io do
+              error = assert_raises(Hive::GitError) do
+                Hive::Commands::Init.new(dir, new_workflow: "writing").call
+              end
+              assert_includes error.message, "commit boom"
+            end
+          end
+        end
+
+        assert(rolled_back.any? { |paths| paths[:descriptor].end_with?("workflows/writing.yml") },
+               "scaffold_descriptor_commit!'s inline rollback_scaffold must run on commit failure: #{rolled_back.inspect}")
+        assert_clean_failed_init(dir)
+        refute File.exist?(File.join(dir, ".hive-state", "workflows", "writing.yml"))
+      end
+    end
+  end
+
+  def test_reset_hive_state_index_warns_with_full_git_stderr_on_failure
+    with_tmp_dir do |dir|
+      # A non-git directory makes `git -C <dir> reset` exit non-zero, exercising
+      # the best-effort reset-failure warn branch (and the full-stderr surfacing).
+      ops = Object.new
+      ops.define_singleton_method(:hive_state_path) { dir }
+      init = Hive::Commands::Init.new(dir)
+      warnings = []
+      init.define_singleton_method(:write_warn) { |line| warnings << line }
+
+      init.send(:reset_hive_state_index, ops, [ "config.yml", "workflows/writing.yml" ])
+
+      assert(warnings.any? { |w| w.include?("could not unstage config.yml, workflows/writing.yml") },
+             "a failed index reset must warn so a staged rebind is not silently left: #{warnings.inspect}")
+      assert(warnings.any? { |w| w.include?("not a git repository") },
+             "the warning must surface git's stderr detail, not swallow it: #{warnings.inspect}")
+      assert(warnings.none? { |w| w.include?("\n") },
+             "the warning must be flattened to a single line: #{warnings.inspect}")
+    end
+  end
+
   def test_rerun_init_with_workflow_warns_about_fieldless_in_flight_tasks
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

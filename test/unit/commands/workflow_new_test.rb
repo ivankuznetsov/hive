@@ -327,6 +327,63 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_rollback_scaffold_warns_with_errno_when_a_leftover_cannot_be_removed
+    with_initialized_project do |project_root|
+      scaffold = Hive::Commands::Workflow.scaffold_files!("stuck-flow", project_root: project_root)
+      paths = scaffold.fetch(:paths)
+
+      # Force the removal to fault (EACCES) so the files genuinely survive
+      # cleanup; the warning must then name each leftover AND its captured errno,
+      # not a bare path list.
+      with_replaced_singleton_method(FileUtils, :remove_entry, lambda { |path, *_args|
+        raise Errno::EACCES, path.to_s
+      }) do
+        _out, err = capture_io { Hive::Commands::Workflow.rollback_scaffold(paths) }
+
+        assert_includes err, "scaffold cleanup could not remove"
+        assert_includes err, paths.fetch(:descriptor)
+        assert_includes err, paths.fetch(:instruction_dir)
+        assert_includes err, "Errno::EACCES",
+                         "the cleanup warning must surface the underlying errno, not just the path"
+      end
+
+      # The stub blocked removal (remove_entry is restored now); tidy up.
+      FileUtils.rm_f(paths.fetch(:descriptor))
+      FileUtils.rm_rf(paths.fetch(:instruction_dir))
+    end
+  end
+
+  def test_rollback_scaffold_swallows_epipe_from_the_cleanup_warning
+    with_initialized_project do |project_root|
+      scaffold = Hive::Commands::Workflow.scaffold_files!("epipe-flow", project_root: project_root)
+      paths = scaffold.fetch(:paths)
+
+      broken = Object.new
+      broken.define_singleton_method(:write) { |*| raise Errno::EPIPE }
+      broken.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+      broken.define_singleton_method(:flush) { nil }
+
+      with_replaced_singleton_method(FileUtils, :remove_entry, lambda { |path, *_args|
+        raise Errno::EACCES, path.to_s
+      }) do
+        real_stderr = $stderr
+        $stderr = broken
+        begin
+          # A broken-pipe stderr during the leftover warning must not crash the
+          # rollback — warn_failed_scaffold_cleanup's `rescue Errno::EPIPE`
+          # swallows it.
+          result = Hive::Commands::Workflow.rollback_scaffold(paths)
+          assert_nil result, "an EPIPE while warning must be swallowed, leaving rollback a no-op return"
+        ensure
+          $stderr = real_stderr
+        end
+      end
+
+      FileUtils.rm_f(paths.fetch(:descriptor))
+      FileUtils.rm_rf(paths.fetch(:instruction_dir))
+    end
+  end
+
   private
 
     def with_initialized_project

@@ -139,6 +139,59 @@ class AgentLimitTest < Minitest::Test
     end
   end
 
+  def test_held_predicate_matches_error_and_review_error_limit_markers
+    attrs = { "reason" => "limits_reached" }
+
+    assert Hive::AgentLimit.held?(:error, attrs)
+    assert Hive::AgentLimit.held?("review_error", attrs)
+    refute Hive::AgentLimit.held?(:execute_waiting, attrs)
+    refute Hive::AgentLimit.held?(:error, "reason" => "implementer_failed")
+  end
+
+  def test_held_provider_prefers_attr_and_falls_back_to_message
+    assert_equal "codex", Hive::AgentLimit.held_provider("provider" => "codex",
+                                                         "message" => "limits reached for claude: wall")
+    assert_equal "claude", Hive::AgentLimit.held_provider("message" => "limits reached for claude: wall")
+    assert_nil Hive::AgentLimit.held_provider("message" => "limits reached")
+    assert_nil Hive::AgentLimit.held_provider("provider" => "bad provider")
+  end
+
+  def test_held_retry_display_formats_utc_and_ignores_garbled_timestamps
+    attrs = { "retry_after" => "2026-06-24T23:20:00+02:00" }
+
+    assert_equal "2026-06-24 21:20 UTC", Hive::AgentLimit.held_retry_display(attrs)
+    assert_nil Hive::AgentLimit.held_retry_display("retry_after" => "not-a-timestamp")
+  end
+
+  def test_held_label_renders_literal_quota_hold_text
+    attrs = {
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00Z"
+    }
+
+    assert_equal "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
+                 "top up or switch execute agent",
+                 Hive::AgentLimit.held_label(attrs)
+  end
+
+  def test_held_label_omits_unknown_provider_and_missing_retry
+    assert_equal "held: agent quota; top up or switch execute agent",
+                 Hive::AgentLimit.held_label({})
+  end
+
+  def test_held_field_serializes_quota_shape
+    attrs = {
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00+02:00"
+    }
+
+    assert_equal({
+      "reason" => "quota",
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T21:20:00Z"
+    }, Hive::AgentLimit.held_field(attrs))
+  end
+
   private
 
   def with_env(values)

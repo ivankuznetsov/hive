@@ -337,6 +337,31 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     refute_includes out, "Needs recovery"
   end
 
+  def test_recover_review_status_shows_quota_hold_label
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "quota-review",
+          stage: "6-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: {
+            "reason" => "limits_reached",
+            "provider" => "codex",
+            "retry_after" => "2026-06-24T23:20:00Z"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
+                 "top up or switch execute agent",
+                 Hive::Tui::Views::TasksPane.status_label(row)
+  end
+
   def test_recover_review_status_falls_back_to_marker_when_reason_missing
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
@@ -544,6 +569,31 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "ERROR panic",
                     "error rows must fall back to the reason attr when no exit_code is set"
+  end
+
+  def test_error_status_shows_quota_hold_label
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "quota-error",
+          stage: "4-execute",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: {
+            "reason" => "limits_reached",
+            "provider" => "codex",
+            "retry_after" => "2026-06-24T23:20:00Z"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
+                 "top up or switch execute agent",
+                 Hive::Tui::Views::TasksPane.status_label(row)
   end
 
   def test_error_status_falls_back_to_action_label_when_attrs_blank

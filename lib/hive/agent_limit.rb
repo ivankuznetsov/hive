@@ -105,6 +105,43 @@ module Hive
       (now.utc + retry_cooldown_sec).iso8601
     end
 
+    def held?(marker_name, attrs)
+      %w[error review_error].include?(marker_name.to_s) &&
+        attr_value(attrs, "reason") == "limits_reached"
+    end
+
+    def held_provider(attrs)
+      provider = safe_provider(attr_value(attrs, "provider"))
+      return provider if provider
+
+      message = attr_value(attrs, "message")
+      match = message.match(/\bfor\s+([a-z0-9_-]+):/i)
+      safe_provider(match[1]) if match
+    end
+
+    def held_retry_display(attrs)
+      retry_after_time(attrs)&.strftime("%Y-%m-%d %H:%M UTC")
+    end
+
+    def held_label(attrs)
+      label = "held: agent quota"
+      provider = held_provider(attrs)
+      label = "#{label} (#{provider})" if provider
+
+      retry_display = held_retry_display(attrs)
+      label = "#{label} — retry after #{retry_display}" if retry_display
+
+      "#{label}; top up or switch execute agent"
+    end
+
+    def held_field(attrs)
+      {
+        "reason" => "quota",
+        "provider" => held_provider(attrs),
+        "retry_after" => retry_after_time(attrs)&.iso8601
+      }
+    end
+
     def first_useful_line(text)
       normalize(text).each_line.map(&:strip).find { |line| !line.empty? }.to_s
     end
@@ -114,6 +151,28 @@ module Hive
           .scrub
           .gsub(/\e\[[0-9;?]*[ -\/]*[@-~]/, "")
           .gsub(/[[:cntrl:]&&[^\n\t]]/, "")
+    end
+
+    def attr_value(attrs, key)
+      return "" unless attrs
+
+      attrs[key].to_s
+    end
+
+    def safe_provider(value)
+      token = value.to_s.strip
+      return nil unless token.match?(/\A[a-z0-9_-]+\z/i)
+
+      token
+    end
+
+    def retry_after_time(attrs)
+      raw = attr_value(attrs, "retry_after")
+      return nil if raw.empty?
+
+      Time.parse(raw).utc
+    rescue ArgumentError
+      nil
     end
   end
 end

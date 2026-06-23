@@ -373,6 +373,47 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_text_status_renders_quota_held_error_label
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      retry_after = "2026-06-24T23:20:00Z"
+      write_status_task(hive_state, "4-execute", "quota-task-260624-abcd",
+                        state_file: "task.md",
+                        marker: "ERROR reason=limits_reached provider=codex retry_after=#{retry_after}")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+
+      assert_includes out, "held: agent quota (codex) — retry after 2026-06-24 23:20 UTC; " \
+                           "top up or switch execute agent"
+      refute_includes out, "reason=limits_reached",
+                      "held quota rows must render the shared label instead of a raw attr dump"
+    end
+  end
+
+  def test_json_payload_emits_quota_held_field_without_overloading_dependency_block
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      retry_after = "2026-06-24T23:20:00Z"
+      write_status_task(hive_state, "4-execute", "quota-task-260624-abcd",
+                        state_file: "task.md",
+                        marker: "ERROR reason=limits_reached provider=codex retry_after=#{retry_after}")
+
+      task = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first.fetch("tasks").find { |row| row.fetch("slug") == "quota-task-260624-abcd" }
+
+      assert_equal({
+        "reason" => "quota",
+        "provider" => "codex",
+        "retry_after" => retry_after
+      }, task.fetch("held"))
+      assert_equal false, task.fetch("blocked")
+      assert_nil task.fetch("blocked_by")
+    end
+  end
+
   # The resolved branch of the text-mode indicator was only exercised via
   # the TUI's separate renderer, so swapping the two branches in
   # Commands::Status would have passed every test. Pin a below-gate

@@ -29,14 +29,19 @@ module Hive
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile)
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "plan", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "plan"),
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
         if profile.name == :claude
@@ -44,8 +49,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task),
-            allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task) # coding-scoped: coding plan stage tmux session
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

@@ -35,6 +35,16 @@
         <%= select_tag "settings[development_agent]", options_for_select(InitSetup.agents, @defaults["development_agent"]) %>
       </div>
       <div class="form-row">
+        <%= label_tag "settings_workflow", "Workflow" %>
+        <%# Union the persisted default into the options so a non-coding
+            `default_workflow` that's no longer in the list (its descriptor was
+            deleted/renamed, so valid_names dropped it) stays SELECTED rather
+            than letting the browser auto-pick the first option (coding) and a
+            bare Apply silently downgrade the project. A genuinely unbindable id
+            then surfaces a 422 from reinit!, not a silent rebind. %>
+        <%= select_tag "settings[workflow]", options_for_select(@workflows | [ @current_workflow ], @current_workflow) %>
+      </div>
+      <div class="form-row">
         <%= label_tag "settings_claude_mode", "Claude launch mode" %>
         <%= select_tag "settings[claude_mode]", options_for_select(InitSetup.claude_modes, @defaults["claude_mode"]) %>
       </div>

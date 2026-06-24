@@ -168,6 +168,45 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_claude_headless_tool_scope_flags_ride_the_argv
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir),
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        allowed_tools: %w[Read LS],
+        disallowed_tools: %w[Write Bash]
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--allowedTools Read,LS], cmd.each_cons(2).find { |a, _| a == "--allowedTools" }
+      assert_equal %w[--disallowedTools Write,Bash], cmd.each_cons(2).find { |a, _| a == "--disallowedTools" }
+      assert_operator cmd.index("--allowedTools"), :<, cmd.index("--max-budget-usd")
+    end
+  end
+
+  def test_non_claude_profiles_omit_tool_scope_flags
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      agent = Hive::Agent.new(
+        task: make_task(dir),
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        allowed_tools: %w[Read LS],
+        disallowed_tools: %w[Write Bash]
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      refute_includes cmd, "--allowedTools"
+      refute_includes cmd, "--disallowedTools"
+    end
+  end
+
   def test_args_include_dangerous_flag_and_add_dir
     with_tmp_dir do |dir|
       task = make_task(dir)

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hive:schema:run:v2",
   "title": "hive run output (v2)",
-  "description": "Stable contract emitted by `hive run --json`. Either a SuccessPayload (the run's marker + next_action) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
+  "description": "Stable contract emitted by `hive run --json`. Either a SuccessPayload (the run's marker + next_action) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`. CONSUMER AUDIT (U6): `stage` (bare name) and `stage_index` were relaxed from the closed coding enum/range to a pattern/open-minimum so runtime-registered (generic) workflow stages validate — `hive run` on a generic task emits descriptor stages such as `gather`. The producer only emits stages that pass `validate_workflow_stage!`; the real valid set is the runtime union `Hive::Workflows.all_stage_names`, so downstream readers must close-default on an unknown stage. Backward-compatible widening, no version bump.",
   "oneOf": [
     {
       "$ref": "#/$defs/SuccessPayload"
@@ -45,22 +45,12 @@
         },
         "stage": {
           "type": "string",
-          "enum": [
-            "inbox",
-            "brainstorm",
-            "plan",
-            "execute",
-            "open-pr",
-            "review",
-            "artifacts",
-            "finalize",
-            "done"
-          ]
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Bare stage name. Pattern relaxed from the closed coding enum so generic workflow stage names validate; the real valid set is the runtime union Hive::Workflows.all_stage_names."
         },
         "stage_index": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 9
+          "minimum": 1
         },
         "folder": {
           "type": "string"

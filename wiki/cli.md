@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-15
+updated: 2026-06-23
 tags: [cli, api]
 ---
 
@@ -25,13 +25,21 @@ reason. Accepted boolean forms match Thor's exact grammar: bare `--json`, exact
 truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
 (`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
 assignments such as `--json=1` or `--json=yes` exit with usage before their
-values can be treated as a command argument or task target. The scan stops at
-the `hive new` text boundary: after `hive new PROJECT`, dash-prefixed tokens
-such as `--help` and unsupported-looking `--json=...` assignments are literal
-task text, and the wrapper inserts `--` before that tail so Thor does not parse
-it as options. When the wrapper itself catches a usage error, JSON-vs-prose mode
-is decided from the last recognized JSON boolean flag in argv, so a trailing
-false form such as `--no-json` or `--json=false` overrides an earlier `--json`.
+values can be treated as a command argument or task target. `hive new` has a
+special lift-and-rebuild path: standalone allow-listed options are lifted from
+before the project, between project and text, or after text, then the remaining
+`PROJECT TEXT...` tail is protected with `--` so Thor does not parse literal
+task text as options. The allow-list is `--workflow`/`--depends-on` (whose value
+is the next token, but only when that token exists and is not option-like — a
+trailing or value-less `--workflow`/`--depends-on` stays literal text rather than
+swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE` `name=`-prefix
+forms, and JSON booleans lifted only in their exact accepted forms (`--json`,
+`--json=true`, `--no-json`, etc.). Non-allow-listed tokens such
+as `--help`, unsupported-looking `--json=...` assignments after `PROJECT`,
+unrecognized `--foo`, and quoted strings containing `--workflow` remain task
+text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
+decided from the last recognized JSON boolean flag in argv, so a trailing false
+form such as `--no-json` or `--json=false` overrides an earlier `--json`.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested
@@ -54,6 +62,7 @@ schema with `error_kind: "error"`.
 |---------|----------|-----------|------|
 | `hive init [PROJECT_PATH] [--json]` | Bootstrap `.hive-state` orphan branch + worktree plus managed llm-wiki context in a git project; `--json` emits `hive-init.v1` on success | `Hive::Commands::Init` | [[commands/init]] |
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project, writing `idea.md` plus `meta.yml`; stdout prints a next-step hint that uses the numeric task id when allocation succeeds | `Hive::Commands::New` | [[commands/new]] |
+| `hive workflow new ID [--json]` | Scaffold a blank per-project workflow descriptor plus placeholder instruction under `<hive_state_path>/workflows/` | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
 | `hive status [--diagnose SLUG [--write [--force]] [--project NAME] [--stage STAGE]]` | Action-grouped task list across registered projects. With `--diagnose <slug>`, prints the bounded diagnostic for one task (schema `hive-status-diagnose`). Add `--write` to spawn the configured execute `AgentProfile` and atomically write `<task>/diagnostics/red-status.md` (no lock, no marker mutation; `--force` bypasses the `marker_signature` idempotency short-circuit; green rows are rejected). | `Hive::Commands::Status` (delegates write path to `Hive::DiagnosisAgent`) | [[commands/status]] |
 | `hive tui` | Live, keystroke-driven Charm bubbletea + lipgloss dashboard over `hive status` (human-only; rejects `--json`) | `Hive::Tui` | [[commands/tui]] |
@@ -95,7 +104,8 @@ schema with `error_kind: "error"`.
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check) and `--json` (single `hive-init.v1` success document with resolved answers and project metadata; precondition failures keep the legacy stderr + exit-code contract).
-- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `bench submit`, `digest`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v2` (v1 remains loadable by explicit schema version for pinned consumers); `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`; `bench submit` emits an unversioned `hive-bench-submit` success document and keeps failures on stderr + exit code; `digest` emits an unversioned `hive-digest` success document and also keeps failures on stderr + exit code.
+- `init` and `new` share one `--workflow` help string sourced from the built-in workflow registry, then append a static note that project-authored workflows are valid and can be created with `hive workflow new ID`. Thor captures (bakes) this string at class-load time and replays it later via `help`, so help does not dynamically enumerate active-project descriptors.
+- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `workflow new`, `bench submit`, `digest`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v2` (v1 remains loadable by explicit schema version for pinned consumers); `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`; `workflow new`, `bench submit`, and `digest` emit unversioned success documents, and `workflow new` also emits unversioned JSON errors for its typed usage/config/git failures.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
 - `bin/hive` normalizes leading Thor-style JSON boolean forms such as `--json=true status` or `--no-json status` to command-local options and rejects unsupported `--json=<value>` assignments before Thor can leave the value behind as a positional. For `hive new`, that rejection and the command-local help rewrite stop once `PROJECT` has been found; the remaining argv is task text and is protected with a `--` sentinel before Thor dispatch.
@@ -150,5 +160,5 @@ A few stage runners still call `warn`/`exit N` directly for non-bug user errors 
 
 - [[architecture]]
 - [[modules/gh]] · [[modules/digest]]
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/daemon]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/babysit]] · [[commands/bot]] · [[commands/bench-submit]] · [[commands/digest]]
+- [[commands/init]] · [[commands/new]] · [[commands/workflow]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/daemon]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/babysit]] · [[commands/bot]] · [[commands/bench-submit]] · [[commands/digest]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]

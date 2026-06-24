@@ -28,6 +28,7 @@ module Hive
         already-green
         label_ignored
         draft_pr
+        pipeline_owned
         fork_pr
         dry_run
       ].freeze

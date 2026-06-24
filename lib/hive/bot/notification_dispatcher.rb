@@ -3,6 +3,7 @@ require "hive/config"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
 require "hive/bot/title_formatter"
+require "hive/workflows"
 
 module Hive
   module Bot
@@ -101,7 +102,8 @@ module Hive
       # `suppress_ready_action?`'s daemon-aware gating.
       def suppress_daemon_plan_pause?(row)
         return false unless row.action == "needs_input"
-        return false unless row.stage.to_s == "3-plan" && row.marker.to_s == "waiting"
+        return false unless Hive::Workflows.coding_row?(row)
+        return false unless row.stage.to_s == "3-plan" && row.marker.to_s == "waiting" # coding-scoped: daemon auto-approval only applies to coding plan pauses
         return false unless daemon_enabled_for?(row.project)
 
         @logger.event(:notification_skipped_daemon_plan_pause,

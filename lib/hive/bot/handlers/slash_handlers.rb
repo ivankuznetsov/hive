@@ -230,15 +230,21 @@ module Hive
         public
 
         def answer(update, _conversation_store)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /answer <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /answer <id|slug>.") if target.empty?
+
+          slug, error = resolve_numeric_target_slug(target)
+          return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(action: :start_answer, slug: slug, mode: :path_b)
         end
 
         def approve(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /approve <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /approve <id|slug>.") if target.empty?
+
+          slug, error = resolve_numeric_target_slug(target)
+          return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "approve", slug, "--json" ],
@@ -346,6 +352,15 @@ module Hive
         def numeric_id(target)
           match = /\A#?(\d+)\z/.match(target.to_s)
           match ? Integer(match[1], 10) : nil
+        end
+
+        def resolve_numeric_target_slug(target)
+          return [ target, nil ] unless numeric_id(target)
+
+          row, error = resolve_status_row(target)
+          return [ nil, error ] if error
+
+          [ row.slug, nil ]
         end
 
         # Resolves an id or slug against the latest status snapshot. Returns

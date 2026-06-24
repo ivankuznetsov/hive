@@ -135,6 +135,120 @@ class HiveBotSlashHandlersTest < Minitest::Test
     diagnostic: nil
   ).freeze
 
+  def test_approve_with_numeric_id_dispatches_resolved_slug
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "9281", "#9281" ].each do |target|
+      result = handlers.approve(Update.new(text: "/approve #{target}", chat_id: 1))
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal [ "hive", "approve", "stuck-260525-abcd", "--json" ], result.command_argv
+      assert_equal "stuck-260525-abcd", result.slug
+    end
+  end
+
+  def test_approve_with_slug_dispatches_verbatim_without_snapshot_lookup
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { raise "unexpected lookup" }
+    )
+
+    result = handlers.approve(Update.new(text: "/approve approve-me-260525-abcd", chat_id: 1))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "approve", "approve-me-260525-abcd", "--json" ], result.command_argv
+    assert_equal "approve-me-260525-abcd", result.slug
+  end
+
+  def test_approve_with_missing_numeric_id_replies_with_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "4242", "#4242" ].each do |target|
+      result = handlers.approve(Update.new(text: "/approve #{target}", chat_id: 1))
+
+      assert_equal :reply, result.action
+      assert_equal "No active task #4242 — was it archived?", result.text
+      assert_nil result.command_argv
+    end
+  end
+
+  def test_approve_with_cold_snapshot_replies_still_loading_for_numeric_id
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { nil }
+    )
+
+    result = handlers.approve(Update.new(text: "/approve 9281", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/still loading/, result.text)
+    assert_nil result.command_argv
+  end
+
+  def test_approve_without_arg_replies_with_usage_hint
+    result = @handlers.approve(Update.new(text: "/approve", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "Use /approve <id|slug>.", result.text
+  end
+
+  def test_answer_with_numeric_id_starts_answer_for_resolved_slug
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "9281", "#9281" ].each do |target|
+      result = handlers.answer(Update.new(text: "/answer #{target}", chat_id: 1), nil)
+
+      assert_equal :start_answer, result.action
+      assert_equal "stuck-260525-abcd", result.slug
+      assert_equal :path_b, result.mode
+    end
+  end
+
+  def test_answer_with_slug_starts_answer_verbatim_without_snapshot_lookup
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { raise "unexpected lookup" }
+    )
+
+    result = handlers.answer(Update.new(text: "/answer answer-me-260525-abcd", chat_id: 1), nil)
+
+    assert_equal :start_answer, result.action
+    assert_equal "answer-me-260525-abcd", result.slug
+    assert_equal :path_b, result.mode
+  end
+
+  def test_answer_with_missing_numeric_id_replies_with_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "4242", "#4242" ].each do |target|
+      result = handlers.answer(Update.new(text: "/answer #{target}", chat_id: 1), nil)
+
+      assert_equal :reply, result.action
+      assert_equal "No active task #4242 — was it archived?", result.text
+      assert_nil result.slug
+    end
+  end
+
+  def test_answer_with_cold_snapshot_replies_still_loading_for_numeric_id
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { nil }
+    )
+
+    result = handlers.answer(Update.new(text: "/answer 9281", chat_id: 1), nil)
+
+    assert_equal :reply, result.action
+    assert_match(/still loading/, result.text)
+    assert_nil result.slug
+  end
+
+  def test_answer_without_arg_replies_with_usage_hint
+    result = @handlers.answer(Update.new(text: "/answer", chat_id: 1), nil)
+
+    assert_equal :reply, result.action
+    assert_equal "Use /answer <id|slug>.", result.text
+  end
+
   def test_autofix_with_default_snapshot_provider_replies_slug_not_found
     # SlashHandlers default-constructs status_snapshot_provider to -> { [] }
     # so it works in isolation when nobody injects one (e.g., scripts that

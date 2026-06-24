@@ -9,7 +9,7 @@ class InteractiveWrapperScriptTest < Minitest::Test
 
   def teardown
     %w[HIVE_FAKE_CLAUDE_LOG_DIR ANTHROPIC_API_KEY CLAUDE_API_KEY
-       HIVE_SCREENOTE_API_TOKEN HIVE_SCREENOTE_BASE_URL].each { |key| ENV.delete(key) }
+       HIVE_SCREENOTE_BASE_URL].each { |key| ENV.delete(key) }
   end
 
   def test_script_syntax
@@ -27,7 +27,6 @@ class InteractiveWrapperScriptTest < Minitest::Test
         "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir,
         "ANTHROPIC_API_KEY" => "parent-anthropic-key",
         "CLAUDE_API_KEY" => "parent-claude-key",
-        "HIVE_SCREENOTE_API_TOKEN" => "parent-screenote-token",
         "HIVE_SCREENOTE_BASE_URL" => "https://screenote.parent"
       }
       _out, err, status = Open3.capture3(
@@ -44,10 +43,8 @@ class InteractiveWrapperScriptTest < Minitest::Test
       assert_includes argv_log, "cwd=#{dir}"
       assert_includes argv_log, "env_ANTHROPIC_API_KEY=__unset__"
       assert_includes argv_log, "env_CLAUDE_API_KEY=__unset__"
-      # The artifacts agent spawns through this wrapper; its screenote
-      # credentials belong to the parent upload, never the agent's Bash.
-      assert_includes argv_log, "env_HIVE_SCREENOTE_API_TOKEN=__unset__"
       assert_includes argv_log, "env_HIVE_SCREENOTE_BASE_URL=__unset__"
+      refute_includes argv_log, "https://screenote.parent"
       refute_includes argv_log, "arg=-p"
       refute_includes argv_log, "arg=--dangerously-skip-permissions"
       assert_equal [ "--add-dir", add_one, "--add-dir", add_two ], argv_args(argv_log)
@@ -130,6 +127,32 @@ class InteractiveWrapperScriptTest < Minitest::Test
         "--allowedTools", "Read,Write,Edit,LS",
         "--disallowedTools", "Bash,Write"
       ], argv_args(argv_log)
+    end
+  end
+
+  def test_mcp_config_flags_are_forwarded_to_claude
+    with_tmp_dir do |dir|
+      log_dir = File.join(dir, "logs")
+      FileUtils.mkdir_p(log_dir)
+      env = { "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir }
+      mcp_config = File.join(dir, "screenote.mcp.json")
+      File.write(mcp_config, "{}")
+
+      _out, err, status = Open3.capture3(
+        env,
+        SCRIPT,
+        "--cwd", dir,
+        "--mcp-config", mcp_config,
+        "--strict-mcp-config",
+        "--allowedTools", "Read,mcp__screenote__list_projects",
+        "--bin", FAKE_BIN
+      )
+
+      assert status.success?, err
+      argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_equal [ "--mcp-config", mcp_config, "--strict-mcp-config",
+                     "--allowedTools", "Read,mcp__screenote__list_projects" ],
+                   argv_args(argv_log)
     end
   end
 

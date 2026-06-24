@@ -1,9 +1,9 @@
 require "fileutils"
-require "json"
 require "hive/claude_launcher"
 require "hive/markers"
-require "hive/media_manifest"
-require "hive/screenote_uploader"
+require "hive/screenote/credential_store"
+require "hive/screenote/mcp_config"
+require "hive/screenote/oauth_client"
 require "hive/stages/base"
 
 module Hive
@@ -11,38 +11,24 @@ module Hive
     module Artifacts
       module_function
 
-      # Aggregate wall-clock budget for the synchronous screenote upload loop.
-      # Each request is bounded (open 10s / read 60s) but the loop runs inside
-      # the spawned `hive run artifacts` child process, so several stills
-      # against a slow endpoint could otherwise serialize to N x 60s of blocking
-      # in that child. Stop starting new uploads once this is exceeded; the
-      # budget-skipped stills keep a blank screenote_url. run! early-returns on
-      # the :complete marker, so they are NOT retried automatically — clearing
-      # the marker and re-running the stage is an explicit operator action.
-      SCREENOTE_UPLOAD_BUDGET_SEC = 120
-
-      # Mirror the web display contract (`[\w.-]+` plus a known image extension)
-      # so a still hivebox would refuse to render — a name with spaces or
-      # newlines — is never pushed to screenote. GIFs are excluded by Hive
-      # policy: only PNG/JPEG stills are pushed to screenote (the artifacts
-      # prompt and the push_to_screenote gating decide what goes), so the
-      # extension allow-list deliberately omits gif.
-      SCREENOTE_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g)\z/i
-
       def run!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         marker = Hive::Markers.current(task.state_file)
         return { commit: nil, status: :complete } if marker.name == :complete
 
         profile = Hive::Stages::Base.stage_profile(cfg, "artifacts")
-        prompt = render_prompt(task)
-        spawn_artifacts_agent(task, cfg, prompt, profile)
+        screenote = screenote_context(cfg)
+        prompt = render_prompt(task, screenote: screenote)
+        spawn_artifacts_agent(task, cfg, prompt, profile, screenote: screenote)
         marker = Hive::Markers.current(task.state_file)
-        push_manifest_media_to_screenote(task) if marker.name == :complete
         { commit: action_for(marker.name), status: marker.name }
       end
 
-      def spawn_artifacts_agent(task, cfg, prompt, profile)
+      # `screenote:` is required (no `screenote_context(cfg)` default): the
+      # default ran a real CredentialStore.new.load against the dev machine for
+      # any caller that omitted it, coupling tests to ambient disk state. The
+      # sole production caller (run!) always passes it.
+      def spawn_artifacts_agent(task, cfg, prompt, profile, screenote:)
         cwd = File.directory?(task.worktree_path.to_s) ? task.worktree_path : task.folder
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "artifacts", task, profile,
@@ -59,19 +45,50 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
+        mcp_config_path = nil
         if profile.name == :claude
+          allowed_tools = Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          if screenote[:connected]
+            begin
+              mcp_config_path = Hive::Screenote::McpConfig.new(credential: screenote.fetch(:credential)).write!
+              allowed_tools = Hive::Screenote::McpConfig.allowed_tools_csv(allowed_tools)
+            rescue SystemCallError, Hive::ConfigError => e
+              # An unwritable/full cache_home (SystemCallError) OR a credential
+              # that lost a required key between screenote_context's check and
+              # McpConfig#payload (Hive::ConfigError) must degrade to a no-MCP
+              # run (the agent keeps local media), not hard-fail the stage (A8).
+              warn "[hive] could not write Screenote MCP config; running artifacts " \
+                   "without Screenote upload: #{e.message}"
+              mcp_config_path = nil
+            end
+          end
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task) # coding-scoped: coding artifacts stage tmux session
+            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task), # coding-scoped: coding artifacts stage tmux session
+            allowed_tools: allowed_tools,
+            mcp_config_path: mcp_config_path,
+            strict_mcp_config: !mcp_config_path.nil?
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
+      ensure
+        if mcp_config_path
+          begin
+            FileUtils.rm_f(mcp_config_path)
+          rescue SystemCallError => e
+            # The ephemeral 0600 config embeds the bearer; if cleanup fails
+            # (e.g. EACCES) it lingers on disk. Surface it so an operator can
+            # remove it, rather than swallowing the failure silently.
+            warn "[hive] could not remove ephemeral Screenote MCP config #{mcp_config_path}: #{e.message}"
+          end
+        end
       end
 
-      def render_prompt(task)
+      def render_prompt(task, screenote: nil)
+        screenote ||= build_unavailable_context("Screenote is not connected; run `hive connect screenote`.", {})
         Hive::Stages::Base.render(
           "artifacts_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -79,9 +96,80 @@ module Hive
             task_folder: task.folder,
             worktree_path: task.worktree_path,
             artifact_file: task.state_file,
+            screenote_connected: screenote[:connected],
+            screenote_project_id: screenote[:project_id],
+            screenote_base_url: screenote[:base_url],
+            screenote_skip_reason: screenote[:reason],
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
+      end
+
+      def screenote_context(cfg, credential_store: Hive::Screenote::CredentialStore.new, now: Time.now)
+        credential = credential_store.load
+        return warn_and_build_unavailable("Screenote is not connected; run `hive connect screenote`.", cfg) unless credential
+
+        if credential_store.expired?(credential, now: now)
+          return warn_and_build_unavailable("Screenote OAuth token expired; run `hive connect screenote`.", cfg)
+        end
+
+        project_id = cfg.dig("screenote", "project_id").to_s.strip
+        project_id = credential["project_id"].to_s.strip if project_id.empty?
+        if project_id.empty?
+          return warn_and_build_unavailable("Screenote has no default project; run `hive connect screenote`.", cfg)
+        end
+
+        if credential["access_token"].to_s.strip.empty? || credential["mcp_resource"].to_s.strip.empty?
+          return warn_and_build_unavailable("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
+        end
+
+        {
+          connected: true,
+          credential: credential,
+          project_id: project_id,
+          base_url: connected_base_url(credential, cfg),
+          reason: nil
+        }
+      rescue Hive::ConfigError => e
+        warn_and_build_unavailable("Screenote credential is invalid: #{e.message}", cfg)
+      rescue SystemCallError => e
+        # A8 fail-soft: a read failure on the credential file (EACCES /
+        # EISDIR / a TOCTOU ENOENT) must skip Screenote, not hard-fail the
+        # 7-artifacts stage. CredentialStore#load only rescues JSON errors,
+        # so an OS-level File.read failure escapes here as SystemCallError.
+        warn_and_build_unavailable("Screenote credential could not be read: #{e.message}", cfg)
+      end
+
+      # Visible fail-soft: warn at run time so an operator watching the run
+      # sees WHY no upload happened (the cause was otherwise buried only in
+      # the prompt/manifest), then return the unavailable context. Used by
+      # screenote_context's skip paths; `build_unavailable_context` stays the
+      # silent builder for render_prompt's default binding (which deliberately
+      # skips the warn).
+      def warn_and_build_unavailable(reason, cfg)
+        warn "[hive] Screenote upload disabled for artifacts: #{reason}"
+        build_unavailable_context(reason, cfg)
+      end
+
+      def build_unavailable_context(reason, cfg)
+        {
+          connected: false,
+          credential: nil,
+          project_id: nil,
+          base_url: config_base_url(cfg),
+          reason: reason
+        }
+      end
+
+      # The configured Screenote base URL, falling back to the OAuth
+      # client's default. The `|| DEFAULT_BASE_URL` fallback is load-bearing
+      # for `render_prompt`'s empty-cfg default-arg path.
+      def config_base_url(cfg)
+        cfg.dig("screenote", "base_url") || Hive::Screenote::OAuthClient::DEFAULT_BASE_URL
+      end
+
+      def connected_base_url(credential, cfg)
+        credential["base_url"].to_s.empty? ? config_base_url(cfg) : credential["base_url"]
       end
 
       def action_for(marker_name)
@@ -90,119 +178,6 @@ module Hive
         when :error then "error"
         else marker_name.to_s
         end
-      end
-
-      def push_manifest_media_to_screenote(task, uploader: nil, screenote_config: nil)
-        manifest_path = media_manifest_path(task)
-        return unless File.file?(manifest_path)
-
-        manifest = JSON.parse(File.read(manifest_path))
-        return unless manifest.is_a?(Hash)
-        return unless manifest["schema"] == Hive::MediaManifest::SCHEMA
-        return unless manifest["status"] == "captured"
-
-        uploader ||= screenote_uploader(screenote_config || Hive::Config.load_global_screenote)
-        return unless uploader
-
-        changed = false
-        items = manifest["items"].is_a?(Array) ? manifest["items"] : []
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SCREENOTE_UPLOAD_BUDGET_SEC
-        items.each do |item|
-          if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-            warn "[hive] screenote upload budget (#{SCREENOTE_UPLOAD_BUDGET_SEC}s) exceeded; " \
-                 "leaving remaining stills for a later run"
-            break
-          end
-          next unless upload_item_to_screenote?(item)
-
-          file_path = media_item_path(task, item["file"])
-          next unless file_path && File.file?(file_path)
-
-          result = uploader.upload(path: file_path, title: item["caption"].to_s.empty? ? item["file"].to_s : item["caption"].to_s)
-          url = result ? result["annotate_url"].to_s : ""
-          next if url.empty?
-
-          item["screenote_url"] = url
-          changed = true
-        end
-
-        if changed
-          File.write(manifest_path, "#{JSON.pretty_generate(manifest)}\n")
-          # The status feed's live-refresh dedup keys on the task folder mtime
-          # (status.rb folder_mtime = File.mtime(task folder)); a write inside
-          # media/ only bumps the media dir, so open task pages would miss the
-          # new hosted links until reload. Touch the folder so the poller sees
-          # the change and broadcasts a refresh.
-          FileUtils.touch(task.folder)
-        end
-      rescue JSON::ParserError => e
-        warn "[hive] media manifest is not valid JSON: #{e.message}"
-      rescue Hive::ConfigError => e
-        # A misconfigured screenote endpoint (e.g. a fat-fingered
-        # HIVE_SCREENOTE_BASE_URL) must not raise into the pipeline, but it is
-        # an operator error distinct from a transient upload blip — warn loudly
-        # and specifically so it isn't flattened into the generic message.
-        warn "[hive] screenote is misconfigured; skipping uploads: #{e.message}"
-      rescue StandardError => e
-        warn "[hive] screenote manifest processing failed: #{e.class}: #{e.message}"
-      end
-
-      def screenote_uploader(screenote_config)
-        base_url = screenote_config["base_url"].to_s.strip
-        api_token = screenote_config["api_token"].to_s.strip
-        return nil if base_url.empty? || api_token.empty?
-
-        Hive::ScreenoteUploader.new(base_url: base_url, api_token: api_token)
-      end
-
-      def media_manifest_path(task)
-        File.join(task.folder, "media", "manifest.json")
-      end
-
-      def upload_item_to_screenote?(item)
-        return false unless item.is_a?(Hash)
-        return false unless item["push_to_screenote"] == true
-        return false unless item["screenote_url"].to_s.strip.empty?
-
-        # Full filename-shape check, not just the extension: an item hivebox
-        # can't display (spaces/newlines fail the web route's `[\w.-]+` shape)
-        # must not be uploaded only to be hidden from the Demo gallery. GIFs are
-        # excluded by Hive policy — only PNG/JPEG stills are pushed to screenote
-        # (SCREENOTE_FILENAME_RE omits gif).
-        item["file"].to_s.match?(SCREENOTE_FILENAME_RE)
-      end
-
-      def media_item_path(task, filename)
-        name = filename.to_s
-        # Handle the null-byte case explicitly and up front: File.basename /
-        # File.realpath raise ArgumentError on a NUL, so reject it here rather
-        # than catching ArgumentError broadly below — a broad catch would mask
-        # any OTHER (genuinely unexpected) ArgumentError as a benign skip.
-        return nil if name.empty? || name.include?("\0") || File.basename(name) != name
-
-        # Anchor the media root to the REAL task folder: resolve the folder's
-        # symlinks, then require `media/` to resolve to exactly <folder>/media.
-        # A `media` directory that is itself a symlink out of the task folder
-        # must not become a trusted root, or an agent could exfiltrate arbitrary
-        # readable host files to screenote. Mirrors the web controller's
-        # resolved_media_path.
-        folder_root = File.realpath(task.folder)
-        media_root = File.realpath(File.join(folder_root, "media"))
-        return nil unless media_root == File.join(folder_root, "media")
-
-        candidate = File.join(media_root, name)
-        return nil unless File.file?(candidate)
-
-        real = File.realpath(candidate)
-        return nil unless real.start_with?("#{media_root}#{File::SEPARATOR}")
-
-        real
-      rescue SystemCallError
-        # A missing media dir / broken symlink: skip just that one item rather
-        # than aborting all remaining uploads. The null-byte ArgumentError case
-        # is guarded explicitly above, so it isn't swallowed here — leaving any
-        # other ArgumentError free to surface as the real bug it would be.
-        nil
       end
     end
   end

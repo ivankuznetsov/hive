@@ -5,6 +5,8 @@ require "hive/commands/forget"
 require "hive/commands/prune"
 require "hive/commands/doctor"
 require "hive/commands/update"
+require "hive/commands/connect"
+require "hive/commands/disconnect"
 require "hive/commands/uninstall"
 require "hive/commands/migrate"
 require "hive/commands/new"
@@ -89,6 +91,18 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Update) do |calls|
       Hive::CLI.start([ "update", "--dry-run" ])
       assert_equal({ dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Connect) do |calls|
+      Hive::CLI.start([ "connect", "screenote", "--base-url", "https://screenote.test", "--json" ])
+      assert_equal [ "screenote" ], calls.first.fetch(:args)
+      assert_equal({ base_url: "https://screenote.test", json: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Disconnect) do |calls|
+      Hive::CLI.start([ "disconnect", "screenote", "--json" ])
+      assert_equal [ "screenote" ], calls.first.fetch(:args)
+      assert_equal({ json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Uninstall) do |calls|

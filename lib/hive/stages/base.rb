@@ -503,7 +503,7 @@ module Hive
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
-                      disallowed_tools: nil)
+                      disallowed_tools: nil, cli_flags: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -523,8 +523,15 @@ module Hive
           warn_isolation_reduced(task, profile, add_dirs)
         end
 
-        cli_flags = []
-        if cfg && profile.name == :claude
+        # `cli_flags: nil` means "no explicit flags — derive model/effort
+        # (and permission_mode) from cfg". `cli_flags: []` means "explicitly
+        # none — do NOT derive" (a caller, e.g. the headless ClaudeLauncher
+        # path, already assembled the flags and must win over cfg; commit
+        # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
+        # distinct rather than collapsing both to "empty".
+        derive_flags_from_cfg = cli_flags.nil?
+        cli_flags ||= []
+        if derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg)
         end
@@ -554,7 +561,8 @@ module Hive
                          session_name:, add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
-                         disallowed_tools: nil)
+                         disallowed_tools: nil, mcp_config_path: nil,
+                         strict_mcp_config: false)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -578,7 +586,9 @@ module Hive
           profile: profile,
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools
+          disallowed_tools: disallowed_tools,
+          mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config
         )
       end
 

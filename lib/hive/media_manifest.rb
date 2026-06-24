@@ -4,7 +4,8 @@ module Hive
   # one gem module both tiers reference, so a version bump can't leave the
   # stage (lib/hive/stages/artifacts.rb) and the web reader
   # (web/app/controllers/tasks_controller.rb) silently disagreeing — one
-  # reading a v2 file as v1.
+  # reading a v2 file as v1. `screenote_url` remains the read-side contract;
+  # `screenote_skipped_reason` is an optional writer-side diagnostic.
   module MediaManifest
     # The only media-manifest schema version the gem stage and the web reader
     # understand. A future manifest with a higher version reshapes items[], so

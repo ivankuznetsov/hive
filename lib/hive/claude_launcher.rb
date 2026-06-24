@@ -131,14 +131,19 @@ module Hive
                 expected_output: nil, profile: nil,
                 allowed_tools: nil,
                 disallowed_tools: nil,
-                permission_mode: nil)
+                permission_mode: nil, mcp_config_path: nil,
+                strict_mcp_config: false)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
+      cli_flags = cfg ? Hive::Config.claude_cli_flags(cfg) : []
       launch_mode = Hive::Config.claude_mode(cfg)
 
       if launch_mode == :headless
         require "hive/stages/base"
+        # mcp_flags is only consumed on this headless branch — the tmux path
+        # recomputes them inside wrapper_command — so compute it here.
+        headless_flags = cli_flags + mcp_cli_flags(mcp_config_path, strict_mcp_config)
         return Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -152,7 +157,8 @@ module Hive
           status_mode: status_mode,
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools
+          disallowed_tools: disallowed_tools,
+          cli_flags: headless_flags
         )
       end
 
@@ -167,7 +173,10 @@ module Hive
         profile: profile,
         allowed_tools: allowed_tools,
         disallowed_tools: disallowed_tools,
-        permission_mode: permission_mode
+        permission_mode: permission_mode,
+        mcp_config_path: mcp_config_path,
+        strict_mcp_config: strict_mcp_config,
+        cli_flags: cli_flags
       ) do |handle|
         result = handle.send_and_wait!(
           prompt: prompt,
@@ -183,7 +192,8 @@ module Hive
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
                             disallowed_tools: nil,
-                            permission_mode: nil)
+                            permission_mode: nil, mcp_config_path: nil,
+                            strict_mcp_config: false, cli_flags: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -217,7 +227,9 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           permission_mode: permission_mode,
-          cli_flags: cfg ? Hive::Config.claude_cli_flags(cfg) : []
+          cli_flags: cli_flags || (cfg ? Hive::Config.claude_cli_flags(cfg) : []),
+          mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config
         )
         # (Re)establish the shared claude session. Reused as the handle's
         # `reestablish` closure so a reviewer that finds the session dead
@@ -378,13 +390,13 @@ module Hive
         env: {
           "ANTHROPIC_API_KEY" => "",
           "CLAUDE_API_KEY" => "",
-          # The screenote upload runs in the parent `hive run artifacts`
-          # process, never the agent — blank the credential vars so a
-          # config/env-sourced token can't be read by the artifacts agent's
-          # Bash tool (that agent spawns through this exact tmux path). The
-          # wrapper additionally `unset`s them; mirrors the headless scrub in
-          # Hive::Agent#spawn_and_wait.
-          "HIVE_SCREENOTE_API_TOKEN" => "",
+          # Screenote's base URL reaches claude through prompt/MCP context,
+          # not the child environment; blanking it here stops an operator's
+          # exported HIVE_SCREENOTE_BASE_URL from becoming a redundant,
+          # unvalidated second source that overrides hive's chosen base_url.
+          # The wrapper additionally `unset`s it, and Hive::Agent's
+          # SCRUBBED_CHILD_ENV mirrors this for the headless path — keep the
+          # three sibling scrub sites in step.
           "HIVE_SCREENOTE_BASE_URL" => "",
           "HIVE_TASK_STAGE_DIR" => task.folder
         },
@@ -452,7 +464,8 @@ module Hive
 
     def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
                         allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                        disallowed_tools: nil, cli_flags: [])
+                        disallowed_tools: nil, cli_flags: [],
+                        mcp_config_path: nil, strict_mcp_config: false)
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
@@ -464,12 +477,21 @@ module Hive
       # pipeline run inherits the operator's interactive default (often
       # their most expensive model).
       command.concat(Array(cli_flags))
+      command.concat(mcp_cli_flags(mcp_config_path, strict_mcp_config))
       allowed = Hive::PermissionScope.tool_csv(allowed_tools)
       disallowed = Hive::PermissionScope.tool_csv(disallowed_tools)
       command.concat([ "--allowedTools", allowed ]) if allowed
       command.concat([ "--disallowedTools", disallowed ]) if disallowed
       command.concat([ "--bin", profile.bin ])
       command
+    end
+
+    def mcp_cli_flags(path, strict)
+      return [] if path.to_s.strip.empty?
+
+      flags = [ "--mcp-config", path ]
+      flags << "--strict-mcp-config" if strict
+      flags
     end
 
     def wait_until_session_exists!(runner)

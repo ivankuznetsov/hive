@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-16
+updated: 2026-06-21
 tags: [commands, api]
 ---
 
@@ -46,7 +46,7 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
+`archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter lifecycle commands, diagnostics, markers,
 findings, metrics, update/uninstall, registry maintenance, the `hive bench
 submit` corpus-submission producer, the `hive digest` shipped-digest producer,
 and `--json` envelopes where the command page says they exist.

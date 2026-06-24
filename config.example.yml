@@ -6,3 +6,7 @@ registered_projects: []
 screenote:
   base_url: null
   api_token: null
+
+# Project .hive-state/config.yml files can opt Claude-backed stages into
+# permission presets with `permissions:`. See docs/permissions.md for the
+# yolo/read-only/scoped reference and the tool-level caveat.

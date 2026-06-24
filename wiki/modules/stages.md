@@ -3,15 +3,15 @@ title: Hive::Stages
 type: module
 source: lib/hive/stages.rb
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-06-20
 tags: [module, stages, constants]
 ---
 
-**TLDR**: Single source of truth for the nine-stage list. Constants `DIRS`, `NAMES`, `SHORT_TO_FULL`; helpers `next_dir(idx)`, `resolve(name)`, `parse(dir)`. Every consumer (`GitOps`, `Status`, `Run#next_stage_dir`, `Approve`) delegates here so stage changes have one canonical source.
+**TLDR**: Public constants for the nine-stage CODING list. `DIRS` is derived from `Hive::Workflows::Registry.default` at load time, while `NAMES` and `SHORT_TO_FULL` remain derived from `DIRS`; helpers `next_dir(idx)`, `prev_dir(idx)`, `resolve(name)`, and `parse(dir)` keep their existing behavior. Coding-pinned consumers (`GitOps`, coding `Status` ordering) still delegate here, but the generic `Run#next_stage_dir` and `Approve` paths no longer read `DIRS` — they route per-task through `task.workflow` and scan the runtime union `Hive::Workflows.all_stage_dirs` (U6) so non-coding workflows resolve their own stages.
 
 ## Constants
 
-- `DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` — the canonical stage directory names (index + bare name).
+- `DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` — the canonical stage directory names (index + bare name), derived from the default workflow descriptor.
 - `NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done]` — bare stage names without the index prefix; same as `Hive::Task::STAGE_NAMES`.
 - `SHORT_TO_FULL = { "inbox" => "1-inbox", … }` — frozen hash for short→full resolution.
 
@@ -38,5 +38,5 @@ The values are pure data + pure functions. No state, no construction. `module_fu
 ## Backlinks
 
 - [[state-model]] · [[modules/git_ops]] · [[modules/task]]
-- [[commands/status]] · [[commands/run]] · [[commands/approve]]
+- [[commands/status]] · [[commands/run]] · [[commands/approve]] · [[modules/workflows]]
 - [[cli]]

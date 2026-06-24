@@ -39,6 +39,7 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE,               Hive::DaemonInstallDriftError.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::DaemonInstallFailed.new("x").exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::RollbackFailed.new("x").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::Workflows::UnknownWorkflow.new("x").exit_code
   end
 
   # The `schema_version` emit sites in run.rb / status.rb / approve.rb call
@@ -71,7 +72,7 @@ class ExitCodesTest < Minitest::Test
   def test_task_action_kind_closed_enum_membership
     expected = %w[
       ready_to_brainstorm ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
-      ready_to_artifacts ready_to_finalize ready_to_archive
+      ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance ready_to_run
       needs_input recover_execute recover_review agent_running archived manual_steering error
     ].sort
     assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort

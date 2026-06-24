@@ -5,11 +5,11 @@ require "time"
 module Hive
   module Bot
     class StatusWatcher
-      Row = Data.define(:project, :project_path, :hive_state_path, :slug, :id, :display_name, :stage, :marker,
+      Row = Data.define(:project, :project_path, :hive_state_path, :slug, :id, :display_name, :stage, :workflow, :marker,
                         :attrs, :folder, :state_file, :pr_url, :state_file_mtime, :age_seconds,
                         :action, :action_label, :suggested_command, :next_action, :diagnostic) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
-                       stage: nil, marker: nil, attrs: {}, folder: nil,
+                       stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
                        action: nil, action_label: nil, suggested_command: nil,
                        next_action: nil, diagnostic: nil)
@@ -18,7 +18,7 @@ module Hive
           # Data.define above can't silently misbind constructor arguments.
           super(
             project: project, project_path: project_path, hive_state_path: hive_state_path,
-            slug: slug, id: id, display_name: display_name, stage: stage, marker: marker,
+            slug: slug, id: id, display_name: display_name, stage: stage, workflow: workflow, marker: marker,
             attrs: attrs, folder: folder, state_file: state_file, pr_url: pr_url,
             state_file_mtime: state_file_mtime, age_seconds: age_seconds, action: action,
             action_label: action_label, suggested_command: suggested_command,
@@ -281,6 +281,7 @@ module Hive
               id: task["id"],
               display_name: task["display_name"],
               stage: task["stage"],
+              workflow: task["workflow"],
               marker: task["marker"],
               attrs: task["attrs"] || {},
               folder: task["folder"],

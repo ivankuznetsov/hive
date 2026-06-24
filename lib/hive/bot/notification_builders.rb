@@ -5,6 +5,7 @@ require "hive"
 require "hive/bot/format"
 require "hive/bot/title_formatter"
 require "hive/markers"
+require "hive/workflows"
 
 module Hive
   module Bot
@@ -20,6 +21,8 @@ module Hive
         ready_to_artifacts
         ready_to_finalize
         ready_to_archive
+        ready_to_advance
+        ready_to_run
       ].freeze
 
       INPUT_ACTIONS = %w[
@@ -128,22 +131,36 @@ module Hive
       def needs_input(row)
         case row.marker
         when "waiting"
-          # A `waiting` marker is used by BOTH 2-brainstorm (genuine
-          # operator questions) and 3-plan (a plan-draft/approval pause).
-          # Label them distinctly so a plan pause isn't mis-announced as
-          # "Brainstorm questions" (it isn't, and the daemon usually
-          # auto-approves it — see suppress_daemon_plan_pause?).
-          row.stage.to_s == "3-plan" ? plan_waiting(row) : brainstorm_waiting(row)
+          waiting_input(row)
         when "review_waiting"
           review_waiting(row)
         else
-          Notification.new(
-            text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
-            keyboard: [
-              [ button("Show details", details_callback(row)) ]
-            ]
-          )
+          default_needs_input(row)
         end
+      end
+
+      # A `waiting` marker is used by BOTH the coding 2-brainstorm stage
+      # (genuine operator questions) and the coding 3-plan stage (a
+      # plan-draft/approval pause); each gets its own label so a plan pause
+      # isn't mis-announced as "Brainstorm questions" (it isn't, and the daemon
+      # usually auto-approves it — see suppress_daemon_plan_pause?). Only the
+      # coding workflow has those two stages, so a `waiting` marker from any
+      # other workflow — or any other coding stage — falls through to the
+      # neutral default below.
+      def waiting_input(row)
+        return plan_waiting(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: plan approval pause only exists in coding workflow
+        return brainstorm_waiting(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" # coding-scoped: brainstorm Q&A answer flow is coding-specific
+
+        default_needs_input(row)
+      end
+
+      def default_needs_input(row)
+        Notification.new(
+          text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
+          keyboard: [
+            [ button("Show details", details_callback(row)) ]
+          ]
+        )
       end
 
       def brainstorm_waiting(row)
@@ -222,6 +239,14 @@ module Hive
         parts = [ "autofix", row.project, row.slug, row.stage, row.marker ]
         match_attr = recovery_match_attr(row)
         parts << match_attr if match_attr
+        # Thread the workflow id so RecoverySequence routes a generic row to the
+        # universal `hive run` verb instead of the coding retry-verb table (slash
+        # /autofix and web recover already thread it). Coding is the nil default
+        # (coding_row? ⟹ true), so it's omitted to save callback bytes; a
+        # non-coding id is appended as a trailing token. The recovery handler
+        # disambiguates it from match_attr by content — match_attr always
+        # contains `=`, a workflow id never does.
+        parts << row.workflow if row.respond_to?(:workflow) && !Hive::Workflows.coding_row?(row)
         parts.join(":")
       end
 
@@ -379,7 +404,13 @@ module Hive
           "ready_for_review" => "review",
           "ready_to_artifacts" => "artifacts",
           "ready_to_finalize" => "finalize",
-          "ready_to_archive" => "archive"
+          "ready_to_archive" => "archive",
+          # Generic-workflow ready rows: advance promotes the task to the
+          # next stage (`hive approve`), run dispatches the generic stage
+          # agent (`hive run`). Without these a generic row gets no Telegram
+          # button and a daemon-disabled project can't drive it from chat.
+          "ready_to_advance" => "approve",
+          "ready_to_run" => "run"
         }[action]
       end
 

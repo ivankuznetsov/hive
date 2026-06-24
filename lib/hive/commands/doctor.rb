@@ -199,7 +199,7 @@ module Hive
         rows = []
         if config_yml_unreadable?
           rows << warning_row(
-            stage: "2-brainstorm",
+            stage: "2-brainstorm", # coding-scoped: doctor probes coding brainstorm config
             label: ".hive-state/config.yml",
             agent: "config",
             configured_skill: "config.yml",
@@ -214,7 +214,7 @@ module Hive
         return rows unless legacy_brainstorm_runtime_present?
 
         rows << warning_row(
-          stage: "2-brainstorm",
+          stage: "2-brainstorm", # coding-scoped: doctor probes coding brainstorm config
           label: "2-brainstorm/brainstorm.runtime",
           agent: "claude",
           configured_skill: "brainstorm.runtime",
@@ -380,7 +380,7 @@ module Hive
       def reviewer_row(name:, agent:, configured_skill:, skill:, status:, message:)
         {
           kind: "reviewer",
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: doctor probes coding review config
           name: name,
           label: "6-review/#{name}",
           agent: agent,

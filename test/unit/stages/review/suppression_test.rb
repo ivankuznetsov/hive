@@ -233,6 +233,47 @@ class ReviewSuppressionTest < Minitest::Test
     end
   end
 
+  def test_reviewer_lines_returns_empty_for_absent_file
+    with_tmp_dir do |dir|
+      assert_empty Suppression.reviewer_lines(File.join(dir, "missing-reviewer.md")),
+                   "an absent reviewer file is the silent empty case"
+    end
+  end
+
+  def test_reviewer_lines_degrades_to_empty_with_warning_when_unreadable
+    with_tmp_dir do |dir|
+      unreadable = File.join(dir, "reviewer.md")
+      FileUtils.mkdir_p(unreadable) # a directory raises EISDIR on readlines
+
+      lines = nil
+      _out, err = capture_io { lines = Suppression.reviewer_lines(unreadable) }
+
+      assert_empty lines, "an unreadable reviewer file degrades to empty, not abort the pass"
+      assert_match(/could not read reviewer file/, err,
+                   "an unreadable reviewer file must warn before degrading")
+    end
+  end
+
+  def test_suppressed_doc_unreadable_treats_a_vanished_file_as_absent
+    with_tmp_dir do |dir|
+      path = File.join(dir, "suppressed.md")
+      File.write(path, "x")
+
+      # Simulate a TOCTOU race: the doc satisfies the File.exist? guard but is
+      # gone by the time we open it. ENOENT must read as "absent" (false), never
+      # as "present but unreadable" (true) — the latter would skip the mutation.
+      # Singleton override (minitest/mock isn't bundled), restored in ensure.
+      original = File.method(:open)
+      File.define_singleton_method(:open) { |*, **, &_blk| raise Errno::ENOENT }
+      begin
+        refute Suppression.suppressed_doc_unreadable?(path),
+               "a vanished doc (ENOENT) is the legitimate absent case, not unreadable"
+      ensure
+        File.define_singleton_method(:open, original)
+      end
+    end
+  end
+
   def test_read_active_keys_hashes_operator_added_line_without_fp
     with_suppression_task do |ctx|
       expected = Suppression.key_for("lib/foo.rb leaks stale state", severity: "high")

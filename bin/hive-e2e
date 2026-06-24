@@ -151,14 +151,14 @@ module Hive
         scenario_root = PathSafety.contained_path!(run_dir, "scenarios", "scenario root")
         scenario_dir = PathSafety.contained_path!(scenario_root, scenario, "scenario dir")
         script = PathSafety.contained_path!(scenario_dir, "repro.sh", "repro script")
-        unless File.exist?(script)
+        unless File.exist?(script) || File.symlink?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} has no repro.sh; the run may have completed successfully (#{script})",
             error_kind: "missing_repro",
             exit_code: BinaryExit::CONFIG
           )
         end
-        unless File.file?(script) && File.executable?(script)
+        unless File.lstat(script).file? && File.executable?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} repro.sh is not executable (#{script})",
             error_kind: "unusable_repro",

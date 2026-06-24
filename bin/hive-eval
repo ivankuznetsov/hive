@@ -85,7 +85,8 @@ FileUtils.rm_f(report_path)
 
 unless remaining.empty?
   unexpected = remaining.join(" ")
-  warn "hive-eval: unexpected argument: #{unexpected} (unexpected argument(s): #{unexpected})"
+  label = remaining.length == 1 ? "argument" : "arguments"
+  warn "hive-eval: unexpected #{label}: #{unexpected}"
   warn parser
   exit 64
 end

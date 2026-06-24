@@ -1557,10 +1557,12 @@ class HiveBotSupervisorTest < Minitest::Test
 
     text = @supervisor.send(:render_details, rows, "hive", "task")
 
+    assert_equal Hive::Bot::NotificationBuilders.details_reply(rows.first), text
     assert_includes text, "hive/task (3-plan)"
     assert_includes text, "Action: ready_to_develop"
     assert_includes text, "Marker: none"
     assert_includes text, "Attrs: a=1 z=9"
+    refute_includes text, "No diagnostic available"
     assert_equal "No active row found for hive/missing.", @supervisor.send(:render_details, rows, "hive", "missing")
   end
 

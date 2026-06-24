@@ -1272,6 +1272,9 @@ module Hive
         if envelope["ok"] == true
           diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
           slug = envelope["slug"] || child.slug
+          # Show details renders directly from the cached status row now.
+          # This remains defensive for refresh_diagnose and manual diagnose
+          # child paths that can still return an empty success envelope.
           return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
           return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
@@ -1469,14 +1472,7 @@ module Hive
         row = Array(rows).find { |candidate| candidate.project == project && candidate.slug == slug }
         return "No active row found for #{project}/#{slug}." unless row
 
-        attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-                   .map { |key, value| "#{key}=#{value}" }
-        [
-          "#{Hive::Bot::NotificationBuilders.display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
-          "Action: #{row.action_label || row.action}",
-          "Marker: #{row.marker || 'none'}",
-          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
-        ].compact.join("\n")
+        Hive::Bot::NotificationBuilders.details_reply(row)
       end
 
       def actionable_queue_rows(rows)

@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "telegram/bot"
+require "hive/bot/poll_health"
 require "hive/bot/telegram"
 
 class HiveBotTelegramTest < Minitest::Test
@@ -65,8 +66,10 @@ class HiveBotTelegramTest < Minitest::Test
     @logger ||= StubLogger.new
   end
 
-  def telegram(api)
-    Hive::Bot::Telegram.new(token: "token", logger: logger, client: FakeClient.new(api))
+  def telegram(api, poll_health: nil)
+    kwargs = { token: "token", logger: logger, client: FakeClient.new(api) }
+    kwargs[:poll_health] = poll_health if poll_health
+    Hive::Bot::Telegram.new(**kwargs)
   end
 
   def telegram_with_http(api, http)
@@ -76,6 +79,14 @@ class HiveBotTelegramTest < Minitest::Test
 
   def fixture(name)
     JSON.parse(File.read(File.expand_path("../../fixtures/telegram_fixtures/#{name}", __dir__)))
+  end
+
+  def response_error
+    response = Struct.new(:body, :status).new(
+      JSON.generate(error_code: 429, description: "Too Many Requests"),
+      429
+    )
+    ::Telegram::Bot::Exceptions::ResponseError.new(response: response)
   end
 
   def test_poll_updates_parses_message_and_callback_records
@@ -102,6 +113,21 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal [], updates
     assert_equal :poll_failure, logger.events.first.first
     assert_match(/ConnectionFailed/, logger.events.first.last[:error_class])
+    assert_equal :debug, logger.events.first.last[:level]
+    assert_equal :noise, logger.events.first.last[:category]
+  end
+
+  def test_poll_updates_logs_net_read_timeout_as_debug_noise
+    api = FakeApi.new
+    api.raise_on_get_updates = Net::ReadTimeout.new("slow")
+
+    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal [], updates
+    assert_equal :poll_failure, logger.events.first.first
+    assert_match(/Net::ReadTimeout/, logger.events.first.last[:error_class])
+    assert_equal :debug, logger.events.first.last[:level]
+    assert_equal :noise, logger.events.first.last[:category]
   end
 
   def test_poll_updates_skips_malformed_update
@@ -180,6 +206,42 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal :poll_failure, logger.events.first.first
     assert_equal "RuntimeError", logger.events.first.last[:error_class]
     assert_equal "boom", logger.events.first.last[:message]
+    refute logger.events.first.last.key?(:level)
+    refute logger.events.first.last.key?(:category)
+  end
+
+  def test_poll_updates_logs_telegram_response_error_as_warning_default
+    api = FakeApi.new
+    api.raise_on_get_updates = response_error
+
+    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal [], updates
+    assert_equal :poll_failure, logger.events.first.first
+    assert_equal "Telegram::Bot::Exceptions::ResponseError", logger.events.first.last[:error_class]
+    assert_match(/error_code/, logger.events.first.last[:message])
+    refute logger.events.first.last.key?(:level), "real logger map supplies the warn level"
+    refute logger.events.first.last.key?(:category)
+  end
+
+  def test_poll_updates_emits_poll_unhealthy_after_sustained_failures
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+    bot = telegram(api, poll_health: health)
+
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 1, unhealthy_events.size
+    attrs = unhealthy_events.first.last
+    assert_equal :warn, attrs[:level]
+    assert_equal 2, attrs[:consecutive_failures]
+    assert_equal 0, attrs[:seconds_since_success]
+    assert_equal "consecutive", attrs[:reason]
   end
 
   def test_poll_updates_accepts_object_shaped_updates

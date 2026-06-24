@@ -590,7 +590,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   def test_brainstorm_tmux_delegates_remaining_helpers_to_claude_launcher
     task = Struct.new(:folder, :slug).new("/tmp/task", "task-slug")
     runner = Object.new
-    profile = Struct.new(:bin).new("claude")
     marker = Object.new
     calls = []
 
@@ -598,7 +597,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       parse_tmux_version: ->(output) { calls << [ :parse, output ]; "3.6" },
       version_tuple: ->(version) { calls << [ :tuple, version ]; [ 3, 6 ] },
       tmux_bin: -> { calls << [ :tmux_bin ]; "tmux-custom" },
-      wrapper_command: ->(**kwargs) { calls << [ :wrapper, kwargs ]; [ "wrapper" ] },
       claude_trust_prompt?: ->(pane) { calls << [ :trust, pane ]; true },
       claude_ready_prompt?: ->(pane) { calls << [ :ready, pane ]; false },
       wait_for_terminal_marker: ->(t, r, timeout) { calls << [ :wait_marker, t, r, timeout ]; marker },
@@ -615,9 +613,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       assert_equal "3.6", Hive::Stages::BrainstormTmux.parse_tmux_version("tmux 3.6")
       assert_equal [ 3, 6 ], Hive::Stages::BrainstormTmux.version_tuple("3.6")
       assert_equal "tmux-custom", Hive::Stages::BrainstormTmux.tmux_bin
-      assert_equal [ "wrapper" ], Hive::Stages::BrainstormTmux.wrapper_command(
-        task, profile, { "claude" => { "permission_mode" => "bypassPermissions" } }
-      )
       assert Hive::Stages::BrainstormTmux.claude_trust_prompt?("pane")
       refute Hive::Stages::BrainstormTmux.claude_ready_prompt?("pane")
       assert_same marker, Hive::Stages::BrainstormTmux.wait_for_terminal_marker(task, runner, 9)
@@ -633,7 +628,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
 
     assert_includes calls, [ :parse, "tmux 3.6" ]
-    assert calls.any? { |entry| entry.first == :wrapper && entry.last[:allowed_tools] == Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS }
     assert_includes calls, [ :wait_marker, task, runner, 9 ]
   end
 

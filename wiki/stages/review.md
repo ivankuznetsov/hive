@@ -1,9 +1,9 @@
 ---
 title: 6-review stage
 type: stage
-source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
+source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-06-18
+updated: 2026-06-22
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -14,7 +14,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 - **State file**: `task.md` with frontmatter written by 4-execute (`slug`, `started_at`) or by patrol handoff (`source: patrol`, finding fingerprint, PR URL). The runner does NOT track pass count in frontmatter — it derives the current pass by reading `reviews/<reviewer-name>-<NN>.md` filenames and taking the maximum NN.
 - **Worktree pointer**: `worktree.yml` (carried over from 4-execute or written by `Hive::Patrol::ReviewHandoff`; missing → exit 1 with "6-review entered without a worktree.yml").
 - **PR pointer**: `pr.md` (carried over from 5-open-pr or written by patrol handoff). Missing PR metadata only disables GitHub comment mirroring; local review still runs.
-- **Reviews directory**: `reviews/` (carried over from the normal pipeline or created by patrol handoff). New per-pass files written here: `<reviewer>-NN.md`, `escalations-NN.md`, `ci-blocked.md` (Phase 1 hard-block), `browser-blocked-NN.md` (Phase 5 warned), `fix-guardrail-NN.md` (post-fix tripped).
+- **Reviews directory**: `reviews/` (carried over from the normal pipeline or created by patrol handoff). New per-pass files written here: `<reviewer>-NN.md`, `escalations-NN.md`, `ci-blocked.md` (Phase 1 hard-block), `browser-blocked-NN.md` (Phase 5 warned), `fix-guardrail-NN.md` (post-fix tripped), and `suppressed.md` (operator-visible no-fix suppression list).
 
 ## Pre-flight (`Review.run!`)
 
@@ -89,6 +89,8 @@ Triage's direct `cfg` fallback values match `Config::DEFAULTS`: `budget_usd.revi
 
 Plan / worktree.yml / task.md are SHA-256 protected around the triage spawn (ADR-013); tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 
+When `review.triage.suppress_no_fix` is not `false` (default on), `Review::Suppression` hardens repeated no-fix findings without changing the all-clean branch. Before triage, it loads `reviews/suppressed.md` and rewrites matching unchecked reviewer lines to `- [x] SUPPRESSED: ...`, so the triage prompt and fix collector ignore findings previously classified as triage `RESOLVED/NO-FIX`. After successful triage, it scans checked `RESOLVED/NO-FIX:` reviewer lines and appends their fingerprints to `suppressed.md`, grouped by severity with High first. The fingerprint key is intentionally loose: severity + normalized file refs (line numbers stripped) + normalized title; justification/body text is excluded. The file is bound to the reviewer compare-base SHA and is hand-editable: uncheck or delete a line to let the finding reach triage again.
+
 The triage spawn is wrapped in the same bounded retry as a per-reviewer spawn (`run_triage_with_retries`): a transient `:error` is retried up to `review.triage.max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; `1` disables retry; validated as a positive integer in `Config::POSITIVE_INTEGER_KEYS`) with the shared `Hive::Reviewers.backoff_seconds_for` capped exponential backoff, so a single momentary infra blip (a `tmux has-session` read misread as a dead session, an "expected output missing" timeout) no longer parks the whole task on a terminal marker the daemon never auto-retries. `:tampered` and provider-limit outcomes short-circuit the retry (a retry would repeat the tamper, and a limit self-heals via `retry_after`). The retry also honors the review wall-clock budget — before starting another spawn it checks `review.max_wall_clock_sec` and bails to `REVIEW_STALE reason=wall_clock` (mirroring `run_reviewers`), so a high `max_attempts` × the 1800s triage timeout can't overrun the outer cap.
 
 If the triage spawn returns an error whose captured message matches `Hive::AgentLimit.limit_reached?`, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>` instead of the terminal `triage_failed` marker. The daemon healer treats that like the reviewers-phase limit marker and retries after the cooldown. Non-limit triage failures (including timeouts with no provider-limit text) that exhaust the retry budget still write `reason=triage_failed` and remain manual — but the marker now also carries a `message="<condensed error>"` attr (capped at `REVIEW_PHASE_ERROR_SUMMARY_MAX = 300` chars). That message surfaces through `status.md`, `hive status --json`, and the web diagnostic card, so a stuck triage names its real cause instead of an opaque `reason=triage_failed`. The same `message=` attr is written by both `mark_review_phase_failure` callers — the triage (`triage_failed`) and fix (`fix_failed`) phases. The CI phase does not route through this helper: a CI failure writes `REVIEW_ERROR phase=ci reason=ci_unrunnable` directly and carries no `message=` attr.
@@ -110,7 +112,7 @@ Spawns the fix agent (`cfg.review.fix.agent`, default `claude`) with the concate
 
 The fix prompt (`templates/fix_prompt.md.erb`) tells the agent to **fix the whole defect class, not just the cited line**: when a finding's root cause is an instance of a recurring pattern (e.g. "this path silently swallows a session expiry and seals a partial result as complete"), the agent greps the worktree for the other sites with the *same* defect and applies the identical remedy to all of them in the one pass. This is the single sanctioned exception to the otherwise-strict scoped-edits rule, and it exists to collapse convergence: without it, each reviewer pass re-finds the identical bug at the next site, costing a full extra pass per site (observed on a real xhigh-effort review that found the same silent-truncation class across `walk_timeline`, `get_tweet`, capture, and resync over five passes). It is explicitly not license for unrelated refactors — only to eliminate every instance of the specific defect a finding names.
 
-Plan / worktree.yml / task.md are SHA-256 protected around the fix spawn; tampering → `REVIEW_ERROR phase=fix reason=fix_tampered`. If the fix agent exits with provider-limit text in its captured error message, the runner writes `REVIEW_ERROR phase=fix reason=limits_reached retry_after=<iso8601>` through the same `mark_review_phase_failure` helper used by triage; ordinary fix-agent errors still write `reason=fix_failed`.
+Plan / worktree.yml / task.md are SHA-256 protected around the fix spawn; tampering → `REVIEW_ERROR phase=fix reason=fix_tampered`. The fix protected set also includes the current pass's escalations/errors/fix-success/fix-guardrail files plus `reviews/suppressed.md`, so a fix agent cannot clear or flip the no-fix suppression list. If the fix agent exits with provider-limit text in its captured error message, the runner writes `REVIEW_ERROR phase=fix reason=limits_reached retry_after=<iso8601>` through the same `mark_review_phase_failure` helper used by triage; ordinary fix-agent errors still write `reason=fix_failed`.
 
 After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 / U13) takes `git diff base..head` of the new commits and walks it once, dispatching each line to the configured pattern set:
 
@@ -178,7 +180,7 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 ## Tests
 
 - `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, CI hard-block, wall-clock cap including triage-retry handoff to `REVIEW_STALE`, reviewers all-limit markers, triage limit vs non-limit failure classification, transient triage retry, and `message=` surfacing on terminal phase-agent errors.
-- `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail}_test.rb` — phase-level unit coverage.
+- `test/unit/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}_test.rb` — phase-level unit coverage, including no-fix fingerprint normalization, base-SHA reset, strip, and seed behavior.
 - `test/unit/stages/review/run_reviewers_test.rb` — reviewer selection, per-reviewer failure handling, shared Claude tmux reviewer sessions, wall-clock deadlines, GitHub mirroring, and patrol-task selection of `patrol.review.reviewers`.
 - `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer, and native Codex-review adapter behavior including transcript trimming before triage.
 - `test/unit/metrics_test.rb`, `test/integration/metrics_command_test.rb` — `hive metrics rollback-rate` against trailered fixture commits.

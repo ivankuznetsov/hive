@@ -230,6 +230,29 @@ class ConnectCommandTest < Minitest::Test
     end
   end
 
+  def test_best_effort_revoke_warns_when_revocation_raises
+    cmd = Hive::Commands::Connect.new("screenote", output: StringIO.new)
+    oauth = Object.new
+    oauth.define_singleton_method(:revoke) { |**| raise StandardError, "revoke boom" }
+
+    _out, err = capture_io do
+      cmd.send(:best_effort_revoke, oauth, nil, { "access_token" => "tok-1" }, "client-1")
+    end
+
+    assert_match(/could not revoke the abandoned Screenote token/, err)
+  end
+
+  def test_json_error_envelope_swallows_a_broken_pipe
+    # A closed stdout (EPIPE) while writing the failure envelope must not
+    # mask the original error with a secondary crash.
+    output = Object.new
+    output.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+    cmd = Hive::Commands::Connect.new("github", json: true, output: output)
+
+    err = assert_raises(Hive::Error) { cmd.call }
+    assert_match(/unsupported connect service/, err.message)
+  end
+
   def test_connect_revokes_token_when_a_post_exchange_step_fails
     # After exchange mints a live bearer, a failure before `save` (here an
     # empty project list) must best-effort revoke it so the next connect does

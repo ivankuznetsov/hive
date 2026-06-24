@@ -105,6 +105,69 @@ module Hive
       (now.utc + retry_cooldown_sec).iso8601
     end
 
+    # The `held_*` family below is the shared rendering layer over a
+    # `reason="limits_reached"` marker (written by 4-execute / 6-review when
+    # a provider quota wall is detected) — text status, JSON status, and the
+    # TUI all route through these so they can never diverge on the hold
+    # label. `held?` recognises ONLY the `:error` / `:review_error` markers
+    # that carry the limit reason; any other marker name (or a non-limit
+    # reason like `implementer_failed`) is not a quota hold.
+    def held?(marker_name, attrs)
+      %w[error review_error].include?(marker_name.to_s) &&
+        attr_value(attrs, "reason") == "limits_reached"
+    end
+
+    # Prefer the explicit `provider=` attr (4-execute always stamps it). The
+    # message-based fallback re-parses the `for <provider>:` token that
+    # `error_message` (above) bakes into its wire format, and exists ONLY for
+    # legacy agent/launcher markers that predate the `provider=` attr; it is
+    # display/JSON-only, so a wrong token from an incidental "for <word>:"
+    # phrase is cosmetic, never a control-flow decision.
+    def held_provider(attrs)
+      provider = safe_provider(attr_value(attrs, "provider"))
+      return provider if provider
+
+      message = attr_value(attrs, "message")
+      match = message.match(/\bfor\s+([a-z0-9_-]+):/i)
+      safe_provider(match[1]) if match
+    end
+
+    # Human-facing retry time, or nil when the marker has no/garbled
+    # `retry_after` (retry_after_time tolerates both).
+    def held_retry_display(attrs)
+      retry_after_time(attrs)&.strftime("%Y-%m-%d %H:%M UTC")
+    end
+
+    # Single-line operator label, e.g. "held: agent quota (codex) — retry
+    # after 2026-06-24 23:20 UTC; top up or switch execute agent". Provider
+    # and retry clauses are appended only when known.
+    def held_label(attrs)
+      label = "held: agent quota"
+      provider = held_provider(attrs)
+      label = "#{label} (#{provider})" if provider
+
+      retry_display = held_retry_display(attrs)
+      label = "#{label} — retry after #{retry_display}" if retry_display
+
+      "#{label}; top up or switch execute agent"
+    end
+
+    # Machine-readable `held` object for the JSON status payload (schema:
+    # hive-status.v4.json#held). The vocabulary switch is deliberate: the
+    # on-disk marker uses `reason="limits_reached"`, but the JSON contract
+    # exposes the held state as `reason="quota"` so consumers key off a
+    # stable noun rather than the internal marker verb. `provider` /
+    # `retry_after` are nullable here precisely because legacy / attr-less
+    # markers can omit them. Frozen to match the codebase's immutable-payload
+    # convention (Snapshot Rows/ProjectViews) — it is only read/serialized.
+    def held_field(attrs)
+      {
+        "reason" => "quota",
+        "provider" => held_provider(attrs),
+        "retry_after" => retry_after_time(attrs)&.iso8601
+      }.freeze
+    end
+
     def first_useful_line(text)
       normalize(text).each_line.map(&:strip).find { |line| !line.empty? }.to_s
     end
@@ -114,6 +177,28 @@ module Hive
           .scrub
           .gsub(/\e\[[0-9;?]*[ -\/]*[@-~]/, "")
           .gsub(/[[:cntrl:]&&[^\n\t]]/, "")
+    end
+
+    def attr_value(attrs, key)
+      return "" unless attrs
+
+      attrs[key].to_s
+    end
+
+    def safe_provider(value)
+      token = value.to_s.strip
+      return nil unless token.match?(/\A[a-z0-9_-]+\z/i)
+
+      token
+    end
+
+    def retry_after_time(attrs)
+      raw = attr_value(attrs, "retry_after")
+      return nil if raw.empty?
+
+      Time.parse(raw).utc
+    rescue ArgumentError
+      nil
     end
   end
 end

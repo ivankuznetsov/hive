@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -111,7 +111,7 @@ jobs:
     outputs:
       aur_enabled: ${{ steps.aur_gate.outputs.enabled }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: hive-cli-gem
@@ -232,7 +232,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -282,7 +282,7 @@ jobs:
     permissions:
       packages: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install and start colima
         run: |
           brew install colima docker
@@ -317,7 +317,7 @@ jobs:
         # packaging/render.rb does `require "erb"` — without it the render
         # step dies with `cannot load such file -- erb (LoadError)`.
         run: pacman -Syu --noconfirm --needed git openssh cosign ruby ruby-erb jq github-cli
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download and cosign-verify release artifacts
         env:
           GH_TOKEN: ${{ github.token }}

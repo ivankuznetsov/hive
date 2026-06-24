@@ -73,6 +73,7 @@ module Hive
 
       def do_call
         task = resolve_task
+        validate_stage_refs!
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
 
@@ -84,6 +85,42 @@ module Hive
 
         new_folder, commit_action = perform_move_and_commit(task, next_stage_dir)
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
+      end
+
+      # Reject a clearly-invalid --from/--to stage ref against the union of every
+      # REGISTERED workflow's stages. Runs AFTER resolve_task (U9-3 boundary fix):
+      # a fresh `hive approve` process has NO project workflow registered until a
+      # task is resolved (Task.new → Project.load! registers the overlay), so an
+      # owner-authored stage like `2-work` would be wrongly rejected if this gate
+      # ran first. With the project loaded, custom stages validate. A ref valid in
+      # some workflow still defers its workflow-specific check (validate_from! /
+      # resolve_explicit_to) to the task's own descriptor — which keeps --from's
+      # idempotency contract (a ref that's valid but not the current stage still
+      # reaches validate_from!'s WRONG_STAGE path).
+      def validate_stage_refs!
+        # Mirror each downstream handler's own wording so the early check is a
+        # pure relocation, not a message change: --from matches validate_from!
+        # ("unknown --from stage"), --to matches resolve_explicit_to
+        # ("unknown stage"). Both append the same valid-stage list.
+        if @from && !known_stage_ref?(@from)
+          raise Hive::InvalidTaskPath, "unknown --from stage '#{@from}'; valid: #{Hive::Workflows.stage_ref_hint}"
+        end
+        if @to && !known_stage_ref?(@to)
+          raise Hive::InvalidTaskPath, "unknown stage '#{@to}'; valid: #{Hive::Workflows.stage_ref_hint}"
+        end
+      end
+
+      # Route the membership test through the canonical cross-workflow resolver
+      # instead of re-implementing its dir/short-name union scan. A ref that
+      # resolves in exactly one workflow is known; an AMBIGUOUS ref (valid in
+      # >1 workflow) is also "known" here and deliberately deferred to the
+      # per-task check (validate_from! / resolve_explicit_to), which
+      # disambiguates against the task's own descriptor — only a ref valid in NO
+      # workflow is rejected at this early gate (see validate_stage_refs!).
+      def known_stage_ref?(ref)
+        !Hive::Workflows.resolve_stage_ref_across_workflows(ref).nil?
+      rescue Hive::InvalidTaskPath => e
+        e.message.start_with?("ambiguous stage")
       end
 
       # ── Destination resolution ──────────────────────────────────────────
@@ -104,28 +141,29 @@ module Hive
       end
 
       def resolve_destination(task)
-        return resolve_explicit_to(@to) if @to
+        return resolve_explicit_to(task, @to) if @to
 
-        Hive::Stages.next_dir(task.stage_index) ||
+        task.workflow.next_stage_after(task.stage_name)&.dir ||
           raise(Hive::FinalStageReached.new(
                   "task is already at the final stage (#{task.stage_index}-#{task.stage_name})",
                   stage: "#{task.stage_index}-#{task.stage_name}"
                 ))
       end
 
-      def resolve_explicit_to(to)
-        Hive::Stages.resolve(to) ||
+      def resolve_explicit_to(task, to)
+        task.workflow.resolve_stage_ref(to) ||
           raise(Hive::InvalidTaskPath,
-                "unknown stage '#{to}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
-                "or short names #{Hive::Stages::NAMES.join(', ')}")
+                "unknown stage '#{to}'; valid: #{task.workflow.stage_dirs.join(', ')} " \
+                "or short names #{task.workflow.stage_names.join(', ')}")
       end
 
       # ── Validation ──────────────────────────────────────────────────────
 
       def validate_from!(task)
-        expected = Hive::Stages.resolve(@from) ||
+        expected = task.workflow.resolve_stage_ref(@from) ||
                    raise(Hive::InvalidTaskPath,
-                         "unknown --from stage '#{@from}'; valid: #{Hive::Stages::DIRS.join(', ')}")
+                         "unknown --from stage '#{@from}'; valid: #{task.workflow.stage_dirs.join(', ')} " \
+                         "or short names #{task.workflow.stage_names.join(', ')}")
         actual = "#{task.stage_index}-#{task.stage_name}"
         return if expected == actual
 
@@ -135,8 +173,8 @@ module Hive
       end
 
       def validate_move!(task, dest_stage, marker)
-        dest_idx, = Hive::Stages.parse(dest_stage)
-        return if dest_idx <= task.stage_index || @force
+        dest = stage_for_dest!(task, dest_stage)
+        return if dest.index <= task.stage_index || @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
         valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")
@@ -145,17 +183,35 @@ module Hive
               "Use --force to override or --to to move backward."
       end
 
+      # No `|| raise` here, unlike the three `stage_for_dest!` call sites: a nil
+      # dest is treated as "not the same stage" (falsy) so the pipeline proceeds
+      # to validate_move!, which is the loud backstop that raises InvalidTaskPath
+      # on an unresolved dir. Reachable only via a test double today.
       def same_stage?(task, dest_stage)
-        dest_idx, dest_name = Hive::Stages.parse(dest_stage)
-        dest_idx == task.stage_index && dest_name == task.stage_name
+        dest = task.workflow.stage_for_dir(dest_stage)
+        dest && dest.index == task.stage_index && dest.name == task.stage_name
       end
 
       def direction_of(task, dest_stage)
-        dest_idx, = Hive::Stages.parse(dest_stage)
-        return "forward" if dest_idx > task.stage_index
-        return "backward" if dest_idx < task.stage_index
+        dest = stage_for_dest!(task, dest_stage)
+        return "forward" if dest.index > task.stage_index
+        return "backward" if dest.index < task.stage_index
 
         "same"
+      end
+
+      # Belt-and-suspenders: every caller passes a `dest_stage` that came from
+      # `resolve_destination`, which only returns validated descriptor dirs, so
+      # the raise is unreachable on every live path. It exists so that if a
+      # future caller ever reaches one of these helpers with an unresolved dir,
+      # the failure is a typed `InvalidTaskPath` rather than a `NoMethodError`
+      # on nil. The single source of the message keeps it from drifting across
+      # the three guard sites. The non-raising `same_stage?` deliberately opts
+      # out — see its comment.
+      def stage_for_dest!(task, dest_stage)
+        task.workflow.stage_for_dir(dest_stage) ||
+          raise(Hive::InvalidTaskPath,
+                "unknown destination stage '#{dest_stage}'; valid: #{task.workflow.stage_dirs.join(', ')}")
       end
 
       # ── Mutation ────────────────────────────────────────────────────────
@@ -334,7 +390,6 @@ module Hive
       def emit_success(task, dest_stage, new_folder, marker, commit_action, direction)
         return if @quiet
 
-        dest_idx, = Hive::Stages.parse(dest_stage)
         if @json
           puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
         else
@@ -343,12 +398,12 @@ module Hive
           puts "  to:   #{new_folder}"
           # Hint goes to stderr so a `| jq` consumer doesn't get prose mixed
           # with data when the user forgot --json.
-          warn "next: #{workflow_command_for(task.slug, dest_idx)}"
+          warn "next: #{workflow_command_for(task, dest_stage)}"
         end
       end
 
       def success_payload(task, dest_stage, new_folder, marker, commit_action, direction, noop: false)
-        dest_idx, dest_name = Hive::Stages.parse(dest_stage)
+        dest = stage_for_dest!(task, dest_stage)
         payload = {
           "schema" => "hive-approve",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-approve"),
@@ -358,8 +413,8 @@ module Hive
           "from_stage" => task.stage_name,
           "from_stage_index" => task.stage_index,
           "from_stage_dir" => "#{task.stage_index}-#{task.stage_name}",
-          "to_stage" => dest_name,
-          "to_stage_index" => dest_idx,
+          "to_stage" => dest.name,
+          "to_stage_index" => dest.index,
           "to_stage_dir" => dest_stage,
           "direction" => direction,
           "forced" => @force,
@@ -367,38 +422,47 @@ module Hive
           "to_folder" => new_folder,
           "from_marker" => marker ? marker.name.to_s : nil,
           "commit_action" => commit_action,
-          "next_action" => json_next_action(new_folder, dest_idx)
+          "next_action" => json_next_action(new_folder, task.workflow, dest_stage)
         }
         payload
       end
 
-      def json_next_action(new_folder, dest_idx)
+      def json_next_action(new_folder, workflow, dest_stage)
         kind = Hive::Schemas::NextActionKind
         # No verb advances out of the final stage; signal completion to
         # the agent so a retry-loop terminates instead of running
         # `hive archive` (which would no-op anyway after this round).
-        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless Hive::Stages.next_dir(dest_idx)
+        dest = workflow.stage_for_dir(dest_stage)
+        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless dest && workflow.next_stage_after(dest.name)
 
         task = Hive::Task.new(new_folder)
         marker = Hive::Markers.current(task.state_file)
         action = Hive::TaskAction.for(task, marker)
         { "kind" => kind::RUN, "folder" => new_folder, "command" => action.command || "hive run #{new_folder}" }
-      rescue Hive::InvalidTaskPath
+      rescue Hive::InvalidTaskPath => e
+        # The move succeeded but re-parsing the task at its new path failed
+        # (e.g. an unregisterable `meta.yml workflow:`). Degrade to a generic
+        # `hive run` hint so the agent still gets a runnable command, but log
+        # the dropped re-parse so a genuine post-move failure isn't silent.
+        warn "hive: warning — could not compute next_action for #{new_folder}: #{e.message}"
         { "kind" => kind::RUN, "folder" => new_folder, "command" => "hive run #{new_folder}" }
       end
 
-      def workflow_command_for(slug, stage_index)
-        # After advancing INTO `stage_index`, the next user-facing
-        # command is "run the stage's agent" — i.e. the verb whose
-        # target is this stage. `hive plan <slug> --from 3-plan` after
-        # arriving at 3-plan hits StageAction's at-target branch and
-        # runs the plan agent (rather than emitting a verb that would
-        # try to advance OUT and refuse on a non-terminal marker).
-        stage_dir = Hive::Stages::DIRS[stage_index - 1]
-        return "hive run #{slug}" unless stage_dir
+      def workflow_command_for(task, stage_dir)
+        # After advancing INTO `stage_dir`, the next command is "run that
+        # stage" using the descriptor's incoming verb when it has one. A nil
+        # advance_verb is mv-only, so fall back to `hive run`.
+        stage = task.workflow.stage_for_dir(stage_dir)
+        return "hive run #{task.slug}" unless stage
 
-        verb = Hive::Workflows.verb_arriving_at(stage_dir)
-        verb ? "hive #{verb} #{slug} --from #{stage_dir}" : "hive run #{slug}"
+        # Only the coding workflow's advance verbs (brainstorm/plan/develop/…)
+        # are registered Thor commands. A generic descriptor's verbs (e.g.
+        # `gather`) are not, so emitting `hive gather …` would suggest a
+        # nonexistent command — the universal generic next step is `hive run`.
+        return "hive run #{task.slug}" unless Hive::Workflows.coding_id?(task.workflow.id)
+
+        verb = task.workflow.advance_verb_for(stage.name)
+        verb ? "hive #{verb} #{task.slug} --from #{stage.dir}" : "hive run #{task.slug}"
       end
 
       def emit_error_envelope(error)

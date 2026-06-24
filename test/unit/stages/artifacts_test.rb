@@ -332,6 +332,39 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_spawn_artifacts_agent_warns_when_ephemeral_mcp_config_cleanup_fails
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      original_spawn = Hive::Stages::Base.method(:spawn_claude_with_tmux_marker!)
+      Hive::Stages::Base.define_singleton_method(:spawn_claude_with_tmux_marker!) do |_task, _cfg, **_kwargs|
+        { status: :complete }
+      end
+      # The 0600 config embeds the bearer; a cleanup failure must warn (so an
+      # operator can remove it) rather than crash the stage.
+      rm_f_original = FileUtils.method(:rm_f)
+      FileUtils.define_singleton_method(:rm_f) { |*| raise Errno::EACCES, "screenote mcp config" }
+
+      begin
+        _out, err = capture_io do
+          with_env("HIVE_HOME" => File.join(dir, "home")) do
+            Hive::Stages::Artifacts.spawn_artifacts_agent(
+              task,
+              {},
+              "collect",
+              Hive::AgentProfiles.lookup(:claude),
+              screenote: connected_screenote_context
+            )
+          end
+        end
+
+        assert_match(/could not remove ephemeral Screenote MCP config/, err)
+      ensure
+        FileUtils.define_singleton_method(:rm_f, rm_f_original)
+        Hive::Stages::Base.define_singleton_method(:spawn_claude_with_tmux_marker!, original_spawn) if original_spawn
+      end
+    end
+  end
+
   private
 
   def make_artifacts_task(dir)

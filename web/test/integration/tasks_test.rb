@@ -1,7 +1,10 @@
 require "test_helper"
 require "tmpdir"
+require_relative "../../../test/support/workflow_helpers"
 
 class TasksTest < ActionDispatch::IntegrationTest
+  include HiveWorkflowTestHelper
+
   setup do
     @project = create_hive_project!
     @slug = create_task!(@project, "actions probe")
@@ -64,6 +67,25 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert css_select("details[data-artifact-name='artifact.md']").first["open"],
            "the leading artifact must render expanded"
     assert_includes names, "idea.md", "the chronological story still follows"
+  end
+
+  test "a non-coding workflow renders its own stage artifacts, derived from the descriptor" do
+    with_registered_workflow(content_workflow) do
+      project = create_hive_project!("content-app")
+      slug = "content-piece-260620-aaaa"
+      folder = stage_dir(project, "2-research").join(slug)
+      folder.mkpath
+      folder.join("idea.md").write("---\ncreated_at: 2026-06-20\n---\nWrite about hive\n")
+      folder.join("research.md").write("# Research\n\nFindings here.\n")
+      Hive::TaskMeta.write(folder.to_s, id: 1, slug: slug, display_name: nil, workflow: "content_fixture")
+
+      get "/tasks/#{project}/#{slug}"
+      assert_response :success
+      names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
+      assert_includes names, "research.md",
+                      "a non-coding stage artifact (research.md) must render — ARTIFACT_ORDER never lists it"
+      assert_equal "idea.md", names.first, "content workflow still reads idea-first"
+    end
   end
 
   test "earlier stages keep the chronological order, idea first" do

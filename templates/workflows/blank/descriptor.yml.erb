@@ -1,0 +1,15 @@
+<%# Quoted like config.yml's default_workflow: a keyword-like SAFE_SLUG id -%>
+<%# (no/yes/on/off/null/...) would otherwise be coerced to a boolean/nil by -%>
+<%# YAML.safe_load and fail DescriptorParser's required-string check. -%>
+id: "<%= id %>"
+stages:
+  - name: inbox
+    kind: terminal
+    state_file: idea.md
+  - name: work
+    kind: agent
+    state_file: work.md
+    instruction: ./<%= id %>/work.md
+  - name: done
+    kind: terminal
+    state_file: done.md

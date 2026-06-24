@@ -49,11 +49,11 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
-findings, metrics, update/uninstall, registry maintenance, Screenote
-connect/disconnect, the `hive bench submit` corpus-submission producer, the
-`hive digest` shipped-digest producer, and `--json` envelopes where the command
-page says they exist.
+`archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
+lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
+registry maintenance, Screenote connect/disconnect, the `hive bench submit`
+corpus-submission producer, the `hive digest` shipped-digest producer, and
+`--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`

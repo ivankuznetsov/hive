@@ -3,12 +3,22 @@ project_name: <%= project_name %>
 default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
+<% unless Hive::Workflows.coding_id?(default_workflow) -%>
+<%# Quoted: YAML.safe_load coerces bare keyword-like ids (yes/on/null/...) to -%>
+<%# booleans/nil. This is the FRESH-RENDER path; the rebind path encodes the -%>
+<%# same invariant in Init#default_workflow_line (lib/hive/commands/init.rb). -%>
+<%# Keep the two quoting sites in sync. -%>
+default_workflow: "<%= default_workflow %>"
+<% end -%>
 
 claude:
   # tmux uses your logged-in Claude session in an attachable pane.
   # headless keeps the non-interactive `claude -p` path.
   mode: <%= claude_mode %>
-  # Applies to every Claude-backed stage, in both tmux and headless mode.
+  # Applies to every Claude-backed stage, in both tmux and headless mode,
+  # EXCEPT where a stage sets a non-yolo `permissions:` scope (below): a
+  # read-only/scoped stage runs in "default" permission mode and ignores this
+  # value for that stage.
   # bypassPermissions skips permission prompts (maps to
   # --dangerously-skip-permissions); auto uses Claude Code's auto-mode rules.
   permission_mode: <%= claude_permission_mode %>
@@ -23,6 +33,16 @@ claude:
 <% if claude_effort %>  effort: <%= claude_effort %>
 <% else %>  # effort: medium
 <% end %>
+# Optional per-stage agent tool scopes. Default is yolo, which preserves
+# today's stage behavior. Non-yolo scopes are Claude-only and are tool-level
+# controls, not an OS sandbox; see docs/permissions.md.
+# permissions: yolo
+# permissions: read-only
+# permissions:
+#   preset: scoped
+#   tools: [Read, Write, Edit]
+#   dirs: [./drafts]
+
 # Stage-level agent for single-agent stages. (6-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
 # below.) Defaults are claude for planning (deeper reasoning) and codex
@@ -39,13 +59,34 @@ claude:
 brainstorm:
   agent: <%= planning_agent %>
   # skill: /ce-brainstorm
+  # Brainstorm must WRITE brainstorm.md (its WAITING/COMPLETE marker), so a
+  # read-only scope would block it from completing — grant Write/Edit via a
+  # scoped block instead. Non-yolo scopes are claude-only, so this stage's
+  # agent must be claude to use it.
+  # permissions:
+  #   preset: scoped
+  #   tools: [Read, Write, Edit]
   # Legacy configs may still carry brainstorm.runtime; new projects use
   # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
   # skill: /plan
+  # Plan must WRITE plan.md (its marker), so a read-only scope would block it
+  # from completing — grant Write/Edit via a scoped block instead. Non-yolo
+  # scopes are claude-only, so this stage's agent must be claude to use it.
+  # permissions:
+  #   preset: scoped
+  #   tools: [Read, Write, Edit]
 execute:
   agent: <%= development_agent %>
+  # Scoped dirs extend the task folder add-dir list; relative paths are
+  # resolved from the task folder. Non-yolo scopes are claude-only: to
+  # uncomment this you must also set `agent: claude` here, since the
+  # development default is codex, which cannot enforce tool scoping.
+  # permissions:
+  #   preset: scoped
+  #   tools: [Read, Write, Edit]
+  #   dirs: [./drafts]
 open_pr:
   agent: claude
 artifacts:
@@ -132,8 +173,9 @@ review:
     max_attempts: 2
   max_passes: 2
   # Aggregate wall-clock cap across all phases of one `hive run` on a
-  # 6-review folder. 14400s = 4h, enough for a couple of 1-2h reviewers.
-  max_wall_clock_sec: 14400
+  # 6-review folder. 28800s = 8h — generous headroom so the cap is not hit
+  # on a normal multi-pass review (a couple of 1-2h reviewers + retries).
+  max_wall_clock_sec: 28800
   # Hive's recommended reviewer set: claude /ce-code-review + codex
   # /ce-code-review + claude /pr-review-toolkit:review-pr. Each entry's
   # `name` becomes part of the output filename (`reviews/<name>-<pass>.md`).

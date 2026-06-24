@@ -29,7 +29,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 2. `Hive::Task.new(folder)` parses the path into `{project, stage, slug}`.
 3. `validate_project_path_match!`: when both an absolute path and `--project` are given, the path's project must match the named project (no silent override).
 4. `validate_from!`: if `--from` was passed, assert the task is at the named stage; raise `WrongStage` (4) on mismatch.
-5. `resolve_destination`: `--to` (long or short stage name), or auto = current stage_index + 1. Past `9-done` raises `FinalStageReached` (also exit 4).
+5. `resolve_destination`: `--to` (long or short stage name), or auto = the descriptor's next stage (`task.workflow.next_stage_after(task.stage_name)`). At the terminal stage (`9-done` for coding) this raises `FinalStageReached` (also exit 4).
 6. **Same-stage no-op**: if destination resolves to the current stage, emit a `noop: true` payload (or one-line `hive: noop —` text) and return success. No mv, no commit.
 7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. `--to` (backward direction) and `--force` both bypass.
 8. **Locking**:

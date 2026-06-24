@@ -1,0 +1,21 @@
+<%# Sample workflow: a gather -> synthesize -> report research pipeline. -%>
+id: "<%= id %>"
+stages:
+  - name: inbox
+    kind: terminal
+    state_file: idea.md
+  - name: gather
+    kind: agent
+    state_file: gather.md
+    instruction: ./<%= id %>/gather.md
+  - name: synthesize
+    kind: agent
+    state_file: synthesize.md
+    instruction: ./<%= id %>/synthesize.md
+  - name: report
+    kind: agent
+    state_file: report.md
+    instruction: ./<%= id %>/report.md
+  - name: done
+    kind: terminal
+    state_file: done.md

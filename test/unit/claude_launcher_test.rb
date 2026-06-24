@@ -28,7 +28,9 @@ class ClaudeLauncherTest < Minitest::Test
           timeout_sec: 1,
           log_label: "test",
           session_name: "hive-test-session",
-          status_mode: :state_file_marker
+          status_mode: :state_file_marker,
+          allowed_tools: %w[Read LS],
+          disallowed_tools: %w[Write Bash]
         )
 
         assert_equal({ status: :complete }, result)
@@ -36,6 +38,8 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal "prompt", captured.fetch(1).fetch(:prompt)
         assert_equal :claude, captured.fetch(1).fetch(:profile).name
         assert_equal "auto", captured.fetch(1).fetch(:permission_mode)
+        assert_equal %w[Read LS], captured.fetch(1).fetch(:allowed_tools)
+        assert_equal %w[Write Bash], captured.fetch(1).fetch(:disallowed_tools)
       end
     end
   end
@@ -66,13 +70,14 @@ class ClaudeLauncherTest < Minitest::Test
           strict_mcp_config: true
         )
 
-        # The headless branch appends mcp_cli_flags + --allowedTools after
-        # any cfg-derived flags; assert that trailing assembly (the branch
-        # under test) is present and ordered.
+        # The headless branch passes allowed_tools through as a kwarg (Agent
+        # renders it to --allowedTools downstream, alongside disallowed_tools)
+        # and appends mcp_cli_flags after any cfg-derived flags. Assert both
+        # halves of that assembly: the tool kwarg and the trailing mcp flags.
+        assert_equal "Read,mcp__screenote__list_projects", captured.fetch(:allowed_tools)
         assert_equal(
-          %w[--mcp-config /tmp/screenote.mcp.json --strict-mcp-config
-             --allowedTools Read,mcp__screenote__list_projects],
-          captured.fetch(:cli_flags).last(5)
+          %w[--mcp-config /tmp/screenote.mcp.json --strict-mcp-config],
+          captured.fetch(:cli_flags).last(3)
         )
       end
     end
@@ -894,6 +899,20 @@ class ClaudeLauncherTest < Minitest::Test
     refute_includes command, "--effort"
   end
 
+  def test_wrapper_command_carries_allowed_and_disallowed_tools
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "default",
+      allowed_tools: %w[Read LS],
+      disallowed_tools: %w[Write Bash]
+    )
+
+    assert_equal %w[--allowedTools Read,LS], command.each_cons(2).find { |a, _| a == "--allowedTools" }
+    assert_equal %w[--disallowedTools Write,Bash], command.each_cons(2).find { |a, _| a == "--disallowedTools" }
+  end
+
   # Readiness-wins contract: the limit menu is only classified AFTER the
   # ready wait exhausts (no fail-fast inside the loop — banner/footer copy
   # in a still-booting pane must never kill a launch). The clock is stubbed
@@ -1130,6 +1149,26 @@ class ClaudeLauncherTest < Minitest::Test
       timeout = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 0, "ci")
       assert_equal :timeout, timeout.fetch(:status)
       assert_match(/stop hook did not signal/, timeout.fetch(:error_message))
+    end
+  end
+
+  # A quota wall stalls the default claude/tmux execute spawn without ever
+  # touching `.done`; the exit_code_only wait must surface it as an :error
+  # carrying the limit message (not drain to the generic stop-hook timeout)
+  # so the execute classifier stamps reason="limits_reached". Mirrors
+  # wait_for_expected_output's limit test.
+  def test_wait_for_done_signal_reports_limit_wall_before_done_signal
+    with_tmp_task do |task|
+      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new(limit_menu)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      refute_match(/stop hook did not signal/, result.fetch(:error_message))
     end
   end
 

@@ -86,9 +86,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   # on-disk marker name), not row.action, so we use the production-
   # accurate combo by default. Tests can override via the action: kwarg.
   def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
-               marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil)
+               marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil, workflow: nil)
     Row.new(
-      project: project, slug: slug, stage: stage,
+      project: project, slug: slug, stage: stage, workflow: workflow,
       marker: marker, marker_attrs: marker_attrs, folder: File.dirname(state_file), state_file: state_file,
       state_file_mtime: mtime,
       action: action, suggested_command: nil,
@@ -939,6 +939,75 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal [ { project: "p", slug: "s", mtime: pre_clear_mtime } ], @controller.observed_mtimes
       assert Hive::Markers.current(state_file).none?,
              "auto-recoverable unpushed finalize marker should clear to :none so daemon can rerun finalize"
+    end
+  end
+
+  # ── Generic-workflow heal paths (cover the coding-id gates) ────────────────
+
+  def test_generic_finalize_unpushed_commits_does_not_auto_recover
+    # The 8-finalize + unpushed_commits auto-recovery is a coding-only branch
+    # (finalize/PR recovery). A generic workflow reusing 8-finalize must NOT be
+    # treated as auto-recoverable, so its error marker stays red.
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=unpushed_commits marker_id=err-g -->\n")
+      row = make_row(
+        state_file, pid_alive: nil, mtime: NOW - 100, stage: "8-finalize",
+        marker: "error",
+        marker_attrs: { "reason" => "unpushed_commits", "marker_id" => "err-g" },
+        action: "error", live_task_lock: false, workflow: "research"
+      )
+
+      heal([ row ])
+
+      refute(@logger.events.any? { |name, _| name == :marker_healed },
+             "a generic 8-finalize unpushed_commits error must not take the coding finalize recovery")
+      refute Hive::Markers.current(state_file).none?,
+             "generic finalize unpushed error stays red (coding-only auto-recovery)"
+    end
+  end
+
+  def test_generic_review_agent_loss_auto_recovers_unlike_coding
+    # Coding EXCLUDES 6-review from generic agent-loss recovery (it has its own
+    # REVIEW_ERROR heal paths). A generic workflow reusing 6-review has no such
+    # specialized path, so an agent-loss error DOES heal there.
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=tmux_session_terminated marker_id=err-r -->\n")
+      row = make_row(
+        state_file, pid_alive: nil, mtime: NOW - 100, stage: "6-review",
+        marker: "error",
+        marker_attrs: { "reason" => "tmux_session_terminated", "marker_id" => "err-r" },
+        action: "error", live_task_lock: false, workflow: "research"
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "a generic 6-review agent-loss error should heal (no coding review exclusion)"
+      assert_equal "terminal_agent_loss", heal_event[1][:reason]
+      assert Hive::Markers.current(state_file).none?,
+             "generic 6-review agent-loss marker clears so the daemon can rerun the stage"
+    end
+  end
+
+  def test_generic_plan_stage_error_heals_without_requeue
+    # The 3-plan post-clear requeue is a coding-only fixup (an empty coding
+    # plan.md re-classifies straight back to error). A generic 3-plan agent-loss
+    # error still heals, but must NOT enqueue the coding `hive plan` rerun.
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=agent_orphaned marker_id=err-p -->\n")
+      row = make_row(
+        state_file, pid_alive: nil, mtime: NOW - 100, stage: "3-plan",
+        marker: "error",
+        marker_attrs: { "reason" => "agent_orphaned", "marker_id" => "err-p" },
+        action: "error", live_task_lock: false, workflow: "research"
+      )
+
+      heal([ row ])
+
+      assert(@logger.events.any? { |name, _| name == :marker_healed },
+             "a generic 3-plan agent-loss error should still heal")
+      assert_empty @request_queue.requests,
+                   "the coding plan rerun requeue must not fire for a generic workflow"
     end
   end
 

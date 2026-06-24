@@ -30,14 +30,19 @@ module Hive
       # sole production caller (run!) always passes it.
       def spawn_artifacts_agent(task, cfg, prompt, profile, screenote:)
         cwd = File.directory?(task.worktree_path.to_s) ? task.worktree_path : task.folder
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "artifacts", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: cwd,
           max_budget_usd: cfg.dig("budget_usd", "artifacts") || Hive::Config::DEFAULTS.dig("budget_usd", "artifacts"),
           timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
           log_label: "artifacts",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
         mcp_config_path = nil
@@ -61,7 +66,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task),
+            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task), # coding-scoped: coding artifacts stage tmux session
             allowed_tools: allowed_tools,
             mcp_config_path: mcp_config_path,
             strict_mcp_config: !mcp_config_path.nil?

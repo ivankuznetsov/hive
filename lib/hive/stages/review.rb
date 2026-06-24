@@ -18,6 +18,7 @@ require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
 require "hive/stages/review/orchestrator_owned"
+require "hive/stages/review/suppression"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
@@ -79,6 +80,15 @@ module Hive
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
       AcceptedFindings = Data.define(:text, :count)
+      # Resolved reviewer compare base. `degraded` is true when the
+      # configured compare ref did not resolve and we fell back to the
+      # worktree HEAD (or an unresolved-ref token). The base is resolved
+      # once per `run!` and frozen across the in-memory pass loop, so it
+      # only moves between separate `run!`/resume invocations once HEAD has
+      # advanced past the recorded base — at which point the suppression
+      # list resets and effectively cannot accumulate. The runner surfaces
+      # this per pass so an operator can tell suppression is self-disabled.
+      ReviewerCompareBase = Data.define(:sha, :degraded)
       # Auto-commit scope constants now live on Hive::Stages::AutoCommit
       # (shared with CleanExit). Aliased here as compatibility constants —
       # external readers that referenced them via Review::CONSTANT continue
@@ -122,7 +132,7 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          next_dir = Hive::Workflows.next_dir_after("6-review")
+          next_dir = Hive::Workflows.next_dir_after("6-review") # coding-scoped: coding review clears into artifacts
           warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
@@ -157,6 +167,9 @@ module Hive
 
         ops = Hive::GitOps.new(worktree_path)
         default_branch = reviewer_compare_ref(cfg, ops)
+        compare_base = reviewer_compare_base_sha(ops, default_branch)
+        reviewer_compare_base_sha = compare_base.sha
+        @suppression_base_degraded = compare_base.degraded
 
         ctx = Hive::Stages::Review::Context.new(
           worktree_path: worktree_path,
@@ -383,6 +396,18 @@ module Hive
             end
 
             if triage_enabled?(cfg)
+              if @suppression_base_degraded && Hive::Stages::Review::Suppression.enabled?(cfg)
+                warn "[hive.review] suppression base unresolved (compare ref did not resolve); " \
+                     "the list still accumulates across passes within this run but resets across " \
+                     "run!/resume re-invocations once HEAD advances past the recorded base"
+              end
+              stripped = Hive::Stages::Review::Suppression.strip_suppressed!(
+                cfg: cfg,
+                ctx: ctx_pass,
+                base_sha: reviewer_compare_base_sha
+              )
+              warn "[hive.review] suppressed #{stripped} no-fix finding(s) before triage for pass #{format('%02d', pass)}" if stripped.positive?
+
               @current_phase = :triage
               triage_result = run_triage_with_retries(
                 cfg, ctx_pass, task, pass: pass,
@@ -408,6 +433,12 @@ module Hive
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
                          status: :review_error }
               end
+              seeded = Hive::Stages::Review::Suppression.seed_from_triage!(
+                cfg: cfg,
+                ctx: ctx_pass,
+                base_sha: reviewer_compare_base_sha
+              )
+              warn "[hive.review] seeded #{seeded} no-fix suppression(s) from triage for pass #{format('%02d', pass)}" if seeded.positive?
             else
               write_manual_escalations(ctx_pass)
             end
@@ -506,6 +537,12 @@ module Hive
             # fix agent rewriting or deleting it would erase the failure
             # provenance the user relies on for triage.
             "reviews/errors-#{format('%02d', pass)}.md",
+            # reviews/suppressed.md is the orchestrator-owned no-fix
+            # suppression list. A fix agent clearing or rewriting it (e.g.
+            # to un-suppress findings or forge new ones) would defeat the
+            # convergence guarantee — guard it like the other provenance
+            # artifacts. Triage's snapshot protects it too (U3/A4).
+            "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
@@ -723,6 +760,36 @@ module Hive
 
         warn "[hive] origin/#{branch} not found in worktree; reviewers will compare against local #{branch} (diffs may be stale)"
         branch
+      end
+
+      def reviewer_compare_base_sha(ops, ref)
+        out, err, status = Open3.capture3(
+          "git", "-C", ops.project_root,
+          "rev-parse", "--verify", "#{ref}^{commit}"
+        )
+        return ReviewerCompareBase.new(sha: out.strip, degraded: false) if status.success?
+
+        warn "[hive.review] compare ref #{ref.inspect} did not resolve for suppression binding; " \
+             "falling back to worktree HEAD (#{(err.strip.empty? ? out : err).strip})"
+        head_out, head_err, head_status = Open3.capture3(
+          "git", "-C", ops.project_root,
+          "rev-parse", "--verify", "HEAD"
+        )
+        # HEAD changes on every fix commit, so binding suppression to it
+        # (or to the unresolved-ref token below) means reset_if_base_changed!
+        # resets the list across run!/resume re-invocations once HEAD advances
+        # past the recorded base — flag it degraded so the runner can warn that
+        # suppression won't survive a resume. Within a single run! the base is
+        # resolved once and frozen across the pass loop, so the list still
+        # accumulates across passes (see ReviewerCompareBase).
+        return ReviewerCompareBase.new(sha: head_out.strip, degraded: true) if head_status.success?
+
+        warn "[hive.review] worktree HEAD did not resolve for suppression binding; " \
+             "using unresolved-ref token (#{(head_err.strip.empty? ? head_out : head_err).strip})"
+        ReviewerCompareBase.new(
+          sha: "unresolved-#{::Digest::SHA256.hexdigest(ref.to_s)[0, 16]}",
+          degraded: true
+        )
       end
 
       def mark_working(task, phase:, pass:)
@@ -1148,28 +1215,31 @@ module Hive
           return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
                                          wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
-          Hive::ClaudeLauncher.with_shared_session(
-            task: task,
-            cfg: cfg,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{ctx.pass}", task),
-            cwd: ctx.worktree_path,
-            add_dirs: [ ctx.task_folder ],
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-          ) do |handle|
-            claude_specs.each do |spec|
-              result = run_reviewer_spec(
-                cfg, ctx, spec,
-                reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-                started_at: started_at,
-                max_wall_clock_sec: max_wall_clock_sec,
-                handle: handle
-              )
-              return :wall_clock_exceeded if result == :wall_clock_exceeded
+          shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
+            scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
+            Hive::ClaudeLauncher.with_shared_session(
+              task: task,
+              cfg: cfg,
+              session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
+              cwd: ctx.worktree_path,
+              add_dirs: scope.fetch(:add_dirs),
+              **Hive::Stages::Base.tool_scope_kwargs(scope)
+            ) do |handle|
+              group.each do |spec|
+                result = run_reviewer_spec(
+                  cfg, ctx, spec,
+                  reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+                  started_at: started_at,
+                  max_wall_clock_sec: max_wall_clock_sec,
+                  handle: handle
+                )
+                return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-              statuses << result.status
-              error_messages << result.error_message if result.error?
-              handle_reviewer_result(task, cfg, ctx, spec, result)
-              remaining_specs -= 1
+                statuses << result.status
+                error_messages << result.error_message if result.error?
+                handle_reviewer_result(task, cfg, ctx, spec, result)
+                remaining_specs -= 1
+              end
             end
           end
         else
@@ -1211,6 +1281,34 @@ module Hive
         return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
 
         Array(cfg.dig("review", "reviewers"))
+      end
+
+      # Group reviewers that share an effective permission scope so they can
+      # share one tmux session. The group key is the RESOLVED spec — an
+      # explicit `permissions:` value, or the project/stage default when the
+      # key is omitted — so a reviewer spelling out `permissions: yolo` and
+      # one inheriting the default yolo land in the SAME group (identical
+      # effective scope → one session) instead of two sessions keyed on
+      # present-vs-absent. Each group's scope is built from group.first, which
+      # is sound because every member resolves to the same effective spec.
+      def shared_reviewer_groups(cfg, specs)
+        default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
+        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
+      end
+
+      def shared_reviewer_session_name(task, pass, group_idx)
+        suffix = group_idx.zero? ? "" : "-scope#{group_idx + 1}"
+        Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{pass}#{suffix}", task)
+      end
+
+      def shared_reviewer_permission_scope(cfg, ctx, task, spec)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        Hive::Stages::Base.stage_permission_scope(
+          cfg, "review.reviewers", task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+          **Hive::Stages::Base.explicit_permission_kwargs(spec)
+        )
       end
 
       def patrol_task?(task)
@@ -1311,6 +1409,18 @@ module Hive
               error_message: "#{e.class}: #{e.message}"
             )
           rescue StandardError => e
+            # A8 fail-closed: a non-yolo permission scope on a reviewer whose
+            # runner can't enforce tool scoping (codex / pi) raises
+            # Hive::ConfigError from stage_permission_scope. Swallowing it as a
+            # per-reviewer :error would let the rest of the pass continue after
+            # silently dropping the unenforceable reviewer — a silent security
+            # downgrade. Re-raise so the outer `Stages::Review.run!`
+            # Hive::ConfigError rescue stamps the `config_error` review_error
+            # marker and hard-fails the run. Only the typed config error
+            # propagates; genuine per-reviewer infra failures (spawn errors,
+            # adapter timeouts) still degrade to a recorded :error below.
+            raise if e.is_a?(Hive::ConfigError)
+
             Hive::Reviewers::Result.new(
               name: spec["name"],
               output_path: adapter.output_path,
@@ -1466,7 +1576,7 @@ module Hive
 
       def auto_fix_finding_line?(line)
         return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX)\b/i
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
 
         true
       end
@@ -1593,6 +1703,11 @@ module Hive
       def spawn_fix_agent(task, cfg, ctx, accepted:)
         profile_name = cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, "review.fix", task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         template = cfg.dig("review", "fix", "prompt_template") || "fix_prompt.md.erb"
         template_path = Hive::Stages::Base.resolve_template_path(
           template,
@@ -1616,12 +1731,13 @@ module Hive
 
         kwargs = {
           prompt: prompt,
-          add_dirs: [ ctx.task_folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: ctx.worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "review_fix") || 100,
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
         if profile.name == :claude
@@ -1629,8 +1745,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task),
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
@@ -1647,8 +1762,10 @@ module Hive
       # Comma-separated reviewer file basenames (sans extension and pass
       # suffix) for the current pass. Surfaced as the `Hive-Reviewer-Sources`
       # trailer so the metric can show which reviewers' findings drove
-      # which fix commits. Excludes orchestrator-owned files (escalations,
-      # ci-blocked, browser-, fix-guardrail-).
+      # which fix commits. Excludes orchestrator-owned files via
+      # `reviewer_file?` — the single-source `ORCHESTRATOR_OWNED_PREFIXES`
+      # list — rather than re-listing the prefixes here (the old inline
+      # list had drifted stale).
       def reviewer_sources_for(ctx)
         sources = Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")]
                   .map { |p| File.basename(p, ".md") }
@@ -1960,7 +2077,7 @@ module Hive
 
         cleanup = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: coding review stage event
           task: task,
           cfg: cfg,
           reason: :pre_fix_dirty_worktree
@@ -1985,7 +2102,7 @@ module Hive
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: coding review stage event
           event_type: :clean_exit_auto_committed,
           message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
         )

@@ -3,6 +3,9 @@ require "monitor"
 module Hive
   module Bot
     module TitleFormatter
+      # coding-scoped (block): bespoke human labels for the coding stage dirs;
+      # every other workflow titleizes its stage name instead of looking up
+      # this coding-only map (see stage_label's fallback).
       STAGE_LABELS = {
         "1-inbox" => "Inbox",
         "2-brainstorm" => "Brainstorm",

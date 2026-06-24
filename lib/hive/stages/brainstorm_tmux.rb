@@ -18,11 +18,15 @@ module Hive
       def run!(task, cfg)
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
         prompt = Hive::Stages::Brainstorm.render_prompt(task, cfg, profile: profile)
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "brainstorm", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
         Hive::ClaudeLauncher.launch!(
           task: task,
           cfg: cfg,
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
@@ -30,14 +34,14 @@ module Hive
           session_name: session_name_for(task),
           status_mode: :state_file_marker,
           profile: profile,
-          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+          **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
       end
 
       def session_name_for(task)
-        Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
+        Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task) # coding-scoped: coding brainstorm stage tmux session
       end
 
       def preflight_tmux!(tmux_bin: Hive::ClaudeLauncher.tmux_bin)
@@ -58,16 +62,6 @@ module Hive
 
       def tmux_bin
         Hive::ClaudeLauncher.tmux_bin
-      end
-
-      def wrapper_command(task, profile, cfg)
-        Hive::ClaudeLauncher.wrapper_command(
-          cwd: task.folder,
-          add_dirs: [ task.folder ],
-          profile: profile,
-          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
-          permission_mode: Hive::Config.claude_permission_mode(cfg)
-        )
       end
 
       def wait_until_session_exists!(runner)

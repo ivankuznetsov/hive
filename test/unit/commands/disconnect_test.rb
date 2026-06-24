@@ -172,6 +172,17 @@ class DisconnectCommandTest < Minitest::Test
     end
   end
 
+  def test_json_error_envelope_swallows_a_broken_pipe
+    # A closed stdout (EPIPE) while writing the failure envelope must not
+    # mask the original error with a secondary crash.
+    output = Object.new
+    output.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+    cmd = Hive::Commands::Disconnect.new("github", json: true, output: output)
+
+    err = assert_raises(Hive::Error) { cmd.call }
+    assert_match(/unsupported disconnect service/, err.message)
+  end
+
   def test_disconnect_clears_a_corrupt_credential_file
     with_tmp_dir do |dir|
       store = store_in(dir)

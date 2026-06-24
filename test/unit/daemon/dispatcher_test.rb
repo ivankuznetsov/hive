@@ -247,10 +247,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false)
+          blocked: false, workflow: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
-      project: project, slug: slug, stage: stage, marker: marker,
+      project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
       folder: folder,
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
@@ -276,6 +276,76 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
+  end
+
+  # A generic-workflow row (`workflow: "research"`, `action: "ready_to_run"`)
+  # must dispatch `hive run` on first sight through the real tick loop — the
+  # generic dispatch path was previously only asserted via direct CLI calls,
+  # never observed firing through `Dispatcher#tick`/`ConcurrencyController`.
+  def test_generic_workflow_ready_to_run_dispatches_through_real_tick
+    rows = [ row(slug: "g1", stage: "2-gather", workflow: "research",
+                 action: "ready_to_run", command: "hive run g1") ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size, "a generic ready_to_run row must dispatch on first sight"
+    assert_equal "hive run g1", sup.spawned.first[:command]
+    assert events_include?(logger, :dispatched)
+    # First-sight dispatch records a [project,slug] baseline so a markerless
+    # re-classification next tick is braked rather than re-spawned.
+    refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "g1")
+  end
+
+  # The generic stall scenario: a `ready_to_run` row whose state file has NOT
+  # advanced past the recorded dispatch baseline (the agent exited 0 without a
+  # WAITING/COMPLETE marker). The real tick must surface it as
+  # `:markerless_stalled` and NOT re-spawn — proving the
+  # handle_row → :markerless_stalled wiring end-to-end.
+  def test_generic_ready_to_run_unchanged_mtime_is_markerless_stalled_not_respawned
+    rows = [ row(slug: "g1", stage: "2-gather", workflow: "research",
+                 action: "ready_to_run", command: "hive run g1",
+                 marker: "none", mtime: T0 - 600) ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    # Baseline equal to the row's mtime ⇒ no progress since the last dispatch.
+    ctrl.observe_state_file_mtime(project: "p1", slug: "g1", mtime: T0 - 600)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned, "an unchanged markerless generic run must not re-dispatch"
+    stalled = logger.events.find { |(n, _)| n == :markerless_stalled }
+    refute_nil stalled, "the stall must be surfaced explicitly, not as a silent skip"
+    assert_equal "agent_exited_without_marker", stalled[1][:reason]
+    refute events_include?(logger, :dispatched)
+  end
+
+  # High #1 regression: after a generic `hive approve` moves a task into a
+  # non-coding dir (research's `2-gather`), the post-completion refresh must
+  # locate it through the runtime union (`Workflows.all_stage_dirs`), NOT the
+  # coding-only `Stages::DIRS` — otherwise the moved task's [project,slug]
+  # mtime baseline goes stale and its fresh stage mis-debounces or stalls.
+  def test_find_post_advance_state_file_locates_generic_non_coding_dir
+    dispatcher, = make_dispatcher
+    Dir.mktmpdir("hive-post-advance") do |hive_state|
+      slug = "gen-1"
+      gather_dir = File.join(hive_state, "stages", "2-gather", slug)
+      FileUtils.mkdir_p(gather_dir)
+      notes = File.join(gather_dir, "notes.md")
+      File.write(notes, "# notes\n<!-- COMPLETE -->\n")
+
+      # Pre-fix behavior: with no workflow registering `2-gather`, the dir is
+      # outside the union and the coding-only scan can't see it.
+      assert_nil dispatcher.send(:find_post_advance_state_file, hive_state, slug),
+                 "a dir outside every registered workflow's union must not resolve"
+
+      # research's gather stage IS `2-gather`; once registered, the union scan
+      # finds the moved file — the exact fix for the daemon advance stall.
+      with_registered_workflow(research_workflow) do
+        assert_equal notes,
+                     dispatcher.send(:find_post_advance_state_file, hive_state, slug),
+                     "the post-advance scan must locate the generic non-coding stage dir"
+      end
+    end
   end
 
   def test_blocked_dependency_row_does_not_dispatch
@@ -3004,6 +3074,13 @@ end
     # Not a brainstorm stage → no Q&A, never pending.
     refute dispatcher.send(:brainstorm_answers_pending?,
                            row(action: "needs_input", stage: "6-review",
+                               state_file: pending, folder: folder))
+    # A NON-coding workflow that reuses the 2-brainstorm dir has no coding
+    # Q&A answer flow → never pending (it must take the generic path, not be
+    # held as answers_pending).
+    refute dispatcher.send(:brainstorm_answers_pending?,
+                           row(action: "needs_input", stage: "2-brainstorm",
+                               workflow: "research",
                                state_file: pending, folder: folder))
     # Not a needs_input row.
     refute dispatcher.send(:brainstorm_answers_pending?,

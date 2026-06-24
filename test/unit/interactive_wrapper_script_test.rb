@@ -104,7 +104,7 @@ class InteractiveWrapperScriptTest < Minitest::Test
     end
   end
 
-  def test_permission_mode_and_allowed_tools_are_forwarded_to_claude
+  def test_permission_mode_and_tool_scope_flags_are_forwarded_to_claude
     with_tmp_dir do |dir|
       log_dir = File.join(dir, "logs")
       FileUtils.mkdir_p(log_dir)
@@ -116,12 +116,17 @@ class InteractiveWrapperScriptTest < Minitest::Test
         "--cwd", dir,
         "--permission-mode", "bypassPermissions",
         "--allowedTools", "Read,Write,Edit,LS",
+        "--disallowedTools", "Bash,Write",
         "--bin", FAKE_BIN
       )
 
       assert status.success?, err
       argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
-      assert_equal [ "--permission-mode", "bypassPermissions", "--allowedTools", "Read,Write,Edit,LS" ], argv_args(argv_log)
+      assert_equal [
+        "--permission-mode", "bypassPermissions",
+        "--allowedTools", "Read,Write,Edit,LS",
+        "--disallowedTools", "Bash,Write"
+      ], argv_args(argv_log)
     end
   end
 

@@ -337,6 +337,33 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     refute_includes out, "Needs recovery"
   end
 
+  def test_recover_review_status_shows_quota_hold_label
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "quota-review",
+          stage: "6-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: {
+            "reason" => "limits_reached",
+            "provider" => "codex",
+            "retry_after" => "2026-06-24T23:20:00Z"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    # Assert the renderer output equals the shared contract it delegates to,
+    # so this test verifies the no-divergence invariant rather than re-pinning
+    # the literal (the canonical literal pin lives in agent_limit_test.rb).
+    assert_equal Hive::AgentLimit.held_label(row.attrs),
+                 Hive::Tui::Views::TasksPane.status_label(row)
+  end
+
   def test_recover_review_status_falls_back_to_marker_when_reason_missing
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
@@ -544,6 +571,33 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "ERROR panic",
                     "error rows must fall back to the reason attr when no exit_code is set"
+  end
+
+  def test_error_status_shows_quota_hold_label
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "quota-error",
+          stage: "4-execute",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: {
+            "reason" => "limits_reached",
+            "provider" => "codex",
+            "retry_after" => "2026-06-24T23:20:00Z"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    # Assert against the shared contract the renderer delegates to (the
+    # canonical literal pin lives in agent_limit_test.rb) so a label tweak
+    # is a one-line edit there, and this test stays a divergence guard.
+    assert_equal Hive::AgentLimit.held_label(row.attrs),
+                 Hive::Tui::Views::TasksPane.status_label(row)
   end
 
   def test_error_status_falls_back_to_action_label_when_attrs_blank

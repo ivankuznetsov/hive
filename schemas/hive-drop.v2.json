@@ -48,19 +48,11 @@
           "type": "string"
         },
         "from_stages": {
+          "description": "Active stage dirs the dropped task occupied. The pattern is relaxed from the closed coding enum so a generic (runtime-registered) workflow's stage dirs validate; the real valid set is the runtime union `Hive::Workflows.all_stage_dirs` minus the archive stage. Readers must close-default on an unknown stage dir rather than assume any `N-name` is coding.",
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [
-              "1-inbox",
-              "2-brainstorm",
-              "3-plan",
-              "4-execute",
-              "5-open-pr",
-              "6-review",
-              "7-artifacts",
-              "8-finalize"
-            ]
+            "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
           }
         },
         "pr_closed": {

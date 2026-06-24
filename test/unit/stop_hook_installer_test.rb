@@ -138,7 +138,11 @@ class StopHookInstallerTest < Minitest::Test
   end
 
   def test_stop_hook_requires_stage_dir_env
-    _out, err, status = Open3.capture3(HOOK, stdin_data: "{}")
+    # Scrub HIVE_TASK_STAGE_DIR from the child env so the test is hermetic even
+    # when the surrounding shell exports it (e.g. under the review harness);
+    # otherwise the hook inherits the value and never reaches its required-env
+    # error path. A nil env value unsets the var for the child process.
+    _out, err, status = Open3.capture3({ "HIVE_TASK_STAGE_DIR" => nil }, HOOK, stdin_data: "{}")
 
     refute status.success?
     assert_match(/HIVE_TASK_STAGE_DIR required/, err)

@@ -114,7 +114,7 @@ module Hive
       # → file I/O).
 
       # Dispatch a workflow verb subprocess. `argv` is the full command
-      # array (`["hive", "plan", "slug", "--from", "2-brainstorm"]`),
+      # array (`["hive", "plan", "slug", "--from", "2-brainstorm"]`), # not-a-stage-ref: command-shape documentation example
       # `verb` is `argv[1]` cached at construction time so the renderer
       # can flash exit codes by verb name without re-deriving.
       DispatchCommand = Data.define(:argv, :verb)

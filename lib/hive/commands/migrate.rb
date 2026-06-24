@@ -22,11 +22,11 @@ module Hive
       # current layout in a single `hive migrate` pass — chaining is not
       # supported (see `Migrate::STAGE_RENAMES` consistency tests).
       STAGE_RENAMES = {
-        "5-review" => "6-review",
-        "6-pr" => "8-finalize",
-        "7-done" => "9-done",
-        "7-finalize" => "8-finalize",
-        "8-done" => "9-done"
+        "5-review" => "6-review", # not-a-stage-ref: legacy migration table
+        "6-pr" => "8-finalize", # not-a-stage-ref: legacy migration table
+        "7-done" => "9-done", # not-a-stage-ref: legacy migration table
+        "7-finalize" => "8-finalize", # not-a-stage-ref: legacy migration table
+        "8-done" => "9-done" # not-a-stage-ref: legacy migration table
       }.freeze
 
       # Legacy `pr` budget/timeout keys are read-through-fallback in
@@ -192,7 +192,8 @@ module Hive
             id: Hive::TaskCounter.next!,
             slug: File.basename(folder),
             display_name: meta[:display_name],
-            depends_on: meta[:depends_on]
+            depends_on: meta[:depends_on],
+            workflow: meta[:workflow]
           )
         end
         targets.size

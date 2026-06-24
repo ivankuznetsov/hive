@@ -313,11 +313,11 @@ class MigrateTest < Minitest::Test
         out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "backfilled 3 task ids"
-        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil, depends_on: nil },
+        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil, depends_on: nil, workflow: nil },
                      Hive::TaskMeta.read(earlier))
-        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil, depends_on: nil },
+        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil, depends_on: nil, workflow: nil },
                      Hive::TaskMeta.read(later))
-        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil, depends_on: nil },
+        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil, depends_on: nil, workflow: nil },
                      Hive::TaskMeta.read(no_idea))
         assert_equal 4, Hive::TaskCounter.peek
       end
@@ -353,7 +353,8 @@ class MigrateTest < Minitest::Test
 
         capture_io { migrate_command(dir).call }
 
-        assert_equal({ id: 1, slug: "named-task-260603-aaaa", display_name: "Named Task", depends_on: nil },
+        assert_equal({ id: 1, slug: "named-task-260603-aaaa", display_name: "Named Task",
+                       depends_on: nil, workflow: nil },
                      Hive::TaskMeta.read(folder))
       end
     end
@@ -380,9 +381,39 @@ class MigrateTest < Minitest::Test
 
         assert_equal(
           { id: 1, slug: "dependent-task-260603-aaaa",
-            display_name: "Dependent Task", depends_on: "base-task-260603-bbbb" },
+            display_name: "Dependent Task", depends_on: "base-task-260603-bbbb", workflow: nil },
           Hive::TaskMeta.read(folder),
           "migrate's id-backfill must preserve depends_on, not strip it"
+        )
+      end
+    end
+  end
+
+  # The id-backfill path re-writes meta.yml; dropping the workflow arg there
+  # would silently revert a non-coding task to the project default workflow
+  # during migrate (the exact sibling of the depends_on strip above). Seed a
+  # populated workflow selector and assert it survives a full migrate run.
+  def test_migrate_fills_null_id_and_preserves_workflow
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        folder = write_task_folder(stages, "4-execute", "generic-task-260603-aaaa")
+        Hive::TaskMeta.write(
+          folder,
+          id: nil,
+          slug: "generic-task-260603-aaaa",
+          display_name: "Generic Task",
+          workflow: "research"
+        )
+
+        capture_io { migrate_command(dir).call }
+
+        assert_equal(
+          { id: 1, slug: "generic-task-260603-aaaa",
+            display_name: "Generic Task", depends_on: nil, workflow: "research" },
+          Hive::TaskMeta.read(folder),
+          "migrate's id-backfill must preserve the workflow selector, not strip it"
         )
       end
     end

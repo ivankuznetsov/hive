@@ -283,7 +283,7 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 on a `hive-status` `schema_version` mismatch — that would hard-crash
 `/status` whenever the `hive` gem is bumped under a running bot. A newer
 payload is parsed best-effort (additive-envelope contract) and logs a
-`poll_failure` skew warning; an older payload (stale binary on PATH) or a
+`poll_schema_skew` skew warning; an older payload (stale binary on PATH) or a
 newer payload that genuinely fails to parse returns an actionable
 `failure(...)` result telling the operator to restart the bot or
 update/reinstall the binary. The full classification (`:match` /

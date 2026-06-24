@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-log.v3.json",
   "title": "hive bot structured log line (v3)",
-  "description": "One JSON-line event emitted by Hive::Bot::Logger. v3 adds a required `level` field and optional `category` tag to every log line, and adds `poll_unhealthy` for loud poll-health escalation. v2 is kept as-is for historical log lines. Like prior versions, v3 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event, or removing required fields) require a v4 schema file with $id and `schema_version` bumped.",
+  "description": "One JSON-line event emitted by Hive::Bot::Logger. v3 adds a required `level` field to every log line plus an optional `category` tag (present only on events that carry one, e.g. noise; omitted otherwise), and adds `poll_unhealthy` for loud poll-health escalation. v2 is kept as-is for historical log lines. Like prior versions, v3 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event, or removing required fields) require a v4 schema file with $id and `schema_version` bumped.",
   "type": "object",
   "additionalProperties": true,
   "required": ["ts", "schema", "schema_version", "event", "level"],

@@ -3,11 +3,11 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-06-18
+updated: 2026-06-22
 tags: [stage, artifacts, release]
 ---
 
-**TLDR**: Artifact collection is the agent-backed handoff between autonomous review and PR finalization. It asks the configured `artifacts.agent` to write `artifact.md`, ending with `<!-- COMPLETE -->`, and now asks the agent to produce best-effort visual proof under `media/` when the task has an observable UI/TUI/CLI surface. Still PNG/JPEG captures are pushed to screenote after the agent finishes, using Ruby-side credentials that are never shown to the agent. Capture skips/failures are recorded in `media/manifest.json` and do not fail the stage. When `artifacts.agent` resolves to Claude, the launch path honors project-global `claude.mode`.
+**TLDR**: Artifact collection is the agent-backed handoff between autonomous review and PR finalization. It asks the configured `artifacts.agent` to write `artifact.md`, ending with `<!-- COMPLETE -->`, and asks the agent to produce best-effort visual proof under `media/` when the task has an observable UI/TUI/CLI surface. Screenote is now agent-driven: when a valid OAuth credential exists, Claude-backed artifacts runs receive a strict Screenote MCP config and the prompt tells the agent to upload PNG/JPEG stills through `create_screenshot_upload`; when Screenote is missing/expired/unusable, the agent still captures local media and records `screenote_skipped_reason`. The Ruby REST uploader is gone.
 
 ## Preconditions
 
@@ -18,14 +18,13 @@ tags: [stage, artifacts, release]
 
 1. Touch `artifact.md` if it does not exist.
 2. If the current marker is already `COMPLETE`, return without a new commit action.
-3. Render `templates/artifacts_prompt.md.erb` with the task folder, worktree path, and target artifact file.
+3. Resolve the Screenote connection state from `~/.config/hive/screenote.json` (or `HIVE_HOME/screenote.json`) plus any per-task `screenote.project_id` override, then render `templates/artifacts_prompt.md.erb` with the task folder, worktree path, target artifact file, and connected/disconnected Screenote context.
 4. Resolve `artifacts.agent` through `Hive::Stages::Base.stage_profile`.
-5. If the profile is Claude, call `Hive::Stages::Base.spawn_claude!` with session name `hive-7-artifacts-<slug>`; otherwise call the normal `spawn_agent` path.
+5. If the profile is Claude and Screenote is connected, write a mode-0600 ephemeral `.mcp.json` under `Hive::Paths.cache_home`, pass it to Claude with `--mcp-config` and `--strict-mcp-config`, and add the Screenote MCP tools to `--allowedTools`. If disconnected or the profile is not Claude, spawn without Screenote MCP injection.
 6. Re-read the terminal marker from `artifact.md`.
-7. On `COMPLETE`, read `media/manifest.json`. If it is `status: "captured"`, upload PNG/JPEG items whose `push_to_screenote` is true and whose `screenote_url` is blank through `Hive::ScreenoteUploader`; write any returned `annotate_url` values back into the manifest.
-8. Return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise.
+7. Return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise. The stage no longer mutates `media/manifest.json` after the agent exits.
 
-Screenote processing is deliberately fail-soft and never turns a completed artifacts stage red. Only invalid manifest JSON, a misconfigured screenote endpoint (`Hive::ConfigError`), individual upload failures, and the outer `StandardError` rescue actually warn. The per-item skips — missing credentials (the whole batch short-circuits), skipped/failed manifests, missing files, non-still GIF entries, and traversal-/symlink-shaped item filenames — are silently skipped.
+Screenote processing remains fail-soft, but the fail-soft behavior now lives in the prompt and MCP injection boundary rather than in a Ruby post-processing loop. A missing credential, expired token, missing project, or invalid credential produces a disconnected prompt context; the agent still captures local media and records the reason in `screenote_skipped_reason`. A revoked token can still fail individual MCP calls inside the agent run; the prompt instructs the agent to leave `screenote_url` null and write a concise skip reason instead of failing the stage.
 
 ## Media manifest
 
@@ -42,14 +41,14 @@ The agent writes `<task>/media/manifest.json`:
       "file": "01-home.png",
       "type": "still",
       "caption": "Home page after load",
-      "push_to_screenote": true,
-      "screenote_url": null
+      "screenote_url": "https://screenote.ai/...",
+      "screenote_skipped_reason": null
     }
   ]
 }
 ```
 
-`status: "skipped"` means the task has no observable surface. `status: "failed"` means boot, driving, or capture tooling failed; hivebox renders the reason as a Demo warning banner. `status: "captured"` renders committed PNG/JPEG/GIF files inline in hivebox through the task media route. See [[commands/web]].
+`status: "skipped"` means the task has no observable surface. `status: "failed"` means boot, driving, or capture tooling failed; hivebox renders the reason as a Demo warning banner. `status: "captured"` renders committed PNG/JPEG/GIF files inline in hivebox through the task media route. `screenote_url` remains the display contract read by hivebox; `screenote_skipped_reason` is an optional writer-side diagnostic. See [[commands/web]] and [[commands/screenote]].
 
 ## Marker -> next action
 
@@ -61,3 +60,4 @@ The agent writes `<task>/media/manifest.json`:
 
 - [[stages/review]] · [[stages/finalize]]
 - [[state-model]] · [[commands/stage_action]] · [[modules/workflows]]
+- [[commands/screenote]]

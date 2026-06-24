@@ -3,6 +3,14 @@ You are running stage 7-artifacts for project <%= project_name %>.
 Worktree (cwd): <%= worktree_path || "(none)" %>
 Task folder (--add-dir): <%= task_folder %>
 Artifact file: <%= artifact_file %>
+Screenote:
+<% if screenote_connected -%>
+- connected via MCP
+- base_url: <%= screenote_base_url %>
+- default project_id: <%= screenote_project_id %>
+<% else -%>
+- not connected: <%= screenote_skip_reason %>
+<% end -%>
 
 ## Goal
 
@@ -38,7 +46,7 @@ observable surface.
 - TUI/CLI surface (record this under `surface: "tui"` — there is no separate
   `cli` enum value): record a short terminal demo of the changed command with
   asciinema or vhs and convert it to a GIF. Also capture at least one final PNG
-  still so the stage can push a screenote link for the PR.
+  still for the PR demo.
 - Failure: if the project cannot be booted or driven, or capture tooling is
   missing, create the manifest with `status: "failed"` and a one-line `reason`,
   mention the failed capture in `artifact.md`, and still complete the stage.
@@ -59,23 +67,38 @@ short GIF plus a few stills over long recordings.
       "file": "01-home.png",
       "type": "still",
       "caption": "Home page after load",
-      "push_to_screenote": true,
-      "screenote_url": null
+      "screenote_url": "https://screenote.ai/...",
+      "screenote_skipped_reason": null
     },
     {
       "file": "demo.gif",
       "type": "gif",
       "caption": "Toggling dark mode",
-      "push_to_screenote": false,
-      "screenote_url": null
+      "screenote_url": null,
+      "screenote_skipped_reason": "animated GIFs are kept local"
     }
   ]
 }
 ```
 
-For captured manifests, set `push_to_screenote: true` only on PNG/JPEG stills.
-Leave every `screenote_url` as `null`; the Ruby stage fills hosted URLs after you
-finish. For skipped/failed manifests, use an empty `items` array.
+For captured manifests:
+
+<% if screenote_connected -%>
+- For every PNG/JPEG still worth linking in the PR, call the Screenote MCP tool
+  `create_screenshot_upload` with `project_id: "<%= screenote_project_id %>"`.
+- PUT the captured image bytes to the signed upload URL returned by Screenote.
+- Write the resulting Screenote annotate/view URL into that item's
+  `screenote_url`.
+- If an individual Screenote upload fails, keep the local file, leave
+  `screenote_url` as `null`, and write a concise `screenote_skipped_reason`.
+<% else -%>
+- Screenote upload is unavailable: <%= screenote_skip_reason %>
+- Still capture and commit local media.
+- Leave every `screenote_url` as `null` and set each still item's
+  `screenote_skipped_reason` to the unavailable reason above.
+<% end -%>
+
+For skipped/failed manifests, use an empty `items` array.
 
 ## Constraints
 

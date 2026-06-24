@@ -197,6 +197,31 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  # Commit 01841e12: explicit cli_flags must suppress cfg-derived
+  # model/effort. Asserts the short-circuit at the spawn_agent seam — the
+  # explicitly-passed flags reach argv and the cfg's flags do not.
+  def test_explicit_cli_flags_win_over_config_derivation
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        cli_flags: [ "--model", "opus" ],
+        cfg: { "claude" => { "model" => "sonnet", "effort" => "medium" } }
+      )
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "arg=--model"
+      assert_includes argv, "arg=opus"
+      refute_includes argv, "arg=sonnet", "explicit cli_flags must suppress cfg-derived model"
+      refute_includes argv, "arg=--effort", "explicit cli_flags must suppress cfg-derived effort"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # --- preflight ordering --------------------------------------------------
 
   def test_preflight_runs_before_agent_spawn_returns_error_envelope

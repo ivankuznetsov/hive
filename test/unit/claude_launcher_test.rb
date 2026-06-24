@@ -44,6 +44,45 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_headless_mode_assembles_mcp_config_and_allowed_tools_flags
+    with_tmp_task do |task|
+      captured = nil
+      original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+      capture_unbound_method_on(Hive::Stages::Base, :spawn_agent, original) do
+        Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_spawn_task, **kwargs|
+          captured = kwargs
+          { status: :complete }
+        end
+
+        Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: { "claude" => { "mode" => "headless", "permission_mode" => "auto" } },
+          prompt: "prompt",
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 1,
+          log_label: "test",
+          session_name: "hive-test-session",
+          status_mode: :state_file_marker,
+          allowed_tools: "Read,mcp__screenote__list_projects",
+          mcp_config_path: "/tmp/screenote.mcp.json",
+          strict_mcp_config: true
+        )
+
+        # The headless branch passes allowed_tools through as a kwarg (Agent
+        # renders it to --allowedTools downstream, alongside disallowed_tools)
+        # and appends mcp_cli_flags after any cfg-derived flags. Assert both
+        # halves of that assembly: the tool kwarg and the trailing mcp flags.
+        assert_equal "Read,mcp__screenote__list_projects", captured.fetch(:allowed_tools)
+        assert_equal(
+          %w[--mcp-config /tmp/screenote.mcp.json --strict-mcp-config],
+          captured.fetch(:cli_flags).last(3)
+        )
+      end
+    end
+  end
+
   def test_tmux_mode_delegates_configured_permission_mode_to_shared_session
     with_tmp_task do |task|
       captured = nil
@@ -76,6 +115,57 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal({ status: :complete }, result)
         assert_equal "auto", captured.fetch(:permission_mode)
       end
+    end
+  end
+
+  def test_shared_session_derives_cli_flags_from_config_when_none_are_passed
+    with_tmp_task do |task|
+      runner = Object.new
+      runner.define_singleton_method(:start_detached) { |command:| @command = command }
+      runner.define_singleton_method(:kill_session) { }
+      captured_flags = nil
+      cfg = {
+        "claude" => {
+          "permission_mode" => "bypassPermissions",
+          "model" => "sonnet",
+          "effort" => "medium"
+        }
+      }
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :build_runner, ->(**) { runner }) do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :preflight!, ->(*) { }) do
+          with_replaced_singleton_method(Hive::ClaudeLauncher, :reset_signal_files, ->(*) { }) do
+            with_replaced_singleton_method(Hive::StopHookInstaller, :install, ->(**) { [] }) do
+              with_replaced_singleton_method(Hive::ClaudeLauncher, :wrapper_command, lambda { |**kwargs|
+                captured_flags = kwargs.fetch(:cli_flags)
+                [ "claude" ]
+              }) do
+                with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_until_session_exists!, ->(*) { }) do
+                  with_replaced_singleton_method(Hive::ClaudeLauncher, :record_claude_pid, ->(*) { }) do
+                    with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, ->(*) { }) do
+                      with_replaced_singleton_method(Hive::ClaudeLauncher, :shutdown_claude, ->(*) { }) do
+                        with_replaced_singleton_method(Hive::ClaudeLauncher, :sweep_orphan_processes, ->(*) { }) do
+                          with_replaced_singleton_method(Hive::ClaudeLauncher, :cleanup_done, ->(*) { }) do
+                            Hive::ClaudeLauncher.with_shared_session(
+                              task: task,
+                              cfg: cfg,
+                              session_name: "hive-test-session",
+                              cwd: task.folder,
+                              add_dirs: []
+                            ) { |_handle| }
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      assert_equal %w[--model sonnet --effort medium], captured_flags
     end
   end
 
@@ -766,7 +856,7 @@ class ClaudeLauncherTest < Minitest::Test
     assert_match(/terminated before becoming ready/, err.message)
   end
 
-def test_wrapper_command_carries_model_and_effort_pins
+  def test_wrapper_command_carries_model_and_effort_pins
     profile = Hive::AgentProfiles.lookup(:claude)
     command = Hive::ClaudeLauncher.send(
       :wrapper_command,
@@ -778,6 +868,23 @@ def test_wrapper_command_carries_model_and_effort_pins
     assert_equal %w[--model sonnet], command.each_cons(2).find { |a, _| a == "--model" },
                  "the configured model pin must reach the wrapper argv"
     assert_equal %w[--effort medium], command.each_cons(2).find { |a, _| a == "--effort" }
+  end
+
+  def test_wrapper_command_carries_mcp_config_flags_before_allowed_tools
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "bypassPermissions",
+      mcp_config_path: "/tmp/screenote.mcp.json",
+      strict_mcp_config: true,
+      allowed_tools: "Read,mcp__screenote__list_projects"
+    )
+
+    assert_equal %w[--mcp-config /tmp/screenote.mcp.json],
+                 command.each_cons(2).find { |a, _| a == "--mcp-config" }
+    assert_includes command, "--strict-mcp-config"
+    assert_operator command.index("--strict-mcp-config"), :<, command.index("--allowedTools")
   end
 
   def test_wrapper_command_omits_pins_when_unconfigured

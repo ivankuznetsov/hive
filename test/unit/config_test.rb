@@ -2948,31 +2948,30 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_screenote_honors_config_and_env_overrides
+  def test_load_global_screenote_honors_base_url_config_and_env_override
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         screenote:
           base_url: https://screenote.example
-          api_token: from-config
       YAML
 
-      with_env("HIVE_SCREENOTE_BASE_URL" => "https://screenote.env", "HIVE_SCREENOTE_API_TOKEN" => "from-env") do
+      with_env("HIVE_SCREENOTE_BASE_URL" => "https://screenote.env") do
         cfg = Hive::Config.load_global_screenote
 
         assert_equal "https://screenote.env", cfg["base_url"]
-        assert_equal "from-env", cfg["api_token"]
+        refute cfg.key?("api_token")
       end
     end
   end
 
-  def test_load_global_screenote_defaults_to_disabled
+  def test_load_global_screenote_defaults_to_screenote_ai
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
       cfg = Hive::Config.load_global_screenote
 
-      assert_nil cfg["base_url"]
-      assert_nil cfg["api_token"]
+      assert_equal "https://screenote.ai", cfg["base_url"]
+      refute cfg.key?("api_token")
     end
   end
 
@@ -2996,10 +2995,53 @@ class ConfigTest < Minitest::Test
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         screenote:
-          api_token: 123
+          api_token: old-secret
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
-      assert_match(/screenote\.api_token.*must be a String/, err.message)
+      assert_match(/remove `screenote\.api_token`/, err.message)
+      assert_match(/hive connect screenote/, err.message)
+    end
+  end
+
+  def test_load_global_screenote_tolerates_blank_or_null_api_token_leftover
+    # A bare `api_token:` (null) or empty string is inert config the old
+    # config.example.yml shipped, so it must NOT fail. The catch-22 (the
+    # prescribed `hive connect screenote` loads this same validation) is lifted
+    # ONLY for these blank leftovers: a non-blank token still raises, so a
+    # genuine leftover token keeps bricking bare connect until the key is
+    # removed — that intended hard failure is covered by the sibling
+    # rejects-non-blank test above.
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: https://screenote.example
+          api_token: null
+      YAML
+
+      cfg = Hive::Config.load_global_screenote
+      assert_equal "https://screenote.example", cfg["base_url"]
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          api_token: ""
+      YAML
+      assert Hive::Config.load_global_screenote
+    end
+  end
+
+  def test_project_config_with_screenote_api_token_gets_migration_error
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        screenote:
+          api_token: old-secret
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/remove `screenote\.api_token`/, err.message)
+      assert_match(/hive connect screenote/, err.message)
     end
   end
 

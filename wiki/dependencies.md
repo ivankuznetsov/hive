@@ -99,7 +99,7 @@ The codebase leans heavily on stdlib (no extra gems for these):
 | `File.open(... LOCK_EX \| EXCL)` | Per-task lock acquisition | `lock.rb` |
 | `YAML.safe_load` | All config / lock / pointer files | `config.rb`, `lock.rb`, `task.rb`, `worktree.rb` |
 | `ERB` (`trim_mode: "-"`) | Prompt and config templates | `commands/init.rb`, `commands/new.rb`, `stages/base.rb` |
-| `Net::HTTP` | Multipart screenote screenshot uploads without adding a gem dependency | `screenote_uploader.rb` |
+| `Net::HTTP` | Screenote OAuth discovery/registration/token/revoke, MCP project listing, and live-test signed upload PUTs without adding a gem dependency | `screenote/oauth_client.rb`, `screenote/mcp_client.rb`, `commands/connect.rb`, `commands/disconnect.rb` |
 | `SecureRandom.hex` | 4-char slug suffix and unique global-config tempfile names | `commands/new.rb`, `config.rb` |
 | `Digest::SHA256` | Reviewer-tamper detection on `plan.md` / `worktree.yml` | `stages/execute.rb` |
 | `Time.now.utc.iso8601` | Lock timestamps, marker `started=`, `worktree.yml#created_at` | `lock.rb`, `agent.rb`, `worktree.rb` |

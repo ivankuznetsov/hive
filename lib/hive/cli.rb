@@ -276,6 +276,52 @@ module Hive
       Hive::Commands::Update.new(dry_run: options[:dry_run]).call
     end
 
+    desc "connect SERVICE", "Connect an external service (screenote)"
+    long_desc <<~DESC
+      Runs the OAuth 2.1 setup flow for SERVICE (currently only `screenote`).
+      Discovers Screenote OAuth/MCP metadata, opens an authorize URL in the
+      browser via a loopback redirect + PKCE, lists Screenote projects over
+      MCP, prompts for a default project, and stores the credential at
+      `~/.config/hive/screenote.json` (mode 0600). The loopback waits up to
+      300s for the browser callback before timing out, so an automated driver
+      should set an outer deadline above that.
+
+      --base-url overrides the resolved Screenote base URL (config /
+      HIVE_SCREENOTE_BASE_URL / default https://screenote.ai).
+
+      --json streams structured lines: an `authorize` line carrying the
+      `authorize_url` (the fallback when the browser cannot auto-open),
+      followed by a success document with `issuer`, `client_id`,
+      `project_id`, `base_url`, and `credential_path`. A lone project is
+      auto-selected; when several projects exist and no default can be chosen
+      non-interactively, connect instead emits a `{ "ok": false, "stage":
+      "needs_project_selection", "projects": [...] }` line and exits non-zero
+      — re-run connect interactively (without --json) to pick the default.
+    DESC
+    option :base_url, type: :string, desc: "Screenote base URL (defaults to config or https://screenote.ai)"
+    def connect(service)
+      require "hive/commands/connect"
+      Hive::Commands::Connect.new(service, base_url: options[:base_url], json: options[:json]).call
+    end
+
+    desc "disconnect SERVICE", "Disconnect an external service (screenote)"
+    long_desc <<~DESC
+      Revokes the stored token for SERVICE (currently only `screenote`) when
+      possible and clears the local credential at
+      `~/.config/hive/screenote.json`. Missing credentials are an idempotent
+      no-op; a revoke failure (or unreachable endpoint) is warned about but
+      still clears the local file.
+
+      --json emits `{ "disconnected": ..., "revoked": ..., "reason": ... }`.
+      Revocation is idempotent (RFC 7009), so when `revoked` is false the
+      `reason` is `no_token`, `unreadable_credential`, or the raw revoke
+      error message.
+    DESC
+    def disconnect(service)
+      require "hive/commands/disconnect"
+      Hive::Commands::Disconnect.new(service, json: options[:json]).call
+    end
+
     desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
     long_desc <<~DESC
       Stops and deregisters the per-user daemon service, removes hive config

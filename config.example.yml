@@ -2,10 +2,10 @@
 registered_projects: []
 
 # Optional hosted screenshot links for 7-artifacts visual demos.
-# HIVE_SCREENOTE_BASE_URL and HIVE_SCREENOTE_API_TOKEN override these values.
+# Run `hive connect screenote` to authorize uploads. HIVE_SCREENOTE_BASE_URL
+# can override the default service URL for staging/self-hosted deployments.
 screenote:
-  base_url: null
-  api_token: null
+  base_url: https://screenote.ai
 
 # Project .hive-state/config.yml files can opt Claude-backed stages into
 # permission presets with `permissions:`. See docs/permissions.md for the

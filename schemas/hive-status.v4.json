@@ -358,7 +358,7 @@
           "type": "boolean"
         },
         "unanswered_questions": {
-          "description": "Count of still-unanswered brainstorm Q&A questions (`### Q{n}.` slots with no answer) for a 2-brainstorm needs_input row; 0 for every other row. Lets a consumer distinguish a brainstorm the daemon is intentionally holding (answers outstanding) from one genuinely waiting for a first answer or broken — the daemon's answers-pending gate is otherwise only visible in daemon.log. Degrades to 0 if the file is missing/mid-write/malformed.",
+          "description": "Count of still-unanswered brainstorm Q&A questions (`### Q{n}.` slots with no answer) for a coding 2-brainstorm needs_input row; 0 for every other row. Also 0 for an incoherent needs_input row — one whose action is `needs_input` but whose marker is not a real input marker (`waiting`/`execute_waiting`/`review_waiting`, e.g. marker=none or marker=complete) — since such a row carries no answerable question. Lets a consumer distinguish a brainstorm the daemon is intentionally holding (answers outstanding) from one genuinely waiting for a first answer or broken — the daemon's answers-pending gate is otherwise only visible in daemon.log. Degrades to 0 if the file is missing/mid-write/malformed.",
           "type": "integer",
           "minimum": 0
         },

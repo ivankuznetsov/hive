@@ -32,6 +32,12 @@ module Hive
     # consumer picks it up.
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
 
+    # Markers whose NEEDS_INPUT action is a real pending operator question.
+    # Other markers can still reach the needs_input action through legacy
+    # classification paths (see umbrella task 9512), but operator surfaces
+    # must not present those incoherent rows as answerable input.
+    INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting].freeze
+
     # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
     # SIGKILL, 143 = SIGTERM). Only ERROR markers shaped as
     # `reason=exit_code exit_code=<kill-class>` are treated as
@@ -161,6 +167,10 @@ module Hive
 
     def display_attrs(attrs)
       attrs.to_h.reject { |key, _value| INTERNAL_ATTR_KEYS.include?(key.to_s) }
+    end
+
+    def input_marker?(name)
+      INPUT_MARKER_NAMES.include?(name.to_s.downcase.to_sym)
     end
 
     def error_recovery_match_attr(attrs)

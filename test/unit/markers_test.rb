@@ -158,6 +158,26 @@ class MarkersTest < Minitest::Test
     assert_equal({ "reason" => "exit_code" }, Hive::Markers.display_attrs(attrs))
   end
 
+  def test_input_marker_predicate_accepts_real_waiting_contexts
+    %i[waiting execute_waiting review_waiting].each do |name|
+      assert Hive::Markers.input_marker?(name), "#{name.inspect} should be a real input marker"
+      assert Hive::Markers.input_marker?(name.to_s), "#{name} string should be a real input marker"
+    end
+  end
+
+  def test_input_marker_predicate_rejects_non_input_markers
+    %i[
+      none complete error agent_working execute_complete review_complete
+      review_working manual_steering
+    ].each do |name|
+      refute Hive::Markers.input_marker?(name), "#{name.inspect} should not be a real input marker"
+      refute Hive::Markers.input_marker?(name.to_s), "#{name} string should not be a real input marker"
+    end
+
+    refute Hive::Markers.input_marker?(:unknown_marker)
+    refute Hive::Markers.input_marker?("unknown_marker")
+  end
+
   def test_set_appends_marker_to_empty_file
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

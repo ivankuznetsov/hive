@@ -21,6 +21,10 @@
       "note": "False positive. Open3.capture3 array form in Worktree.fetch_origin_branch: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is a hive task slug / dependency branch name interpolated only into a single refspec literal (`+<branch>:refs/remotes/origin/<branch>`) that becomes one argv member; no shell ever sees it. The first arg is a static GIT_* env hash, not a command string."
     },
     {
+      "fingerprint": "60ec534e2692469dc572935adfb3fe7ab97b9001f64ac38964f73e0594e2fc7d",
+      "note": "False positive. Open3.capture3 array form: ref is interpolated only into a single rev-parse <ref>^{commit} argv element passed to git via execve(2); no shell ever sees it."
+    },
+    {
       "fingerprint": "6c7220d812801d79f634aa63179b515a90854f02696d034da7693068081493a2",
       "note": "False positive. Open3.capture3 array form: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a refspec literal that becomes a single argv member; no shell ever sees it."
     },

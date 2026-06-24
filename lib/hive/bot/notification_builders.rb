@@ -137,6 +137,13 @@ module Hive
         when "review_waiting"
           review_waiting(row)
         else
+          # Authoritative suppression of incoherent needs_input markers
+          # (marker=none / marker=complete) lives in the dispatcher gate
+          # (NotificationDispatcher#suppress_incoherent_needs_input?), which
+          # drops them before `build` is ever called. This `else` is layered
+          # defense for the remaining genuine fall-through (a `waiting` marker
+          # outside coding's 2-brainstorm/3-plan stages), not the incoherent
+          # path — that no longer reaches here.
           default_needs_input(row)
         end
       end
@@ -156,22 +163,25 @@ module Hive
         default_needs_input(row)
       end
 
-      def default_needs_input(row)
+      # Shared shape for the three "needs_input, no dedicated answer flow"
+      # notifications (default / execute-waiting / plan-waiting): a header,
+      # one custom sentence, and a single Show-details button. Each caller
+      # owns only its sentence so the keyboard construction lives in one place.
+      def details_only(row, sentence)
         Notification.new(
-          text: header(row) + "\nThis task needs your input.",
+          text: header(row) + "\n" + sentence,
           keyboard: [
             [ button("Show details", details_callback(row)) ]
           ]
         )
       end
 
+      def default_needs_input(row)
+        details_only(row, "This task needs your input.")
+      end
+
       def execute_waiting_input(row)
-        Notification.new(
-          text: header(row) + "\nExecute paused — needs your input.",
-          keyboard: [
-            [ button("Show details", details_callback(row)) ]
-          ]
-        )
+        details_only(row, "Execute paused — needs your input.")
       end
 
       def brainstorm_waiting(row)
@@ -192,12 +202,7 @@ module Hive
       # daemon-OFF case, where the operator reviews the draft and advances
       # it from the CLI — so it points at the plan, not the `/answer` flow.
       def plan_waiting(row)
-        Notification.new(
-          text: header(row) + "\nPlan draft is ready for your review.",
-          keyboard: [
-            [ button("Show details", details_callback(row)) ]
-          ]
-        )
+        details_only(row, "Plan draft is ready for your review.")
       end
 
       def review_waiting(row)

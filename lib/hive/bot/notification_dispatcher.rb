@@ -1,4 +1,5 @@
 require "time"
+require "set"
 require "hive/config"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
@@ -33,6 +34,8 @@ module Hive
         # operator is already answering). nil = no suppression (older
         # wiring / tests that don't inject it).
         @conversation_store = conversation_store
+        @dedupe_logged = Set.new
+        @backoff_logged = Set.new
       end
 
       def process_rows(rows)
@@ -175,6 +178,8 @@ module Hive
       end
 
       def process_current(current)
+        reconcile_skip_log_state(current)
+
         current.each do |fingerprint, payload|
           row = payload.fetch(:row)
           entry = @alert_store.entry(fingerprint)
@@ -192,9 +197,7 @@ module Hive
               @alert_store.record_send_failure(fingerprint, @now.call)
             end
           elsif backoff_active?(entry)
-            @logger.event(:notification_skipped_backoff, project: row.project, slug: row.slug,
-                                                          marker: row.marker,
-                                                          consecutive_failures: entry.consecutive_failures.to_i)
+            log_backoff_skip_once(fingerprint, row, entry)
           elsif (pending = pending_chat_ids(entry)).any?
             newly_delivered = send_notification(payload.fetch(:notification), to: pending)
             if newly_delivered.any?
@@ -212,11 +215,34 @@ module Hive
               @alert_store.record_send_failure(fingerprint, @now.call)
             end
           else
-            @logger.event(:notification_skipped_dedupe, project: row.project,
-                                                         slug: row.slug,
-                                                         marker: row.marker)
+            log_dedupe_skip_once(fingerprint, row)
           end
         end
+      end
+
+      def reconcile_skip_log_state(current)
+        @dedupe_logged.keep_if { |fingerprint| current.key?(fingerprint) }
+        @backoff_logged.keep_if { |fingerprint| current.key?(fingerprint) }
+      end
+
+      def log_backoff_skip_once(fingerprint, row, entry)
+        return if @backoff_logged.include?(fingerprint)
+
+        @backoff_logged.add(fingerprint)
+        @logger.event(:notification_skipped_backoff, level: :debug, category: :noise,
+                                                      project: row.project, slug: row.slug,
+                                                      marker: row.marker,
+                                                      consecutive_failures: entry.consecutive_failures.to_i)
+      end
+
+      def log_dedupe_skip_once(fingerprint, row)
+        return if @dedupe_logged.include?(fingerprint)
+
+        @dedupe_logged.add(fingerprint)
+        @logger.event(:notification_skipped_dedupe, level: :debug, category: :noise,
+                                                     project: row.project,
+                                                     slug: row.slug,
+                                                     marker: row.marker)
       end
 
       def backoff_active?(entry)

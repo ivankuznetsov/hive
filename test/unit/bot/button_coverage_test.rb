@@ -1,0 +1,152 @@
+require "test_helper"
+require "hive/bot/notification_builders"
+require "hive/bot/row_actions"
+require "hive/bot/router"
+require "hive/bot/status_watcher"
+require "hive/bot/supervisor"
+require "hive/markers"
+require "hive/stages/base"
+require "hive/workflows"
+
+class HiveBotButtonCoverageTest < Minitest::Test
+  Row = Hive::Bot::StatusWatcher::Row
+
+  MARKERS = (
+    Hive::Markers::TERMINAL_MARKER_NAMES +
+    Hive::Stages::Base::PAUSE_MARKERS +
+    %i[
+      none waiting complete agent_working error review_waiting review_working
+      review_error review_stale review_ci_stale execute_waiting execute_stale
+    ]
+  ).map(&:to_s).uniq.freeze
+
+  WORKFLOWS = %w[coding content].freeze
+
+  def row(action:, marker:, stage:, workflow: "coding", attrs: {}, diagnostic: nil)
+    Row.new(
+      project: "hive",
+      slug: "slug-260624-abcd",
+      stage: stage,
+      workflow: workflow,
+      marker: marker,
+      attrs: attrs,
+      action: action,
+      action_label: action,
+      suggested_command: nil,
+      diagnostic: diagnostic
+    )
+  end
+
+  def test_every_representative_row_has_resolvable_button_or_is_suppressed
+    rows = Hive::Schemas::TaskActionKind::ALL.product(MARKERS, stages, WORKFLOWS).map do |action, marker, stage, workflow|
+      row(action: action, marker: marker, stage: stage, workflow: workflow, attrs: attrs_for(marker),
+          diagnostic: diagnostic_for(action, marker))
+    end
+
+    rows.each do |candidate|
+      resolution = Hive::Bot::RowActions.resolve(candidate)
+      assert_status_surface_matches_resolver(candidate, resolution)
+      next if resolution.suppress || resolution.actions.empty?
+
+      primary = resolution.actions.find(&:primary) || resolution.actions.first
+      assert_resolvable_callback(primary.callback, candidate)
+      if candidate.action.to_s == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        refute_dead_details_only(candidate, resolution)
+      end
+    end
+  end
+
+  def test_per_marker_regressions_from_needs_input_report
+    cases = {
+      "plan_waiting" => row(action: "needs_input", marker: "waiting", stage: "3-plan"),
+      "execute_waiting" => row(action: "needs_input", marker: "execute_waiting", stage: "4-execute"),
+      "finalize_waiting" => row(action: "needs_input", marker: "waiting", stage: "8-finalize"),
+      "generic_needs_input" => row(action: "needs_input", marker: "waiting", stage: "1-inbox", workflow: "content"),
+      "none" => row(action: "needs_input", marker: "none", stage: "4-execute"),
+      "complete" => row(action: "needs_input", marker: "complete", stage: "4-execute")
+    }
+
+    assert_equal [ :approve_plan, :details ], roles(cases.fetch("plan_waiting"))
+    assert_equal [ :rerun, :details ], roles(cases.fetch("execute_waiting"))
+    assert_equal [ :run, :details ], roles(cases.fetch("finalize_waiting"))
+    assert_equal [ :run ], roles(cases.fetch("generic_needs_input"))
+    assert Hive::Bot::RowActions.resolve(cases.fetch("none")).suppress
+    assert Hive::Bot::RowActions.resolve(cases.fetch("complete")).suppress
+  end
+
+  def test_new_task_action_kind_requires_row_action_decision
+    mapped = Hive::Schemas::TaskActionKind::ALL.select do |action|
+      MARKERS.any? do |marker|
+        stages.any? do |stage|
+          resolution = Hive::Bot::RowActions.resolve(row(action: action, marker: marker, stage: stage))
+          resolution.suppress || !resolution.actions.empty?
+        end
+      end
+    end
+
+    expected = %w[
+      needs_input recover_execute recover_review error ready_to_brainstorm
+      ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
+      ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance
+      ready_to_run agent_running archived manual_steering
+    ]
+    assert_equal expected.sort, Hive::Schemas::TaskActionKind::ALL.sort
+    assert_equal expected.sort, mapped.sort
+  end
+
+  private
+
+    def stages
+      @stages ||= Hive::Workflows::Registry.all.flat_map(&:stage_dirs).uniq
+    end
+
+    def roles(candidate)
+      Hive::Bot::RowActions.resolve(candidate).actions.map(&:role)
+    end
+
+    def attrs_for(marker)
+      case marker.to_s
+      when "review_waiting" then { "pass" => "1" }
+      when "review_error" then { "phase" => "fix", "reason" => "timeout", "pass" => "1" }
+      when "review_stale" then { "pass" => "2" }
+      when "execute_waiting" then { "reason" => "no_worktree_changes" }
+      else {}
+      end
+    end
+
+    def diagnostic_for(action, marker)
+      return nil unless %w[recover_execute recover_review error].include?(action.to_s)
+      return nil if marker.to_s == "execute_stale"
+
+      { "suggested_next_action" => { "kind" => "retry", "command" => "hive run slug --json" } }
+    end
+
+    def assert_status_surface_matches_resolver(candidate, resolution)
+      button = Hive::Bot::Supervisor.allocate.send(:status_action_button, candidate)
+      should_render = !resolution.suppress && resolution.actions.any?
+      if should_render
+        refute_nil button, "expected /status button for #{label(candidate)}"
+        primary = resolution.actions.find(&:primary) || resolution.actions.first
+        assert_equal primary.callback, Hive::Bot::NotificationBuilders.resolve_callback(button.fetch(:callback_data)),
+                     "status callback for #{label(candidate)}"
+      else
+        assert_nil button, "expected no /status button for #{label(candidate)}"
+      end
+    end
+
+    def assert_resolvable_callback(callback, candidate)
+      intent = Hive::Bot::Router.allocate.send(:callback_intent, callback)
+      refute_equal :unknown, intent, "unroutable callback #{callback.inspect} for #{label(candidate)}"
+    end
+
+    def refute_dead_details_only(candidate, resolution)
+      return unless resolution.actions.map(&:role) == [ :details ]
+      return if Hive::Bot::RowActions.terminal_details?(candidate)
+
+      flunk "needs_input row has only Details for #{label(candidate)}"
+    end
+
+    def label(candidate)
+      "action=#{candidate.action} marker=#{candidate.marker} stage=#{candidate.stage} workflow=#{candidate.workflow}"
+    end
+end

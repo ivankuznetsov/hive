@@ -68,9 +68,11 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 `generic_ready_to_run` and `generic_needs_input` are distinct on the JSON wire.
 Markerless generic stages emit `READY_TO_RUN` so the daemon can dispatch
 `hive run <slug>` on first sight. Generic `WAITING` markers still emit
-`NEEDS_INPUT` and go through the edit/mtime debounce path. This split is additive
-to `Hive::Schemas::TaskActionKind` and is mirrored by `hive-status` and
-`hive-stage-action` schemas.
+`NEEDS_INPUT` and go through the edit/mtime debounce path. Coding also uses
+`generic_ready_to_run` for markerless brainstorm and execute rows, and for
+markerless finalize rows once `pr.md` exists; those are runnable states, not
+operator-input gates. This split is additive to `Hive::Schemas::TaskActionKind`
+and is mirrored by `hive-status` and `hive-stage-action` schemas.
 
 ## Kind-Routed Classification
 
@@ -96,16 +98,16 @@ stages fall through to the descriptor-generic classifier:
   terminal inert stage (degenerate single-stage workflow, entry == terminal) ->
   `generic_ready_to_run` with label "Ready to run".
 
-This keeps coding behavior byte-stable while moving the classifier onto
-descriptor `kind:` routing. A test-only parity harness compares the retired
-stage-name case against the production kind path across coding markers,
-diagnostics, and command strings. `Commands::Approve` and `Commands::Run`
-resolve generic advance destinations through the task's descriptor, the CLI
-accepts runtime-registered stage refs for `--from`/`--to`/`--stage`,
-`Status#collect_rows` scans `Hive::Workflows.all_stage_dirs`, and `TaskResolver`
-can find generic-only stage dirs by bare slug. U6's integration test proves a
-registered generic task advancing through status -> policy -> `hive run`/`hive
-approve` for two stage hops.
+Coding behavior is pinned by the same matrix while the classifier routes through
+descriptor `kind:`. A test-only parity harness compares the retired stage-name
+case against the production kind path across coding markers, diagnostics, and
+command strings. `Commands::Approve` and `Commands::Run` resolve generic advance
+destinations through the task's descriptor, the CLI accepts runtime-registered
+stage refs for `--from`/`--to`/`--stage`, `Status#collect_rows` scans
+`Hive::Workflows.all_stage_dirs`, and `TaskResolver` can find generic-only stage
+dirs by bare slug. U6's integration test proves a registered generic task
+advancing through status -> policy -> `hive run`/`hive approve` for two stage
+hops.
 
 ## Marker carve-outs
 
@@ -116,6 +118,13 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 - **`:error`** → always `error` at the status/action layer. The stage agent recorded a failure; recovery is manual unless diagnostics expose a guarded retry command or the daemon healer owns one of its narrow auto-clear paths. The healer-written subset (`reason=agent_died` / `reason=agent_orphaned`) must be re-read through `hive status --json` / red-status detail after the daemon rewrites the marker so consumers use the current `suggested_next_action.command` with the `marker_id` guard. Separately, `StaleAgentHealer` may auto-clear no-live-lock terminal `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` in non-review stages; `3-plan` additionally queues a same-stage `hive plan ... --from 3-plan` rerun because an empty markerless `plan.md` remains `:error` here and is skipped by daemon policy.
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug>` rather than a workflow verb. Legacy `:execute_waiting findings_count>0` uses the same recovery surface so old state folders do not fall through to generic edit guidance. Running `hive develop <slug>` on either shape would refuse or loop on a non-terminal marker; pointing the user at `findings` opens the recovery loop instead.
+
+Markerless coding rows are not input gates. `2-brainstorm` and `4-execute`
+with `:none` now emit `READY_TO_RUN`; `8-finalize` with `:none` emits
+`READY_TO_RUN` once `pr.md` exists (missing `pr.md` remains `ERROR`). A stray
+`:complete` marker at execute-stage is treated like `:execute_complete` and
+surfaces `READY_TO_OPEN_PR`; other unexpected terminal markers at execute-stage
+become `ERROR` rather than phantom `NEEDS_INPUT`.
 
 Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This matters after a recovery marker is cleared: the next useful action is to run the review stage, while only an explicit `REVIEW_WAITING` marker should open the input-editor path.
 

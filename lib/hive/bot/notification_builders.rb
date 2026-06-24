@@ -132,6 +132,8 @@ module Hive
         case row.marker
         when "waiting"
           waiting_input(row)
+        when "execute_waiting"
+          execute_waiting_input(row)
         when "review_waiting"
           review_waiting(row)
         else
@@ -156,7 +158,16 @@ module Hive
 
       def default_needs_input(row)
         Notification.new(
-          text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
+          text: header(row) + "\nThis task needs your input.",
+          keyboard: [
+            [ button("Show details", details_callback(row)) ]
+          ]
+        )
+      end
+
+      def execute_waiting_input(row)
+        Notification.new(
+          text: header(row) + "\nExecute paused — needs your input.",
           keyboard: [
             [ button("Show details", details_callback(row)) ]
           ]

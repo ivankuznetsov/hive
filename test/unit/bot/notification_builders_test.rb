@@ -227,7 +227,9 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       row(action: "needs_input", marker: "waiting", stage: "2-gather", workflow: "dispatch")
     )
 
-    assert_match(/Needs input: waiting/, notification.text)
+    assert_match(/This task needs your input/, notification.text)
+    refute_match(/Needs input:/, notification.text)
+    refute_match(/\bwaiting\b/, notification.text)
     refute_match(/Brainstorm questions/, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     assert_equal [ "Show details" ], labels
@@ -237,7 +239,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   # 2-brainstorm / 3-plan in practice (supervisor.rb / notification_dispatcher),
   # so the U6 routing migration is inert for coding. Pin that a coding `waiting`
   # at ANY other stage (e.g. 5-open-pr, 8-finalize) falls through to the neutral
-  # "Needs input" / "Show details" default rather than the brainstorm "Answer in
+  # "This task needs your input" / "Show details" default rather than the brainstorm "Answer in
   # chat" affordance — preserving the byte-identical-coding mandate. Restoring
   # the old unconditional brainstorm routing would be wrong: it would mislabel a
   # generic row as "Brainstorm questions".
@@ -247,8 +249,10 @@ class HiveBotNotificationBuildersTest < Minitest::Test
         row(action: "needs_input", marker: "waiting", stage: stage, workflow: "coding")
       )
 
-      assert_match(/Needs input: waiting/, notification.text,
+      assert_match(/This task needs your input/, notification.text,
                    "coding waiting at #{stage} must use the neutral default, not brainstorm copy")
+      refute_match(/Needs input:/, notification.text)
+      refute_match(/\bwaiting\b/, notification.text)
       refute_match(/Brainstorm questions/, notification.text)
       refute_match(/Answer in chat/, notification.text,
                    "coding waiting at #{stage} must not offer the brainstorm /answer affordance")
@@ -257,15 +261,49 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     end
   end
 
+  def test_execute_waiting_builds_reworded_details_notification
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "execute_waiting", stage: "4-execute")
+    )
+
+    assert_match(/Execute paused — needs your input/, notification.text)
+    refute_includes notification.text, "execute_waiting"
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Show details" ], labels
+    assert_equal "details:hive:slug-260514-abcd:4-execute",
+                 notification.keyboard.flatten.first[:callback_data]
+  end
+
   def test_generic_needs_input_marker_builds_show_details_only_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" })
     )
 
-    assert_match(/Needs input: agent_waiting reason=operator/, notification.text)
+    assert_match(/This task needs your input/, notification.text)
+    refute_match(/Needs input:/, notification.text)
+    refute_includes notification.text, "agent_waiting"
+    refute_includes notification.text, "reason=operator"
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     assert_equal [ "Show details" ], labels,
                  "the only useful action for an unknown waiting marker is Show details"
+  end
+
+  def test_needs_input_notifications_do_not_leak_internal_marker_names
+    rows = [
+      row(action: "needs_input", marker: "none", slug: "task-alpha-260624", stage: "2-brainstorm"),
+      row(action: "needs_input", marker: "complete", slug: "task-beta-260624", stage: "4-execute"),
+      row(action: "needs_input", marker: "execute_waiting", slug: "task-gamma-260624", stage: "4-execute")
+    ]
+
+    rows.each do |status_row|
+      notification = Hive::Bot::NotificationBuilders.build(status_row)
+
+      refute_nil notification
+      %w[none complete execute_waiting].each do |marker_text|
+        refute_includes notification.text, marker_text,
+                        "operator notification leaked marker text #{marker_text.inspect}: #{notification.text.inspect}"
+      end
+    end
   end
 
   def test_compacted_callback_round_trips

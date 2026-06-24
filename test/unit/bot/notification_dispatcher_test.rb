@@ -165,7 +165,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     d.process_rows([ row(stage: "3-plan", marker: "waiting", action: "needs_input", workflow: "dispatch") ])
 
     assert_equal 1, telegram.messages.size
-    assert_match(/Needs input: waiting/, telegram.messages.first[:text])
+    assert_match(/This task needs your input/, telegram.messages.first[:text])
+    refute_match(/Needs input:/, telegram.messages.first[:text])
     refute(logger.events.any? { |name, _| name == :notification_skipped_daemon_plan_pause },
            "generic workflows must not hit the coding plan-pause suppression")
   end

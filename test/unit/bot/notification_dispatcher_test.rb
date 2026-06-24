@@ -836,6 +836,37 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 1, flaky_telegram.calls
   end
 
+  def test_backoff_skip_logs_again_when_fingerprint_changes
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+    first = row(attrs: { "round" => "1" })
+    changed = row(attrs: { "round" => "2" })
+
+    d.process_rows([ first ])
+    logger.events.clear
+    d.process_rows([ first ])
+    d.process_rows([ first ])
+    d.process_rows([ changed ])
+    d.process_rows([ changed ])
+
+    assert_equal 2, events_named(:notification_skipped_backoff).size
+  end
+
+  def test_backoff_skip_logs_again_after_row_leaves_current_set
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+    waiting = row
+
+    d.process_rows([ waiting ])
+    logger.events.clear
+    d.process_rows([ waiting ])
+    d.process_rows([])
+    d.process_rows([ waiting ])
+    d.process_rows([ waiting ])
+
+    assert_equal 2, events_named(:notification_skipped_backoff).size
+  end
+
   def test_ready_action_uses_config_fallback_when_no_daemon_probe
     projects = []
     loads = []

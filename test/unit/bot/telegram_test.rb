@@ -244,6 +244,48 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal "consecutive", attrs[:reason]
   end
 
+  def test_poll_updates_emits_poll_unhealthy_after_sustained_generic_errors
+    # The generic `rescue StandardError` arm also drives escalation; a
+    # copy-paste regression dropping `emit_poll_unhealthy_if_needed` from
+    # only that arm would otherwise go unnoticed.
+    api = FakeApi.new
+    api.raise_on_get_updates = RuntimeError.new("boom")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+    bot = telegram(api, poll_health: health)
+
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 1, unhealthy_events.size
+    attrs = unhealthy_events.first.last
+    assert_equal :warn, attrs[:level]
+    assert_equal 2, attrs[:consecutive_failures]
+    assert_equal "consecutive", attrs[:reason]
+  end
+
+  def test_poll_updates_emits_poll_unhealthy_with_silence_reason
+    # Silence escalation (no successful poll for max_silence_sec) is the other
+    # PollHealth reason; pin its Telegram-layer emission with an injected clock.
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 99, max_silence_sec: 10)
+    bot = telegram(api, poll_health: health)
+
+    now += 11
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 1, unhealthy_events.size
+    attrs = unhealthy_events.first.last
+    assert_equal "silence", attrs[:reason]
+    assert_equal 1, attrs[:consecutive_failures]
+    assert_equal 11, attrs[:seconds_since_success]
+  end
+
   def test_poll_updates_accepts_object_shaped_updates
     chat = Struct.new(:id).new(12345)
     from = Struct.new(:id).new(54321)

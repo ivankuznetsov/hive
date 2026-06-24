@@ -47,6 +47,17 @@ class HiveBotPollHealthTest < Minitest::Test
     refute health.record_failure.escalate?
   end
 
+  def test_backwards_clock_clamps_seconds_since_success_to_zero
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 5, max_silence_sec: 10)
+    now -= 30
+
+    result = health.record_failure
+
+    assert_equal 0, result.seconds_since_success
+    refute result.escalate?, "a non-monotonic (backwards) clock must not read as a silence outage"
+  end
+
   def test_success_resets_silence_window
     now = Time.utc(2026, 6, 24, 12, 0, 0)
     health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 5, max_silence_sec: 10)

@@ -4,9 +4,13 @@ module Hive
       DEFAULT_MAX_CONSECUTIVE = 5
       DEFAULT_MAX_SILENCE_SEC = 60
 
-      Result = Data.define(:escalate, :reason, :consecutive_failures, :seconds_since_success) do
+      # `reason` is the single source of truth: it is non-nil exactly when this
+      # failure escalates a fresh unhealthy episode, so `escalate?` derives from
+      # it. Dropping a separate `escalate` boolean makes the contradictory
+      # `escalate: false, reason: :silence` state unrepresentable.
+      Result = Data.define(:reason, :consecutive_failures, :seconds_since_success) do
         def escalate?
-          escalate
+          !reason.nil?
         end
       end
 
@@ -35,10 +39,9 @@ module Hive
         @unhealthy_latched = true if should_escalate
 
         Result.new(
-          escalate: should_escalate,
           reason: should_escalate ? reason : nil,
           consecutive_failures: @consecutive_failures,
-          seconds_since_success: seconds_since_success
+          seconds_since_success: seconds_since_success.round
         )
       end
 

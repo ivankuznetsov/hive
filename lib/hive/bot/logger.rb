@@ -96,9 +96,12 @@ module Hive
           ts: Time.now.utc.iso8601,
           schema: SCHEMA,
           schema_version: SCHEMA_VERSION,
-          event: name.to_s,
-          level: level.to_s
+          event: name.to_s
         }.merge(attrs.transform_keys(&:to_sym))
+        # Stamp the validated level AFTER merging caller attrs so a string-keyed
+        # `level` attr (e.g. **{"level" => "verbose"}) can't overwrite it and emit
+        # a v3 line that fails the schema's closed level enum.
+        payload[:level] = level.to_s
         payload[:category] = category.to_s unless category.nil?
 
         line = JSON.generate(payload)

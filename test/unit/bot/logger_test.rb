@@ -86,13 +86,17 @@ class HiveBotLoggerTest < Minitest::Test
   end
 
   def test_info_stream_excludes_noise_events_under_repeated_poll_and_dedupe_chatter
+    # The high-frequency events are emitted with NO explicit level, so their
+    # severity comes from the production LEVELS map (poll_failure → warn,
+    # notification_skipped_dedupe → debug) — not from tags the test supplies.
+    # This makes the acceptance criterion non-circular: regressing
+    # LEVELS[:poll_failure] or LEVELS[:notification_skipped_dedupe] to :info
+    # would leak them into the info view and fail `info.size`.
     with_log do |logger, path|
       20.times { |i| logger.event(:notification_sent, sequence: i) }
       100.times do |i|
-        logger.event(:poll_failure, level: :debug, category: :noise,
-                                    error_class: "Faraday::TimeoutError", message: "slow #{i}")
-        logger.event(:notification_skipped_dedupe, level: :debug, category: :noise,
-                                                  project: "hive", slug: "slug", marker: "waiting")
+        logger.event(:poll_failure, error_class: "Faraday::TimeoutError", message: "slow #{i}")
+        logger.event(:notification_skipped_dedupe, project: "hive", slug: "slug", marker: "waiting")
       end
       logger.close
 
@@ -105,7 +109,6 @@ class HiveBotLoggerTest < Minitest::Test
 
       assert_equal 20, info.size
       assert_equal 0, noise_in_info.size
-      assert_operator noise_in_info.size.to_f / info.size, :<, 0.05
     end
   end
 
@@ -117,6 +120,17 @@ class HiveBotLoggerTest < Minitest::Test
       payload = JSON.parse(File.read(path))
       assert_equal "debug", payload["level"]
       assert_equal "noise", payload["category"]
+    end
+  end
+
+  def test_string_keyed_level_attr_cannot_overwrite_the_validated_level
+    with_log do |logger, path|
+      logger.event(:bot_started, **{ "level" => "verbose" })
+      logger.close
+
+      payload = JSON.parse(File.read(path))
+      assert_equal "info", payload["level"],
+                   "a string-keyed level attr must not overwrite the validated level"
     end
   end
 

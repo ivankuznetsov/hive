@@ -7,7 +7,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
-  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
+  Row = Struct.new(:project, :slug, :stage, :workflow, :action, :action_label, :marker, :attrs, :diagnostic,
                    :id, :display_name, :pr_url,
                    keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
@@ -238,10 +238,10 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
-  def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
+  def row(project: "hive", slug: "task", stage: "3-plan", workflow: "coding", action: "ready_to_develop",
           action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil,
           id: nil, display_name: nil, pr_url: nil)
-    Row.new(project: project, slug: slug, stage: stage, action: action,
+    Row.new(project: project, slug: slug, stage: stage, workflow: workflow, action: action,
             action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic,
             id: id, display_name: display_name, pr_url: pr_url)
   end
@@ -1521,6 +1521,16 @@ class HiveBotSupervisorTest < Minitest::Test
                      action: "needs_input", marker: "waiting")
     ready_to_x = row(slug: "ship-it-260526-bbbb", stage: "7-artifacts",
                      action: "ready_to_finalize", marker: "complete")
+    plan_waiting = row(slug: "plan-260624-abcd", stage: "3-plan",
+                       action: "needs_input", marker: "waiting")
+    execute_waiting = row(slug: "execute-260624-abcd", stage: "4-execute",
+                          action: "needs_input", marker: "execute_waiting")
+    finalize_waiting = row(slug: "finalize-260624-abcd", stage: "8-finalize",
+                           action: "needs_input", marker: "waiting")
+    generic_waiting = row(slug: "generic-260624-abcd", stage: "1-intake", workflow: "blank",
+                          action: "needs_input", marker: "waiting")
+    review_waiting = row(slug: "review-260624-abcd", stage: "6-review",
+                         action: "needs_input", marker: "review_waiting")
     retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
                              action: "recover_review", marker: "review_error",
                              attrs: { "phase" => "fix", "pass" => "2" },
@@ -1531,18 +1541,39 @@ class HiveBotSupervisorTest < Minitest::Test
     inert = row(slug: "agent-running-260526-eeee", action: "agent_running")
 
     keyboard = @supervisor.send(:status_keyboard,
-                                [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+                                [ brainstorm, ready_to_x, plan_waiting, execute_waiting,
+                                  finalize_waiting, generic_waiting, review_waiting,
+                                  retryable_recovery, manual_recovery, inert ])
     callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
 
     assert_includes callbacks, "answer:hive:ask-q-260526-aaaa",
                     "brainstorm-waiting rows get an answer button"
     assert_includes callbacks, "approve:finalize:hive:ship-it-260526-bbbb:7-artifacts",
                     "ready_to_X rows get an approve button with the workflow verb"
+    assert_includes callbacks, "approve_plan:hive:plan-260624-abcd:3-plan",
+                    "plan waiting rows get a plan-approve button"
+    assert_includes callbacks, "rerun:hive:execute-260624-abcd:4-execute:develop",
+                    "execute waiting rows get a develop rerun button"
+    assert_includes callbacks, "rerun:hive:finalize-260624-abcd:8-finalize:finalize",
+                    "finalize waiting rows get a finalize run button"
+    assert_includes callbacks, "rerun:hive:generic-260624-abcd:1-intake:run",
+                    "generic needs-input rows get a universal run button"
+    assert_includes callbacks, "findings:accept_all:hive:review-260624-abcd:6-review",
+                    "review waiting rows get an accept-all primary button"
     assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
                     "retryable recovery rows get an autofix button"
     assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
                     "manual-only recovery rows get a details button"
-    assert_equal 4, callbacks.length, "inert agent_running rows produce no button"
+    assert_equal 9, callbacks.length, "inert agent_running rows produce no button"
+  end
+
+  def test_status_keyboard_suppresses_none_and_complete_needs_input_rows
+    suppressed = [
+      row(slug: "none-260624-abcd", action: "needs_input", marker: "none"),
+      row(slug: "complete-260624-abcd", action: "needs_input", marker: "complete")
+    ]
+
+    assert_nil @supervisor.send(:status_keyboard, suppressed)
   end
 
   def test_status_keyboard_is_nil_when_no_row_is_actionable

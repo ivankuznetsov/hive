@@ -21,6 +21,7 @@ require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
+require "hive/bot/row_actions"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/paths"
@@ -1439,31 +1440,31 @@ module Hive
         buttons.empty? ? nil : buttons.map { |btn| [ btn ] }
       end
 
-      # One primary action button for a row, or nil when the row has no
-      # Telegram-side next step. Mirrors the push-notification surface:
-      #   needs_input + 2-brainstorm + waiting → Answer  (answer: callback)
-      #   ready_to_*                            → Approve (approve: callback)
-      #   recover_* AND retryable_recovery?     → Autofix (autofix: callback)
-      #   recover_* AND manual_only_recovery?   → Details (details: callback)
-      #   else                                  → nil
-      # Labels carry the task title so the operator can tell rows apart.
+      # One primary action button for a row, or nil when the canonical
+      # row-action resolver says the row is suppressed or has no Telegram-side
+      # action. Labels carry the task title so the operator can tell rows apart.
       def status_action_button(row)
         nb = Hive::Bot::NotificationBuilders
-        title = nb.display_title(row)
-        action = row.action.to_s
+        resolution = Hive::Bot::RowActions.resolve(row)
+        return nil if resolution.suppress || resolution.actions.empty?
 
-        if action == "needs_input" && Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting" # coding-scoped: Telegram answer flow edits coding brainstorm.md
-          nb.button("✏️ #{title}", "answer:#{row.project}:#{row.slug}")
-        elsif action.start_with?("ready_to_")
-          verb = nb.verb_for_action(row.action)
-          nb.button("✅ #{title}", "approve:#{verb}:#{row.project}:#{row.slug}:#{row.stage}") if verb
-        elsif nb.recovery?(row)
-          if nb.retryable_recovery?(row)
-            nb.button("🔧 #{title}", nb.autofix_callback(row))
-          else
-            nb.button("🔍 #{title}", nb.details_callback(row))
-          end
-        end
+        action = resolution.actions.find(&:primary) || resolution.actions.first
+        title = nb.display_title(row)
+        nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
+      end
+
+      def status_action_emoji(role)
+        {
+          answer: "✏️",
+          approve: "✅",
+          approve_plan: "✅",
+          findings_accept: "✅",
+          findings_reject: "✅",
+          autofix: "🔧",
+          details: "🔍",
+          rerun: "▶️",
+          run: "▶️"
+        }.fetch(role)
       end
 
       def render_details(rows, project, slug)

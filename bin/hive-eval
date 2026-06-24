@@ -23,15 +23,65 @@ parser = OptionParser.new do |opts|
   opts.on("--no-judge", "Skip Codex judge assertions") do
     options[:no_judge] = true
   end
+  # Define help explicitly so it survives require_exact below; the officious -h
+  # is otherwise rejected once exact matching is on. Printing to stdout and
+  # exiting 0 inside parse! keeps --help/-h a read-only path.
+  opts.on("-h", "--help", "Show this message") do
+    puts opts
+    exit
+  end
+end
+# Reject abbreviated long options (e.g. --rep for --report). OptionParser accepts
+# unambiguous prefixes by default, but the exact-only manual scan in
+# selected_report_path only recognizes --report/--report=, so an abbreviation
+# could select a report the usage-error cleanup below would fail to clear. Exact
+# matching keeps both paths in agreement.
+parser.require_exact = true
+
+def selected_report_path(root, argv, default_report)
+  report = default_report
+  index = 0
+
+  while index < argv.length
+    arg = argv[index]
+    break if arg == "--"
+
+    if arg == "--report"
+      value = argv[index + 1]
+      if value && !value.start_with?("-")
+        report = value
+        index += 1
+      end
+    elsif arg.start_with?("--report=")
+      report = arg.split("=", 2).fetch(1)
+    end
+
+    index += 1
+  end
+
+  File.expand_path(report, root)
 end
 
 begin
   remaining = parser.parse!
 rescue OptionParser::ParseError => e
+  # A usage error must not leave a stale report behind. We can't clear before
+  # parsing, because the --help/-h switch prints help and exits 0 inside parse!,
+  # and that read-only path must not delete the report.
+  # So clear here, covering both ways the selected report can be named:
+  #   * OptionParser captured it into options (exact --report only; abbreviations
+  #     are rejected via require_exact, matching the manual scan).
+  #   * an invalid option raised before --report was reached, leaving it in ARGV
+  #     (the manual scan recognizes the exact --report/--report= forms).
+  FileUtils.rm_f(File.expand_path(options.fetch(:report), root))
+  FileUtils.rm_f(selected_report_path(root, ARGV, options.fetch(:report)))
   warn "hive-eval: #{e.message}"
   warn parser
   exit 64
 end
+
+report_path = File.expand_path(options.fetch(:report), root)
+FileUtils.rm_f(report_path)
 
 unless remaining.empty?
   unexpected = remaining.join(" ")
@@ -59,7 +109,7 @@ scenario_root = File.expand_path(
 )
 
 env = {
-  "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
+  "HIVE_EVAL_REPORT" => report_path,
   "HIVE_EVAL_SCENARIOS_ONLY" => "1",
   "HIVE_EVAL_NO_JUDGE" => (options[:no_judge] ? "1" : nil),
   "TEST" => nil

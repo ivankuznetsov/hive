@@ -1,4 +1,5 @@
 require "lipgloss"
+require "hive/agent_limit"
 require "hive/commands/status"
 require "hive/dependencies"
 require "hive/pr"
@@ -255,6 +256,9 @@ module Hive
           value.empty? ? row.slug.to_s : value
         end
 
+        # A detected provider quota wall short-circuits to the shared
+        # `held_label` first; everything below is the exit_code/reason
+        # fallback chain for non-held recovery markers.
         # Operator-supplied marker reasons (stdout-tail snippets,
         # exception messages stored in REVIEW_ERROR's `reason` attr)
         # can carry control characters or ANSI CSI escapes that would
@@ -265,6 +269,8 @@ module Hive
         # the contract uniform regardless of which branch fires.
         def review_recovery_status(row)
           attrs = row.attrs || {}
+          return Hive::AgentLimit.held_label(attrs) if Hive::AgentLimit.held?(row.marker, attrs)
+
           reason = Hive::Tui::Text.sanitize(attrs["reason"])
           return reason unless reason.empty?
 
@@ -287,6 +293,9 @@ module Hive
           marker.empty? ? row.action_label.to_s : marker
         end
 
+        # A detected provider quota wall short-circuits to the shared
+        # `held_label` first; the exit_code/reason fallback chain below
+        # runs only for non-held error markers.
         # `error` action rows carry the failure context in `attrs`
         # (`reason=exit_code exit_code=1` for typical agent failures);
         # surfacing it in the status column tells the operator WHY a
@@ -297,6 +306,8 @@ module Hive
         # can carry CSI escapes that would hijack the cursor.
         def error_status(row)
           attrs = row.attrs || {}
+          return Hive::AgentLimit.held_label(attrs) if Hive::AgentLimit.held?(row.marker, attrs)
+
           exit_code = Hive::Tui::Text.sanitize(attrs["exit_code"])
           reason = Hive::Tui::Text.sanitize(attrs["reason"])
           return "ERROR exit_code=#{exit_code}" unless exit_code.empty?

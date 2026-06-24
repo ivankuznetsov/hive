@@ -3,6 +3,41 @@ require "hive/workflow"
 module Hive
   module Workflows
     module Coding
+      # Per-stage user-facing action keys for coding's `:agent`/`:inert`
+      # descriptor stages, consumed by `TaskAction#coding_table_action`. This
+      # table covers ONLY those stages — coding's runtime-kind stages
+      # (`:execute`, `:review_council`, `:finalize`) are classified by their
+      # own helpers in `task_action.rb` and are deliberately absent here.
+      ACTION_DISPATCH = {
+        "inbox" => {
+          kind: :inert,
+          default: :inbox
+        },
+        "brainstorm" => {
+          kind: :agent,
+          complete: :brainstorm_complete,
+          default: :brainstorm_waiting
+        },
+        "plan" => {
+          kind: :agent,
+          handler: :plan_action
+        },
+        "open-pr" => {
+          kind: :agent,
+          complete: :open_pr_complete,
+          default: :open_pr_ready
+        },
+        "artifacts" => {
+          kind: :agent,
+          complete: :artifacts_complete,
+          default: :artifacts_ready
+        },
+        "done" => {
+          kind: :inert,
+          default: :done
+        }
+      }.freeze
+
       DESCRIPTOR = Hive::Workflow.new(
         id: :coding,
         stages: [
@@ -38,7 +73,7 @@ module Hive
             index: 4,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "develop"),
-            kind: :marker,
+            kind: :execute,
             status_mode: :exit_code_only,
             budget_usd: 500,
             timeout_sec: 14400
@@ -48,7 +83,7 @@ module Hive
             index: 5,
             state_file: "pr.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "open-pr"),
-            kind: :marker,
+            kind: :agent,
             status_mode: :state_file_marker,
             budget_usd: 50,
             timeout_sec: 1800
@@ -58,14 +93,14 @@ module Hive
             index: 6,
             state_file: "task.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "review"),
-            kind: :marker
+            kind: :review_council
           ),
           Hive::Workflow::Stage.new(
             name: "artifacts",
             index: 7,
             state_file: "artifact.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "artifacts"),
-            kind: :marker,
+            kind: :agent,
             status_mode: :state_file_marker,
             budget_usd: 100,
             timeout_sec: 3600
@@ -75,7 +110,7 @@ module Hive
             index: 8,
             state_file: "pr.md",
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "finalize"),
-            kind: :marker,
+            kind: :finalize,
             status_mode: :state_file_marker,
             budget_usd: 50,
             timeout_sec: 1800

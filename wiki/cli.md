@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-21
+updated: 2026-06-23
 tags: [cli, api]
 ---
 
@@ -25,13 +25,21 @@ reason. Accepted boolean forms match Thor's exact grammar: bare `--json`, exact
 truthy assignments (`--json=true`/`TRUE`/`t`/`T`), and false forms
 (`--no-json`, `--skip-json`, `--json=false`/`FALSE`/`f`/`F`). Unsupported
 assignments such as `--json=1` or `--json=yes` exit with usage before their
-values can be treated as a command argument or task target. The scan stops at
-the `hive new` text boundary: after `hive new PROJECT`, dash-prefixed tokens
-such as `--help` and unsupported-looking `--json=...` assignments are literal
-task text, and the wrapper inserts `--` before that tail so Thor does not parse
-it as options. When the wrapper itself catches a usage error, JSON-vs-prose mode
-is decided from the last recognized JSON boolean flag in argv, so a trailing
-false form such as `--no-json` or `--json=false` overrides an earlier `--json`.
+values can be treated as a command argument or task target. `hive new` has a
+special lift-and-rebuild path: standalone allow-listed options are lifted from
+before the project, between project and text, or after text, then the remaining
+`PROJECT TEXT...` tail is protected with `--` so Thor does not parse literal
+task text as options. The allow-list is `--workflow`/`--depends-on` (whose value
+is the next token, but only when that token exists and is not option-like — a
+trailing or value-less `--workflow`/`--depends-on` stays literal text rather than
+swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE` `name=`-prefix
+forms, and JSON booleans lifted only in their exact accepted forms (`--json`,
+`--json=true`, `--no-json`, etc.). Non-allow-listed tokens such
+as `--help`, unsupported-looking `--json=...` assignments after `PROJECT`,
+unrecognized `--foo`, and quoted strings containing `--workflow` remain task
+text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
+decided from the last recognized JSON boolean flag in argv, so a trailing false
+form such as `--no-json` or `--json=false` overrides an earlier `--json`.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested
@@ -96,6 +104,7 @@ schema with `error_kind: "error"`.
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check) and `--json` (single `hive-init.v1` success document with resolved answers and project metadata; precondition failures keep the legacy stderr + exit-code contract).
+- `init` and `new` share one `--workflow` help string sourced from the built-in workflow registry, then append a static note that project-authored workflows are valid and can be created with `hive workflow new ID`. Thor captures (bakes) this string at class-load time and replays it later via `help`, so help does not dynamically enumerate active-project descriptors.
 - `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `workflow new`, `bench submit`, `digest`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v2` (v1 remains loadable by explicit schema version for pinned consumers); `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`; `workflow new`, `bench submit`, and `digest` emit unversioned success documents, and `workflow new` also emits unversioned JSON errors for its typed usage/config/git failures.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.

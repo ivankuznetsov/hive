@@ -786,9 +786,27 @@ module Hive
       ""
     end
 
-    def wait_for_done_signal(task, _runner, timeout, log_label)
+    def wait_for_done_signal(task, runner, timeout, log_label)
       deadline = Time.now + timeout
       loop do
+        # A usage/credit wall stalls claude WITHOUT ever touching `.done`,
+        # so this exit_code_only path (the default `claude`/tmux execute
+        # spawn) would otherwise drain to the generic "stop hook did not
+        # signal completion" timeout — a marker with no limit text, which
+        # the execute classifier reads as `implementer_failed` rather than
+        # `limits_reached`. Mirror the sibling wait modes
+        # (`wait_for_expected_output`, `limits_reached_marker`): surface a
+        # detected wall as an :error carrying the limit error_message so the
+        # execute stage stamps `reason="limits_reached"` and the cooldown
+        # healer can hold/retry. `capture_limit_tail` is nil-runner safe.
+        pane_tail = capture_limit_tail(runner)
+        if Hive::AgentLimit.limit_reached?(pane_tail)
+          return {
+            status: :error,
+            error_message: Hive::AgentLimit.error_message(pane_tail, agent: "claude")
+          }
+        end
+
         if File.exist?(done_path(task))
           # The stop-hook touches `.done` even on `empty_stdin` /
           # other non-success completions; the real status lives in

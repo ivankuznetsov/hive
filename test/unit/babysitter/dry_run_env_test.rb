@@ -267,6 +267,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_skips_invalid_utf8_argv_without_crashing
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
+      invalid_url = "https://evil.example.com/bad\xFF".b
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", invalid_url)
+
+      assert status.success?, err
+      expected = "gh api https://evil.example.com/bad\xFF skipped".b
+      assert_includes err.b, expected
+      refute_includes err.b, "ArgumentError"
+      skipped = File.binread(log_path)
+      assert_includes skipped, expected
+    end
+  end
+
   def test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands
     with_tmp_dir do |dir|
       real_gh = recording_binary(dir, "real-gh")

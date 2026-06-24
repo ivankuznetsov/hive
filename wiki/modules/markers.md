@@ -3,11 +3,11 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-06-24
 tags: [marker, protocol, flock]
 ---
 
-**TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` returns the *last* marker in a file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)`, replacing the last marker (or appending if none).
+**TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` returns the *last* marker in a file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)`, replacing the last marker (or appending if none). `Markers.input_marker?` is the shared allowlist for markers whose `needs_input` action means a real operator-input gate.
 
 ## Marker grammar
 
@@ -32,6 +32,8 @@ tags: [marker, protocol, flock]
 ```
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
+
+`INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting]` defines the only marker names whose `needs_input` action should be surfaced as a pending question. Historical/upstream classification can still emit `action=needs_input` for markerless (`none`) or terminal (`complete`) rows; bot/status/TUI presentation boundaries use `Markers.input_marker?` to suppress those incoherent rows instead of showing internal marker names to operators.
 
 `ERROR` markers written through `Markers.set` receive a generated `marker_id` attr unless the caller supplies one. This is the high-cardinality recovery discriminator for `hive markers clear --match-attr marker_id=...`; legacy rows without it fall back to observed attrs such as `reason=exit_code,exit_code=143`.
 
@@ -87,7 +89,7 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 
 ## Tests
 
-- `test/unit/markers_test.rb` — round-trip set/get, attribute quoting/sanitization, last-marker semantics, missing-file handling, and Git stderr attrs containing `branch -> branch`.
+- `test/unit/markers_test.rb` — round-trip set/get, attribute quoting/sanitization, last-marker semantics, missing-file handling, Git stderr attrs containing `branch -> branch`, and the `input_marker?` allowlist.
 
 ## Used by
 

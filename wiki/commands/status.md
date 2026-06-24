@@ -3,11 +3,11 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-20
+updated: 2026-06-24
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory across `Hive::Workflows.all_stage_dirs`, reads each task's marker and `meta.yml`, resolves same-project task dependencies, and prints human task identities grouped by the next useful action. Status scans tolerate normal stage-move races: vanished task folders are skipped, and duplicate-slug rows are collapsed only when one duplicate folder has already disappeared. Normal text status hides `9-done` tasks whose row `mtime` is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory across `Hive::Workflows.all_stage_dirs`, reads each task's marker and `meta.yml`, resolves same-project task dependencies, and prints human task identities grouped by the next useful action. Status scans tolerate normal stage-move races: vanished task folders are skipped, and duplicate-slug rows are collapsed only when one duplicate folder has already disappeared. Normal text status hides `9-done` tasks whose row `mtime` is older than 3 days, filters incoherent `needs_input` rows whose marker is not `Hive::Markers.input_marker?`, and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
 
 ## Output shape
 
@@ -27,7 +27,9 @@ Rows also include `workflow`, the descriptor id that resolved the task (`"coding
 
 Rows also include `pr_url`: once a coding task reaches `5-open-pr` or later, status reads `<task>/pr.md` frontmatter through `Hive::Gh.pr_frontmatter` and emits a stripped non-empty `pr_url`; before a PR exists, or when `pr.md` is missing, blank, or malformed, the field is `null`. This is a sibling task-payload field, not copied out of marker attrs, so consumers do not need to scrape `<!-- COMPLETE pr_url=... -->`.
 
-JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken. Dependency fields are also present on every task row: `depends_on`, `blocked_by`, `dependency_stage`, and `blocked`; text and TUI rows append `⏸ blocked by <slug> (<stage>)` or `(unresolved)` when `blocked` is true. The daemon consumes that `blocked` boolean directly.
+JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row whose marker passes `Hive::Markers.input_marker?` (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken. Dependency fields are also present on every task row: `depends_on`, `blocked_by`, `dependency_stage`, and `blocked`; text and TUI rows append `⏸ blocked by <slug> (<stage>)` or `(unresolved)` when `blocked` is true. The daemon consumes that `blocked` boolean directly.
+
+The JSON `action` field is deliberately not rewritten when a row is incoherent (`action: "needs_input"` with `marker: "none"` or `marker: "complete"`). That keeps daemon/bot/web contracts stable. Human presentation surfaces apply `Hive::Markers.input_marker?` at the boundary: text status omits those rows from the "Needs your input" bucket and reports `unanswered_questions: 0`; the bot and TUI apply the same predicate in their own render/dispatch paths.
 
 ## Archived tasks
 
@@ -125,7 +127,7 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
-- `test/unit/commands/status_test.rb` — status row collection, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, and archive-mode listing.
+- `test/unit/commands/status_test.rb` — status row collection, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, archive-mode listing, and the JSON-stable/text-filtered handling of incoherent `needs_input` rows.
 - `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 

@@ -1,3 +1,4 @@
+require "hive/bot/notification_builders"
 require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
 
@@ -8,6 +9,7 @@ module Hive
         def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:,
                        idea_draft_store: nil,
                        projects_provider: -> { [] },
+                       status_snapshot_provider: -> { [] },
                        last_project: -> { nil },
                        logger: nil)
           @pending_ideas = pending_ideas
@@ -16,6 +18,7 @@ module Hive
           @result_class = result_class
           @idea_draft_store = idea_draft_store
           @projects_provider = projects_provider
+          @status_snapshot_provider = status_snapshot_provider
           @last_project = last_project
           @logger = logger
         end
@@ -105,19 +108,10 @@ module Hive
 
         def show_details(data)
           _prefix, project, slug, stage = split_callback(data, [ 3, 4 ])
-          stage_argv = stage ? [ "--stage", stage ] : []
-          # Replace the previous full-status dump with a targeted
-          # `hive status --diagnose <slug>` so the bot reply renders the
-          # bounded Diagnostic envelope (summary + detail) instead of
-          # the whole snapshot. `--stage` disambiguates duplicate slugs
-          # in the same project. See PR #84 review row 24.
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: project,
-            slug: slug,
-            command_argv: [ "hive", "status", "--diagnose", slug,
-                            "--project", project, *stage_argv, "--json" ]
-          )
+          row, error = resolve_details_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: error) if error
+
+          @result_class.new(action: :reply, text: Hive::Bot::NotificationBuilders.details_reply(row))
         end
 
         def refresh_diagnose(data)
@@ -264,6 +258,24 @@ module Hive
           raise ArgumentError, "malformed callback" unless counts.include?(parts.length)
 
           parts
+        end
+
+        def resolve_details_row(project:, slug:, stage:)
+          snapshot = @status_snapshot_provider.call
+          return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
+
+          matches = Array(snapshot).select do |row|
+            row.respond_to?(:project) && row.respond_to?(:slug) &&
+              row.project == project && row.slug == slug &&
+              (stage.nil? || row.stage.to_s == stage)
+          end
+          case matches.length
+          when 0 then [ nil, "That task is no longer active — send /status to see current tasks." ]
+          when 1 then [ matches.first, nil ]
+          else [ nil, "That task is ambiguous — send /status to pick the current task." ]
+          end
+        rescue StandardError
+          [ nil, "Status lookup failed — try again in a moment." ]
         end
 
         # The recovery callbacks (autofix / clear_and_retry) carry up to two

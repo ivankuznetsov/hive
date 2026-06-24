@@ -523,4 +523,31 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "blank-mtime", "invalid-mtime" ], filtered.rows.map(&:slug)
     assert_equal 0, snapshot.hidden_old_archived_count(now: now)
   end
+
+  def test_visible_projection_drops_incoherent_needs_input_rows
+    none = sample_task(slug: "none-row", marker: "none")
+    complete = sample_task(slug: "complete-row", marker: "complete")
+    waiting = sample_task(slug: "waiting-row", marker: "waiting")
+    execute_waiting = sample_task(slug: "execute-waiting-row", marker: "execute_waiting")
+    [ none, complete, waiting, execute_waiting ].each do |task|
+      task["action"] = "needs_input"
+      task["action_label"] = "Needs your input"
+    end
+
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+                                                                 {
+                                                                   "name" => "alpha",
+                                                                   "path" => "/tmp/alpha",
+                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
+                                                                   "tasks" => [ none, complete, waiting, execute_waiting ]
+                                                                 }
+                                                               ]))
+
+    assert_equal [ "none-row", "complete-row", "waiting-row", "execute-waiting-row" ],
+                 snapshot.rows.map(&:slug),
+                 "raw snapshot preserves the JSON contract for daemon/bot consumers"
+
+    visible = snapshot.visible_projection(scope: 0, filter: nil)
+    assert_equal [ "waiting-row", "execute-waiting-row" ], visible.rows.map(&:slug)
+  end
 end

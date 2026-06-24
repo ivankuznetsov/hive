@@ -206,7 +206,8 @@ module Hive
         when "agent_running" then Messages::OpenLogTail.new(row: row)
         when "error" then error_message(row)
         when "recover_review" then Messages::RecoverReview.new(row: row)
-        when "needs_input" then needs_input_message(row)
+        when "needs_input"
+          input_marker?(row) ? needs_input_message(row) : enter_fallback_message(row)
         else enter_fallback_message(row)
         end
       end
@@ -300,6 +301,10 @@ module Hive
         end
 
         Messages::OpenInputEditor.new(row: row)
+      end
+
+      def input_marker?(row)
+        Hive::Markers.input_marker?(row.marker)
       end
 
       def run_next_action?(row)

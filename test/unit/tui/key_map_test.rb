@@ -968,6 +968,25 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_enter_on_incoherent_needs_input_row_is_not_input_affordance
+    row = make_row(action_key: "needs_input", action_label: "Needs your input",
+                   marker: "none", suggested_command: nil)
+
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_enter_on_waiting_needs_input_row_still_opens_input_editor
+    row = make_row(action_key: "needs_input", action_label: "Needs your input",
+                   marker: "waiting", suggested_command: nil)
+
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+
+    assert_kind_of Hive::Tui::Messages::OpenInputEditor, msg
+    assert_same row, msg.row
+  end
+
   def test_verb_key_on_needs_input_still_dispatches_suggested_command
     # The verb key path is the explicit "rerun the stage" surface and
     # must stay independent of the Enter-opens-editor change above.

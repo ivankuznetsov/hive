@@ -2,6 +2,7 @@ require "hive"
 require "time"
 require "hive/archive_filter"
 require "hive/commands/status"
+require "hive/markers"
 
 module Hive
   module Tui
@@ -234,6 +235,14 @@ module Hive
         self.class.new(generated_at: @generated_at, projects: filtered)
       end
 
+      def without_incoherent_needs_input
+        filtered = @projects.map do |project|
+          rows = project.rows.reject { |row| incoherent_needs_input_row?(row) }
+          project.with(rows: rows.freeze)
+        end
+        self.class.new(generated_at: @generated_at, projects: filtered)
+      end
+
       def hidden_old_archived_count(now: Time.now)
         rows.count { |row| old_archived_row?(row, now: now) }
       end
@@ -260,6 +269,7 @@ module Hive
       def visible_projection(scope:, filter:, now: Time.now)
         scope_to_project_index(scope)
           .filter_by_slug(filter)
+          .without_incoherent_needs_input
           .without_old_archived(now: now)
       end
 
@@ -280,6 +290,11 @@ module Hive
       end
 
       private
+
+      def incoherent_needs_input_row?(row)
+        row.action_key.to_s == Hive::Schemas::TaskActionKind::NEEDS_INPUT &&
+          !Hive::Markers.input_marker?(row.marker)
+      end
 
       def old_archived_row?(row, now:)
         Hive::ArchiveFilter.hide?(

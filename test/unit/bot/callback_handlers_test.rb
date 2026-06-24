@@ -267,6 +267,30 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal true, result.clear_keyboard
   end
 
+  def test_approve_callback_uses_from_for_coding_advance_verbs
+    result = @handlers.handle(:callback_approve, update("approve:plan:hive:slug-260620-aaaa:2-brainstorm"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal(
+      [ "hive", "plan", "slug-260620-aaaa", "--from", "2-brainstorm", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_approve_callback_uses_stage_for_generic_run_verb
+    # A generic `ready_to_run` row's button encodes the `run` verb. `hive run`
+    # has no --from — it scopes by --stage — so the callback must NOT build an
+    # invalid `hive run --from`.
+    result = @handlers.handle(:callback_approve, update("approve:run:hive:generic-260620-aaaa:1-intake"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal(
+      [ "hive", "run", "generic-260620-aaaa", "--stage", "1-intake", "--project", "hive", "--json" ],
+      result.command_argv,
+      "generic run button must use `hive run --stage`, never `hive run --from`"
+    )
+  end
+
   def test_show_details_dispatches_status_diagnose_for_targeted_envelope
     # The Show-details button previously ran a full `hive status --json`
     # and replied with the entire snapshot. PR #84 review row 24 narrows

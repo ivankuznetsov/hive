@@ -6,6 +6,7 @@ class CommandsRunTest < Minitest::Test
   TaskDouble = Struct.new(
     :slug, :stage_name, :stage_index, :folder, :state_file,
     :hive_state_path, :project_root, :project_name, :worktree_path,
+    :workflow,
     keyword_init: true
   )
   MarkerDouble = Struct.new(:name, :attrs, keyword_init: true)
@@ -19,17 +20,19 @@ class CommandsRunTest < Minitest::Test
     Hive::Commands::Run.new("some-slug", **kwargs)
   end
 
-  def task(folder: "/tmp/hive-task", stage_name: "brainstorm", stage_index: 2)
+  def task(folder: "/tmp/hive-task", stage_name: "brainstorm", stage_index: 2,
+           state_file: nil, hive_state_path: nil, workflow: Hive::Workflows::Registry.default)
     TaskDouble.new(
       slug: "some-slug",
       stage_name: stage_name,
       stage_index: stage_index,
       folder: folder,
-      state_file: File.join(folder, "brainstorm.md"),
-      hive_state_path: File.join(folder, "..", "..", ".."),
+      state_file: state_file || File.join(folder, "brainstorm.md"),
+      hive_state_path: hive_state_path || File.join(folder, "..", "..", ".."),
       project_root: "/tmp/project",
       project_name: "project",
-      worktree_path: "/tmp/worktree"
+      worktree_path: "/tmp/worktree",
+      workflow: workflow
     )
   end
 
@@ -68,10 +71,46 @@ class CommandsRunTest < Minitest::Test
 
   def test_pick_runner_rejects_unknown_stage_name
     err = assert_raises(Hive::StageError) do
-      command.send(:pick_runner, TaskDouble.new(stage_name: "mystery"))
+      command.send(:pick_runner, task(stage_name: "mystery"))
     end
 
     assert_match(/no runner for stage mystery/, err.message)
+  end
+
+  def test_pick_runner_passes_task_workflow_to_resolver
+    run = command
+    descriptor = research_workflow
+    t = task(stage_name: "gather")
+    t.workflow = descriptor
+    calls = []
+    replacement = lambda do |resolved_task, descriptor:|
+      calls << [ resolved_task, descriptor ]
+      :runner
+    end
+
+    with_replaced_singleton_method(Hive::Stages::Resolver, :resolve, replacement) do
+      assert_equal :runner, run.send(:pick_runner, t)
+    end
+
+    assert_equal [ [ t, descriptor ] ], calls
+  end
+
+  def test_pick_runner_uses_on_disk_task_workflow_selector
+    with_tmp_dir do |dir|
+      with_registered_workflow(research_workflow) do
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "x-260424-7a3b")
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "meta.yml"), "workflow: research\n")
+
+        t = Hive::Task.new(folder)
+        runner = command.send(:pick_runner, t)
+
+        assert_equal :research, t.workflow.id
+        assert_equal %w[intake gather report], t.stage_names
+        assert_equal File.join(folder, "notes.md"), t.state_file
+        assert_equal Hive::Stages::Agent.method(:run!), runner
+      end
+    end
   end
 
   def test_quiet_report_still_raises_for_error_markers
@@ -147,6 +186,81 @@ class CommandsRunTest < Minitest::Test
     assert_match(/sign_policy/, signing_failure.fetch("instructions"))
     refute signing_failure.key?("rerun_with")
     assert_equal({ "kind" => Hive::Schemas::NextActionKind::NO_OP }, unknown)
+  end
+
+  def test_next_stage_dir_uses_task_workflow_sequence
+    run = command
+    t = task(stage_name: "gather", stage_index: 2, workflow: research_workflow)
+
+    assert_equal File.join(t.hive_state_path, "stages", "3-report"),
+                 run.send(:next_stage_dir, t)
+  end
+
+  def test_json_next_action_generic_complete_approves_to_descriptor_stage
+    run = command
+
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        folder = File.join(dir, ".hive-state", "stages", "2-gather", "some-slug")
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "notes.md")
+        File.write(state_file, "# notes\n")
+        Hive::Markers.set(state_file, :complete)
+        t = task(
+          folder: folder,
+          stage_name: "gather",
+          stage_index: 2,
+          state_file: state_file,
+          hive_state_path: File.join(dir, ".hive-state"),
+          workflow: research_workflow
+        )
+
+        action = run.send(:json_next_action, t, marker(:complete))
+
+        assert_equal Hive::Schemas::NextActionKind::APPROVE, action.fetch("kind")
+        assert_equal "2-gather", action.fetch("from_stage")
+        assert_match(%r{/\.hive-state/stages/3-report/\z}, action.fetch("to"))
+        assert_equal "3-report", action.fetch("to_stage")
+        assert_equal "hive approve some-slug --from 2-gather", action.fetch("command")
+      end
+    end
+  end
+
+  def test_json_next_action_collision_workflow_avoids_coding_stage
+    run = command
+
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "some-slug")
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "brainstorm.md")
+        File.write(state_file, "# brainstorm\n")
+        Hive::Markers.set(state_file, :complete)
+        t = task(
+          folder: folder,
+          stage_name: "brainstorm",
+          stage_index: 2,
+          state_file: state_file,
+          hive_state_path: File.join(dir, ".hive-state"),
+          workflow: collision_workflow
+        )
+
+        action = run.send(:json_next_action, t, marker(:complete))
+
+        assert_equal Hive::Schemas::NextActionKind::APPROVE, action.fetch("kind")
+        assert_match(%r{/\.hive-state/stages/3-report/\z}, action.fetch("to"))
+        assert_equal "3-report", action.fetch("to_stage")
+        refute_match(%r{/3-plan/\z}, action.fetch("to"))
+      end
+    end
+  end
+
+  def test_json_next_action_generic_terminal_complete_is_no_op
+    run = command
+    t = task(stage_name: "report", stage_index: 3, workflow: research_workflow)
+
+    assert_equal({ "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "final_stage" },
+                 run.send(:json_next_action, t, marker(:complete)))
   end
 
   # CleanExit's `:error reason=ensure_clean_on_exit_failed` used to

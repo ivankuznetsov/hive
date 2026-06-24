@@ -46,6 +46,7 @@ module Hive
         :slug,
         :id,
         :display_name,
+        :workflow,
         :depends_on,
         :blocked_by,
         :dependency_stage,
@@ -56,6 +57,13 @@ module Hive
         :pr_url,
         :marker,
         :attrs,
+        # Carried verbatim from the JSON `held` object for payload↔Row
+        # schema-correspondence only (schema_correspondence_test). The
+        # renderer does NOT read this — it derives the hold label from
+        # `attrs` via `Hive::AgentLimit.held_label` (tasks_pane.rb). Asymmetric
+        # with `blocked`, which IS consumed by the renderer; do not "fix" a
+        # hold-label bug by editing `row.held`.
+        :held,
         :mtime,
         :folder_mtime,
         :age_seconds,
@@ -82,18 +90,20 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
-        def initialize(id: nil, display_name: nil, worktree_path: nil,
+        def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, folder_mtime: nil, live_task_lock: false,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
-                       blocked: false, **rest)
+                       blocked: false, held: nil, **rest)
           super(id: id, display_name: display_name,
+                workflow: workflow,
                 depends_on: depends_on,
                 blocked_by: blocked_by,
                 dependency_stage: dependency_stage,
                 blocked: blocked,
                 worktree_path: worktree_path,
                 pr_url: pr_url,
+                held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
@@ -153,6 +163,7 @@ module Hive
           slug: payload["slug"],
           id: payload["id"],
           display_name: payload["display_name"],
+          workflow: payload["workflow"],
           depends_on: payload["depends_on"],
           blocked_by: payload["blocked_by"],
           dependency_stage: payload["dependency_stage"],
@@ -163,6 +174,7 @@ module Hive
           pr_url: payload["pr_url"],
           marker: payload["marker"],
           attrs: payload["attrs"],
+          held: payload["held"],
           mtime: payload["mtime"],
           folder_mtime: payload["folder_mtime"],
           age_seconds: payload["age_seconds"],

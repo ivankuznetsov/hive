@@ -1734,9 +1734,9 @@ module Hive
 
       def stage_extra_for(row)
         case row.stage.to_s
-        when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md"))
-        when "3-plan" then read_capped(File.join(row.folder, "plan.md"))
-        when "4-execute" then tail_capped(latest_execute_log_for(row))
+        when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md")) # coding-scoped: TUI preview for coding brainstorm artifact
+        when "3-plan" then read_capped(File.join(row.folder, "plan.md")) # coding-scoped: TUI preview for coding plan artifact
+        when "4-execute" then tail_capped(latest_execute_log_for(row)) # coding-scoped: TUI preview for coding execute logs
         else nil
         end
       rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO, SystemCallError
@@ -2393,6 +2393,9 @@ module Hive
         return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
 
+        # coding-scoped (block): the TUI's per-stage outcome panes are coding
+        # presentation work; a generic workflow renders no bespoke pane and
+        # falls through to :silent.
         case row.stage.to_s
         when "2-brainstorm"
           brainstorm_outcome(row, path, changed)

@@ -316,6 +316,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname=evil.example.com"
+      assert_stubbed env, "gh", "api", "https://example.com"
+      # `-p`/`--preview` takes a value; the api endpoint scanner must consume it so it
+      # does not stop on the preview name and miss the trailing external URL. Cover the
+      # separate short, glued short, and long forms.
+      assert_stubbed env, "gh", "api", "-p", "shadow-cat", "https://evil.example.com"
+      assert_stubbed env, "gh", "api", "-pshadow-cat", "https://evil.example.com"
+      assert_stubbed env, "gh", "api", "--preview", "shadow-cat", "https://evil.example.com"
+      # gh (pflag) clusters shorthands, so `-ip` is `-i -p`: the value-taking `-p` is the
+      # cluster's last char and swallows the next argv as its preview value. The endpoint
+      # scanner must mirror that consumption or it mistakes the preview name for the endpoint
+      # and waves the trailing attacker host through.
+      assert_stubbed env, "gh", "api", "-ip", "shadow-cat", "https://evil.example.com"
+      # The read/write classifier has the same cluster blind spot: a value-taking shorthand
+      # hidden behind a boolean (`-iX POST` = `-i -X POST`, `-if body=hi` = `-i -f body=hi`)
+      # must still be seen as a method/payload so the mutating call is skipped, not exec'd.
+      assert_stubbed env, "gh", "api", "-iX", "POST", "repos/owner/repo/dispatches"
+      assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-if", "body=hi"
       # An scp-style `git@host:owner/repo` carries a host through a single-slash
       # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
       # disqualify it.
@@ -340,6 +357,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
       assert_passes env, "gh", "api", "repos/owner/repo"
+      assert_passes env, "gh", "api", "graphql"
+      # A `-p`/`--preview` read against a default-host endpoint must still reach real gh:
+      # consuming the preview value must not over-block the safe, host-free form.
+      assert_passes env, "gh", "api", "-p", "shadow-cat", "repos/owner/repo"
+      assert_passes env, "gh", "api", "--preview", "shadow-cat", "repos/owner/repo"
+      # The clustered `-ip` preview read against a default-host endpoint must also pass:
+      # mirroring pflag's cluster consumption must not over-block the safe form.
+      assert_passes env, "gh", "api", "-ip", "shadow-cat", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
       # The safe positional forms must still reach real gh, so the new positional
@@ -553,8 +578,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr view 42 -Revil.example.com/octo/repo skipped"
       assert_includes skipped, "gh pr view 42 -R=evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh api -ip shadow-cat https://evil.example.com skipped"
+      assert_includes skipped, "gh api -iX POST repos/owner/repo/dispatches skipped"
+      assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -if body=hi skipped"
       assert_includes skipped, "gh api rate_limit --hostname evil.example.com skipped"
       assert_includes skipped, "gh api rate_limit --hostname=evil.example.com skipped"
+      assert_includes skipped, "gh api https://example.com skipped"
       assert_includes skipped, "gh -R git@evil.example.com:owner/repo pr view 42 skipped"
       assert_includes skipped, "gh repo view evil.example.com/owner/repo skipped"
       assert_includes skipped, "gh repo view https://evil.example.com/owner/repo skipped"
@@ -586,6 +615,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "real-gh --repo=owner/repo pr view 42"
       assert_includes real_invocations, "real-gh auth status"
       assert_includes real_invocations, "real-gh api repos/owner/repo"
+      assert_includes real_invocations, "real-gh api -ip shadow-cat repos/owner/repo"
+      assert_includes real_invocations, "real-gh api graphql"
       assert_includes real_invocations, "real-gh repo view owner/repo"
       assert_includes real_invocations, "real-gh pr view 42"
       assert_includes real_invocations, "real-gh pr view feature/topic/branch"

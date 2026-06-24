@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "hive"
 require "hive/bot/format"
+require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
 require "hive/workflows"
@@ -129,13 +130,23 @@ module Hive
       end
 
       def needs_input(row)
-        case row.marker
-        when "waiting"
-          waiting_input(row)
-        when "review_waiting"
-          review_waiting(row)
+        resolution = Hive::Bot::RowActions.resolve(row)
+        return nil if resolution.suppress
+        return nil if resolution.actions.empty?
+
+        case resolution.actions.map(&:role)
+        when [ :answer ]
+          brainstorm_waiting(row, actions: resolution.actions)
+        when [ :approve_plan, :details ]
+          plan_waiting(row, actions: resolution.actions)
+        when [ :findings_accept, :findings_reject, :details ], [ :details ]
+          review_waiting(row, actions: resolution.actions)
+        when [ :rerun, :details ]
+          execute_waiting(row, actions: resolution.actions)
+        when [ :run, :details ]
+          finalize_waiting(row, actions: resolution.actions)
         else
-          default_needs_input(row)
+          default_needs_input(row, actions: resolution.actions)
         end
       end
 
@@ -154,23 +165,19 @@ module Hive
         default_needs_input(row)
       end
 
-      def default_needs_input(row)
+      def default_needs_input(row, actions: nil)
         Notification.new(
           text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
-          keyboard: [
-            [ button("Show details", details_callback(row)) ]
-          ]
+          keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:details, details_callback(row)) ])
         )
       end
 
-      def brainstorm_waiting(row)
+      def brainstorm_waiting(row, actions: nil)
         Notification.new(
           text: header(row) + "\n" \
                 "Brainstorm questions are waiting. " \
                 "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
-          keyboard: [
-            [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ]
-          ]
+          keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:answer, "answer:#{row.project}:#{row.slug}") ])
         )
       end
 
@@ -180,35 +187,43 @@ module Hive
       # (`suppress_daemon_plan_pause?`); this notification is for the
       # daemon-OFF case, where the operator reviews the draft and advances
       # it from the CLI — so it points at the plan, not the `/answer` flow.
-      def plan_waiting(row)
+      def plan_waiting(row, actions: nil)
         Notification.new(
           text: header(row) + "\nPlan draft is ready for your review.",
-          keyboard: [
-            [ button("Show details", details_callback(row)) ]
-          ]
+          keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:details, details_callback(row)) ])
         )
       end
 
-      def review_waiting(row)
+      def review_waiting(row, actions: nil)
         normalized_attrs = row.attrs.to_h.transform_keys(&:to_s)
         if normalized_attrs["reason"] == "fix_guardrail"
           return Notification.new(
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
-            keyboard: [
-              [ button("Show details", details_callback(row)) ]
-            ]
+            keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:details, details_callback(row)) ])
           )
         end
 
         Notification.new(
           text: header(row) + "\nReview triage is waiting.",
-          keyboard: [
-            [
-              button("Accept all", "findings:accept_all:#{row.project}:#{row.slug}:#{row.stage}"),
-              button("Reject all", "findings:reject_all:#{row.project}:#{row.slug}:#{row.stage}")
-            ],
-            [ button("Show details", details_callback(row)) ]
-          ]
+          keyboard: keyboard_for_actions(actions || [
+            Hive::Bot::RowActions.action(:findings_accept, "findings:accept_all:#{row.project}:#{row.slug}:#{row.stage}"),
+            Hive::Bot::RowActions.action(:findings_reject, "findings:reject_all:#{row.project}:#{row.slug}:#{row.stage}"),
+            Hive::Bot::RowActions.action(:details, details_callback(row))
+          ])
+        )
+      end
+
+      def execute_waiting(row, actions:)
+        Notification.new(
+          text: header(row) + "\nExecute paused — needs your input.",
+          keyboard: keyboard_for_actions(actions)
+        )
+      end
+
+      def finalize_waiting(row, actions:)
+        Notification.new(
+          text: header(row) + "\nFinalize paused — ready to run.",
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
@@ -386,6 +401,32 @@ module Hive
 
       def details_callback(row)
         callback_with_stage("details", row)
+      end
+
+      def keyboard_for_actions(actions)
+        actions = Array(actions)
+        if actions.first(2).map(&:role) == [ :findings_accept, :findings_reject ]
+          return [
+            actions.first(2).map { |action| button(label_for_action(action), action.callback) },
+            *actions.drop(2).map { |action| [ button(label_for_action(action), action.callback) ] }
+          ]
+        end
+
+        actions.map { |action| [ button(label_for_action(action), action.callback) ] }
+      end
+
+      def label_for_action(action)
+        {
+          answer: "Answer in chat",
+          approve: "Approve",
+          approve_plan: "Approve",
+          findings_accept: "Accept all",
+          findings_reject: "Reject all",
+          rerun: "Re-run",
+          run: "Run",
+          autofix: "🔧 Autofix",
+          details: "Show details"
+        }.fetch(action.role)
       end
 
       def callback_with_stage(prefix, row)

@@ -21,6 +21,7 @@ module Hive
         notification_skipped_backoff
         notification_skipped_active_conversation
         notification_skipped_daemon_plan_pause
+        notification_skipped_incoherent
         fresh_install_seeded
         answer_lock_contention
         dispatched_command

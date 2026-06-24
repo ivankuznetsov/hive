@@ -1,5 +1,6 @@
 require "time"
 require "hive/config"
+require "hive/markers"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
 require "hive/bot/title_formatter"
@@ -62,6 +63,7 @@ module Hive
           next if suppress_ready_action?(row)
           next if suppress_daemon_plan_pause?(row)
           next if suppress_active_conversation?(row)
+          next if suppress_incoherent_needs_input?(row)
 
           notification = NotificationBuilders.build(row, logger: @logger)
           next unless notification
@@ -87,6 +89,19 @@ module Hive
 
         @logger.event(:notification_skipped_active_conversation,
                       project: row.project, slug: row.slug, marker: row.marker)
+        true
+      end
+
+      def suppress_incoherent_needs_input?(row)
+        return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        return false if Hive::Markers.input_marker?(row.marker)
+
+        @logger.event(:notification_skipped_incoherent,
+                      project: row.project,
+                      slug: row.slug,
+                      stage: row.stage,
+                      marker: row.marker,
+                      action: row.action)
         true
       end
 

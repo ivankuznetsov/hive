@@ -195,6 +195,84 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_match(/Brainstorm questions/, telegram.messages.first[:text])
   end
 
+  def test_brainstorm_none_needs_input_is_suppressed_and_logged
+    d = dispatcher
+    leaked = row(id: 9281, slug: "brainstorm-none-260624-9281", stage: "2-brainstorm",
+                 marker: "none", action: "needs_input")
+
+    d.process_rows([ leaked ])
+
+    assert_empty telegram.messages
+    assert_nil alert_store_via(d).entry(Hive::Bot::NotificationBuilders.fingerprint(leaked)),
+               "suppressed incoherent rows must not enter alert dedupe state"
+    event = logger.events.find { |name, _attrs| name == :notification_skipped_incoherent }
+    refute_nil event, "incoherent needs_input suppression must be logged"
+    assert_equal(
+      {
+        project: "hive",
+        slug: "brainstorm-none-260624-9281",
+        stage: "2-brainstorm",
+        marker: "none",
+        action: "needs_input"
+      },
+      event.last
+    )
+  end
+
+  def test_execute_complete_needs_input_is_suppressed_and_logged
+    d = dispatcher
+    leaked = row(id: 5, slug: "execute-complete-260624-0005", stage: "4-execute",
+                 marker: "complete", action: "needs_input")
+
+    d.process_rows([ leaked ])
+
+    assert_empty telegram.messages
+    event = logger.events.find { |name, _attrs| name == :notification_skipped_incoherent }
+    refute_nil event, "incoherent execute complete row must be logged"
+    assert_equal "execute-complete-260624-0005", event.last[:slug]
+    assert_equal "4-execute", event.last[:stage]
+    assert_equal "complete", event.last[:marker]
+    assert_equal "needs_input", event.last[:action]
+  end
+
+  def test_evidence_matrix_suppresses_none_and_complete_but_allows_execute_waiting
+    d = dispatcher
+    leaked_none = 22.times.map do |i|
+      row(slug: format("none-leak-%02d-260624", i + 1), stage: "2-brainstorm",
+          marker: "none", action: "needs_input")
+    end
+    leaked_complete = [
+      row(slug: "complete-leak-260624", stage: "4-execute", marker: "complete", action: "needs_input")
+    ]
+    genuine_execute = 4.times.map do |i|
+      row(slug: format("execute-waiting-%02d-260624", i + 1), stage: "4-execute",
+          marker: "execute_waiting", action: "needs_input")
+    end
+
+    d.process_rows(leaked_none + leaked_complete + genuine_execute)
+
+    assert_equal 4, telegram.messages.size,
+                 "execute_waiting rows are genuine input markers and must not be suppressed"
+    skipped = logger.events.select { |name, _attrs| name == :notification_skipped_incoherent }
+    assert_equal 23, skipped.size, "22 none rows plus 1 complete row should be skipped"
+    assert_equal({ "none" => 22, "complete" => 1 }, skipped.map { |_name, attrs| attrs[:marker] }.tally)
+  end
+
+  def test_recognized_needs_input_markers_pass_the_incoherent_gate
+    d = dispatcher
+    genuine_rows = [
+      row(slug: "brainstorm-waiting-260624", stage: "2-brainstorm", marker: "waiting"),
+      row(slug: "execute-waiting-260624", stage: "4-execute", marker: "execute_waiting"),
+      row(slug: "review-waiting-260624", stage: "6-review", marker: "review_waiting")
+    ]
+
+    d.process_rows(genuine_rows)
+
+    assert_equal 3, telegram.messages.size
+    refute(logger.events.any? { |name, _attrs| name == :notification_skipped_incoherent },
+           "recognized input markers must not be logged as incoherent")
+  end
+
   # The operator is actively answering this slug → suppress the proactive
   # "questions waiting" push (it would re-fire mid-answer when the row
   # flaps out of and back into WAITING, e.g. a daemon resume).

@@ -57,6 +57,13 @@ module Hive
         :pr_url,
         :marker,
         :attrs,
+        # Carried verbatim from the JSON `held` object for payload↔Row
+        # schema-correspondence only (schema_correspondence_test). The
+        # renderer does NOT read this — it derives the hold label from
+        # `attrs` via `Hive::AgentLimit.held_label` (tasks_pane.rb). Asymmetric
+        # with `blocked`, which IS consumed by the renderer; do not "fix" a
+        # hold-label bug by editing `row.held`.
+        :held,
         :mtime,
         :folder_mtime,
         :age_seconds,
@@ -87,7 +94,7 @@ module Hive
                        pr_url: nil, folder_mtime: nil, live_task_lock: false,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
-                       blocked: false, **rest)
+                       blocked: false, held: nil, **rest)
           super(id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
@@ -96,6 +103,7 @@ module Hive
                 blocked: blocked,
                 worktree_path: worktree_path,
                 pr_url: pr_url,
+                held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
@@ -166,6 +174,7 @@ module Hive
           pr_url: payload["pr_url"],
           marker: payload["marker"],
           attrs: payload["attrs"],
+          held: payload["held"],
           mtime: payload["mtime"],
           folder_mtime: payload["folder_mtime"],
           age_seconds: payload["age_seconds"],

@@ -1,5 +1,6 @@
 require "json"
 require "time"
+require "hive/agent_limit"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
@@ -290,6 +291,9 @@ module Hive
           "diagnostic" => row[:diagnostic]
         }
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
+          payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
+        end
         payload
       end
 
@@ -937,6 +941,8 @@ module Hive
       end
 
       def label_for(marker)
+        return Hive::AgentLimit.held_label(marker.attrs) if Hive::AgentLimit.held?(marker.name, marker.attrs)
+
         attrs = Hive::Markers.display_attrs(marker.attrs)
                             .map { |k, v| "#{k}=#{status_attr_value(v)}" }.join(" ")
         attrs.empty? ? marker.name.to_s : "#{marker.name} #{attrs}"

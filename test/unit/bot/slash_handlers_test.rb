@@ -148,7 +148,23 @@ class HiveBotSlashHandlersTest < Minitest::Test
       assert_equal :dispatch_then_reply, result.action
       assert_equal [ "hive", "approve", "stuck-260525-abcd", "--json" ], result.command_argv
       assert_equal "stuck-260525-abcd", result.slug
+      assert_nil result.text, "a resolved numeric id dispatches silently — no operator reply text"
     end
+  end
+
+  def test_numeric_id_filters_multi_row_snapshot_instead_of_taking_head
+    # The head row's id (9282) does NOT match the target (9281); only the
+    # second row does. Proves resolve_status_row's `select { row.id == id }`
+    # actually filters by id rather than blindly taking the snapshot head —
+    # guarding against a future refactor that swaps the predicate for `.first`.
+    handlers = autofix_handlers([ EXECUTE_STALE_ROW, REVIEW_ERROR_ROW ])
+
+    result = handlers.approve(Update.new(text: "/approve 9281", chat_id: 1))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal "stuck-260525-abcd", result.slug,
+                 "must resolve the row whose id matches, not the snapshot head"
+    assert_equal [ "hive", "approve", "stuck-260525-abcd", "--json" ], result.command_argv
   end
 
   def test_approve_with_slug_dispatches_verbatim_without_snapshot_lookup
@@ -205,6 +221,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       assert_equal :start_answer, result.action
       assert_equal "stuck-260525-abcd", result.slug
       assert_equal :path_b, result.mode
+      assert_nil result.text, "a resolved numeric id starts the answer flow — no operator reply text"
     end
   end
 
@@ -360,6 +377,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       assert_equal "stuck-260525-abcd", result.slug
       assert_equal [ "hive", "status", "--diagnose", "stuck-260525-abcd",
                      "--project", "hive", "--stage", "6-review", "--json" ], result.command_argv
+      assert_nil result.text, "a resolved numeric id dispatches diagnose silently — no operator reply text"
     end
   end
 
@@ -412,6 +430,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal :dispatch_commands, result.action
     assert_equal "hive", result.project
     assert_equal "stuck-260525-abcd", result.slug
+    assert_nil result.text, "a successful autofix dispatch carries no operator reply text"
     assert_equal [
       [ "hive", "markers", "clear", "stuck-260525-abcd", "--name", "REVIEW_ERROR",
         "--project", "hive", "--match-attr", "pass=2", "--json" ],

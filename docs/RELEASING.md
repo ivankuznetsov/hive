@@ -42,8 +42,10 @@ big versions.
   is pre-1.0; `1.0.0` is reserved for when the CLI/JSON contracts are declared
   stable.
 
-**How to cut a release:** bump `VERSION` in `lib/hive.rb`, sync `Gemfile.lock`
-(`hive-cli (X.Y.Z)`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
+**How to cut a release:** bump `VERSION` in `lib/hive.rb`, sync **both**
+`Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — the hivebox web app
+depends on the gem via `path: ".."`, so a stale web lock fails its frozen
+`bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
 `install.md`, add a `## X.Y.Z` CHANGELOG section, PR → merge → `git tag vX.Y.Z
 && git push origin vX.Y.Z`. The tag drives `release.yml` (above). The owner
 bypasses the `v*` tag-protection ruleset.

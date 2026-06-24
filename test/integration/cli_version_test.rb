@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "rbconfig"
 require "hive/commands/init"
+require "hive/task_meta"
 
 class CliVersionTest < Minitest::Test
   include HiveTestHelper
@@ -92,6 +93,29 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_new_accepts_workflow_option_before_project
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", "--workflow", "coding", project, "workflow", "flag")
+
+      assert status.success?, "hive new should parse --workflow before PROJECT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      folder = only_inbox_folder(dir, "workflow-flag-*")
+      assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
+    end
+  end
+
+  def test_bin_hive_new_lifts_workflow_option_after_project
+    with_cli_project do |dir, project|
+      out, err, status = run_bin_hive("new", project, "--workflow", "coding", "literal")
+
+      assert status.success?, "hive new should parse --workflow after PROJECT, stderr was: #{err}"
+      assert_includes out, "hive: captured"
+      folder = only_inbox_folder(dir, "literal-*")
+      assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
+      refute_includes File.read(File.join(folder, "idea.md")), "--workflow"
+    end
+  end
+
   private
 
   def with_cli_project
@@ -114,6 +138,12 @@ class CliVersionTest < Minitest::Test
     idea_paths = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*", "idea.md")]
     assert_equal 1, idea_paths.size, "expected one captured idea, got #{idea_paths.inspect}"
     assert_includes File.read(idea_paths.first), text
+  end
+
+  def only_inbox_folder(dir, glob)
+    folders = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", glob)]
+    assert_equal 1, folders.size, "expected one task folder for #{glob.inspect}, got #{folders.inspect}"
+    folders.first
   end
 
   def without_generated_at(payload)

@@ -21,11 +21,16 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
   # values are placeholders — the test only inspects keys.
   FAKE_ROW = {
     stage: "1-inbox",
+    workflow: "coding",
     slug: "probe",
     folder: "/tmp/hive/probe",
     state_file: "/tmp/hive/probe/idea.md",
-    marker_name: :waiting,
-    marker_attrs: {},
+    marker_name: :error,
+    marker_attrs: {
+      "reason" => "limits_reached",
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00Z"
+    },
     mtime: Time.now,
     folder_mtime: Time.now,
     claude_pid: nil,

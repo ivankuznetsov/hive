@@ -1,8 +1,14 @@
 require "test_helper"
 require "json"
+require "json_schemer"
+require "shellwords"
+require "hive/cli"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/approve"
+require "hive/stages/resolver"
+require "hive/task_action"
+require "hive/markers"
 
 class RunApproveTest < Minitest::Test
   include HiveTestHelper
@@ -19,6 +25,78 @@ class RunApproveTest < Minitest::Test
     state = Hive::Task.new(folder).state_file
     FileUtils.touch(state) unless File.exist?(state)
     Hive::Markers.set(state, marker_name, attrs)
+  end
+
+  def seed_research_task(dir, stage_dir: "2-gather", slug: "research-task-260620-abcd", marker: :complete)
+    state_file = stage_dir.end_with?("gather") ? "notes.md" : "report.md"
+    seed_descriptor_task(
+      dir,
+      descriptor: research_workflow,
+      stage_dir: stage_dir,
+      state_file: state_file,
+      slug: slug,
+      marker: marker
+    )
+  end
+
+  def seed_collision_task(dir, stage_dir: "2-brainstorm", slug: "collision-task-260620-abcd", marker: :complete)
+    state_file = stage_dir.end_with?("brainstorm") ? "brainstorm.md" : "report.md"
+    seed_descriptor_task(
+      dir,
+      descriptor: collision_workflow,
+      stage_dir: stage_dir,
+      state_file: state_file,
+      slug: slug,
+      marker: marker
+    )
+  end
+
+  def seed_descriptor_task(dir, descriptor:, stage_dir:, state_file:, slug:, marker:)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: #{descriptor.id}\n")
+    folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "meta.yml"), "workflow: #{descriptor.id}\n")
+    File.write(File.join(folder, state_file), "# #{slug}\n")
+    write_marker(folder, marker)
+    [ folder, slug ]
+  end
+
+  # End-to-end proof for the inert-middle advance. U6.6 dropped the `entry &&`
+  # conjunct so an inert NON-entry middle stage classifies as ready_to_advance;
+  # the daemon-dispatched `hive approve --from <inert> --force` must actually
+  # move it forward, not dead-loop on approve's VALID_TERMINAL_MARKERS gate
+  # (the markerless inert stage has no agent to stamp a terminal marker). Drives
+  # the real classifier → command → CLI approve chain so a regression in the
+  # unified TaskAction#command's --force or in validate_move! would fail here,
+  # not ship green.
+  def test_inert_middle_stage_advances_end_to_end_through_dispatched_approve
+    with_registered_workflow(agent_entry_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          slug = "inert-middle-260620-abcd"
+          capture_io { Hive::Commands::Init.new(dir).call }
+          File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: agent_entry\n")
+          hold = File.join(dir, ".hive-state", "stages", "2-hold", slug)
+          FileUtils.mkdir_p(hold)
+          File.write(File.join(hold, "meta.yml"), "slug: #{slug}\nworkflow: agent_entry\n")
+          File.write(File.join(hold, "hold.md"), "# #{slug}\n")
+
+          task = Hive::Task.new(hold)
+          command = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file)).command
+          assert_equal "hive approve #{slug} --from 2-hold --force", command,
+                       "a markerless inert middle stage must dispatch a forced approve"
+
+          # Run the EXACT dispatched command through the CLI (real Thor parsing
+          # of --from/--force), not a hand-built Approve.new, to prove the chain.
+          capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }
+
+          assert File.directory?(File.join(dir, ".hive-state", "stages", "3-ship", slug)),
+                 "the inert middle stage must advance to 3-ship via the dispatched approve"
+          refute File.exist?(hold), "the old 2-hold folder must be gone after the advance"
+        end
+      end
+    end
   end
 
   # ── Happy paths ─────────────────────────────────────────────────────────
@@ -115,6 +193,115 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_generic_forward_approve_moves_to_descriptor_next_stage
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          gather, slug = seed_research_task(dir)
+          report = File.join(dir, ".hive-state", "stages", "3-report", slug)
+
+          _out, err = capture_io do
+            Hive::Commands::Approve.new(gather, from: "2-gather").call
+          end
+
+          assert File.directory?(report), "task must move into the research descriptor's report stage"
+          refute File.exist?(gather), "old gather folder must be gone"
+          assert_includes err, "next: hive run #{slug}"
+        end
+      end
+    end
+  end
+
+  def test_generic_forward_approve_json_envelope_resolves_descriptor_stage
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          gather, _slug = seed_research_task(dir)
+
+          out, _err = capture_io do
+            Hive::Commands::Approve.new(gather, from: "2-gather", json: true).call
+          end
+
+          payload = JSON.parse(out)
+          assert payload["ok"]
+          # The generic envelope must validate against the PUBLISHED v2 schema
+          # (the repo's near-universal idiom). Before the enums were relaxed to
+          # patterns, a valid generic payload (`to_stage:"report"` /
+          # `to_stage_dir:"3-report"`) failed the closed coding enums — exactly
+          # what bot/daemon consumers validate against. This is the assertion
+          # the field-value checks below were silently missing.
+          schemer = JSONSchemer.schema(
+            JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
+          )
+          errors = schemer.validate(payload).to_a
+          assert_empty errors,
+                       "generic approve --json must validate against hive-approve.v2 " \
+                       "(errors: #{errors.map { |e| e['error'] }.inspect})"
+          # Destination resolved through the research descriptor, not the
+          # coding stage table — pins the approve-side JSON envelope end-to-end
+          # for a generic task (the helper units only exercise the lines).
+          assert_equal "report", payload["to_stage"]
+          assert_equal 3, payload["to_stage_index"]
+          assert_equal "3-report", payload["to_stage_dir"]
+          assert_includes payload["commit_action"], "approve 2-gather -> 3-report"
+          # report is the descriptor's terminal stage → next_action terminates
+          # the agent retry loop instead of emitting a runnable verb.
+          assert_equal Hive::Schemas::NextActionKind::NO_OP, payload["next_action"]["kind"]
+          assert_equal "final_stage", payload["next_action"]["reason"]
+        end
+      end
+    end
+  end
+
+  def test_collision_workflow_approve_moves_and_re_resolves_descriptor_runner
+    with_registered_workflow(collision_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          brainstorm, slug = seed_collision_task(dir)
+          report = File.join(dir, ".hive-state", "stages", "3-report", slug)
+          coding_plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+
+          capture_io do
+            Hive::Commands::Approve.new(brainstorm, from: "2-brainstorm").call
+          end
+
+          assert File.directory?(report), "collision workflow must advance to descriptor 3-report"
+          refute File.exist?(coding_plan), "global coding 3-plan must not receive the task"
+
+          # Pin the descriptor-derived commit provenance: a regression that
+          # moved to the right dir but logged the wrong stage would land in the
+          # correct folder yet leave a misleading audit trail.
+          log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
+          assert_match(%r{approve 2-brainstorm -> 3-report}, log,
+                       "commit message must record the descriptor-derived stage provenance")
+
+          moved = Hive::Task.new(report)
+          runner = Hive::Stages::Resolver.resolve(moved, descriptor: moved.workflow)
+
+          assert_equal :collision, moved.workflow.id
+          assert_equal "report", moved.stage_name
+          assert_equal Hive::Stages::Agent.method(:run!), runner
+        end
+      end
+    end
+  end
+
+  def test_generic_terminal_approve_raises_final_stage
+    with_registered_workflow(research_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          report, = seed_research_task(dir, stage_dir: "3-report")
+
+          _, err, status = with_captured_exit do
+            Hive::Commands::Approve.new(report).call
+          end
+
+          assert_equal Hive::ExitCodes::WRONG_STAGE, status
+          assert_includes err, "task is already at the final stage (3-report)"
+        end
+      end
+    end
+  end
 
   def test_folder_path_target_works_directly
     with_tmp_global_config do

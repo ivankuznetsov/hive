@@ -1,0 +1,3 @@
+## [2026-06-21T12:00:00Z] e2e - classify dangling symlink replay repro as unusable
+
+**Action:** Fixed `bin/hive-e2e replay` so a dangling `repro.sh` symlink falls through to the `lstat`-based check and reports `error_kind: "unusable_repro"` (exit `78`) instead of `missing_repro`. The `missing_repro` guard now also short-circuits on `File.symlink?`, since `File.exist?` follows the link and would otherwise misreport a present-but-broken artifact as missing. Added a dangling-symlink replay regression in `test/e2e/lib/hive_e2e_binary_test.rb` and refreshed [[e2e]] contract wording. Did not run `qmd update` or `qmd embed`.

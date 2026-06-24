@@ -105,7 +105,8 @@ class TasksController < ApplicationController
     # the page rendered makes the clear a no-op and the retry never fires.
     row = task_row!
     dispatcher.recover(slug: params[:slug], project: @project["name"],
-                       stage: row["stage"], marker: row["marker"], attrs: row["attrs"])
+                       stage: row["stage"], marker: row["marker"], attrs: row["attrs"],
+                       workflow: row["workflow"])
     redirect_to task_path(@project["name"], params[:slug]),
                 notice: "Recovery queued — clearing the error and re-running the stage"
   end
@@ -185,10 +186,36 @@ class TasksController < ApplicationController
   # run's deliverable is what the operator opens the page for, so artifact.md
   # leads (and, being first, renders open). Not at 7-artifacts: the file is
   # still being written there.
+  #
+  # A non-coding workflow has its own stage state_files (research.md, draft.md,
+  # done.md, …) that ARTIFACT_ORDER never lists, so the page rendered nothing
+  # for them. Derive the order from the task's workflow descriptor instead; the
+  # coding branch stays byte-identical.
   def artifact_order(row)
+    return generic_artifact_order(row) unless Hive::Workflows.coding_id?(row["workflow"])
+
     return ARTIFACT_ORDER unless %w[8-finalize 9-done].include?(row["stage"].to_s)
 
     [ "artifact.md" ] + (ARTIFACT_ORDER - [ "artifact.md" ])
+  end
+
+  # Chronological stage state_files for a non-coding workflow. Falls back to the
+  # coding order if the descriptor is unregistered (a hand-edited or
+  # later-removed workflow) so the page still renders something.
+  def generic_artifact_order(row)
+    # The row belongs to @project, but a custom workflow is registered only in
+    # ITS project's overlay. Load that overlay under the lock before fetching:
+    # without it the fetch reads whatever overlay the StatusFeed poller last
+    # left active, so on a multi-project box every project but the active one
+    # raises UnknownWorkflow → falls back to coding ARTIFACT_ORDER and renders
+    # an empty artifact list for the custom-workflow task. The lock holds the
+    # load and the fetch together so a concurrent swap can't race between them.
+    Hive::Workflows::Project.synchronize do
+      Hive::Workflows::Project.load!(@project["path"])
+      Hive::Workflows::Registry.fetch(row["workflow"].to_sym).stages.map(&:state_file).uniq
+    end
+  rescue Hive::Workflows::UnknownWorkflow
+    ARTIFACT_ORDER
   end
 
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif)\z/i

@@ -24,6 +24,8 @@ module Hive
         slash_help
         slash_start
         callback_approve
+        callback_approve_plan
+        callback_rerun
         callback_reject
         callback_autofix
         callback_clear_and_retry
@@ -101,7 +103,8 @@ module Hive
           idea_draft_store: @idea_draft_store,
           projects_provider: @projects_provider,
           last_project: -> { @last_project },
-          logger: @logger
+          logger: @logger,
+          status_snapshot_provider: status_snapshot_provider
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
           conversation_store: @conversation_store,
@@ -211,6 +214,8 @@ module Hive
       def callback_intent(data)
         case data
         when /\Aapprove:/ then :callback_approve
+        when /\Aapprove_plan:/ then :callback_approve_plan
+        when /\Arerun:/ then :callback_rerun
         when /\Areject:/ then :callback_reject
         when /\Aautofix:/ then :callback_autofix
         when /\Aclear_retry:/ then :callback_clear_and_retry

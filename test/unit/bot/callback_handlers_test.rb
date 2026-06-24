@@ -1,6 +1,8 @@
 require "test_helper"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
+require "hive/bot/status_watcher"
+require "hive/markers"
 
 # Pins the dispatch shape emitted by CallbackHandlers for callbacks that
 # fan out to `hive` subprocess invocations. The router exposes one Result
@@ -17,6 +19,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       events << { name: name, payload: payload }
     end
   end
+  StatusRow = Hive::Bot::StatusWatcher::Row
 
   def setup
     @pending_ideas = {}
@@ -33,6 +36,38 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   def update(callback_data)
     Struct.new(:callback_data).new(callback_data)
+  end
+
+  def with_plan_row(marker_name)
+    Dir.mktmpdir("bot-plan-approve") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, marker_name)
+      row = StatusRow.new(
+        project: "hive",
+        slug: "plan-task-260624-abcd",
+        stage: "3-plan",
+        workflow: "coding",
+        marker: marker_name.to_s,
+        attrs: {},
+        state_file: state_file,
+        action: "needs_input",
+        action_label: "Needs input",
+        suggested_command: "hive plan plan-task-260624-abcd --from 3-plan --project hive"
+      )
+      yield row, state_file
+    end
+  end
+
+  def handlers_with_rows(rows)
+    Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil,
+      result_class: Result,
+      logger: @logger,
+      status_snapshot_provider: -> { rows }
+    )
   end
 
   def test_simple_reply_callbacks_return_operator_facing_text
@@ -289,6 +324,84 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       result.command_argv,
       "generic run button must use `hive run --stage`, never `hive run --from`"
     )
+  end
+
+  def test_rerun_callback_dispatches_develop_against_current_execute_stage
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:develop"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal(
+      [ "hive", "develop", "slug-260624-abcd", "--from", "4-execute", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_rerun_callback_dispatches_finalize_against_current_finalize_stage
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:8-finalize:finalize"))
+
+    assert_equal(
+      [ "hive", "finalize", "slug-260624-abcd", "--from", "8-finalize", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_rerun_callback_dispatches_generic_run_with_stage_filter
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:1-intake:run"))
+
+    assert_equal(
+      [ "hive", "run", "slug-260624-abcd", "--stage", "1-intake", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_approve_plan_callback_flips_waiting_marker_and_dispatches_develop
+    with_plan_row(:waiting) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-abcd", "--from", "3-plan",
+          "--project", "hive", "--json" ],
+        result.command_argv
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_callback_allows_already_complete_marker
+    with_plan_row(:complete) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal :complete, Hive::Markers.current(state_file).name
+      assert_equal "develop", result.command_argv[1]
+    end
+  end
+
+  def test_approve_plan_callback_refuses_non_approvable_marker_without_crashing
+    with_plan_row(:error) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :reply, result.action
+      assert_match(/no longer waiting/, result.text)
+      assert_equal :error, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_unknown_rerun_verb_uses_confused_fallback
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:doctor"))
+
+    assert_equal :reply, result.action
+    assert_match(/Bot got confused/, result.text)
   end
 
   def test_show_details_dispatches_status_diagnose_for_targeted_envelope

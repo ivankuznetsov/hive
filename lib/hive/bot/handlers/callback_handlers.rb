@@ -1,5 +1,7 @@
 require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
+require "hive/daemon/plan_approval"
+require "shellwords"
 
 module Hive
   module Bot
@@ -9,7 +11,8 @@ module Hive
                        idea_draft_store: nil,
                        projects_provider: -> { [] },
                        last_project: -> { nil },
-                       logger: nil)
+                       logger: nil,
+                       status_snapshot_provider: -> { [] })
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
           @conversation_store = conversation_store
@@ -18,12 +21,15 @@ module Hive
           @projects_provider = projects_provider
           @last_project = last_project
           @logger = logger
+          @status_snapshot_provider = status_snapshot_provider
         end
 
         def handle(intent, update)
           data = update.callback_data.to_s
           case intent
           when :callback_approve then approve(data)
+          when :callback_approve_plan then approve_plan(data)
+          when :callback_rerun then rerun(data)
           when :callback_reject then @result_class.new(action: :reply, text: "Left unchanged.")
           when :callback_autofix then autofix(data)
           when :callback_clear_and_retry then clear_and_retry(data)
@@ -68,6 +74,46 @@ module Hive
             slug: slug,
             command_argv: [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
           )
+        end
+
+        def rerun(data)
+          _prefix, project, slug, stage, verb = split_callback(data, 5)
+          raise ArgumentError, "unsupported rerun verb" unless %w[run develop finalize].include?(verb)
+
+          # Workflow verbs only expose --from in the CLI; at the target stage
+          # it acts as the same stage filter the plan called for and avoids
+          # the source-stage terminal-marker gate. The generic `run` verb
+          # scopes with --stage.
+          stage_flag = verb == "run" ? "--stage" : "--from"
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: project,
+            slug: slug,
+            command_argv: [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
+          )
+        end
+
+        def approve_plan(data)
+          _prefix, project, slug, stage = split_callback(data, 4)
+          row = status_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.") unless row
+          unless row.respond_to?(:state_file) && !row.state_file.to_s.empty?
+            return @result_class.new(action: :reply, text: "Plan state is unavailable - reopen /queue.")
+          end
+
+          command = row.respond_to?(:suggested_command) ? row.suggested_command.to_s : ""
+          command = "hive plan #{Shellwords.escape(slug)} --from #{Shellwords.escape(stage)} --project #{Shellwords.escape(project)}" if command.empty?
+          argv = Shellwords.split(Hive::Daemon::PlanApproval.prepare(command, row.state_file))
+          ensure_flag!(argv, "--project", project)
+          argv << "--json" unless argv.include?("--json")
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: project,
+            slug: slug,
+            command_argv: argv
+          )
+        rescue Hive::Daemon::PlanApproval::NotApprovable
+          @result_class.new(action: :reply, text: "Plan is no longer waiting for approval. Reopen /queue.")
         end
 
         def clear_and_retry(data)
@@ -264,6 +310,19 @@ module Hive
           raise ArgumentError, "malformed callback" unless counts.include?(parts.length)
 
           parts
+        end
+
+        def status_row(project:, slug:, stage:)
+          Array(@status_snapshot_provider.call).find do |row|
+            row.respond_to?(:project) && row.respond_to?(:slug) && row.respond_to?(:stage) &&
+              row.project.to_s == project.to_s && row.slug.to_s == slug.to_s && row.stage.to_s == stage.to_s
+          end
+        end
+
+        def ensure_flag!(argv, flag, value)
+          return if argv.include?(flag)
+
+          argv.concat([ flag, value ])
         end
 
         # The recovery callbacks (autofix / clear_and_retry) carry up to two

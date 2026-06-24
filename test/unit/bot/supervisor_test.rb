@@ -1181,6 +1181,7 @@ class HiveBotSupervisorTest < Minitest::Test
   def test_trigger_for_result_maps_intents_for_telemetry
     %i[
       slash_done callback_autofix callback_clear_and_retry callback_approve
+      callback_approve_plan callback_rerun
       callback_findings_accept_all callback_findings_reject_all callback_show_details
     ].each do |intent|
       result = FakeRouter::Result.new(intent: intent)

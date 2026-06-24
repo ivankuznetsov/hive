@@ -1073,7 +1073,8 @@ module Hive
         case intent
         when :slash_done then "slash_done"
         when :callback_autofix, :callback_clear_and_retry then "autofix"
-        when :callback_approve then "callback_approve"
+        when :callback_approve, :callback_approve_plan then "callback_approve"
+        when :callback_rerun then "callback_rerun"
         when :callback_findings_accept_all then "findings_accept"
         when :callback_findings_reject_all then "findings_reject"
         else "bot_dispatch"

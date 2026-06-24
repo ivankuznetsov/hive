@@ -1,5 +1,6 @@
 require "test_helper"
 require "open3"
+require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
 
@@ -90,7 +91,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       end
 
       real_invocations = File.read(File.join(dir, "real.log"))
-      assert_includes real_invocations, "git -c core.fsmonitor=false -c core.askPass= status --short"
+      assert_includes real_invocations,
+                      "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
+                      "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
+                      "-c gpg.ssh.program=false status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
       refute_includes real_invocations, "pwn-git"
       refute_includes real_invocations, "pwn-gh"
@@ -990,6 +994,110 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_signature_verification_options_without_running_gpg
+    with_tmp_signed_git_repo do |dir, marker_path|
+      env = real_git_env(dir)
+      cases = [
+        [ "log", "--show-signature", "-1" ],
+        [ "show", "--show-signature", "HEAD" ],
+        [ "log", "--format=%G?", "-1" ],
+        [ "log", "--format", "%G?", "-1" ],
+        [ "show", "--pretty=format:%G?", "HEAD" ],
+        [ "rev-list", "--format=%G?", "HEAD", "-1" ]
+      ]
+
+      cases.each do |args|
+        FileUtils.rm_f(marker_path)
+
+        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        assert_includes err, "[dry-run] git -C #{dir} #{args.join(' ')} skipped"
+        refute_path_exists marker_path
+      end
+    end
+  end
+
+  def test_git_stub_disables_configured_signature_verification_before_passthrough
+    with_tmp_signed_git_repo(log_show_signature: true) do |dir, marker_path|
+      out, err, status = Open3.capture3(
+        real_git_env(dir),
+        stub_path("git"),
+        "-C",
+        dir,
+        "log",
+        "-1",
+        "--format=%H"
+      )
+
+      assert status.success?, err
+      assert_match(/\A[0-9a-f]{40}\n\z/, out)
+      refute_path_exists marker_path
+    end
+  end
+
+  def test_git_stub_disables_config_resolved_signature_format_before_passthrough
+    with_tmp_signed_git_repo do |dir, marker_path|
+      # The argv scan only sees literal `%G` in argv. A worktree-local pretty alias selected as
+      # the default format resolves to a `%G?` signature placeholder even for a bare `git log`,
+      # so the gate lets the read through. The passthrough must still neutralize the gpg exec
+      # seam (`-c gpg.program=false` and friends) so the configured gpg.program helper cannot
+      # run — `log.showSignature=false` does not suppress `%G*` placeholders.
+      run!("git", "-C", dir, "config", "pretty.pwn", "format:%G?")
+      run!("git", "-C", dir, "config", "format.pretty", "pwn")
+
+      [
+        [ "log", "-1" ],
+        [ "log", "--pretty=pwn", "-1" ],
+        [ "show", "--pretty=pwn", "HEAD" ]
+      ].each do |args|
+        FileUtils.rm_f(marker_path)
+
+        _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        refute_path_exists marker_path,
+                           "config-resolved %G format ran gpg.program during #{args.join(' ')} passthrough"
+      end
+    end
+  end
+
+  def test_git_stub_pins_path_so_gpg_no_op_cannot_be_hijacked
+    with_tmp_signed_git_repo do |dir, _marker_path|
+      # The `-c gpg.program=false` no-op the stub installs neutralizes `%G*` signature
+      # verification only if git resolves `false` from a trusted location — git looks `false`
+      # up on PATH, and the inherited PATH is agent-controlled. An agent that prepends a
+      # directory holding its own `false` would turn the supposed no-op back into an exec seam.
+      # Drive verification through a config-resolved `%G` format (which passes the argv gate the
+      # way a bare `git log` does) and confirm the poisoned `false` never runs because the stub
+      # pins PATH to root-owned system dirs before handing off to real git.
+      run!("git", "-C", dir, "config", "pretty.pwn", "format:%G?")
+      run!("git", "-C", dir, "config", "format.pretty", "pwn")
+
+      poison_dir = File.join(dir, "poison-bin")
+      FileUtils.mkdir_p(poison_dir)
+      poison_marker = File.join(dir, "poison-false-ran")
+      executable_touch_binary(poison_dir, "false", poison_marker)
+
+      env = real_git_env(dir).merge(
+        "PATH" => [ poison_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      )
+
+      [
+        [ "log", "-1" ],
+        [ "show", "--pretty=pwn", "HEAD" ]
+      ].each do |args|
+        FileUtils.rm_f(poison_marker)
+
+        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        refute_path_exists poison_marker,
+                           "PATH-resolved gpg no-op ran the poisoned `false` during #{args.join(' ')} passthrough"
+      end
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")
@@ -1059,7 +1167,15 @@ class BabysitterDryRunEnvTest < Minitest::Test
       passthrough.insert(index + 1, "--no-ext-diff", "--no-textconv")
     end
 
-    "real-git #{([ "-c", "core.fsmonitor=false", "-c", "core.askPass=" ] + passthrough).join(' ')}"
+    "real-git #{([
+      "-c", "core.fsmonitor=false",
+      "-c", "core.askPass=",
+      "-c", "log.showSignature=false",
+      "-c", "gpg.program=false",
+      "-c", "gpg.openpgp.program=false",
+      "-c", "gpg.x509.program=false",
+      "-c", "gpg.ssh.program=false"
+    ] + passthrough).join(' ')}"
   end
 
   def git_subcommand_index(args)
@@ -1079,7 +1195,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def recording_binary(dir, name)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
@@ -1091,7 +1207,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def cache_writing_gh_binary(dir, name)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       require "fileutils"
       cache_path = File.join(ENV.fetch("XDG_CACHE_HOME"), "gh")
       FileUtils.mkdir_p(cache_path)
@@ -1108,7 +1224,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def recording_env_binary(dir, name, keys)
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       keys = #{keys.inspect}
       File.open(#{File.join(dir, "env.log").dump}, "a") do |file|
         keys.each do |key|
@@ -1128,10 +1244,44 @@ class BabysitterDryRunEnvTest < Minitest::Test
     }
   end
 
+  def with_tmp_signed_git_repo(log_show_signature: false)
+    with_tmp_dir do |dir|
+      marker_path = File.join(dir, "gpg-ran")
+      gpg = executable_touch_binary(dir, "fake-gpg", marker_path, "exit 1")
+      run!("git", "-C", dir, "init", "-b", "master", "--quiet")
+      run!("git", "-C", dir, "config", "user.email", "test@example.com")
+      run!("git", "-C", dir, "config", "user.name", "Test")
+      run!("git", "-C", dir, "config", "gpg.program", gpg)
+      run!("git", "-C", dir, "config", "log.showSignature", "true") if log_show_signature
+      File.write(File.join(dir, "README.md"), "test\n")
+      run!("git", "-C", dir, "add", ".")
+
+      tree = run!("git", "-C", dir, "write-tree").strip
+      now = Time.now.to_i
+      commit = [
+        "tree #{tree}",
+        "author Test <test@example.com> #{now} +0000",
+        "committer Test <test@example.com> #{now} +0000",
+        "gpgsig -----BEGIN PGP SIGNATURE-----",
+        " ",
+        " fake",
+        " -----END PGP SIGNATURE-----",
+        "",
+        "synthetic signed commit"
+      ].join("\n")
+      commit << "\n"
+      oid, status = Open3.capture2("git", "-C", dir, "hash-object", "-t", "commit", "-w", "--stdin", stdin_data: commit)
+      raise "failed to create signed commit object" unless status.success?
+
+      run!("git", "-C", dir, "update-ref", "refs/heads/master", oid.strip)
+      yield dir, marker_path
+    end
+  end
+
   def executable_touch_binary(dir, name, pwn_path, after_touch = "")
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
-      #!/usr/bin/env ruby
+      #!#{RbConfig.ruby}
       File.write(#{pwn_path.dump}, "ran")
       #{after_touch}
     RUBY

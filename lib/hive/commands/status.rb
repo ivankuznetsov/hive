@@ -306,6 +306,7 @@ module Hive
       # bot answer-writer use, so the three never disagree.
       def unanswered_question_count(row)
         return 0 unless row[:action_key] == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        return 0 unless Hive::Markers.input_marker?(row[:marker_name])
         # Only the coding `2-brainstorm` stage drives the `### Q{n}.` answer
         # flow; a generic workflow reusing the dir has no Q&A to count.
         return 0 unless Hive::Workflows.coding_id?(row[:workflow])
@@ -437,16 +438,17 @@ module Hive
         end
 
         hidden_rows, visible_rows = rows.partition { |row| hide_archived_row?(row) }
+        render_rows = visible_rows.reject { |row| incoherent_needs_input?(row) }
         legacy = detect_legacy_stage_dirs(hive_state)
         puts project["name"]
         render_legacy_stage_warning(legacy) unless legacy.empty?
-        if visible_rows.empty? && hidden_rows.empty?
+        if render_rows.empty? && hidden_rows.empty?
           puts "  no active tasks" if legacy.empty?
           return
         end
 
-        action_labels(visible_rows).each do |label|
-          stage_rows = visible_rows.select { |r| r[:action_label] == label }
+        action_labels(render_rows).each do |label|
+          stage_rows = render_rows.select { |r| r[:action_label] == label }
           next if stage_rows.empty?
 
           puts "  #{label}"
@@ -458,6 +460,11 @@ module Hive
           end
         end
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
+      end
+
+      def incoherent_needs_input?(row)
+        row[:action_key] == Hive::Schemas::TaskActionKind::NEEDS_INPUT &&
+          !Hive::Markers.input_marker?(row[:marker_name])
       end
 
       def hide_archived_row?(row)

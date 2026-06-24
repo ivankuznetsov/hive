@@ -243,6 +243,47 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_text_status_excludes_incoherent_needs_input_rows_but_json_contract_stays_stable
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      none_slug = "brainstorm-no-marker-260624-aaaa"
+      waiting_slug = "brainstorm-waiting-260624-bbbb"
+      done_slug = "execute-done-260624-cccc"
+
+      none_folder = File.join(hive_state, "stages", "2-brainstorm", none_slug)
+      FileUtils.mkdir_p(none_folder)
+      File.write(File.join(none_folder, "brainstorm.md"),
+                 "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+      waiting_folder = File.join(hive_state, "stages", "2-brainstorm", waiting_slug)
+      FileUtils.mkdir_p(waiting_folder)
+      File.write(File.join(waiting_folder, "brainstorm.md"),
+                 "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+      write_status_task(hive_state, "4-execute", done_slug, state_file: "task.md", marker: "COMPLETE")
+
+      project = status_project(project_root, hive_state)
+      payload = Hive::Commands::Status.new.json_payload([ project ])
+      tasks = payload.fetch("projects").first.fetch("tasks").to_h { |task| [ task.fetch("slug"), task ] }
+
+      assert_equal "needs_input", tasks.fetch(none_slug).fetch("action")
+      assert_equal "none", tasks.fetch(none_slug).fetch("marker")
+      assert_equal 0, tasks.fetch(none_slug).fetch("unanswered_questions"),
+                   "marker=none is incoherent needs_input, not a pending brainstorm question"
+      assert_equal "needs_input", tasks.fetch(done_slug).fetch("action")
+      assert_equal "complete", tasks.fetch(done_slug).fetch("marker")
+      assert_equal "needs_input", tasks.fetch(waiting_slug).fetch("action")
+      assert_equal 1, tasks.fetch(waiting_slug).fetch("unanswered_questions")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+
+      assert_includes out, "Needs your input"
+      assert_includes out, waiting_slug
+      refute_includes out, none_slug
+      refute_includes out, done_slug
+    end
+  end
+
   # A non-coding workflow that reuses the `2-brainstorm` dir has no coding
   # Q&A answer flow, so unanswered_questions must report 0 even if a stray
   # `### Q{n}.` file is present — the gate keys on the coding workflow, not

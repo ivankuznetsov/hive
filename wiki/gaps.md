@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-06-20
+updated: 2026-06-22
 tags: [gap, todo]
 ---
 
@@ -45,6 +45,28 @@ Uncertainty: this table was refreshed manually from targeted source, dependency-
 Latest refresh note (2026-06-16): the babysitter gh-hostname dry-run audit remains source- and unit-pinned only. This refresh found no in-tree artifact for a full live-agent `hive babysit --once PROJECT --dry-run` run after commits `a86ca033` and `ede81ac7`.
 
 ## Open questions about the codebase
+
+### 2026-06-22 dependency-stacking placeholder branch investigation
+
+Branch-creator inventory for the U1-U10 inversion dogfood found no separate
+in-`lib/` creator for normal task slug branches. The only normal slug branch
+creator is `Hive::Worktree#create!`'s `git worktree add -b <slug> <base>` path;
+`Hive::Babysitter::Worktree` creates only `hive-babysitter/pr-*` branches from
+PR refs, and `Hive::GitOps` branch operations in this area delete/drop branches
+rather than pre-create task slugs.
+
+The leading root cause is therefore a stale placeholder left by an earlier
+collapsed execute attempt: the first run resolved a dependency override to the
+default branch, created `<slug>` from that default, then halted with
+`EXECUTE_WAITING reason=no_worktree_changes` or otherwise removed the worktree
+while leaving `refs/heads/<slug>` behind. Later runs hit the existing-branch
+attach path and kept the placeholder on the default branch. The current fix is
+the `Hive::Worktree` hardening documented in [[modules/worktree]] and
+[[modules/task_dependencies]]: empty placeholders with a stacked override are
+re-pointed, local prerequisite branches are preferred over default fallback,
+and branches with real commits remain preserved. Remaining uncertainty: no
+checked-in live dogfood artifact yet proves the U1-U10 stacked sequence after
+this fix.
 
 1. **Has `hive run` been smoke-tested against a live `claude` v2.1.118?** The plan calls for this before declaring the MVP done. No evidence in tree (no `docs/solutions/` notes, no `docs/smoke-results.md`).
 2. **Has `hive init` been run against a real project yet?** Planned pilot, but the working tree shows no first commit on `~/Dev/hive` itself, so the pilot may not have started.

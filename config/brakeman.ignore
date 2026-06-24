@@ -1,8 +1,44 @@
 {
   "ignored_warnings": [
     {
+      "fingerprint": "2b04ae09c74c02877b56a2a2a91f97b6363dbd965e1537c105d6781bb785a670",
+      "note": "False positive. Open3.capture3 array form in Stages::Finalize#final_commits. base is produced by `git merge-base HEAD origin/<default>` and interpolated into one revspec argv element (`base..HEAD`); no shell ever sees it."
+    },
+    {
+      "fingerprint": "2e347323431447c31226b2574bb718f7909484d348ecce84acc43b4ddfaf04c5",
+      "note": "False positive. params[:project] never reaches the filesystem raw: find_project! resolves it against the REGISTERED projects allowlist and returns the registry's own hive_state_path; params[:slug] is route-constrained and additionally File.basename()d. The taint laundering through the registry lookup is invisible to static analysis."
+    },
+    {
+      "fingerprint": "3a5269f601bcaa4cba48697518aa32a79c4f7ae236c97f07e1af4998ecc61205",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#commit_changes. The finding title becomes the value for git commit's `-m` argument as a discrete argv element; no shell is invoked."
+    },
+    {
+      "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
+      "note": "False positive: array-form Open3.capture3 (no shell). slug is a resolved 9-done task slug (ADR-012 regex) interpolated only into the gh PR title/body text, not a shell command. hive bench submit."
+    },
+    {
+      "fingerprint": "441ba8780a4fcbfa2d292765749020b9457cae8f2e854d8036df4d049ed70781",
+      "note": "False positive. Open3.capture3 array form in Worktree.fetch_origin_branch: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is a hive task slug / dependency branch name interpolated only into a single refspec literal (`+<branch>:refs/remotes/origin/<branch>`) that becomes one argv member; no shell ever sees it. The first arg is a static GIT_* env hash, not a command string."
+    },
+    {
       "fingerprint": "6c7220d812801d79f634aa63179b515a90854f02696d034da7693068081493a2",
       "note": "False positive. Open3.capture3 array form: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a refspec literal that becomes a single argv member; no shell ever sees it."
+    },
+    {
+      "fingerprint": "75bf3e2dbab92663c2976d6000fad8a6d3ff5dce84b8d3e6b5261c380dfe888c",
+      "note": "False positive. The task media route constrains filename to a single png/jpg/jpeg/gif component, resolved_media_path File.basename()s and revalidates it, resolves the real task folder/media directory, refuses a symlinked media root, and only streams files whose realpath stays under that media root. Integration tests cover traversal, disallowed extensions, missing files, symlinked media roots, and inline image streaming."
+    },
+    {
+      "fingerprint": "8122417c98bf7e28572aa9a7a8361ff6c1b3d0f9465adb6a984e84be2cbdea3b",
+      "note": "False positive. Open3.capture3 array form: branch_name is interpolated only into a refs/heads/<name> refspec literal passed as a single argv element to git via execve(2); no shell ever sees it."
+    },
+    {
+      "fingerprint": "872fe3ac01d8099ac5fc97f31b105f0c7023eb663f5ed4a462d80988ee6e1692",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. default_branch is interpolated into a single git revspec argv element (`branch...HEAD`); no shell is invoked."
+    },
+    {
+      "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",
+      "note": "False positive. Open3.capture3 array form in GitOps#commits_behind. `ref` is `origin/<default_branch>` constructed inside Hive::Rebase from `cfg.default_branch || git.default_branch` (the latter from `git symbolic-ref refs/remotes/origin/HEAD`). Not attacker-controlled; passed as a single argv element to execve(2)."
     },
     {
       "fingerprint": "9f73651d265a69db942fb10947510d982d4dbd1db3e69638332f147d32829e97",
@@ -10,53 +46,21 @@
     },
     {
       "fingerprint": "c5383e38ce67101d42861fc17ef61be803b4270f300f47b186f531104b9bada6",
-      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! \u2014 internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
+      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! — internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
     },
     {
-      "fingerprint": "2b04ae09c74c02877b56a2a2a91f97b6363dbd965e1537c105d6781bb785a670",
-      "note": "False positive. Open3.capture3 array form in Stages::Finalize#final_commits. base is produced by `git merge-base HEAD origin/<default>` and interpolated into one revspec argv element (`base..HEAD`); no shell ever sees it."
-    },
-    {
-      "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",
-      "note": "False positive. Open3.capture3 array form in GitOps#commits_behind. `ref` is `origin/<default_branch>` constructed inside Hive::Rebase from `cfg.default_branch || git.default_branch` (the latter from `git symbolic-ref refs/remotes/origin/HEAD`). Not attacker-controlled; passed as a single argv element to execve(2)."
-    },
-    {
-      "fingerprint": "f4e0dcfe7fbb847c09d2b929e3566c2092dbee71a4c34865e8d86248fad239d4",
-      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#pr_diff_stat. base_ref comes from the PR base ref and head_ref is the local literal HEAD in the babysitter context path; the `origin/<base>...HEAD` revspec is passed as one argv element to execve(2), not through a shell."
-    },
-    {
-      "fingerprint": "872fe3ac01d8099ac5fc97f31b105f0c7023eb663f5ed4a462d80988ee6e1692",
-      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. default_branch is interpolated into a single git revspec argv element (`branch...HEAD`); no shell is invoked."
-    },
-    {
-      "fingerprint": "3a5269f601bcaa4cba48697518aa32a79c4f7ae236c97f07e1af4998ecc61205",
-      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#commit_changes. The finding title becomes the value for git commit's `-m` argument as a discrete argv element; no shell is invoked."
-    },
-    {
-      "fingerprint": "2e347323431447c31226b2574bb718f7909484d348ecce84acc43b4ddfaf04c5",
-      "note": "False positive. params[:project] never reaches the filesystem raw: find_project! resolves it against the REGISTERED projects allowlist and returns the registry's own hive_state_path; params[:slug] is route-constrained and additionally File.basename()d. The taint laundering through the registry lookup is invisible to static analysis."
-    },
-    {
-      "fingerprint": "75bf3e2dbab92663c2976d6000fad8a6d3ff5dce84b8d3e6b5261c380dfe888c",
-      "note": "False positive. The task media route constrains filename to a single png/jpg/jpeg/gif component, resolved_media_path File.basename()s and revalidates it, resolves the real task folder/media directory, refuses a symlinked media root, and only streams files whose realpath stays under that media root. Integration tests cover traversal, disallowed extensions, missing files, symlinked media roots, and inline image streaming."
-    },
-    {
-      "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
-      "note": "False positive: array-form Open3.capture3 (no shell). slug is a resolved 9-done task slug (ADR-012 regex) interpolated only into the gh PR title/body text, not a shell command. hive bench submit."
-    },
-    {
-      "fingerprint": "a11d1f5701bcc1ab87021515e2fdf48ea34cd74a6c848aea5f04da176726f86e",
-      "note": "False positive: array-form Open3.capture3 (no shell) \u2014 slug is passed as its own discrete argv element immediately after a standalone `--grep` flag (not interpolated into a `--grep=<slug>` token), so it cannot inject a command; `-F` makes it a fixed string, so at worst it is a benign literal git-log grep, and matches are re-filtered by exact substring on the subject afterward. slug is a controlled hive task slug."
-    },
-    {
-      "fingerprint": "441ba8780a4fcbfa2d292765749020b9457cae8f2e854d8036df4d049ed70781",
-      "note": "False positive. Open3.capture3 array form in Worktree.fetch_origin_branch: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is a hive task slug / dependency branch name interpolated only into a single refspec literal (`+<branch>:refs/remotes/origin/<branch>`) that becomes one argv member; no shell ever sees it. The first arg is a static GIT_* env hash, not a command string."
+      "fingerprint": "c5c39c0a1135e3fb33c9ce0cd68e30931e3068a9d4e27393fd53987df1c3ceea",
+      "note": "False positive. Open3.capture3 array form: base_ref and branch_name are interpolated into one git rev-list range (<base>..refs/heads/<name>) argv element passed via execve(2); no shell ever sees it."
     },
     {
       "fingerprint": "dab5a53227ca623d05f4399366043b21068b6b015f607da01a55331b607ae7e5",
       "note": "False positive. Open3.capture3 array form in Worktree.origin_branch_ref_exists?: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a single ref-path literal (`refs/remotes/origin/<branch>`) passed to `git rev-parse --verify --quiet` as one argv member; no shell ever sees it."
+    },
+    {
+      "fingerprint": "f4e0dcfe7fbb847c09d2b929e3566c2092dbee71a4c34865e8d86248fad239d4",
+      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#pr_diff_stat. base_ref comes from the PR base ref and head_ref is the local literal HEAD in the babysitter context path; the `origin/<base>...HEAD` revspec is passed as one argv element to execve(2), not through a shell."
     }
   ],
-  "updated": "2026-06-19",
+  "updated": "2026-06-24 00:00:00 +0000",
   "brakeman_version": "8.0.5"
 }

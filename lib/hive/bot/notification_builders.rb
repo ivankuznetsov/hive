@@ -37,6 +37,9 @@ module Hive
         archived
       ].freeze
 
+      TELEGRAM_MESSAGE_MAX_CHARS = 4096
+      DETAILS_TRUNCATION_MARKER = "\n... [truncated]".freeze
+
       def build(row, logger: nil)
         return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
 
@@ -329,6 +332,30 @@ module Hive
         suggested.is_a?(Hash) ? suggested : nil
       end
 
+      def details_summary(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
+                   .map { |key, value| "#{key}=#{value}" }
+        action_label = row.respond_to?(:action_label) ? row.action_label : nil
+        action = action_label.to_s.empty? ? row.action : action_label
+        marker = row.marker.to_s.empty? ? "none" : row.marker
+        [
+          "#{display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
+          "Action: #{action}",
+          "Marker: #{marker}",
+          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
+        ].compact.join("\n")
+      end
+
+      def details_reply(row)
+        sections = [ details_summary(row), details_hint(row) ].compact
+        diagnostic = diagnostic_detail(row)
+        text = (sections + [ diagnostic ].compact).join("\n\n")
+        return text if text.length <= TELEGRAM_MESSAGE_MAX_CHARS
+        return truncate_diagnostic_reply(sections, diagnostic) if diagnostic
+
+        truncate_text(text)
+      end
+
       def recovery_match_attr(row)
         attrs = row.attrs.to_h.transform_keys(&:to_s)
         keys = case row.marker.to_s.downcase
@@ -382,6 +409,79 @@ module Hive
         normalized = row.attrs.to_h.transform_keys(&:to_s)
         attrs = normalized.to_a.sort_by(&:first).map { |key, value| "#{key}=#{value}" }.join(" ")
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
+      end
+
+      def details_hint(row)
+        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" && row.marker.to_s == "waiting"
+          plan = present_value(row, :state_file) || File.join(present_value(row, :folder).to_s, "plan.md")
+          return "Plan draft: #{plan}\nApprove when ready with /approve #{row.slug}."
+        end
+
+        if recovery?(row) && manual_only_recovery?(row)
+          folder = present_value(row, :folder)
+          lines = [
+            cause_sentence_for(row),
+            manual_only_reply(marker: row.marker, attrs: row.attrs)
+          ]
+          lines << "Logs/artifacts: #{folder}" if folder
+          return lines.join("\n")
+        end
+
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        if row.marker.to_s == "review_waiting" && attrs["reason"].to_s == "fix_guardrail"
+          return "Open on a laptop to inspect the fix before continuing."
+        end
+
+        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
+          return "Reply /answer #{row.slug} to provide input."
+        end
+
+        next_step_hint(row) || "Open on a laptop to advance."
+      end
+
+      def next_step_hint(row)
+        command = nil
+        next_action = row.respond_to?(:next_action) ? row.next_action : nil
+        command = next_action["command"] if next_action.is_a?(Hash)
+        command = present_value(row, :suggested_command) if command.to_s.strip.empty?
+        command = command.to_s.strip
+        return nil if command.empty? || command == "-"
+
+        "Next step: #{command}"
+      end
+
+      def diagnostic_detail(row)
+        diagnostic = row.respond_to?(:diagnostic) ? row.diagnostic : nil
+        return nil unless diagnostic.is_a?(Hash) && !diagnostic.empty?
+
+        summary = diagnostic["summary"].to_s.strip
+        detail = diagnostic["detail"].to_s.strip
+        lines = [ summary, detail ].reject(&:empty?)
+        lines.empty? ? nil : lines.join("\n")
+      end
+
+      def truncate_diagnostic_reply(sections, diagnostic)
+        summary, detail = diagnostic.to_s.split("\n", 2)
+        prefix = (sections + [ summary.to_s.strip ]).reject(&:empty?).join("\n\n")
+        return truncate_text((sections + [ diagnostic ]).join("\n\n")) if detail.to_s.empty?
+
+        available = TELEGRAM_MESSAGE_MAX_CHARS - prefix.length - 1 - DETAILS_TRUNCATION_MARKER.length
+        return truncate_text((sections + [ diagnostic ]).join("\n\n")) unless available.positive?
+
+        truncated_detail = detail[0, available].to_s.rstrip + DETAILS_TRUNCATION_MARKER
+        [ prefix, truncated_detail ].reject(&:empty?).join("\n")
+      end
+
+      def truncate_text(text)
+        limit = TELEGRAM_MESSAGE_MAX_CHARS - DETAILS_TRUNCATION_MARKER.length
+        text[0, limit].to_s.rstrip + DETAILS_TRUNCATION_MARKER
+      end
+
+      def present_value(row, key)
+        return nil unless row.respond_to?(key)
+
+        value = row.public_send(key).to_s.strip
+        value.empty? ? nil : value
       end
 
       def details_callback(row)

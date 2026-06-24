@@ -725,7 +725,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     dispatcher.process_rows([ row(action: "agent_running", marker: "agent_working") ])
 
     assert_empty telegram.messages
-    assert_empty logger.events
+    assert_equal :notification_skipped_live_agent, logger.events.first.first
   end
 
   def test_send_failures_are_logged_without_marking_seen

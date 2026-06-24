@@ -40,6 +40,16 @@ module Hive
       def build(row, logger: nil)
         return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
 
+        # `action` is the live-state signal. A live task lock can make status
+        # report agent_running while the state file still carries a stale
+        # recovery marker from the previous run; those rows must stay silent.
+        if SKIP_ACTIONS.include?(row.action)
+          logger&.event(:notification_skipped_live_agent,
+                        project: row.project, slug: row.slug, stage: row.stage,
+                        marker: row.marker, action: row.action)
+          return nil
+        end
+
         if READY_ACTIONS.include?(row.action)
           stage_approval(row)
         elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT

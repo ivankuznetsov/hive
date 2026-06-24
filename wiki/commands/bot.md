@@ -252,13 +252,18 @@ the bot after rotating).
 ## Structured log
 
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
-`hive-bot-log.v2` (`SCHEMA_VERSION = 2`). The event enum is closed in
-`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
+`hive-bot-log.v3` (`SCHEMA_VERSION = 3`). The event enum is closed in
+`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site. Every v3
+line carries `level` (`debug`, `info`, `warn`, or `error`) and may carry
+`category` for cross-cutting tags such as `noise`.
 
-`v2` was introduced when the Telegram "Codex draft-assist" feature was
-retired: it drops the `codex_spawned` / `codex_succeeded` / `codex_failed`
-events from the enum. `schemas/hive-bot-log.v1.json` is kept as-is for
-historical log lines emitted before the bump.
+`v3` keeps event names stable and adds severity. Benign Telegram long-poll
+transport timeouts still emit `poll_failure`, but at `debug`/`noise`; real poll
+failures remain `warn`, and sustained outages also emit `poll_unhealthy` at
+`warn`. `notification_skipped_dedupe` and `notification_skipped_backoff` are
+debug/noise and are logged only on skip-state transitions. `v2` was introduced
+when the Telegram "Codex draft-assist" feature was retired; `schemas/hive-bot-log.v1.json`
+and `schemas/hive-bot-log.v2.json` are kept as-is for historical log lines.
 
 The schema evolves additively: new event values may be appended to the
 current version without changing `schema_version`. Breaking changes

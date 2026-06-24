@@ -76,10 +76,36 @@ class HiveBotLoggerTest < Minitest::Test
       logger.event(:poll_failure)
       logger.event(:notification_skipped_dedupe)
       logger.event(:bot_started)
+      logger.event(:notification_skipped_active_conversation)
+      logger.event(:notification_skipped_daemon_plan_pause)
       logger.close
 
       levels = File.read(path).lines.map { |line| JSON.parse(line).fetch("level") }
-      assert_equal %w[warn debug info], levels
+      assert_equal %w[warn debug info info info], levels
+    end
+  end
+
+  def test_info_stream_excludes_noise_events_under_repeated_poll_and_dedupe_chatter
+    with_log do |logger, path|
+      20.times { |i| logger.event(:notification_sent, sequence: i) }
+      100.times do |i|
+        logger.event(:poll_failure, level: :debug, category: :noise,
+                                    error_class: "Faraday::TimeoutError", message: "slow #{i}")
+        logger.event(:notification_skipped_dedupe, level: :debug, category: :noise,
+                                                  project: "hive", slug: "slug", marker: "waiting")
+      end
+      logger.close
+
+      payloads = File.read(path).lines.map { |line| JSON.parse(line) }
+      info = payloads.select { |payload| payload.fetch("level") == "info" }
+      noise_in_info = info.select do |payload|
+        payload["category"] == "noise" ||
+          %w[poll_failure notification_skipped_dedupe notification_skipped_backoff].include?(payload.fetch("event"))
+      end
+
+      assert_equal 20, info.size
+      assert_equal 0, noise_in_info.size
+      assert_operator noise_in_info.size.to_f / info.size, :<, 0.05
     end
   end
 

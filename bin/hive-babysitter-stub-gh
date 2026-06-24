@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "pathname"
 require "tmpdir"
 require "uri"
 
@@ -429,6 +430,10 @@ end
 real = ENV["HIVE_BABYSITTER_REAL_GH"].to_s
 if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
+  exit 127
+end
+unless Pathname.new(real).absolute?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH must be an absolute path; refusing to exec #{real.inspect}"
   exit 127
 end
 

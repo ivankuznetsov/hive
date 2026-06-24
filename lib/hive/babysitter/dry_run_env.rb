@@ -97,7 +97,7 @@ module Hive
       def which(name)
         ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
           candidate = File.join(dir, name)
-          return candidate if File.file?(candidate) && File.executable?(candidate)
+          return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
         end
         nil
       end

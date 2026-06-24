@@ -102,6 +102,70 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_canonicalizes_relative_path_real_binaries_before_agent_cwd_changes
+    with_tmp_dir do |dir|
+      parent = File.join(dir, "parent")
+      worktree = File.join(dir, "worktree")
+      parent_bin = File.join(parent, "bin")
+      worktree_bin = File.join(worktree, "bin")
+      FileUtils.mkdir_p([ parent_bin, worktree_bin ])
+      recording_binary(parent_bin, "git")
+      recording_binary(parent_bin, "gh")
+      pwn_git = File.join(worktree, "pwn-git-ran")
+      pwn_gh = File.join(worktree, "pwn-gh-ran")
+      executable_touch_binary(worktree_bin, "git", pwn_git)
+      executable_touch_binary(worktree_bin, "gh", pwn_gh)
+
+      Dir.chdir(parent) do
+        with_env("PATH" => [ "bin", ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+          Hive::Babysitter::DryRunEnv.with_env(worktree) do
+            Dir.chdir(worktree) do
+              _out, git_err, git_status = Open3.capture3("git", "status", "--short")
+              _out, gh_err, gh_status = Open3.capture3("gh", "repo", "view", "owner/repo")
+
+              assert git_status.success?, git_err
+              assert gh_status.success?, gh_err
+            end
+          end
+        end
+      end
+
+      real_invocations = File.read(File.join(parent_bin, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+      refute_path_exists pwn_git
+      refute_path_exists pwn_gh
+    end
+  end
+
+  def test_stubs_refuse_relative_real_binary_paths
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      pwn_git = File.join(dir, "pwn-git-ran")
+      pwn_gh = File.join(dir, "pwn-gh-ran")
+      executable_touch_binary(bin_dir, "git", pwn_git)
+      executable_touch_binary(bin_dir, "gh", pwn_gh)
+
+      [
+        [ "git", "HIVE_BABYSITTER_REAL_GIT", [ "status", "--short" ], pwn_git ],
+        [ "gh", "HIVE_BABYSITTER_REAL_GH", [ "repo", "view", "owner/repo" ], pwn_gh ]
+      ].each do |binary, env_name, args, pwn_path|
+        env = {
+          env_name => "bin/#{binary}",
+          "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "#{binary}-skipped.log")
+        }
+
+        _out, err, status = Open3.capture3(env, stub_path(binary), *args, chdir: dir)
+
+        assert_equal 127, status.exitstatus, err
+        assert_includes err, "#{env_name} must be an absolute path"
+        refute_path_exists pwn_path
+      end
+    end
+  end
+
   def test_with_env_isolates_gh_config_against_command_local_home
     with_tmp_dir do |dir|
       recording_binary(dir, "git")
@@ -873,7 +937,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     with_tmp_git_repo do |dir|
       trace_path = File.join(dir, "trace.log")
       env = {
-        "HIVE_BABYSITTER_REAL_GIT" => "git",
+        "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
         "GIT_TRACE" => trace_path
       }
 
@@ -969,7 +1033,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       File.write(File.join(dir, "README.md"), "changed\n")
 
       base_env = {
-        "HIVE_BABYSITTER_REAL_GIT" => "git",
+        "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
       }
 
@@ -1309,9 +1373,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def real_git_env(dir)
     {
-      "HIVE_BABYSITTER_REAL_GIT" => "git",
+      "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
       "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
     }
+  end
+
+  def real_git_binary
+    Hive::Babysitter::DryRunEnv.which("git") || raise("git binary not found on PATH")
   end
 
   def with_tmp_signed_git_repo(log_show_signature: false)

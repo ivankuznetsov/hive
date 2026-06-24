@@ -18,24 +18,26 @@ Custom workflows: Hive's pipeline engine is now generic data. Author your own pe
 
 ### Patrol security hardening
 
-- A large wave of fixes to the `hive patrol` dry-run sandbox, where stubbed `gh`/`git` passthrough could be abused. Closed: auth-token leakage via passthrough and to attacker-controlled hosts; dry-run reads targeting arbitrary hosts or executing repo-configured transport/remote helpers and askpass; skip-log FIFOs hanging stubs or following symlinks; gh-api guard bypass via glued `-F=` fields and short flags; cache writes during dry-run.
-- JSON usage/error envelopes completed across the patrol and eval command surface; scenario-basename validation enforced; non-executable or unusable repro scripts now report precisely instead of as generic failures.
+- A large wave of fixes to the `hive patrol` dry-run sandbox, where stubbed `gh`/`git` passthrough could be abused. Closed: auth-token leakage via passthrough and to attacker-controlled hosts; dry-run reads targeting arbitrary hosts, executing repo-configured transport/remote helpers, GPG signature helpers, or askpass, or launching a pager on TTY git reads; gh-api guard bypass via glued `-F=` fields, short flags, or absolute URLs slipping the host gate; skip-log FIFOs hanging stubs or following symlinks; replay accepting symlinked repro scripts; invalid-byte git argv crashing the stub; cache writes during dry-run.
+- JSON usage/error envelopes completed across the patrol and eval command surface; scenario-basename validation enforced; stale eval reports no longer survive usage errors; hive-eval stops emitting spurious plural positional-argument errors; non-executable or unusable repro scripts now report precisely instead of as generic failures.
 
 ### Pipeline & daemon
 
-- Task dependencies: a `depends_on` gate holds a task until its dependency completes, and dependent PRs stack on their parent's branch.
+- Task dependencies: a `depends_on` gate holds a task until its dependency completes, and dependent PRs stack on their parent's branch instead of collapsing onto main.
 - PR numbers now show across all task-list surfaces (TUI, CLI, hivebox).
 - The daemon assigns ids to tasks created outside `hive new`, self-heals non-token error classes, and closes a web/ auto-commit scope gap.
 - Fixed: an AgentLimit false-positive that killed healthy runs; finalize now short-circuits on an already-merged PR and fast-forwards a stale rebase-duplicate worktree instead of looping on `unpushed_commits`.
 - Fixed: transient duplicate rows and `ENOENT` during stage moves; tmux-mode stage completion hardened against missing terminal markers; large pastes settle before submit.
 - Fixed: the babysitter skips PRs owned by an active pipeline task and gitignores dry-run scaffolding so it can't trip clean-exit review.
 - `hive drop` accepts a bare numeric task id; `bin/hive new` lifts recognized options out of the task text.
+- Execute holds real provider quota walls (usage-limit reached) on cooldown and retries, instead of failing the task.
 
 ### Reviewers
 
 - Self-diagnosing review failures, transient-triage retry, and whole-class fixes; triage and fix usage-limit failures now self-heal like reviewers do.
 - Codex-native reviews read codex's real answer instead of the echoed prompt template and normalize native `[Pn]` output so patrol reviews stop failing; the codex session transcript is dropped from published findings.
 - Triage bare timeout/budget fallbacks aligned with `DEFAULTS`; the default review wall-clock cap is doubled to 8h.
+- Findings you triage as no-fix are suppressed from re-raising on later review passes.
 
 ### Digest
 
@@ -50,9 +52,13 @@ Custom workflows: Hive's pipeline engine is now generic data. Author your own pe
 
 - `hive bench submit` packages a completed task as a corpus producer for the hive-bench coding-agent benchmark; preflight delegates to hive-bench's canonical SecretScan.
 
+### Integrations
+
+- Screenote integration: connects via OAuth 2.1 / MCP, replacing the previous API-key upload.
+
 ### Dependencies
 
-- Fixed: `concurrent-ruby` 1.3.6 → 1.3.7 (CVE-2026-54904/5/6). Dependabot/action bumps: brakeman 8.0.5, docker/* actions v4, actions/checkout 7.
+- Fixed: `concurrent-ruby` 1.3.6 → 1.3.7 (CVE-2026-54904/5/6). Dependabot/action bumps: rubocop 1.88, brakeman 8.0.5, docker/* actions v4, actions/checkout 7.
 
 ## 0.3.0
 

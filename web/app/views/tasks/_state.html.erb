@@ -29,8 +29,8 @@
       <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
             params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
     <% end %>
-    <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row["stage"])) %>
-      <%= button_to "Run #{stage_run_verb(@row["stage"])}", task_run_path(@project["name"], @row["slug"]),
+    <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row)) %>
+      <%= button_to "Run #{stage_run_verb(@row)}", task_run_path(@project["name"], @row["slug"]),
             params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
             data: { turbo_submits_with: "Queueing…" } %>
     <% end %>

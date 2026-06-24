@@ -55,20 +55,40 @@ class SchemaFilesTest < Minitest::Test
                     "v1 enum must NOT include the v2-introduced 6-review stage"
   end
 
-  def test_hive_approve_v2_includes_current_stage_dirs
+  # U6: the stage-dir / stage-name / stage-index fields were relaxed from the
+  # closed coding enums to patterns so generic (runtime-registered) workflow
+  # stages validate, mirroring the hive-status.v4 precedent. The contract is
+  # now "well-formed N-name dir / bare name", not a fixed coding whitelist.
+  def test_hive_approve_v2_relaxes_stage_fields_to_patterns_for_generic_workflows
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
-    v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
-    assert_includes v2_dirs, "5-open-pr"
-    assert_includes v2_dirs, "6-review"
-    assert_includes v2_dirs, "7-artifacts",
-                    "v2 widens the enum to include 7-artifacts (plan U1; ADR-029)"
-    assert_includes v2_dirs, "8-finalize"
-    assert_includes v2_dirs, "9-done"
-    refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
-    refute_includes v2_dirs, "7-finalize",
-                    "v2 retires the pre-renumber 7-finalize enum value"
-    refute_includes v2_dirs, "8-done",
-                    "v2 retires the pre-renumber 8-done enum value"
+    props = doc.dig("$defs", "SuccessPayload", "properties")
+
+    %w[from_stage_dir to_stage_dir].each do |field|
+      assert_nil props.dig(field, "enum"),
+                 "#{field} must not be a closed coding enum — generic dirs are runtime-registered"
+      dir_re = Regexp.new(props.fetch(field).fetch("pattern"))
+      # Coding dirs still validate (no regression for pinned consumers)…
+      assert_match dir_re, "7-artifacts", "#{field} pattern must still accept coding dirs"
+      assert_match dir_re, "9-done"
+      # …and the generic descriptor dirs the producer now emits validate too.
+      assert_match dir_re, "3-report", "#{field} pattern must accept generic descriptor dirs"
+      assert_match dir_re, "2-gather"
+      refute_match dir_re, "plan", "#{field} pattern still requires the N- index prefix"
+    end
+
+    %w[from_stage to_stage].each do |field|
+      assert_nil props.dig(field, "enum"),
+                 "#{field} must not be a closed coding enum"
+      name_re = Regexp.new(props.fetch(field).fetch("pattern"))
+      assert_match name_re, "open-pr", "#{field} pattern must accept hyphenated coding names"
+      assert_match name_re, "report", "#{field} pattern must accept generic stage names"
+    end
+
+    %w[from_stage_index to_stage_index].each do |field|
+      assert_nil props.dig(field, "maximum"),
+                 "#{field} must drop the maximum:9 cap so generic descriptors past 9 stages validate"
+      assert_equal 1, props.dig(field, "minimum")
+    end
   end
 
   def test_hive_approve_success_required_keys_match_producer_emission
@@ -192,8 +212,13 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_status_task_enums_match_closed_sets
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
 
-    assert_equal Hive::Stages::DIRS.sort,
-                 doc.dig("$defs", "Task", "properties", "stage", "enum").sort
+    stage_pattern = "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+    assert_equal stage_pattern,
+                 doc.dig("$defs", "Task", "properties", "stage", "pattern")
+    assert_equal stage_pattern,
+                 doc.dig("$defs", "Task", "properties", "dependency_stage", "pattern")
+    assert_nil doc.dig("$defs", "Task", "properties", "stage", "enum"),
+               "generic workflow stage dirs are runtime-registered, so stage must not be a coding enum"
     assert_equal Hive::Commands::Status::ICON.keys.map(&:to_s).sort,
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
@@ -1003,33 +1028,90 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     expected = %w[
       answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
-      default_branch development_agent enabled_reviewers hive_state_path ok path patrol_mode patrol_reviewers planning_agent
-      project schema schema_version timeouts triage_bias worktree_root
+      default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
+      project schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
                  "schema/producer required-key drift in hive-init.v1.json"
 
-    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
-    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
-    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
-    producer = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers
-    )
-    assert_equal schema_required, producer.keys.sort,
-                 "Init#success_payload must emit exactly the schema's required keys"
+    # Sandbox the project root: success_payload now drives load_dir against
+    # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
+    # world-shared path. Mirror the twin test_hive_init_success_payload_validates.
+    Dir.mktmpdir("hive-init-keys") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      producer = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+      assert_equal schema_required, producer.keys.sort,
+                   "Init#success_payload must emit exactly the schema's required keys"
+    end
   end
 
   def test_hive_init_success_payload_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    Dir.mktmpdir("hive-init-schema") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      payload = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+
+      assert_equal [
+        {
+          "kind" => "custom_workflow",
+          "command" => "hive workflow new <id>",
+          "message" => "custom workflows live in this project — author one with `hive workflow new <id>`"
+        }
+      ], payload.fetch("hints")
+
+      errors = schemer.validate(payload).map { |e| e["error"] }
+      assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
+    end
+  end
+
+  def test_hive_init_new_workflow_success_payload_validates_with_scaffold_paths
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
     ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
     entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
     answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
     payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers
+      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :writing
+    ).merge(
+      "descriptor_path" => "/tmp/demo/.hive-state/workflows/writing.yml",
+      "instruction_path" => "/tmp/demo/.hive-state/workflows/writing/work.md"
     )
 
     errors = schemer.validate(payload).map { |e| e["error"] }
-    assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
+    assert_empty errors, "hive-init --new-workflow SuccessPayload must validate (errors: #{errors.inspect})"
+    assert_equal "writing", payload.fetch("workflow")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing.yml", payload.fetch("descriptor_path")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing/work.md", payload.fetch("instruction_path")
+  end
+
+  def test_hive_init_new_workflow_already_initialized_payload_validates_with_scaffold_paths
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    ops = Struct.new(:hive_state_path).new("/tmp/demo/.hive-state")
+    descriptor = Struct.new(:id).new(:writing)
+    workflow_choice = Hive::Commands::Init::WorkflowChoice.new(descriptor: descriptor, source: :flag)
+    payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
+      :existing_payload, ops, workflow_choice: workflow_choice
+    ).merge(
+      "descriptor_path" => "/tmp/demo/.hive-state/workflows/writing.yml",
+      "instruction_path" => "/tmp/demo/.hive-state/workflows/writing/work.md"
+    )
+
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "hive-init --new-workflow AlreadyInitializedPayload must validate (errors: #{errors.inspect})"
+    assert_equal true, payload.fetch("already_initialized")
+    assert_equal "writing", payload.fetch("workflow")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing.yml", payload.fetch("descriptor_path")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing/work.md", payload.fetch("instruction_path")
   end
 
   # ── hive-forget ────────────────────────────────────────────────────────

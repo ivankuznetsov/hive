@@ -112,8 +112,11 @@ class DropCommandTest < Minitest::Test
   end
 
   # Walk every active stage drop is supposed to clean up so a future
-  # stage rename can't silently drop the per-stage assertion.
-  Hive::Commands::Drop::ACTIVE_STAGE_DIRS.each do |stage|
+  # stage rename can't silently drop the per-stage assertion. Derived the
+  # same way production's `active_stage_dirs` is (registered stage dirs minus
+  # the terminal/archive stage). Only the coding workflow is registered in this
+  # unit, so the archive set is the coding terminal dir (`DIRS.last`).
+  Hive::Stages::DIRS.reject { |stage| stage == Hive::Stages::DIRS.last }.each do |stage|
     define_method("test_drop_removes_task_from_#{stage.tr('-', '_')}_stage") do
       with_drop_project do |dir, ops, project|
         slug = "stage-cov-260522-aaaa"
@@ -208,6 +211,73 @@ class DropCommandTest < Minitest::Test
       assert_equal "wrong_stage", payload["error_kind"]
       assert_equal "3-plan", payload["current_stage"]
       assert_equal "2-brainstorm", payload["target_stage"]
+    end
+  end
+
+  # When `--from` names a stage that doesn't resolve in the matched project,
+  # the WrongStage message degrades "expected" to the raw ref rather than
+  # raising mid-message (the resolve rescue in raise_wrong_stage_if_slug_exists_elsewhere!).
+  def test_drop_from_unknown_stage_degrades_expected_to_raw_ref
+    with_drop_project do |dir, _ops, project|
+      slug = "degrade-260522-aaaa"
+      create_task(dir, "3-plan", slug)
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Drop.new(slug, project: project, from: "nonexistent-stage", json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::WRONG_STAGE, status
+      assert_equal "wrong_stage", payload["error_kind"]
+      assert_equal "3-plan", payload["current_stage"]
+      assert_equal "nonexistent-stage", payload["target_stage"],
+                   "an unresolvable --from must degrade to the raw ref, not crash"
+    end
+  end
+
+  def seed_generic_task(dir, ops, stage_dir, slug)
+    folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "meta.yml"), { "slug" => slug, "workflow" => "research" }.to_yaml)
+    File.write(File.join(folder, "notes.md"), "# #{slug}\n<!-- WAITING -->\n")
+    commit_hive_state(ops, stage_dir, slug)
+    folder
+  end
+
+  # U6.4: a generic-workflow task folder lives in a stage dir outside the
+  # coding Hive::Stages::DIRS, so a slug-only `hive drop` that scans only the
+  # coding dirs can't find it. Scanning Workflows.all_stage_dirs makes it
+  # droppable by slug.
+  def test_drop_finds_and_removes_generic_workflow_task_by_slug
+    with_drop_project do |dir, ops, project|
+      with_registered_workflow(research_workflow) do
+        slug = "generic-drop-260620-aaaa"
+        folder = seed_generic_task(dir, ops, "2-gather", slug)
+
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal [ "2-gather" ], payload["from_stages"]
+        refute File.directory?(folder), "generic task folder must be removed by `hive drop <slug>`"
+      end
+    end
+  end
+
+  # U6.4: a generic `--from <stage>` must resolve (the CLI accepts it), not be
+  # rejected as an unknown stage by the coding-only Stages.resolve.
+  def test_drop_accepts_generic_from_stage
+    with_drop_project do |dir, ops, project|
+      with_registered_workflow(research_workflow) do
+        slug = "generic-from-260620-aaaa"
+        folder = seed_generic_task(dir, ops, "2-gather", slug)
+
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, from: "2-gather", json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal [ "2-gather" ], payload["from_stages"]
+        refute File.directory?(folder), "generic --from must resolve and drop the generic task folder"
+      end
     end
   end
 

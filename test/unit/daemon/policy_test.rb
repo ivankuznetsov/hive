@@ -46,6 +46,109 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive finalize slug-a --from 7-artifacts")
   end
 
+  def test_ready_to_advance_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_advance",
+                                   command: "hive approve slug-a --from 2-gather")
+  end
+
+  def test_ready_to_run_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_run",
+                                   command: "hive run slug-a")
+  end
+
+  # ── ready_to_run brake: markerless generic re-dispatch ─────────────────
+
+  def test_ready_to_run_first_sight_dispatches
+    # No prior dispatch (last_dispatched nil): run the generic stage once.
+    assert_equal :dispatch, decide(action: "ready_to_run",
+                                   command: "hive run slug-a",
+                                   state_file_mtime: T0 - 5,
+                                   last_dispatched_state_file_mtime: nil)
+  end
+
+  def test_ready_to_run_markerless_rerun_is_braked_to_markerless_stalled
+    # A generic agent exited 0 without writing a WAITING/COMPLETE marker, so
+    # the stage re-classifies as ready_to_run. The post-completion mtime
+    # refresh makes the snapshot mtime equal the recorded last-dispatch mtime,
+    # so the brake surfaces an explicit :markerless_stalled (not a silent skip)
+    # instead of re-dispatching `hive run` every tick (the bug that would drain
+    # the per-project daily cap and then halt dispatch).
+    same_mtime = T0 - 100
+    assert_equal :markerless_stalled, decide(action: "ready_to_run",
+                                             command: "hive run slug-a",
+                                             state_file_mtime: same_mtime,
+                                             last_dispatched_state_file_mtime: same_mtime)
+  end
+
+  def test_ready_to_run_redispatches_on_new_input_past_debounce
+    # Operator touched the state file after the last dispatch and it settled
+    # past the debounce window → re-run with the fresh input.
+    assert_equal :dispatch, decide(action: "ready_to_run",
+                                   command: "hive run slug-a",
+                                   state_file_mtime: T0 - 60,
+                                   last_dispatched_state_file_mtime: T0 - 600)
+  end
+
+  def test_ready_to_run_new_input_within_debounce_waits
+    assert_equal :wait_for_debounce, decide(action: "ready_to_run",
+                                            command: "hive run slug-a",
+                                            state_file_mtime: T0 - 5,
+                                            last_dispatched_state_file_mtime: T0 - 600)
+  end
+
+  def test_ready_to_run_with_nil_mtime_after_prior_dispatch_is_markerless_stalled
+    # Defensive: prior dispatch recorded, but the snapshot has no mtime → can't
+    # prove new input, so don't re-dispatch. The agent left no state file at all,
+    # which is the markerless-stall case, surfaced explicitly.
+    assert_equal :markerless_stalled, decide(action: "ready_to_run",
+                                             command: "hive run slug-a",
+                                             state_file_mtime: nil,
+                                             last_dispatched_state_file_mtime: T0 - 600)
+  end
+
+  def test_ready_to_run_with_nil_command_skips
+    assert_equal :skip, decide(action: "ready_to_run", command: nil)
+  end
+
+  def test_coding_policy_decision_matrix_is_characterized
+    # U6 characterization: adding generic workflow dispatch keys must leave
+    # the existing coding daemon policy outcomes byte-for-byte equivalent.
+    cases = [
+      {
+        name: "advance",
+        expected: :dispatch,
+        args: { action: "ready_to_develop", stage: "3-plan",
+                command: "hive develop slug-a --from 3-plan" }
+      },
+      {
+        name: "plan approval",
+        expected: :dispatch,
+        args: { action: "needs_input", stage: "3-plan",
+                command: "hive plan slug-a --from 3-plan",
+                state_file_mtime: T0 - 60,
+                last_dispatched_state_file_mtime: nil }
+      },
+      {
+        name: "edit resume",
+        expected: :dispatch,
+        args: { action: "needs_input", stage: "2-brainstorm",
+                command: "hive brainstorm slug-a --from 2-brainstorm",
+                state_file_mtime: T0 - 60,
+                last_dispatched_state_file_mtime: T0 - 600 }
+      },
+      {
+        name: "merge wait",
+        expected: :poll_for_merge,
+        args: { action: "ready_to_archive", stage: "8-finalize",
+                command: "hive archive slug-a --from 8-finalize" }
+      }
+    ]
+
+    cases.each do |example|
+      assert_equal example.fetch(:expected), decide(**example.fetch(:args)), example.fetch(:name)
+    end
+  end
+
   # ── merge wait: hand off to PrMergeWatcher ─────────────────────────────
 
   def test_ready_to_archive_polls_for_merge
@@ -62,6 +165,20 @@ class HiveDaemonPolicyTest < Minitest::Test
     assert_equal :blocked_on_dependency,
                  decide(action: "ready_to_develop",
                         command: "hive develop slug-a --from 3-plan",
+                        blocked: true)
+  end
+
+  def test_blocked_ready_to_advance_does_not_dispatch
+    assert_equal :blocked_on_dependency,
+                 decide(action: "ready_to_advance",
+                        command: "hive approve slug-a --from 2-gather",
+                        blocked: true)
+  end
+
+  def test_blocked_ready_to_run_does_not_dispatch
+    assert_equal :blocked_on_dependency,
+                 decide(action: "ready_to_run",
+                        command: "hive run slug-a",
                         blocked: true)
   end
 
@@ -131,6 +248,16 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive develop slug-a --from 3-plan",
                                    state_file_mtime: T0 - 600,
                                    last_dispatched_state_file_mtime: nil)
+  end
+
+  def test_generic_plan_named_needs_input_does_not_hit_coding_plan_approval
+    assert_equal :record_baseline,
+                 decide(action: "needs_input",
+                        workflow: "dispatch",
+                        stage: "3-plan",
+                        command: "hive run slug-a",
+                        state_file_mtime: T0 - 600,
+                        last_dispatched_state_file_mtime: nil)
   end
 
   def test_needs_input_first_sight_with_fresh_mtime_records_baseline
@@ -304,6 +431,10 @@ class HiveDaemonPolicyTest < Minitest::Test
     assert_equal :skip, decide(action: "ready_to_plan", command: "")
   end
 
+  def test_ready_to_advance_with_nil_command_skips
+    assert_equal :skip, decide(action: "ready_to_advance", command: nil)
+  end
+
   def test_plan_approval_matches_only_literal_3_plan_stage
     # PR #83 code review finding #4 (cross-corroborated by 4
     # reviewers): the earlier `/\A\d+-plan\z/` regex matched any
@@ -435,12 +566,13 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   private
 
-  def decide(action:, command:, stage: nil, state_file_mtime: nil,
+  def decide(action:, command:, stage: nil, workflow: nil, state_file_mtime: nil,
              last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
              answers_pending: false, blocked: false)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
+      workflow: workflow,
       command: command,
       state_file_mtime: state_file_mtime,
       last_dispatched_state_file_mtime: last_dispatched_state_file_mtime,

@@ -134,14 +134,29 @@ module ApplicationHelper
     PASSABLE_MARKERS.include?(task["marker"].to_s)
   end
 
-  def stage_dispatch_action(stage_dir)
-    STAGE_DISPATCH_ACTIONS[stage_dir.to_s.split("-", 2).first]
+  # STAGE_DISPATCH_ACTIONS maps coding stage indexes to coding verbs, so it is
+  # gated on the coding workflow: a non-coding row (e.g. content `2-research`)
+  # would otherwise queue `hive brainstorm` for a stage that has no such verb.
+  # Generic-workflow rows take the dispatcher's single manual path —
+  # `ready_to_run` → `hive run --stage` — and only when the row is actually
+  # runnable (`ready_to_advance` rows use the Approve button instead).
+  def stage_dispatch_action(task)
+    unless Hive::Workflows.coding_id?(task["workflow"])
+      return task["action"].to_s == "ready_to_run" ? "ready_to_run" : nil
+    end
+
+    STAGE_DISPATCH_ACTIONS[task["stage"].to_s.split("-", 2).first]
   end
 
-  # "ready_to_open_pr" → "open-pr": the hive verb the dispatch will run,
-  # shown on the button so the operator knows exactly what they trigger.
-  def stage_run_verb(stage_dir)
-    stage_dispatch_action(stage_dir)&.sub(/\Aready_(?:to|for)_/, "")&.tr("_", "-")
+  # "ready_to_open_pr" → "open-pr": the hive verb the dispatch will run, shown
+  # on the button so the operator knows exactly what they trigger. A generic
+  # `ready_to_run` row runs the stage agent, labelled "stage".
+  def stage_run_verb(task)
+    action = stage_dispatch_action(task)
+    return nil unless action
+    return "stage" if action == "ready_to_run"
+
+    action.sub(/\Aready_(?:to|for)_/, "").tr("_", "-")
   end
 
   # Color the JSONL log tail by event class so errors jump out of the noise.

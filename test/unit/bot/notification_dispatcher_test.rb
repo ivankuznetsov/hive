@@ -9,13 +9,14 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          id: nil, display_name: nil, pr_url: nil)
+          id: nil, display_name: nil, pr_url: nil, workflow: "coding")
     Row.new(
       project: "hive",
       slug: slug,
       id: id,
       display_name: display_name,
       stage: stage,
+      workflow: workflow,
       marker: marker,
       attrs: attrs,
       action: action,
@@ -156,6 +157,17 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
                  "a daemon-auto-approved 3-plan pause must not page the operator"
     assert(logger.events.any? { |name, _| name == :notification_skipped_daemon_plan_pause },
            "the suppressed plan pause must be logged for an audit trail")
+  end
+
+  def test_generic_plan_named_waiting_row_is_not_daemon_plan_pause
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+
+    d.process_rows([ row(stage: "3-plan", marker: "waiting", action: "needs_input", workflow: "dispatch") ])
+
+    assert_equal 1, telegram.messages.size
+    assert_match(/Needs input: waiting/, telegram.messages.first[:text])
+    refute(logger.events.any? { |name, _| name == :notification_skipped_daemon_plan_pause },
+           "generic workflows must not hit the coding plan-pause suppression")
   end
 
   # With the daemon OFF, the plan pause does need the operator — but it is

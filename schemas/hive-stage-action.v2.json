@@ -246,6 +246,8 @@
             "ready_to_artifacts",
             "ready_to_finalize",
             "ready_to_archive",
+            "ready_to_advance",
+            "ready_to_run",
             "needs_input",
             "recover_execute",
             "recover_review",

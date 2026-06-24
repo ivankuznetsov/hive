@@ -15,6 +15,18 @@ class WorkflowsTest < Minitest::Test
     assert_equal 8, Hive::Workflows::VERBS.size
   end
 
+  # Registry.default uses the bare `:coding` literal (a deliberate break in the
+  # workflows.rb ⇆ registry.rb require cycle, before CODING_ID is reachable).
+  # registry.rb#default documents that the literal is "equal to CODING_ID by
+  # construction (workflows_test pins them equal)" — this is that pin, so the
+  # invariant is regression-protected rather than merely asserted in a comment.
+  def test_coding_id_constant_equals_the_default_workflow_literal
+    assert_equal :coding, Hive::Workflows::CODING_ID,
+                 "CODING_ID must be the bare :coding symbol the registry's default literal uses"
+    assert_equal Hive::Workflows::CODING_ID, Hive::Workflows::Registry.default.id,
+                 "Registry.default must resolve to the CODING_ID workflow"
+  end
+
   def test_every_workflow_verb_has_thor_command
     missing = Hive::Workflows::VERBS.keys.reject do |verb|
       Hive::CLI.all_commands.key?(verb) || Hive::CLI.map.key?(verb)
@@ -116,5 +128,90 @@ class WorkflowsTest < Minitest::Test
     cfg = Hive::Workflows.for_verb("review")
     assert_equal "5-open-pr", cfg[:source]
     assert_equal "6-review", cfg[:target]
+  end
+
+  def test_all_stage_dirs_and_names_default_to_registered_descriptors
+    # Pinned against literals (not re-derived from the same
+    # Registry.all.flat_map expression the production code uses) so a
+    # co-regression in that derivation can't pass this guard — mirrors how
+    # test_all_terminal_stage_dirs_defaults_to_registered_terminals hardcodes
+    # its expected terminals. The trailing content-workflow run is the portion
+    # most at risk of silent drift.
+    expected_dirs = [
+      "1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr",
+      "6-review", "7-artifacts", "8-finalize", "9-done",
+      "2-research", "3-outline", "4-draft", "5-critique", "6-done"
+    ]
+    expected_names = [
+      "inbox", "brainstorm", "plan", "execute", "open-pr",
+      "review", "artifacts", "finalize", "done",
+      "research", "outline", "draft", "critique"
+    ]
+
+    assert_equal expected_dirs, Hive::Workflows.all_stage_dirs
+    assert_equal expected_names, Hive::Workflows.all_stage_names
+  end
+
+  def test_all_stage_dirs_and_names_include_registered_workflows
+    with_registered_workflow(research_workflow) do
+      assert_includes Hive::Workflows.all_stage_dirs, "2-gather"
+      assert_includes Hive::Workflows.all_stage_names, "gather"
+      assert_includes Hive::Workflows.all_stage_dirs, "3-plan"
+      assert_includes Hive::Workflows.all_stage_names, "plan"
+    end
+  end
+
+  def test_all_terminal_stage_dirs_defaults_to_registered_terminals
+    assert_equal [ "9-done", "6-done" ], Hive::Workflows.all_terminal_stage_dirs
+  end
+
+  def test_all_terminal_stage_dirs_includes_registered_workflow_terminal
+    with_registered_workflow(research_workflow) do
+      assert_includes Hive::Workflows.all_terminal_stage_dirs, "3-report"
+      assert_includes Hive::Workflows.all_terminal_stage_dirs, "9-done"
+    end
+  end
+
+  def test_stage_ref_hint_lists_dirs_then_short_names
+    hint = Hive::Workflows.stage_ref_hint
+
+    assert_includes hint, "1-inbox"
+    assert_includes hint, "or short names"
+    assert_includes hint, "inbox"
+  end
+
+  def test_resolve_stage_ref_across_workflows_rejects_ambiguous_refs
+    descriptor = Hive::Workflow.new(
+      id: :alternate_plan,
+      stages: [
+        Hive::Workflow::Stage.new(name: "plan", index: 1, state_file: "plan.md", kind: :agent)
+      ]
+    )
+
+    with_registered_workflow(descriptor) do
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Workflows.resolve_stage_ref_across_workflows("plan")
+      end
+
+      assert_includes error.message, "ambiguous stage 'plan'"
+      assert_includes error.message, "3-plan"
+      assert_includes error.message, "1-plan"
+    end
+  end
+
+  def test_resolve_stage_ref_across_workflows_rejects_production_done_short_name
+    # Unlike the synthetic `:alternate_plan` case above (which only proves the
+    # ambiguity *mechanism*), this pins the real registered workflows: `done`
+    # is the terminal short name of BOTH coding (`9-done`) and content
+    # (`6-done`). Pre-`:content` the bare ref resolved cleanly to `9-done`, so
+    # a regression flipping the resolver back to `matches.first` would silently
+    # misroute `hive drop --from done` / `--stage done` instead of erroring.
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Workflows.resolve_stage_ref_across_workflows("done")
+    end
+
+    assert_includes error.message, "ambiguous stage 'done'"
+    assert_includes error.message, "9-done"
+    assert_includes error.message, "6-done"
   end
 end

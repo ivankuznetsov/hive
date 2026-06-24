@@ -17,14 +17,14 @@ module Hive
     module_function
 
     # Build a SyntheticTask from a Reviewers::Context. Stage_name is
-    # always "6-review" because every sub-spawn here is part of the
+    # always "6-review" because every sub-spawn here is part of the # coding-scoped: synthetic reviewers run only inside coding review
     # review autonomous loop.
     def synthetic_task_for(ctx, project_root: nil)
       SyntheticTask.new(
         folder: ctx.task_folder,
         state_file: File.join(ctx.task_folder, "task.md"),
         log_dir: File.join(ctx.task_folder, "logs"),
-        stage_name: "6-review",
+        stage_name: "6-review", # coding-scoped: synthetic reviewers run only inside coding review
         project_root: project_root
       )
     end

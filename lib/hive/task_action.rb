@@ -395,9 +395,20 @@ module Hive
       end
     end
 
+    def brainstorm_action
+      case marker.name
+      when :complete
+        ACTIONS.fetch(:brainstorm_complete)
+      when :none
+        ACTIONS.fetch(:generic_ready_to_run)
+      else
+        ACTIONS.fetch(:brainstorm_waiting)
+      end
+    end
+
     def execute_action
       case marker.name
-      when :execute_complete
+      when :execute_complete, :complete
         ACTIONS.fetch(:execute_complete)
       when :execute_stale
         ACTIONS.fetch(:execute_stale)
@@ -405,8 +416,14 @@ module Hive
         return ACTIONS.fetch(:execute_stale) if legacy_execute_findings?
 
         ACTIONS.fetch(:execute_waiting)
+      when :none
+        ACTIONS.fetch(:generic_ready_to_run)
       else
-        ACTIONS.fetch(:execute_waiting)
+        if Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
+          ACTIONS.fetch(:error)
+        else
+          ACTIONS.fetch(:generic_ready_to_run)
+        end
       end
     end
 
@@ -417,12 +434,13 @@ module Hive
       ACTIONS.fetch(:plan_waiting)
     end
 
-    def finalize_action
-      return ACTIONS.fetch(:error) if finalize_missing_pr_md?
-      return finalize_complete_action if marker.name == :complete
+      def finalize_action
+        return ACTIONS.fetch(:error) if finalize_missing_pr_md?
+        return finalize_complete_action if marker.name == :complete
+        return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
 
-      ACTIONS.fetch(:finalize_waiting)
-    end
+        ACTIONS.fetch(:finalize_waiting)
+      end
 
     def finalize_complete_action
       return ACTIONS.fetch(:error) if finalize_missing_pr_url?

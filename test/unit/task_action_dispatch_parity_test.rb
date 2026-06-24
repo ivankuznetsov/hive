@@ -25,7 +25,7 @@ class TaskActionDispatchParityTest < Minitest::Test
         when "inbox"
           ACTIONS.fetch(:inbox)
         when "brainstorm"
-          marker.name == :complete ? ACTIONS.fetch(:brainstorm_complete) : ACTIONS.fetch(:brainstorm_waiting)
+          brainstorm_action
         when "plan"
           plan_action
         when "execute"

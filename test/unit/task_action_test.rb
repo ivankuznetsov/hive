@@ -1092,7 +1092,7 @@ class TaskActionTest < Minitest::Test
       terminal: "ready_to_brainstorm"
     },
     "brainstorm" => {
-      none: "needs_input",
+      none: "ready_to_run",
       waiting: "needs_input",
       terminal: "ready_to_plan"
     },
@@ -1102,7 +1102,7 @@ class TaskActionTest < Minitest::Test
       terminal: "ready_to_develop"
     },
     "execute" => {
-      none: "needs_input",
+      none: "ready_to_run",
       waiting: "needs_input",
       terminal: "ready_to_open_pr"
     },
@@ -1218,7 +1218,7 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive open-pr demo-260426-aaaa --from 5-open-pr", action.command
   end
 
-  def test_finalize_waiting_when_pr_md_exists
+  def test_markerless_finalize_when_pr_md_exists_is_ready_to_run
     Dir.mktmpdir("task-action-finalize-waiting") do |dir|
       folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
@@ -1230,9 +1230,33 @@ class TaskActionTest < Minitest::Test
 
       action = Hive::TaskAction.for(task, marker(:none))
 
-      assert_equal "needs_input", action.key
-      assert_equal "hive finalize demo-260426-aaaa --from 7-finalize", action.command
+      assert_equal "ready_to_run", action.key
+      assert_equal "hive run demo-260426-aaaa", action.command
     end
+  end
+
+  def test_execute_complete_marker_uses_execute_complete_semantics
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:complete))
+
+    assert_equal "ready_to_open_pr", action.key
+    assert_equal "hive open-pr demo-260426-aaaa --from 4-execute", action.command
+  end
+
+  def test_markerless_execute_is_ready_to_run_not_needs_input
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:none))
+
+    assert_equal "ready_to_run", action.key
+    assert_equal "hive run demo-260426-aaaa", action.command
+  end
+
+  def test_markerless_brainstorm_is_ready_to_run_not_needs_input
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:none))
+
+    assert_equal "ready_to_run", action.key
+    assert_equal "hive run demo-260426-aaaa", action.command
   end
 
   def test_dead_agent_without_recorded_pid_uses_generic_summary

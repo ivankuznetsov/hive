@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-06-15
+updated: 2026-06-21
 tags: [agent, claude, subprocess]
 ---
 
@@ -24,6 +24,8 @@ Hive::Agent.new(
   expected_output: nil, # used by :output_file_exists profiles
   status_mode: nil,     # per-spawn override
   permission_mode: nil, # Claude-only override; nil uses profile default/config caller
+  allowed_tools: nil,   # Claude-only --allowedTools CSV source
+  disallowed_tools: nil,# Claude-only --disallowedTools CSV source
   cli_flags: []         # per-run argv extras, currently Claude model/effort pins
 )
 ```
@@ -57,6 +59,8 @@ hardcoded Claude template:
 <profile.bin> <profile.headless_flag>
   <permission flags>
   [<profile.add_dir_flag> <dir> ...]
+  [--allowedTools <csv>]
+  [--disallowedTools <csv>]
   [<profile.budget_flag> <amount>]
   [<cli_flags...>]
   <profile.output_format_flags...>
@@ -69,6 +73,8 @@ For the built-in Claude profile this is still:
 claude -p
   --dangerously-skip-permissions
   [--add-dir <dir> ...]
+  [--allowedTools <csv>]
+  [--disallowedTools <csv>]
   --max-budget-usd <amount>
   [--model <claude.model>]
   [--effort <claude.effort>]
@@ -93,6 +99,15 @@ skip flag for backward-compatible headless behavior. Any other Claude
 permission mode is emitted as `--permission-mode <mode>`; current config
 validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `dontAsk`, and `plan`.
+
+Claude tool-scope flags are also per spawn. `allowed_tools:` and
+`disallowed_tools:` are emitted only for the Claude profile and only when
+non-empty, after `--add-dir` flags and before budget/model/output-format
+flags. This preserves the historical yolo headless argv (no tool lists) while
+letting `Hive::PermissionScope` enforce opt-in `read-only` and `scoped`
+presets through `--allowedTools` / `--disallowedTools`. `read-only` uses
+`permission_mode: "default"` with allowed tools `Read,LS,Grep,Glob` and
+denies mutating/shell tools.
 
 Claude model/effort flags are config-derived rather than profile-derived.
 When `Stages::Base.spawn_agent` receives `cfg:` and the selected profile is
@@ -150,7 +165,8 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 - `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv and model/effort `cli_flags` reaching the headless command.
 - `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
-- `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns.
+- `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns and the stage permission-scope helper preserving yolo defaults.
+- `test/smoke/permission_scope_headless_smoke_test.rb` is a live Claude smoke proving a read-only headless write attempt completes without timeout and does not create the file, while yolo creates it.
 
 ## Backlinks
 

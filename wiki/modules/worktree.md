@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-06-22
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -44,11 +44,12 @@ If passed explicitly, that's used. Otherwise:
 
 1. `mkdir -p` the parent of `path`.
 2. Probe `git show-ref --verify refs/heads/<branch_name>`:
-   - If it exists, run `git worktree add <path> <branch_name>` (attach to existing branch).
+   - If it exists with no stacked `base_override`, run `git worktree add <path> <branch_name>` (attach to existing branch).
+   - If it exists with a stacked `base_override`, `empty_placeholder?` measures `git rev-list --count <base>..<branch_name>` against **both** default refs that exist — `origin/<default>` (when its tracking ref `refs/remotes/origin/<default>` exists) and local `<default>` — and treats the branch as an empty placeholder if it carries **no unique commits beyond either** ref. Consulting both refs catches placeholders left by drift in either direction: one created from `origin/<default>` (via `freshest_base`) sits ahead of a lagging local default, while one created from a local default that runs ahead of a stale origin (`freshest_base`'s fetch-failure fallback) sits ahead of `origin/<default>` — measuring against only one ref would misread the other as carrying work. This emptiness check is a *heuristic* and its base differs from the origin→local→default base the branch is recreated on. When some ref measures zero, Hive deletes the branch with `git branch -D <branch_name>` and falls through to the normal first-creation path below. If every measurable ref is non-zero the branch is preserved and attached as-is; a branch is deleted only on positive proof of emptiness, so any git error skips that ref (warned to stderr) rather than counting as proof, and if no default ref could be measured the branch is preserved (fail-closed) and warned. Delete failure raises `Hive::WorktreeError` naming the branch (and hinting it may be checked out in another worktree).
    - If not, resolve the base via `base_override` when present, otherwise `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
 3. On non-zero exit, raise `Hive::WorktreeError` with the captured stderr.
 
-This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history.
+This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history, while allowing dependency-stacked empty placeholders to be recreated on the intended prerequisite base.
 
 ### `freshest_base(default_branch)` — origin-first base resolution
 
@@ -68,7 +69,9 @@ Local `<default>` is never modified — any unpushed commits there are preserved
 enters `4-execute`. Hive tries to fetch and branch from
 `origin/<base_override>` so stacked tasks start from their prerequisite branch.
 If there is no origin, the fetch fails, or the remote branch is unavailable,
-`create!` warns and falls back through `freshest_base(default_branch)`.
+Hive next checks local `refs/heads/<base_override>` and stacks on that local
+branch when present. It warns and falls back through `freshest_base(default_branch)`
+only when neither the remote nor local prerequisite branch is available.
 
 ## `remove!`
 
@@ -113,7 +116,7 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new branch, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
 
 ## Backlinks
 

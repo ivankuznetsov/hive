@@ -89,6 +89,46 @@ class PromptInjectionTest < Minitest::Test
     end
   end
 
+  def test_agent_prompt_wraps_hostile_prior_artifacts_in_unique_tags
+    # U2 generic runner: agent_prompt.md.erb wraps prior_artifacts in the
+    # same per-spawn nonce wrapper. The dedicated suite renders every other
+    # template with HOSTILE_IDEA; without this case a refactor that dropped
+    # the wrapper or double-interpolated prior_context on this
+    # security-critical path would go uncaught (ADR-019).
+    with_tmp_dir do |dir|
+      task = make_task(dir, "2-brainstorm")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "agent_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          stage_name: "brainstorm",
+          output_file: "brainstorm.md",
+          user_supplied_tag: tag,
+          prior_context: HOSTILE_IDEA,
+          skill_invocation: nil
+        )
+      )
+
+      assert_includes prompt, "<#{tag} content_type=\"prior_artifacts\">"
+      assert_includes prompt, "</#{tag}>"
+      assert_includes prompt, HOSTILE_IDEA, "hostile content must round-trip into the prompt verbatim"
+      # The defence: the open/close pair using the nonce tag must appear
+      # exactly once each. The forged `</user_supplied>` (no nonce) inside
+      # the content is harmless — only `</#{tag}>` (with the random nonce the
+      # attacker cannot guess) would terminate the wrapper.
+      assert_equal 1, prompt.scan("<#{tag} ").count, "open tag should appear exactly once"
+      assert_equal 1, prompt.scan("</#{tag}>").count, "close tag should appear exactly once"
+      # The hostile literal `</user_supplied>` must land strictly BETWEEN the
+      # nonce open and close — i.e., the wrapper still contains it.
+      open_idx = prompt.index("<#{tag} ")
+      close_idx = prompt.index("</#{tag}>")
+      hostile_close_idx = prompt.index("</user_supplied>")
+      assert open_idx && close_idx && hostile_close_idx
+      assert open_idx < hostile_close_idx, "hostile </user_supplied> must be inside the wrapper, not before it"
+      assert hostile_close_idx < close_idx, "hostile </user_supplied> must be inside the wrapper, not after it"
+    end
+  end
+
   def test_plan_prompt_wraps_brainstorm_text
     with_tmp_dir do |dir|
       task = make_task(dir, "3-plan")

@@ -47,7 +47,7 @@ def escape_control_chars(arg)
   arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
-argv = ARGV.dup
+argv = ARGV.map(&:b)
 
 # Walk only the leading global-option region (everything before the subcommand) and
 # report whether any unsafe global option appears there. Scoping to the leading region
@@ -98,7 +98,7 @@ def unsafe_command_options?(rest)
   # Only tokens before the `--` pathspec separator are options; everything after it is a
   # literal pathspec, so `git log -- -o` targets a file named `-o`, not the output flag.
   options = (rest[1..] || []).take_while { |arg| arg != "--" }
-  options.any? { |arg| unsafe_read_option?(subcommand, arg) }
+  options.each_with_index.any? { |arg, index| unsafe_read_option?(subcommand, arg, options[index + 1]) }
 end
 
 # `git grep` short options that consume the remainder of a cluster as their value. Once one
@@ -106,6 +106,8 @@ end
 # flags — so cluster scanning must stop there; e.g. `-eTODO` is the pattern `TODO`, not a
 # hidden `-O` pager flag.
 GREP_VALUE_TAKING_SHORT = "efmABC".chars.freeze
+SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
+SHOW_SIGNATURE_SUBCOMMANDS = %w[log show].freeze
 
 def grep_short_cluster_has_pager?(arg)
   arg[1..].each_char do |ch|
@@ -115,7 +117,7 @@ def grep_short_cluster_has_pager?(arg)
   false
 end
 
-def unsafe_read_option?(subcommand, arg)
+def unsafe_read_option?(subcommand, arg, next_arg = nil)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
   # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts any
@@ -128,6 +130,9 @@ def unsafe_read_option?(subcommand, arg)
   # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
   # hardening never sees, since cat-file stays a plain allowlisted passthrough.
   return true if arg == "--filters"
+  # Signature display and `%G*` pretty placeholders verify commit signatures, which executes
+  # the configured gpg.program / gpg.<format>.program helper from repo config.
+  return true if signature_verification_option?(subcommand, arg, next_arg)
 
   # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
   # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the
@@ -160,6 +165,20 @@ def unsafe_read_option?(subcommand, arg)
   arg == "--output" || arg.start_with?("--output=", "-o")
 end
 
+def signature_verification_option?(subcommand, arg, next_arg)
+  return false unless SIGNATURE_FORMAT_SUBCOMMANDS.include?(subcommand.to_s)
+  return true if SHOW_SIGNATURE_SUBCOMMANDS.include?(subcommand.to_s) &&
+                 (arg == "--show-signature" || arg.start_with?("--show-signature="))
+
+  signature_format_placeholder?(arg) ||
+    ([ "--format", "--pretty" ].include?(arg) && next_arg.to_s.include?("%G"))
+end
+
+def signature_format_placeholder?(arg)
+  option, value = arg.split("=", 2)
+  [ "--format", "--pretty" ].include?(option) && value.to_s.include?("%G")
+end
+
 def textconv_abbreviation?(arg)
   # `--t`, `--te`, `--tex`, `--text`, `--textc`, ... `--textconv` are all prefixes git accepts
   # as the `--textconv` long option. start_with?("--t") pins this to the textconv branch (min
@@ -181,8 +200,8 @@ def unsafe_env?
   #   * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject those keys as well.
   #   * GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM repoint config at an attacker-written file that
   #     can carry the same keys.
-  # GIT_PAGER / core.pager is intentionally left alone — non-TTY dry-run stdout does not
-  # auto-spawn a pager, so guarding it would only over-block legitimate reads.
+  # Pager config/env is scrubbed or neutralized at passthrough time. It is not a reason to
+  # skip an otherwise read-only command.
   return true if env_set?("GIT_EXEC_PATH")
   return true if env_set?("GIT_EXTERNAL_DIFF")
   return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
@@ -207,6 +226,26 @@ end
 
 def env_set?(name)
   !ENV.fetch(name, "").empty?
+end
+
+def resolve_real_git(real, search_path)
+  # A path-qualified value (absolute or relative) is execed verbatim; only a bare command
+  # name needs resolving. Resolve it here, against the *inherited* PATH, so the absolute
+  # path can be execed after the PATH pin below — otherwise `exec "git"` would resolve only
+  # against /usr/bin:/bin and fail on Nix/custom installs where git lives elsewhere. This
+  # adds no attack surface: the real-git binary is selected by the trusted env var, not by
+  # PATH, and the pin still guards git's own internal PATH-based helper resolution.
+  return real if real.include?("/")
+
+  search_path.split(File::PATH_SEPARATOR).each do |dir|
+    next if dir.empty?
+
+    candidate = File.join(dir, real)
+    return candidate if File.file?(candidate) && File.executable?(candidate)
+  end
+  # Unresolved: fall through with the bare name so the exec-failure handler emits a clear
+  # exit-127 diagnostic instead of us guessing a path.
+  real
 end
 
 def read_only_remote?(rest)
@@ -285,7 +324,27 @@ def hardened_passthrough_argv(argv, rest)
     passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
   end
 
-  [ "-c", "core.fsmonitor=false", "-c", "core.askPass=", *passthrough ]
+  [
+    "-c", "core.fsmonitor=false",
+    "-c", "core.askPass=",
+    "-c", "log.showSignature=false",
+    # `log.showSignature=false` only suppresses the implicit `--show-signature`; it does NOT
+    # stop `%G*` pretty placeholders from verifying signatures. A `%G` format can reach git
+    # without ever appearing in argv: a worktree-local `pretty.<name>=format:%G?` alias selected
+    # by `format.pretty=<name>` resolves to `%G?` even for a bare `git log`, and the argv scan
+    # cannot see config-resolved formats. Every `%G*` verification execs the repo's gpg.program /
+    # gpg.<format>.program helper, so pin all of them to the no-op `false` — these `-c` overrides
+    # outrank the worktree config, so no attacker-configured helper runs no matter how the
+    # placeholder is reached.
+    "-c", "gpg.program=false",
+    "-c", "gpg.openpgp.program=false",
+    "-c", "gpg.x509.program=false",
+    "-c", "gpg.ssh.program=false",
+    # A read can otherwise auto-spawn a repo/caller-controlled `core.pager` on a TTY; force
+    # `--no-pager` so a dry-run read cannot launch a pager (PAGER/GIT_PAGER are also scrubbed below).
+    "--no-pager",
+    *passthrough
+  ]
 end
 
 unsafe_global, rest = split_global_options(argv)
@@ -306,7 +365,7 @@ end
 # write files if these env vars or config files reach real git, and argv
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
-%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS].each { |key| ENV.delete(key) }
+%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL
@@ -318,6 +377,19 @@ ENV["GIT_CONFIG_SYSTEM"] = File::NULL
 # the optional index/refs locks and rewrite `.git/index` to refresh stat data. Disable optional
 # locks so a dry-run read cannot mutate the repo on disk.
 ENV["GIT_OPTIONAL_LOCKS"] = "0"
+# The `-c gpg.program=false` (and gpg.<format>.program=false) no-ops above pin signature
+# verification to `false`, but git resolves that bare name through PATH — and the inherited
+# PATH is agent-controlled. Without this, an agent could prepend a directory holding its own
+# `false` and turn the supposed no-op back into an exec seam (likewise any other helper git
+# resolves via PATH). Pin PATH to root-owned system dirs so every PATH lookup git makes
+# resolves from a location an unprivileged agent cannot write. `/usr/local/bin` is omitted on
+# purpose: it is user-writable under Homebrew, which would reopen the same poisoning vector.
+#
+# Resolve a bare `real` against the inherited PATH *before* the pin, so a command-name override
+# (e.g. the test helper's "git") still execs the parent-resolved binary instead of being forced
+# through /usr/bin:/bin.
+real = resolve_real_git(real, ENV["PATH"].to_s)
+ENV["PATH"] = "/usr/bin:/bin"
 
 begin
   # Array-form exec (no shell) hands argv straight to the real git binary.

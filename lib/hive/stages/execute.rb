@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "date"
 require "yaml"
+require "hive/agent_limit"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
@@ -137,11 +138,7 @@ module Hive
         end
 
         if agent_failed?(impl_result)
-          Hive::Markers.set(task.state_file, :error,
-                            reason: "implementer_failed",
-                            status: impl_result&.fetch(:status, nil),
-                            message: impl_result&.fetch(:error_message, nil))
-          return { commit: "implementer_failed", status: :error }
+          return mark_implementer_failure(task, cfg, impl_result)
         end
 
         worktree_state = inspect_worktree_state(task, worktree_git)
@@ -206,6 +203,36 @@ module Hive
         %i[error timeout].include?(result[:status])
       end
 
+      def mark_implementer_failure(task, cfg, impl_result)
+        if implementer_hit_limit?(impl_result)
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "limits_reached",
+                            provider: execute_agent_name(cfg),
+                            message: "implementer hit a usage/credit limit",
+                            retry_after: Hive::AgentLimit.retry_after)
+          return { commit: "limits_reached", status: :error }
+        end
+
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "implementer_failed",
+                          status: impl_result&.fetch(:status, nil),
+                          message: impl_result&.fetch(:error_message, nil))
+        { commit: "implementer_failed", status: :error }
+      end
+
+      def implementer_hit_limit?(impl_result)
+        return false unless impl_result
+
+        Hive::AgentLimit.limit_reached?(impl_result[:limit_text].to_s) ||
+          Hive::AgentLimit.limit_reached?(impl_result[:error_message].to_s)
+      end
+
+      def execute_agent_name(cfg)
+        Hive::Stages::Base.stage_profile(cfg, "execute").name.to_s
+      rescue StandardError
+        nil
+      end
+
       def spawn_implementation(task, cfg, worktree_path)
         plan_text = File.read(File.join(task.folder, "plan.md"))
         prompt = Hive::Stages::Base.render(
@@ -219,6 +246,10 @@ module Hive
           )
         )
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "execute", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         # 4-execute's lifecycle contract is "stage runner writes
         # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
         # not "the agent writes its own marker" — `templates/
@@ -236,12 +267,13 @@ module Hive
         # :output_file_exists; this pin overrides it for both modes.
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
         if profile.name == :claude
@@ -249,8 +281,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task),
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task) # coding-scoped: coding execute stage tmux session
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

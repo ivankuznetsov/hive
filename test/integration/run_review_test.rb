@@ -386,6 +386,46 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # A8 fail-closed, end-to-end: a reviewer that declares a non-yolo permission
+  # scope on a runner that can't enforce tool scoping (kind: codex_review)
+  # passes LOAD validation (the shape is valid) but must fail at RUN time. The
+  # Hive::ConfigError raised while resolving the scope propagates out of
+  # run_reviewers, reaches Stages::Review.run!'s ConfigError rescue, and stamps
+  # an attributed `:review_error reason=config_error` on the real task — rather
+  # than silently dropping the unenforceable reviewer or crashing with a stale
+  # REVIEW_WORKING marker (a hang). All review sub-stages that use plain
+  # stage_permission_scope (ci/triage/fix/browser_test) share this same outer
+  # rescue, so this pins the propagation contract for the whole class.
+  def test_reviewer_a8_config_error_lands_review_error_reason_config_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => {
+            "reviewers" => [
+              {
+                "name" => "codex-native-review",
+                "kind" => "codex_review",
+                "agent" => "codex",
+                "output_basename" => "codex-native-review",
+                "prompt_template" => "reviewer_codex_native_review.md.erb",
+                "permissions" => "read-only"
+              }
+            ]
+          }
+        })
+
+        with_captured_exit { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "config_error", marker.attrs["reason"]
+        assert_match(/cannot enforce tool scoping/, marker.attrs["message"].to_s)
+        refute File.exist?(File.join(folder, "reviews", "codex-native-review-01.md")),
+               "the unenforceable reviewer must not produce a findings file"
+      end
+    end
+  end
+
   # --- CI hard-block path -----------------------------------------------
 
   def test_ci_failures_yield_review_ci_stale_after_cap

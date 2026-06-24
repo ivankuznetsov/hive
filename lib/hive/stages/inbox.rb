@@ -8,12 +8,12 @@ module Hive
       # gives agent callers a distinct exit code (4) so they can branch on
       # "wrong stage" without parsing stderr.
       def run!(task, _cfg)
-        target = File.join(task.hive_state_path, "stages", "2-brainstorm")
+        target = File.join(task.hive_state_path, "stages", "2-brainstorm") # coding-scoped: coding inbox advances to brainstorm
         raise Hive::WrongStage.new(
           "1-inbox/ is an inert capture zone. To start work: " \
           "mv #{task.folder} #{target}/ && hive run #{File.join(target, task.slug)}",
-          current_stage: "1-inbox",
-          target_stage: "2-brainstorm"
+          current_stage: "1-inbox", # coding-scoped: coding inbox stage event
+          target_stage: "2-brainstorm" # coding-scoped: coding brainstorm target event
         )
       end
     end

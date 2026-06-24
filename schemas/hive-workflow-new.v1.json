@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-new.v1.json",
+  "title": "hive workflow new output (v1)",
+  "description": "Stable contract emitted by `hive workflow new ID --json`. Scaffolds a per-project workflow descriptor under <hive_state_path>/workflows/ID.yml plus its stage instruction(s) under <hive_state_path>/workflows/ID/, then records a hive/state commit. Defaults to the blank inbox -> work -> done stub; `--template NAME` seeds from a richer sample workflow instead (the payload shape is identical). The error arm routes through Hive::Schemas::ErrorEnvelope so its keys match every other hive-* command's error envelope; the success arm builds its hash directly. A missing/invalid/reserved id or a missing/unknown subcommand is a USAGE error (64); commit-lock contention is a retryable TEMPFAIL (75).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "id",
+        "descriptor_path",
+        "instruction_path",
+        "next"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-workflow-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "id": {
+          "type": "string",
+          "description": "The scaffolded workflow id (matches the descriptor filename stem)."
+        },
+        "descriptor_path": {
+          "type": "string",
+          "description": "Absolute path to the written <id>.yml descriptor."
+        },
+        "instruction_path": {
+          "type": "string",
+          "description": "Absolute path to the primary (first stage's) scaffolded instruction under <id>/. For the blank default this is <id>/work.md; a --template seed names its first agent stage's instruction. Multi-stage templates scaffold additional instructions alongside it in the same <id>/ directory (see the descriptor)."
+        },
+        "next": {
+          "type": "string",
+          "description": "Copy-paste command to create the first task pinned to this workflow."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-workflow-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage",
+            "config",
+            "git",
+            "concurrent_run",
+            "error"
+          ],
+          "description": "usage = missing/invalid/reserved id or missing/unknown subcommand (64). config = malformed config.yml (78). git = commit failure (70). concurrent_run = commit-lock contention (75, retryable). error = uncategorised fallback."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            1,
+            64,
+            70,
+            75,
+            78
+          ],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 75=TEMPFAIL, 78=CONFIG."
+        },
+        "message": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string",
+          "description": "Present only for usage errors that reject a specific token: the rejected/colliding workflow id (or unknown subcommand) echoed verbatim so an agent recovers it from a structured field instead of regexing `message`. Absent for the missing-subcommand case, which carries only `expected`."
+        },
+        "expected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Present only for missing/unknown subcommand usage errors: the valid subcommand verbs (e.g. [\"new\"]), so an agent discovers them without regexing `message`."
+        },
+        "holder": {
+          "type": "object",
+          "description": "Present only for concurrent_run: metadata about the lock holder.",
+          "additionalProperties": true
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Present only for concurrent_run: the contended commit-lock path."
+        }
+      }
+    }
+  }
+}

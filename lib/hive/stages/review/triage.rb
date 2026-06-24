@@ -90,15 +90,20 @@ module Hive
 
           before = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
           task = synthetic_task(ctx)
+          scope = Hive::Stages::Base.stage_permission_scope(
+            cfg, "review.triage", task, profile,
+            default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          )
           kwargs = {
             prompt: prompt,
-            add_dirs: [ ctx.task_folder ],
+            add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
             max_budget_usd: cfg.dig("budget_usd", "review_triage") || 75,
             timeout_sec: cfg.dig("timeout_sec", "review_triage") || 1800,
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
             expected_output: escalations,
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
           spawn_result =
@@ -107,8 +112,7 @@ module Hive
                 task,
                 cfg,
                 **kwargs,
-                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task),
-                allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
               )
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)

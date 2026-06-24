@@ -11,12 +11,13 @@ class HiveDigestE2ETest < Minitest::Test
   end
 
   def setup
-    missing = %w[HIVE_TELEGRAM_BOT_TOKEN HIVE_DIGEST_TEST_CHAT_ID].select { |key| ENV[key].to_s.strip.empty? }
+    missing = %w[HOME HIVE_TELEGRAM_BOT_TOKEN HIVE_DIGEST_TEST_CHAT_ID].select { |key| ENV[key].to_s.strip.empty? }
     flunk "missing required live digest env vars: #{missing.join(', ')}" unless missing.empty?
+    preflight_live_agent! if name == "test_live_agent_and_telegram_digest_over_fixture_tasks"
   end
 
   def test_live_agent_and_telegram_digest_over_fixture_tasks
-    with_tmp_global_config do |home|
+    with_tmp_global_config(home: ENV.fetch("HOME")) do |home|
       project = create_project(home, "alpha")
       first = create_done_task(project, "feature-260613-abcd", display_name: "Feature: Digest command", pr_number: 10)
       second = create_done_task(project, "fix-260613-abcd", display_name: "Fix: Escaping", pr_number: 11)
@@ -74,7 +75,7 @@ class HiveDigestE2ETest < Minitest::Test
   # ModelError (the only realistic trigger we can't summon from a live model
   # deterministically) but let the real Sender render + deliver the notice.
   def test_live_telegram_failed_notice_when_categorizer_raises
-    with_tmp_global_config do |home|
+    with_tmp_global_config(home: ENV.fetch("HOME")) do |home|
       project = create_project(home, "alpha")
       slug = create_done_task(project, "feature-260613-abcd",
                               display_name: "Feature: Digest command", pr_number: 10)
@@ -105,7 +106,7 @@ class HiveDigestE2ETest < Minitest::Test
   end
 
   def test_live_telegram_empty_digest
-    with_tmp_global_config do |home|
+    with_tmp_global_config(home: ENV.fetch("HOME")) do |home|
       project = create_project(home, "alpha")
       write_global_config(home, [ project ])
       collector = Hive::Digest::Collector.new(
@@ -126,6 +127,19 @@ class HiveDigestE2ETest < Minitest::Test
   end
 
   private
+
+  def preflight_live_agent!
+    profile = Hive::AgentProfiles.lookup(live_agent_name)
+    profile.check_version!
+    profile.preflight!
+  rescue Hive::Error => e
+    flunk "live digest agent #{live_agent_name.inspect} preflight failed: #{e.message}"
+  end
+
+  def live_agent_name
+    agent = ENV["HIVE_DIGEST_TEST_AGENT"].to_s.strip
+    agent.empty? ? "claude" : agent
+  end
 
   def write_global_config(home, projects)
     File.write(File.join(home, "config.yml"), {

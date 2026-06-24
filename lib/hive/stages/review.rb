@@ -132,7 +132,7 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          next_dir = Hive::Workflows.next_dir_after("6-review")
+          next_dir = Hive::Workflows.next_dir_after("6-review") # coding-scoped: coding review clears into artifacts
           warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
@@ -1215,28 +1215,31 @@ module Hive
           return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
                                          wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
-          Hive::ClaudeLauncher.with_shared_session(
-            task: task,
-            cfg: cfg,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{ctx.pass}", task),
-            cwd: ctx.worktree_path,
-            add_dirs: [ ctx.task_folder ],
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-          ) do |handle|
-            claude_specs.each do |spec|
-              result = run_reviewer_spec(
-                cfg, ctx, spec,
-                reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-                started_at: started_at,
-                max_wall_clock_sec: max_wall_clock_sec,
-                handle: handle
-              )
-              return :wall_clock_exceeded if result == :wall_clock_exceeded
+          shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
+            scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
+            Hive::ClaudeLauncher.with_shared_session(
+              task: task,
+              cfg: cfg,
+              session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
+              cwd: ctx.worktree_path,
+              add_dirs: scope.fetch(:add_dirs),
+              **Hive::Stages::Base.tool_scope_kwargs(scope)
+            ) do |handle|
+              group.each do |spec|
+                result = run_reviewer_spec(
+                  cfg, ctx, spec,
+                  reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+                  started_at: started_at,
+                  max_wall_clock_sec: max_wall_clock_sec,
+                  handle: handle
+                )
+                return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-              statuses << result.status
-              error_messages << result.error_message if result.error?
-              handle_reviewer_result(task, cfg, ctx, spec, result)
-              remaining_specs -= 1
+                statuses << result.status
+                error_messages << result.error_message if result.error?
+                handle_reviewer_result(task, cfg, ctx, spec, result)
+                remaining_specs -= 1
+              end
             end
           end
         else
@@ -1278,6 +1281,34 @@ module Hive
         return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
 
         Array(cfg.dig("review", "reviewers"))
+      end
+
+      # Group reviewers that share an effective permission scope so they can
+      # share one tmux session. The group key is the RESOLVED spec — an
+      # explicit `permissions:` value, or the project/stage default when the
+      # key is omitted — so a reviewer spelling out `permissions: yolo` and
+      # one inheriting the default yolo land in the SAME group (identical
+      # effective scope → one session) instead of two sessions keyed on
+      # present-vs-absent. Each group's scope is built from group.first, which
+      # is sound because every member resolves to the same effective spec.
+      def shared_reviewer_groups(cfg, specs)
+        default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
+        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
+      end
+
+      def shared_reviewer_session_name(task, pass, group_idx)
+        suffix = group_idx.zero? ? "" : "-scope#{group_idx + 1}"
+        Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{pass}#{suffix}", task)
+      end
+
+      def shared_reviewer_permission_scope(cfg, ctx, task, spec)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        Hive::Stages::Base.stage_permission_scope(
+          cfg, "review.reviewers", task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+          **Hive::Stages::Base.explicit_permission_kwargs(spec)
+        )
       end
 
       def patrol_task?(task)
@@ -1378,6 +1409,18 @@ module Hive
               error_message: "#{e.class}: #{e.message}"
             )
           rescue StandardError => e
+            # A8 fail-closed: a non-yolo permission scope on a reviewer whose
+            # runner can't enforce tool scoping (codex / pi) raises
+            # Hive::ConfigError from stage_permission_scope. Swallowing it as a
+            # per-reviewer :error would let the rest of the pass continue after
+            # silently dropping the unenforceable reviewer — a silent security
+            # downgrade. Re-raise so the outer `Stages::Review.run!`
+            # Hive::ConfigError rescue stamps the `config_error` review_error
+            # marker and hard-fails the run. Only the typed config error
+            # propagates; genuine per-reviewer infra failures (spawn errors,
+            # adapter timeouts) still degrade to a recorded :error below.
+            raise if e.is_a?(Hive::ConfigError)
+
             Hive::Reviewers::Result.new(
               name: spec["name"],
               output_path: adapter.output_path,
@@ -1660,6 +1703,11 @@ module Hive
       def spawn_fix_agent(task, cfg, ctx, accepted:)
         profile_name = cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
+        scope = Hive::Stages::Base.stage_permission_scope(
+          cfg, "review.fix", task, profile,
+          base_add_dirs: [ ctx.task_folder ],
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         template = cfg.dig("review", "fix", "prompt_template") || "fix_prompt.md.erb"
         template_path = Hive::Stages::Base.resolve_template_path(
           template,
@@ -1683,12 +1731,13 @@ module Hive
 
         kwargs = {
           prompt: prompt,
-          add_dirs: [ ctx.task_folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: ctx.worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "review_fix") || 100,
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
         if profile.name == :claude
@@ -1696,8 +1745,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task),
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
@@ -2029,7 +2077,7 @@ module Hive
 
         cleanup = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: coding review stage event
           task: task,
           cfg: cfg,
           reason: :pre_fix_dirty_worktree
@@ -2054,7 +2102,7 @@ module Hive
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
-          stage: "6-review",
+          stage: "6-review", # coding-scoped: coding review stage event
           event_type: :clean_exit_auto_committed,
           message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
         )

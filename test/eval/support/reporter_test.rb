@@ -249,12 +249,13 @@ class HiveEvalReporterTest < Minitest::Test
 
       _out, err, status = Open3.capture3(
         { "HIVE_EVAL_NO_JUDGE" => "1" },
-        "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report, "extra"
+        "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report, "extra", "bonus"
       )
 
       refute status.success?
       assert_equal 64, status.exitstatus
-      assert_match(/hive-eval: unexpected argument: extra/, err)
+      assert_match(/hive-eval: unexpected arguments: extra bonus/, err)
+      refute_match(/argument\(s\)/, err)
       refute File.exist?(report)
     end
   end
@@ -277,6 +278,24 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_abbreviated_report_flag_with_usage
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "abbrev.json")
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--rep", report
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/invalid option: --rep/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(report)
+    end
+  end
+
   def test_cli_rejects_missing_option_values_with_usage
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "missing-scenario.json")
@@ -292,6 +311,42 @@ class HiveEvalReporterTest < Minitest::Test
       assert_match(%r{Usage: bin/hive-eval}, err)
       refute_match(/OptionParser::/, err)
       refute File.exist?(report)
+    end
+  end
+
+  def test_cli_usage_error_removes_existing_selected_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      _out, err, status = Open3.capture3(
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--report", report, "--scenario", "definitely_missing", "--no-judge"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/scenario not found/, err)
+      refute File.exist?(report), "usage errors must not leave stale eval reports behind"
+    end
+  end
+
+  def test_cli_help_is_read_only_and_preserves_selected_report
+    [ "--help", "-h" ].each do |help_flag|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "report.json")
+        File.write(report, JSON.dump({ "schema" => "hive-eval-report", "preexisting" => true }))
+
+        out, _err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1" },
+          "bin/hive-eval", "--report", report, help_flag
+        )
+
+        assert status.success?, "#{help_flag} must exit successfully"
+        assert_match(%r{Usage: bin/hive-eval}, out, "#{help_flag} must print usage")
+        assert File.exist?(report),
+          "#{help_flag} is read-only and must not delete the selected report"
+      end
     end
   end
 

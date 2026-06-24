@@ -50,14 +50,29 @@ module Hive
 
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
-      if exists.success?
-        # A local branch named `branch_name` already exists — only reachable
-        # on a re-run with a stale branch (a normal first creation has no
-        # such branch). Attach the worktree to it as-is; `base_override`
-        # (dependency stacking) is intentionally NOT honored on this path
-        # because the branch already carries history and re-basing it could
-        # discard committed work. `base_override` is honored on the normal
-        # first-creation else-branch below.
+      reuse_existing = exists.success?
+      stacked_override = !base_override.to_s.strip.empty?
+      # Delete-then-recreate is intentionally non-atomic: if the `worktree add`
+      # below fails after this delete, the placeholder branch is gone with no
+      # rollback. This is safe ONLY because `empty_placeholder?` positively
+      # proved the branch carries no unique commits (it sits at a default ref's
+      # tip), so nothing recoverable is lost. A future loosening of that
+      # emptiness gate would silently turn this into data loss — keep the proof
+      # strictly ahead of the delete.
+      if reuse_existing && stacked_override && empty_placeholder?(branch_name, default_branch)
+        delete_local_branch!(branch_name)
+        reuse_existing = false
+      end
+
+      if reuse_existing
+        # A local branch named `branch_name` already exists. Attach it as-is
+        # so committed work is never discarded by dependency stacking. Empty
+        # placeholders are the only exception: with a stacked override they
+        # are deleted above (see `empty_placeholder?`, which measures
+        # emptiness against both `origin/<default>` and local `<default>` —
+        # empty if no unique commits beyond either — never against the
+        # override base) and recreated through the normal first-creation path
+        # below.
         args = [ "worktree", "add", path, branch_name ]
       else
         # Branch new worktrees from `origin/<default>` (after a quick
@@ -70,10 +85,10 @@ module Hive
         # fall back to the local default with a stderr warning.
         # Never touches local `<default>` — preserves any unpushed
         # commits the user has there.
-        base = if base_override.to_s.strip.empty?
-                 freshest_base(default_branch)
-        else
+        base = if stacked_override
                  freshest_override_base(base_override, default_branch)
+        else
+                 freshest_base(default_branch)
         end
         args = [ "worktree", "add", path, "-b", branch_name, base ]
       end
@@ -133,27 +148,25 @@ module Hive
         # No origin remote, so the requested stacked base can't be fetched.
         # Warn like the sibling branches below so a dropped stack request is
         # observable instead of silently collapsing onto the default.
-        warn "[hive] worktree base: no origin remote; cannot stack on #{branch}, " \
-             "falling back to the default branch base (origin/#{default_branch} when reachable)"
-        return freshest_base(default_branch)
+        return override_local_or_default(
+          branch, default_branch,
+          "no origin remote, origin/#{branch} unavailable"
+        )
       end
 
-      # The fallbacks below call freshest_base, which returns
-      # `origin/<default>` on a successful fetch (only local `<default>` if
-      # that fetch also fails) — so the message names the default branch
-      # base rather than a specific ref.
       _, err, status = self.class.fetch_origin_branch(@project_root, branch)
       unless status.success?
-        warn "[hive] worktree base: fetch origin #{branch} failed " \
-             "(#{err.strip[0, 200]}); falling back to the default branch base " \
-             "(origin/#{default_branch} when reachable)"
-        return freshest_base(default_branch)
+        return override_local_or_default(
+          branch, default_branch,
+          "fetch origin #{branch} failed (#{err.strip[0, 200]})"
+        )
       end
 
       unless self.class.origin_branch_ref_exists?(@project_root, branch)
-        warn "[hive] worktree base: origin/#{branch} not found after fetch; " \
-             "falling back to the default branch base (origin/#{default_branch} when reachable)"
-        return freshest_base(default_branch)
+        return override_local_or_default(
+          branch, default_branch,
+          "origin/#{branch} not found after fetch"
+        )
       end
 
       "origin/#{branch}"
@@ -259,6 +272,16 @@ module Hive
       status.success?
     end
 
+    def self.local_branch_ref_exists?(project_root, branch_name)
+      branch = branch_name.to_s.strip
+      return false if branch.empty?
+
+      _, _, status = Open3.capture3("git", "-C", project_root,
+                                    "rev-parse", "--verify", "--quiet",
+                                    "refs/heads/#{branch}")
+      status.success?
+    end
+
     # Resolve symlinks before the prefix check — File.expand_path normalises
     # `..` and `~` lexically but does not follow symlinks. An agent that
     # writes a symlink at the worktree path could otherwise escape the root.
@@ -278,6 +301,106 @@ module Hive
     rescue Errno::ENOENT
       # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
       File.expand_path(path)
+    end
+
+    private
+
+    # Detect a stacked placeholder: a same-named branch a prior dependency
+    # run created at the default base but left no real work on. With a stacked
+    # override such a branch is re-pointed onto the prerequisite rather than
+    # attached as-is.
+    #
+    # Measurement basis: count the commits `branch_name` carries beyond the
+    # default branch, measured against BOTH `origin/<default>` (when its
+    # tracking ref `refs/remotes/origin/<default>` exists) and local
+    # `<default>` (when that branch exists). The branch is an empty placeholder
+    # when it carries no unique commits beyond EITHER ref. Both directions of
+    # drift create empty placeholders that look non-empty against the wrong
+    # ref: one created from `origin/<default>` (freshest_base) sits ahead of a
+    # lagging local default, while one created from a local default that runs
+    # ahead of a stale origin (freshest_base's fetch-failure fallback) sits
+    # ahead of `origin/<default>`. Consulting both refs catches either. Always
+    # measured vs the default branch, never `base_override` (R1).
+    #
+    # Fail-closed: a branch is deleted only on positive proof of emptiness
+    # (some default ref measures zero). Any git error skips that ref rather
+    # than counting it as proof, and if no ref could be measured the branch is
+    # preserved and attached as-is — stacking never deletes a branch it could
+    # not positively prove empty. Each skipped/absent measurement is warned so
+    # a dropped re-point is observable instead of silent.
+    def empty_placeholder?(branch_name, default_branch)
+      base_refs = default_base_refs(default_branch)
+      if base_refs.empty?
+        warn "[hive] worktree base: cannot measure #{branch_name} against #{default_branch} " \
+             "(no origin/#{default_branch} or local #{default_branch} ref); preserving branch as-is"
+        return false
+      end
+
+      measured = false
+      base_refs.each do |base_ref|
+        out, err, status = Open3.capture3("git", "-C", @project_root,
+                                          "rev-list", "--count", "#{base_ref}..refs/heads/#{branch_name}")
+        unless status.success?
+          warn "[hive] worktree base: cannot measure #{branch_name} against #{base_ref} " \
+               "(#{err.strip[0, 200]}); skipping this base"
+          next
+        end
+
+        measured = true
+        # Empty against EITHER default ref ⇒ the placeholder carries no unique
+        # work (it sits at one default's tip), so re-pointing is safe.
+        return true if out.strip == "0"
+      end
+
+      unless measured
+        warn "[hive] worktree base: cannot measure #{branch_name} against any default ref " \
+             "(origin/#{default_branch}, #{default_branch}); preserving branch as-is"
+      end
+
+      false
+    end
+
+    # Default refs to measure a placeholder's emptiness against: `origin/<default>`
+    # when its tracking ref exists, and local `<default>` when that branch
+    # exists. A placeholder is empty if it carries no commits beyond either.
+    def default_base_refs(default_branch)
+      refs = []
+      refs << "origin/#{default_branch}" if self.class.origin_branch_ref_exists?(@project_root, default_branch)
+      refs << default_branch if self.class.local_branch_ref_exists?(@project_root, default_branch)
+      refs
+    end
+
+    def delete_local_branch!(branch_name)
+      out, err, status = Open3.capture3("git", "-C", @project_root, "branch", "-D", branch_name)
+      return if status.success?
+
+      detail = err.strip.empty? ? out.strip : err.strip
+      raise WorktreeError,
+            "cannot re-point empty placeholder branch #{branch_name}: git branch -D failed: " \
+            "#{detail} (is #{branch_name} checked out in another worktree?)"
+    end
+
+    # Stack on the requested override when possible, else degrade gracefully.
+    # `reason` is the distinguishing clause (no origin / fetch failed / ref
+    # missing) explaining why `origin/<branch>` is unusable; both arms build
+    # their full warning from it. A present local prereq is stacked on
+    # directly; otherwise we fall back through `freshest_base` to the default
+    # branch base. The default-fallback tail names the default branch base
+    # generically because `freshest_base` resolves it to `origin/<default>` on
+    # a successful fetch and only local `<default>` if that fetch also fails.
+    def override_local_or_default(branch, default_branch, reason)
+      if self.class.local_branch_ref_exists?(@project_root, branch)
+        warn "[hive] worktree base: #{reason}; stacking on local #{branch}"
+        # Fully-qualify the start-point: a bare `<branch>` resolves through
+        # gitrevisions precedence, where a same-named tag (refs/tags/<branch>)
+        # shadows refs/heads/<branch>. The local ref was just verified to
+        # exist, so refs/heads/<branch> is unambiguous and strictly safer.
+        return "refs/heads/#{branch}"
+      end
+
+      warn "[hive] worktree base: #{reason}; " \
+           "falling back to the default branch base (origin/#{default_branch} when reachable)"
+      freshest_base(default_branch)
     end
   end
 end

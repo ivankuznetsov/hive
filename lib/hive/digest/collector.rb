@@ -10,7 +10,7 @@ require "hive/task_meta"
 module Hive
   module Digest
     class Collector
-      DONE_STAGE = "9-done".freeze
+      DONE_STAGE = "9-done".freeze # coding-scoped: shipped digest reads archived coding tasks
 
       # Generous per-item cap on the PR body inlined into the categorizer
       # prompt. Preserves the full body for a normal PR while bounding a

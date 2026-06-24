@@ -1,35 +1,44 @@
 require "yaml"
+require "hive/config"
 require "hive/stages"
 require "hive/task_meta"
+require "hive/workflows/project"
+require "hive/workflows/registry"
 require "hive/worktree"
 
 module Hive
   class Task
-    STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done].freeze
-    STATE_FILES = {
-      "inbox" => "idea.md",
-      "brainstorm" => "brainstorm.md",
-      "plan" => "plan.md",
-      "execute" => "task.md",
-      "open-pr" => "pr.md",
-      "review" => "task.md",
-      "artifacts" => "artifact.md",
-      "finalize" => "pr.md",
-      "done" => "task.md"
-    }.freeze
-    PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
+    # Coding-default only: pinned to Registry.default. Prefer the
+    # descriptor-driven Task#stage_names instance accessor for workflow-aware
+    # callers — these constants diverge for non-coding workflows (full consumer
+    # migration is U6).
+    STAGE_NAMES = Hive::Workflows::Registry.default.stages.map(&:name).freeze
+    STATE_FILES = Hive::Workflows::Registry.default.stages.to_h { |stage| [ stage.name, stage.state_file ] }.freeze
+    PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_dir>(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*))/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
+
+    # Per-process cache of each project's resolved `default_workflow`, keyed by
+    # the project's `.hive-state/config.yml` path and invalidated by its
+    # (mtime, size) stamp. Without it `Task.new` re-ran a full `Hive::Config.load`
+    # (file read + YAML parse + validate!) for every field-less task on every
+    # `hive status` / daemon tick — a real per-tick regression, since
+    # `resolve_workflow` only consults the project default when the task meta
+    # carries no selector. Keying on (mtime, size) — not mtime alone — closes the
+    # coarse-mtime window (FAT, some NFS) where a same-second rewrite that changes
+    # the default would otherwise serve a long-lived reader (TUI / daemon) the
+    # stale value until restart; negligible cost on ns-mtime ext4/xfs.
+    @project_default_workflow_cache = {}
+
+    class << self
+      attr_reader :project_default_workflow_cache
+    end
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,
-                :stage_name, :slug, :state_dir_basename
+                :stage_name, :slug, :state_dir_basename, :workflow
 
     def initialize(folder)
       folder = File.expand_path(folder)
       m = PATH_RE.match(folder)
       raise InvalidTaskPath, "task path must match <project>/.hive-state/stages/<N>-<name>/<slug>/: #{folder}" unless m
-      stage_dir = "#{m[:stage_idx]}-#{m[:stage_name]}"
-      unless STAGE_NAMES.include?(m[:stage_name]) && Hive::Stages.parse(stage_dir)
-        raise InvalidTaskPath, "unknown stage name: #{stage_dir}; run `hive migrate` if this task uses pre-open-pr stage names"
-      end
 
       @folder = folder.sub(%r{/\z}, "")
       @project_root = m[:root]
@@ -38,6 +47,8 @@ module Hive
       @stage_index = m[:stage_idx].to_i
       @stage_name = m[:stage_name]
       @slug = m[:slug]
+      @workflow = resolve_workflow
+      validate_workflow_stage!(m[:stage_dir], @workflow)
     end
 
     def project_name
@@ -45,7 +56,11 @@ module Hive
     end
 
     def state_file
-      File.join(@folder, STATE_FILES.fetch(@stage_name))
+      File.join(@folder, workflow.state_file_for(@stage_name))
+    end
+
+    def stage_names
+      workflow.stage_names
     end
 
     def reviews_dir
@@ -111,6 +126,97 @@ module Hive
 
     def meta
       @meta ||= Hive::TaskMeta.read(@folder)
+    end
+
+    # Self-locking: the per-project overlay load and the subsequent registry
+    # fetch are held together under Project::LOCK (a reentrant Monitor), so a
+    # concurrent `load!(otherProject)` on another thread — the web tier runs
+    # this on both a StatusFeed poller and per-request Puma threads — can't
+    # swap the overlay between the load and the fetch and make a custom-workflow
+    # task resolve as UnknownWorkflow / against the wrong descriptor. The lock
+    # being reentrant lets callers that already hold it (Status#json_payload)
+    # re-enter without deadlock, and `Task.new` (a widely-reused constructor)
+    # needs no caller-side lock.
+    def resolve_workflow
+      Hive::Workflows::Project.synchronize do
+        Hive::Workflows::Project.load!(@project_root)
+        selector = meta[:workflow]
+        # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
+        # always nil here (no .empty? branch needed).
+        selector ||= project_default_workflow
+        # A per-task `workflow:` pin to a descriptor that was SKIPPED at load
+        # (bad YAML, invalid stage, id collision) must surface its REAL
+        # ConfigError instead of a misleading UnknownWorkflow — the same
+        # boundary rule the `--workflow` / `hive init` path uses (U9-3). Scoped
+        # to the explicit pin; a typo'd project default keeps its
+        # warn-and-continue behavior (warn_if_unregistered_project_default).
+        Hive::Workflows::Project.assert_descriptor_loadable!(meta[:workflow]&.to_sym, project_root: @project_root)
+        Hive::Workflows::Registry.fetch(selector.to_sym)
+      end
+    rescue Hive::Workflows::UnknownWorkflow => e
+      raise InvalidTaskPath, e.message
+    end
+
+    def project_default_workflow
+      config_path = File.join(@hive_state_path, "config.yml")
+      # Stamp on (mtime, size) so a coarse-mtime filesystem can't serve a stale
+      # default after a same-second rewrite that changed the file's length.
+      stamp = begin
+        stat = File.stat(config_path)
+        [ stat.mtime, stat.size ]
+      rescue SystemCallError
+        nil
+      end
+      cache = Hive::Task.project_default_workflow_cache
+      cached = cache[config_path]
+      return cached[:value] if cached && cached[:stamp] == stamp
+
+      value = load_project_default_workflow(config_path)
+      cache[config_path] = { stamp: stamp, value: value }
+      value
+    end
+
+    def load_project_default_workflow(config_path)
+      configured = Hive::Config.load(@project_root)["default_workflow"].to_s.strip
+      return Hive::Config::DEFAULTS["default_workflow"] if configured.empty?
+
+      warn_if_unregistered_project_default(configured)
+      configured
+    rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+      warn "hive: task: failed to read default_workflow from #{config_path} " \
+           "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"
+      Hive::Config::DEFAULTS["default_workflow"]
+    end
+
+    # D1 still fails loud — resolve_workflow re-raises UnknownWorkflow as
+    # InvalidTaskPath — so this returns the configured value verbatim. But unlike
+    # a per-task `workflow:` selector, whose typo skips just that one task out of
+    # `hive status` (and is rescued by Status#collect_rows), a typo'd PROJECT
+    # default skips EVERY field-less task and silently empties the whole project
+    # (the daemon then sees nothing to dispatch). Warn so that whole-project blast
+    # radius is observable; resolution still raises afterwards.
+    def warn_if_unregistered_project_default(name)
+      Hive::Workflows::Registry.fetch(name.to_sym)
+    rescue Hive::Workflows::UnknownWorkflow
+      warn "hive: task: project default_workflow #{name.inspect} in " \
+           "#{File.join(@hive_state_path, "config.yml")} is not a registered workflow; " \
+           "every field-less task in this project will fail to load until it is fixed"
+    end
+
+    # Takes the resolved workflow explicitly (rather than reading @workflow) so
+    # the dependency on resolve_workflow having run first is visible at the call
+    # site, not an implicit ctor-ordering invariant.
+    def validate_workflow_stage!(stage_dir, workflow)
+      stage = workflow.stage_named(@stage_name)
+      unless stage
+        raise InvalidTaskPath,
+              "unknown stage name: #{stage_dir} for workflow #{workflow.id.inspect}; " \
+              "run `hive migrate` if this task uses pre-open-pr stage names"
+      end
+      return if stage.dir == stage_dir
+
+      raise InvalidTaskPath,
+            "stage directory #{stage_dir} does not match workflow #{workflow.id.inspect}; expected #{stage.dir}"
     end
   end
 end

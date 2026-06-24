@@ -115,6 +115,56 @@ class TuiSnapshotTest < Minitest::Test
     assert_nil snapshot.rows.first.folder_mtime
   end
 
+  def test_from_payload_preserves_content_workflow_stage_rows
+    row = sample_task(slug: "content-row", stage: "2-research")
+    row["workflow"] = "content_fixture"
+    row["action"] = "ready_to_run"
+    row["action_label"] = "Ready to run"
+    row["suggested_command"] = "hive run content-row"
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ row ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    content = snapshot.rows.first
+
+    assert_equal "content_fixture", content.workflow
+    assert_equal "2-research", content.stage
+    assert_equal "ready_to_run", content.action_key
+    assert_equal "hive run content-row", content.suggested_command
+  end
+
+  def test_from_payload_preserves_quota_held_field
+    row = sample_task(slug: "quota-row", stage: "4-execute", marker: "error")
+    row["attrs"] = {
+      "reason" => "limits_reached",
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00Z"
+    }
+    row["held"] = {
+      "reason" => "quota",
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00Z"
+    }
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ row ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+
+    assert_equal row.fetch("held"), snapshot.rows.first.held
+  end
+
   def test_from_payload_handles_nil_payload
     snapshot = Hive::Tui::Snapshot.from_payload(nil)
     assert_nil snapshot.generated_at

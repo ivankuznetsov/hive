@@ -1,3 +1,5 @@
+require "hive/workflows"
+
 module Hive
   module Daemon
     # Pure decision module: maps a `hive status --json` task row's
@@ -66,7 +68,22 @@ module Hive
         ready_for_review
         ready_to_artifacts
         ready_to_finalize
+        ready_to_advance
       ].freeze
+
+      # `ready_to_run` is the generic-stage "run the agent" action. Unlike
+      # the pure advance actions it is mtime-debounced against the last
+      # dispatch, NOT fired unconditionally: a generic `kind: :agent` stage
+      # whose agent exits 0 without writing a WAITING/COMPLETE marker leaves
+      # the stage marker `:none`, which re-classifies as `ready_to_run` on
+      # every tick. Treating it as a pure advance action would re-dispatch
+      # `hive run` until the per-project daily cap drains and then halt all
+      # dispatch (coding is immune — a markerless post-run coding stage
+      # classifies as the debounced `needs_input`). First sight (no prior
+      # dispatch) runs once; afterwards it only re-runs when the state file
+      # mtime advances past the last dispatch (genuine new input), mirroring
+      # the edit-resume brake.
+      RUN_ACTION = "ready_to_run".freeze
 
       # Action that means "task is at the finalize stage, waiting for the human
       # to merge the PR on GitHub". Daemon hands off to PrMergeWatcher (U10)
@@ -84,7 +101,10 @@ module Hive
       # Decide what to do with one task row.
       #
       # @param action [String] the `tasks[].action` value from hive-status JSON
-      # @param stage [String, nil] the `tasks[].stage` value (e.g. "3-plan")
+      # @param stage [String, nil] the `tasks[].stage` value (e.g. "3-plan") # coding-scoped: example dir only
+      # @param workflow [String, nil] the `tasks[].workflow` value. Nil is
+      #   treated as coding for backward-compatible test doubles and older
+      #   status payloads.
       # @param command [String, nil] the `suggested_command` for the row (may be nil)
       # @param state_file_mtime [Time, nil] mtime of the task's state file
       # @param last_dispatched_state_file_mtime [Time, nil] mtime captured at the
@@ -114,7 +134,7 @@ module Hive
       # the dispatcher does NOT spawn a child, but it MUST call
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
-      def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
+      def decide(action:, stage: nil, workflow: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
                  now:, edit_debounce_sec: 30, answers_pending: false, blocked: false)
         return :skip if action.nil?
         # Three branches dispatch the row's command verbatim (advance,
@@ -125,15 +145,39 @@ module Hive
         # (`needs_input`); a future refactor extending plan_approval?
         # to a non-edit_resume action would otherwise silently lose
         # this coverage. PR #83 code review finding #3.
-        if (advance?(action) || edit_resume?(action) || plan_approval?(action, stage)) &&
+        if (advance?(action) || edit_resume?(action) || run?(action) ||
+            plan_approval?(action, stage, workflow)) &&
            (command.nil? || command.empty?)
           return :skip
         end
 
-        if advance?(action) || plan_approval?(action, stage)
+        if advance?(action) || plan_approval?(action, stage, workflow)
           blocked ? :blocked_on_dependency : :dispatch
         elsif action == MERGE_WAIT_ACTION
           :poll_for_merge
+        elsif run?(action)
+          # Debounced generic-run dispatch (see RUN_ACTION). First sight
+          # dispatches; a markerless re-classification (mtime unchanged
+          # since last dispatch) is braked so the daemon does not re-spawn
+          # `hive run` every tick. The dependency gate still wins over a
+          # would-be dispatch.
+          outcome = decide_run(state_file_mtime: state_file_mtime,
+                               last_dispatched: last_dispatched_state_file_mtime,
+                               now: now,
+                               debounce_sec: edit_debounce_sec)
+          if outcome == :dispatch && blocked
+            :blocked_on_dependency
+          elsif outcome == :skip
+            # The stage was already dispatched but its state file shows no
+            # progress — the agent exited without stamping a WAITING/COMPLETE
+            # marker, so the row would re-classify to ready_to_run forever.
+            # Surface it as an explicit `:markerless_stalled` instead of a
+            # silent skip (NO-SILENT-CAPS); the per-project daily cap remains
+            # the backstop against re-dispatch storms when the file DOES change.
+            :markerless_stalled
+          else
+            outcome
+          end
         elsif edit_resume?(action)
           outcome = decide_edit(state_file_mtime: state_file_mtime,
                                 last_dispatched: last_dispatched_state_file_mtime,
@@ -173,18 +217,37 @@ module Hive
         EDIT_RESUME_ACTIONS.include?(action)
       end
 
-      # Literal `"3-plan"` equality matches every other stage-identity
-      # check in the codebase (e.g., `bubble_model.rb:1833 when "3-plan"`
+      def run?(action)
+        action == RUN_ACTION
+      end
+
+      # Literal `"3-plan"` equality matches every other stage-identity # coding-scoped: plan auto-approval is a coding workflow rule
+      # check in the codebase (e.g., `BubbleModel#stage_extra_for`'s `when "3-plan"` # coding-scoped: historical coding TUI reference
       # and `Hive::Stages::DIRS` membership). Earlier drafts used
       # `/\A\d+-plan\z/` but the regex matched any digit-prefixed plan
-      # stage; today's `Hive::Stages::DIRS` is a closed 8-entry enum
+      # stage; today's `Hive::Stages::DIRS` is a closed 9-entry enum
       # with exactly one plan stage, so the regex implied a forward-flex
       # that didn't exist and a hypothetical `1-plan`/`5-plan` would
       # silently inherit auto-approval. PR #83 code review finding #4
       # (cross-corroborated by reliability + testing + maintainability +
       # project-standards reviewers).
-      def plan_approval?(action, stage)
-        action == "needs_input" && stage == "3-plan"
+      def plan_approval?(action, stage, workflow)
+        action == "needs_input" && Hive::Workflows.coding_id?(workflow) && stage == "3-plan" # coding-scoped: daemon auto-approval only applies to coding plan pauses
+      end
+
+      # Generic-stage run decision. First sight (no prior dispatch) runs the
+      # stage once. After that, only re-dispatch when the operator has
+      # touched the state file since the last dispatch (mtime advanced past
+      # the recorded baseline, then settled past the debounce window) — so a
+      # markerless agent run (marker stays `:none` → `ready_to_run` again)
+      # cannot re-spawn `hive run` on every tick.
+      def decide_run(state_file_mtime:, last_dispatched:, now:, debounce_sec:)
+        return :dispatch if last_dispatched.nil?
+        return :skip if state_file_mtime.nil?
+        return :skip if state_file_mtime <= last_dispatched
+        return :wait_for_debounce if (now - state_file_mtime) < debounce_sec
+
+        :dispatch
       end
 
       def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:)

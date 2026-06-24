@@ -7,11 +7,10 @@ require "hive/markers"
 # Pins the dispatch shape emitted by CallbackHandlers for callbacks that
 # fan out to `hive` subprocess invocations. The router exposes one Result
 # struct per callback; this test exercises the per-callback methods so
-# changes to argv shape (e.g., row 24 — show_details switching to
-# --diagnose) cannot regress silently.
+# changes to argv shape cannot regress silently.
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                      :project, :slug, :question_n, :answer_text, :mode,
+                      :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
                       :attachment, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
@@ -404,33 +403,21 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_match(/Bot got confused/, result.text)
   end
 
-  def test_show_details_dispatches_status_diagnose_for_targeted_envelope
-    # The Show-details button previously ran a full `hive status --json`
-    # and replied with the entire snapshot. PR #84 review row 24 narrows
-    # it to `hive status --diagnose <slug> --project <project> --json`
-    # so the bot reply renders the bounded summary + detail instead of
-    # dumping the whole status payload.
+  def test_show_details_dispatches_cached_status_details_render
     result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal "alpha", result.project
     assert_equal "red-task-260518-aaaa", result.slug
-    assert_equal(
-      [ "hive", "status", "--diagnose", "red-task-260518-aaaa", "--project", "alpha", "--json" ],
-      result.command_argv,
-      "show_details must invoke `hive status --diagnose` so the reply renders the bounded envelope"
-    )
+    assert_nil result.stage
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
   end
 
   def test_show_details_passes_stage_when_callback_carries_it
     result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-stage:6-review"))
 
-    assert_equal(
-      [ "hive", "status", "--diagnose", "red-task-260518-stage",
-        "--project", "alpha", "--stage", "6-review", "--json" ],
-      result.command_argv,
-      "show_details must pass --stage so duplicate slugs in the same project resolve"
-    )
+    assert_equal "6-review", result.stage
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
   end
 
   def test_refresh_diagnose_dispatches_diagnose_write_for_fresh_agent_verdict

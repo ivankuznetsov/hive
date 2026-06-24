@@ -971,7 +971,10 @@ module Hive
             legacy_stage_dirs = filtered_legacy_stage_dirs
           end
           if result.slug
-            safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
+            safe_send_message(
+              chat_id: update.chat_id,
+              text: render_details(rows, result.project, result.slug, stage: result_stage(result))
+            )
           else
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
@@ -1467,9 +1470,14 @@ module Hive
         }.fetch(role)
       end
 
-      def render_details(rows, project, slug)
-        row = Array(rows).find { |candidate| candidate.project == project && candidate.slug == slug }
-        return "No active row found for #{project}/#{slug}." unless row
+      def render_details(rows, project, slug, stage: nil)
+        row = Array(rows).find do |candidate|
+          candidate.project == project && candidate.slug == slug &&
+            (stage.to_s.empty? || candidate.stage.to_s == stage.to_s)
+        end
+        target = [ project, slug ].compact.join("/")
+        target = "#{target} (#{stage})" unless stage.to_s.empty?
+        return "No active row found for #{target}." unless row
 
         attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
                    .map { |key, value| "#{key}=#{value}" }
@@ -1477,8 +1485,37 @@ module Hive
           "#{Hive::Bot::NotificationBuilders.display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
           "Action: #{row.action_label || row.action}",
           "Marker: #{row.marker || 'none'}",
-          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
+          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?),
+          next_step_hint(row)
         ].compact.join("\n")
+      end
+
+      def next_step_hint(row)
+        resolution = Hive::Bot::RowActions.resolve(row)
+        action = resolution.actions.find(&:primary) || resolution.actions.first
+        return "Next: open on a laptop to inspect." unless action
+        return "Next: open on a laptop to inspect." if action.role == :details
+
+        case action.role
+        when :answer
+          "Next: tap Answer to answer in chat."
+        when :approve, :approve_plan
+          "Next: tap Approve to advance this task."
+        when :findings_accept
+          "Next: tap Accept all or Reject all to triage findings."
+        when :rerun
+          "Next: tap Re-run to re-run #{action.callback.split(':').last}."
+        when :run
+          "Next: tap Run to run #{action.callback.split(':').last}."
+        when :autofix
+          "Next: tap Autofix to retry the stage cleanly."
+        else
+          "Next: open on a laptop to inspect."
+        end
+      end
+
+      def result_stage(result)
+        result.respond_to?(:stage) ? result.stage : nil
       end
 
       def actionable_queue_rows(rows)

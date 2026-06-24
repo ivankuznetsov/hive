@@ -6,7 +6,7 @@ require "hive/bot/notification_builders"
 
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                      :project, :slug, :question_n, :answer_text, :mode,
+                      :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
                       :attachment, keyword_init: true)
   Update = Struct.new(:text, :chat_id, keyword_init: true) do
@@ -320,15 +320,16 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(%r{/details norefry-260525-abcd}, result.text)
   end
 
-  def test_details_dispatches_status_diagnose_argv
+  def test_details_dispatches_cached_status_details_render
     handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
 
     result = handlers.details(Update.new(text: "/details stuck-260525-abcd", chat_id: 1))
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal "hive", result.project
-    assert_equal [ "hive", "status", "--diagnose", "stuck-260525-abcd",
-                   "--project", "hive", "--stage", "6-review", "--json" ], result.command_argv
+    assert_equal "stuck-260525-abcd", result.slug
+    assert_equal "6-review", result.stage
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
   end
 
   def test_details_without_slug_arg_replies_with_usage_hint

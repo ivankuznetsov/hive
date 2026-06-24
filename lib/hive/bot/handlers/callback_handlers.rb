@@ -151,18 +151,12 @@ module Hive
 
         def show_details(data)
           _prefix, project, slug, stage = split_callback(data, [ 3, 4 ])
-          stage_argv = stage ? [ "--stage", stage ] : []
-          # Replace the previous full-status dump with a targeted
-          # `hive status --diagnose <slug>` so the bot reply renders the
-          # bounded Diagnostic envelope (summary + detail) instead of
-          # the whole snapshot. `--stage` disambiguates duplicate slugs
-          # in the same project. See PR #84 review row 24.
           @result_class.new(
             action: :dispatch_then_reply,
             project: project,
             slug: slug,
-            command_argv: [ "hive", "status", "--diagnose", slug,
-                            "--project", project, *stage_argv, "--json" ]
+            stage: stage,
+            command_argv: [ "hive", "status", "--json" ]
           )
         end
 

@@ -59,7 +59,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        :stage, :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
                         :intent, :attachment,
                         keyword_init: true)
   end
@@ -1593,7 +1593,30 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_includes text, "Action: ready_to_develop"
     assert_includes text, "Marker: none"
     assert_includes text, "Attrs: a=1 z=9"
+    assert_includes text, "Next: tap Approve to advance this task."
     assert_equal "No active row found for hive/missing.", @supervisor.send(:render_details, rows, "hive", "missing")
+  end
+
+  def test_render_details_filters_by_stage_and_hints_next_action
+    rows = [
+      row(slug: "same", stage: "3-plan", action: "needs_input", marker: "waiting"),
+      row(slug: "same", stage: "4-execute", action: "needs_input", marker: "execute_waiting")
+    ]
+
+    text = @supervisor.send(:render_details, rows, "hive", "same", stage: "4-execute")
+
+    assert_includes text, "hive/same (4-execute)"
+    assert_includes text, "Marker: execute_waiting"
+    assert_includes text, "Next: tap Re-run to re-run develop."
+  end
+
+  def test_render_details_manual_only_hint_points_to_laptop
+    text = @supervisor.send(:render_details, [
+                              row(slug: "stale", stage: "4-execute", action: "recover_execute",
+                                  marker: "execute_stale")
+                            ], "hive", "stale", stage: "4-execute")
+
+    assert_includes text, "Next: open on a laptop to inspect."
   end
 
   def test_execute_dispatch_renders_status_queue_without_spawning_child
@@ -1770,6 +1793,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
 
     assert_includes @telegram.messages.last.fetch(:text), "hive/alpha (3-plan)"
+    assert_includes @telegram.messages.last.fetch(:text), "Next: tap Approve to advance this task."
   end
 
   def test_execute_dispatch_dry_run_does_not_spawn_child

@@ -8,6 +8,7 @@ require "hive/agent_limit"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
+require "hive/permission_scope"
 require "hive/stop_hook_installer"
 require "hive/tmux_runner"
 
@@ -72,6 +73,12 @@ module Hive
     # PRs inlined the string literal across 11 sites and silently drifted
     # when one of them was updated without the others. R4 in the plan
     # called out the implementer/planner split — keep them separate.
+    #
+    # These are CSV STRINGS, while a resolved PermissionScope::Scope feeds
+    # Arrays into the same `allowed_tools:`/`disallowed_tools:` params. That
+    # is intentional: both forms are normalized by PermissionScope.tool_csv
+    # at the argv chokepoint, which accepts CSV String | Array | nil (see its
+    # doc for the idempotency caveat).
     PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
     IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
@@ -122,13 +129,15 @@ module Hive
     def launch!(task:, cfg:, prompt:, add_dirs:, cwd:, max_budget_usd:,
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
-                allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                allowed_tools: nil,
+                disallowed_tools: nil,
                 permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
+      launch_mode = Hive::Config.claude_mode(cfg)
 
-      if Hive::Config.claude_mode(cfg) == :headless
+      if launch_mode == :headless
         require "hive/stages/base"
         return Hive::Stages::Base.spawn_agent(
           task,
@@ -141,10 +150,13 @@ module Hive
           profile: profile,
           expected_output: expected_output,
           status_mode: status_mode,
-          permission_mode: permission_mode
+          permission_mode: permission_mode,
+          allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools
         )
       end
 
+      allowed_tools ||= DEFAULT_ALLOWED_TOOLS
       result = nil
       with_shared_session(
         task: task,
@@ -154,6 +166,7 @@ module Hive
         add_dirs: add_dirs,
         profile: profile,
         allowed_tools: allowed_tools,
+        disallowed_tools: disallowed_tools,
         permission_mode: permission_mode
       ) do |handle|
         result = handle.send_and_wait!(
@@ -169,6 +182,7 @@ module Hive
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                            disallowed_tools: nil,
                             permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
@@ -201,6 +215,7 @@ module Hive
           add_dirs: add_dirs,
           profile: profile,
           allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools,
           permission_mode: permission_mode,
           cli_flags: cfg ? Hive::Config.claude_cli_flags(cfg) : []
         )
@@ -436,7 +451,8 @@ module Hive
     end
 
     def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
-                        allowed_tools: DEFAULT_ALLOWED_TOOLS, cli_flags: [])
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS,
+                        disallowed_tools: nil, cli_flags: [])
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
@@ -448,10 +464,11 @@ module Hive
       # pipeline run inherits the operator's interactive default (often
       # their most expensive model).
       command.concat(Array(cli_flags))
-      command.concat([
-        "--allowedTools", allowed_tools,
-        "--bin", profile.bin
-      ])
+      allowed = Hive::PermissionScope.tool_csv(allowed_tools)
+      disallowed = Hive::PermissionScope.tool_csv(disallowed_tools)
+      command.concat([ "--allowedTools", allowed ]) if allowed
+      command.concat([ "--disallowedTools", disallowed ]) if disallowed
+      command.concat([ "--bin", profile.bin ])
       command
     end
 
@@ -769,9 +786,27 @@ module Hive
       ""
     end
 
-    def wait_for_done_signal(task, _runner, timeout, log_label)
+    def wait_for_done_signal(task, runner, timeout, log_label)
       deadline = Time.now + timeout
       loop do
+        # A usage/credit wall stalls claude WITHOUT ever touching `.done`,
+        # so this exit_code_only path (the default `claude`/tmux execute
+        # spawn) would otherwise drain to the generic "stop hook did not
+        # signal completion" timeout — a marker with no limit text, which
+        # the execute classifier reads as `implementer_failed` rather than
+        # `limits_reached`. Mirror the sibling wait modes
+        # (`wait_for_expected_output`, `limits_reached_marker`): surface a
+        # detected wall as an :error carrying the limit error_message so the
+        # execute stage stamps `reason="limits_reached"` and the cooldown
+        # healer can hold/retry. `capture_limit_tail` is nil-runner safe.
+        pane_tail = capture_limit_tail(runner)
+        if Hive::AgentLimit.limit_reached?(pane_tail)
+          return {
+            status: :error,
+            error_message: Hive::AgentLimit.error_message(pane_tail, agent: "claude")
+          }
+        end
+
         if File.exist?(done_path(task))
           # The stop-hook touches `.done` even on `empty_stdin` /
           # other non-success completions; the real status lives in

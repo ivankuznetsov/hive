@@ -3,33 +3,42 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-06-15
-tags: [command, capture, slug, task-id, commit-lock]
+updated: 2026-06-20
+tags: [command, capture, slug, task-id, commit-lock, workflow]
 ---
 
-**TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, scaffolds `<hive-state>/stages/1-inbox/<slug>/idea.md` plus `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
+**TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, resolves the effective workflow (`--workflow` override, project `default_workflow`, then `coding`), scaffolds the descriptor's entry-stage folder plus state file and `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
 
 ## Usage
 
 ```
-hive new PROJECT TEXT...
+hive new PROJECT [--workflow NAME] [--depends-on ID_OR_SLUG] TEXT...
 ```
 
-`PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into `idea.md`. Empty text raises `Hive::Error("missing task text")`.
+`PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
 
-After `PROJECT`, the executable wrapper treats the rest of argv as task text
-even when tokens look like wrapper controls. `hive new PROJECT add --help docs`
-captures `add --help docs` instead of rendering help, and
+The executable wrapper lifts standalone allow-listed `new` options from anywhere
+outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`,
+`--depends-on VALUE`, `--depends-on=VALUE`, and Thor-style JSON booleans. The
+first remaining positional is `PROJECT`; the rest remains literal task text
+behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
+`hive new PROJECT --workflow my-flow "<your idea>"` pins the task instead of
+capturing `--workflow my-flow` in `idea.md`. `--json` is lifted too, but `new`
+still emits the plain text surface below.
+
+Only the closed allow-list is lifted. `hive new PROJECT add --help docs`
+captures `add --help docs` instead of rendering help,
 `hive new PROJECT literal --json=yes text` captures the malformed-looking JSON
-assignment literally instead of failing the wrapper boolean grammar. Wrapper
-options before the project boundary are still parsed normally; this special
-case applies only to the text tail after the registered project argument.
+assignment literally instead of failing the wrapper boolean grammar, and
+`hive new PROJECT --foo idea` captures `--foo idea` rather than treating `--foo`
+as a command option. A `--workflow` substring inside one quoted argv element
+also remains literal task text.
 
 The human stdout surface is still plain text:
 
 ```
 hive: captured <task>/idea.md
-next: mv <task> <hive-state>/stages/2-brainstorm/ && hive run <id-or-task>
+next: mv <task> <hive-state>/stages/<next-stage>/ && hive run <id-or-task>
 ```
 
 When `Hive::TaskCounter.next!` allocates an id, the final token in the next-step hint is that numeric id. If the counter lock is busy long enough to raise `Hive::ConcurrentRunError`, capture still succeeds and the hint falls back to `<task>`.
@@ -61,8 +70,9 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
 
 1. `Hive::Config.find_project(name)` → resolve `hive_state_path`. Exits 1 if not found.
 2. Validate slug → exits 1 with `"invalid slug"` or `"reserved or unsafe slug"` on failure.
-3. `mkdir -p <hive_state_path>/stages/1-inbox/<slug>` — exits 1 with `"slug collision"` if the directory already exists (rare; user retries to regenerate the random suffix).
-4. Write `idea.md` from `templates/idea.md.erb`. Frontmatter:
+3. Resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`. The selected descriptor decides the entry stage directory and state filename. `meta.yml workflow:` is pinned when an override was passed or the project default is non-coding; plain coding captures remain field-less.
+4. `mkdir -p <hive_state_path>/stages/<entry-stage>/<slug>` — exits 1 with `"slug collision"` if the directory already exists (rare; user retries to regenerate the random suffix).
+5. Write the entry state from `templates/idea.md.erb`. Frontmatter:
    ```
    ---
    slug: <slug>
@@ -71,12 +81,12 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
      <indented text>
    ---
    ```
-   Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing `<!-- WAITING -->` (so `1-inbox` shows ⏸ in `hive status`, even though `hive run` there is inert).
-5. If attachments were supplied, copy them into `assets/` beside `idea.md`.
-6. Allocate a monotonic task id via `Hive::TaskCounter.next!` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
-7. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: "1-inbox", slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
-8. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; if the task still has a blank sidecar name later, a running daemon retries the same command from `Hive::Daemon::DisplayNameBackfiller`.
-9. Print `hive: captured <path>` and the `mv ... && hive run ...` next-step hint.
+   Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing marker. Coding keeps `<!-- WAITING -->` for the historical inbox path. Non-coding workflows remove the waiting marker; if the entry stage is `kind: :inert`, capture writes `<!-- COMPLETE -->` so the real `hive approve` safety gate can move it forward.
+6. If attachments were supplied, copy them into `assets/` beside the state file.
+7. Allocate a monotonic task id via `Hive::TaskCounter.next!` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil, workflow: ...)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
+8. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: entry_stage.dir, slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
+9. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; if the task still has a blank sidecar name later, a running daemon retries the same command from `Hive::Daemon::DisplayNameBackfiller`.
+10. Print `hive: captured <path>` and the descriptor-derived `mv ... && hive run ...` next-step hint.
 
 ## Task metadata
 
@@ -88,11 +98,12 @@ slug: add-inbox-filter-260603-abcd
 display_name:
 ```
 
-`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until the initial name generator, a manual `hive generate-name`, `hive migrate`, or the daemon backfiller fills it.
+`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until the initial name generator, a manual `hive generate-name`, `hive migrate`, or the daemon backfiller fills it. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults.
 
 ## Tests
 
-- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, `meta.yml` capture, counter-lock fallback, the per-project commit-lock wrapper, display-name subprocess spawning, and the captured commit.
+- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, `meta.yml` capture, `--workflow` overrides/default pinning, non-coding entry markers, counter-lock fallback, the per-project commit-lock wrapper, display-name subprocess spawning, and the captured commit.
+- `test/integration/new_wrapper_argv_test.rb` drives the real `bin/hive` subprocess and pins wrapper-only argv behavior: canonical `PROJECT --workflow ID "text"`, before-project and trailing options, `--workflow=ID`, combined dependency/workflow flags, literal `--workflow` substrings, lifted-but-plain `--json`, missing text after lifted options, and unrecognized options as task text.
 - `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
 
 ## Backlinks

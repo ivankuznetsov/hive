@@ -1,6 +1,10 @@
 require "time"
+require "set"
 require "hive/config"
 require "hive/gh"
+require "hive/stages"
+require "hive/workflows"
+require "hive/worktree"
 require "hive/babysitter/events"
 require "hive/babysitter/status_writer"
 require "hive/babysitter/pr_fixer"
@@ -30,7 +34,8 @@ module Hive
           count: prs.size
         )
 
-        selected = select_prs(prs, project_entry, cfg, inflight)
+        owned_branches = pipeline_owned_branches(project_entry)
+        selected = select_prs(prs, project_entry, cfg, inflight, owned_branches)
         summary = { total: selected.size, fixed: 0, untouched: 0, needs_human: 0 }
         selected.each do |pr|
           outcome =
@@ -85,11 +90,27 @@ module Hive
         { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
       end
 
-      def select_prs(prs, project_entry, cfg, inflight)
+      def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new)
         ignored = Array(cfg.dig("babysitter", "labels_ignore")).map { |label| label.to_s.downcase }
         limit = cfg.dig("babysitter", "max_concurrent_prs").to_i
         prs.filter_map do |pr|
           number = pr["number"]
+          # hive-state (git) is the source of truth for ownership: a PR whose
+          # branch an active pipeline task still drives must be left alone. The
+          # task's worktree is pinned to its own base, so a babysitter rebase +
+          # force-push would strand it and the finalize push gate would loop on
+          # unpushed_commits. This holds even after finalize flips the PR from
+          # draft to ready (the draft flag below only protects pre-finalize).
+          if owned_branches.include?(pr["headRefName"].to_s)
+            Hive::Babysitter::Events.emit(
+              project: project_entry,
+              pr: number,
+              action: "skipped",
+              outcome: "pipeline_owned"
+            )
+            next
+          end
+
           if pr["isDraft"] == true
             Hive::Babysitter::Events.emit(
               project: project_entry,
@@ -114,6 +135,43 @@ module Hive
 
           pr
         end.sort_by { |pr| [ selection_priority(pr), parse_time(pr["updatedAt"]) ] }.first(limit)
+      end
+
+      # Branches owned by a task still moving through the pipeline — read from
+      # hive-state (the `hive/state` branch) rather than inferred from the PR's
+      # GitHub draft flag. Scans every non-terminal stage's task folders and
+      # collects each worktree.yml `branch`. A missing/malformed pointer is
+      # skipped so a single bad task never aborts the scan (and the babysitter
+      # then simply doesn't skip that PR — same as before this guard).
+      def pipeline_owned_branches(project_entry)
+        hive_state = project_entry["hive_state_path"].to_s
+        hive_state = File.join(project_entry.fetch("path"), ".hive-state") if hive_state.empty?
+
+        active_stage_dirs.each_with_object(Set.new) do |stage_dir, branches|
+          Dir.glob(File.join(hive_state, "stages", stage_dir, "*")).each do |task_folder|
+            branch = task_branch(task_folder)
+            branches << branch if branch
+          end
+        end
+      end
+
+      # Stage dirs a task can still be actively driven from: every stage that
+      # has a further pipeline verb (i.e. all but the terminal done stage).
+      # Derived from the workflow descriptor so a stage renumber can't strand it.
+      def active_stage_dirs
+        Hive::Stages::DIRS.select { |stage_dir| Hive::Workflows.verb_advancing_from(stage_dir) }
+      end
+
+      # The branch a task's worktree.yml records, or nil when the task has no
+      # worktree yet (pre-execute) or the pointer is missing/unreadable.
+      def task_branch(task_folder)
+        return nil unless File.directory?(task_folder)
+
+        pointer = Hive::Worktree.read_pointer(task_folder)
+        branch = pointer && pointer["branch"].to_s.strip
+        branch.nil? || branch.empty? ? nil : branch
+      rescue StandardError
+        nil
       end
 
       def selection_priority(pr)

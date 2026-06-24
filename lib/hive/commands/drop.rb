@@ -10,6 +10,8 @@ require "hive/gh"
 require "hive/lock"
 require "hive/process_kill"
 require "hive/stages"
+require "hive/workflows"
+require "hive/workflows/project"
 require "hive/worktree"
 
 module Hive
@@ -20,28 +22,20 @@ module Hive
     class Drop
       include Hive::Schemas::EnvelopeEmitter
 
-      # Derived from `Hive::Stages::DIRS` so a stage rename updates
-      # both the active-stage list and the archive-guard predicate
-      # in lockstep.
-      ARCHIVE_STAGE = Hive::Stages::DIRS.last
-
-      # Mirror `schemas/hive-drop.v1.json#from_stages.enum`.
-      ACTIVE_STAGE_DIRS = Hive::Stages::DIRS.reject { |stage| stage == ARCHIVE_STAGE }.freeze
-
       AlreadyArchived = Class.new(Hive::InvalidTaskPath)
 
       TaskContext = Struct.new(
         :slug, :project_name, :project_root, :hive_state_path, :folders,
-        :from_stages, keyword_init: true
+        :from_stages, :archive_stage_dirs, keyword_init: true
       )
 
-      # `from` accepts either the long stage dir ("4-execute") or the
+      # `from` accepts either the long stage dir ("4-execute") or the # not-a-stage-ref: CLI help example
       # short name ("execute"); see `Hive::Stages.resolve` for the map.
       def initialize(target, project: nil, from: nil, json: false)
         @target = target
         @project_filter = project
         @from = from
-        @stage_filter = resolve_stage_filter(from)
+        @stage_filter = from
         @json = json
       end
 
@@ -81,7 +75,7 @@ module Hive
       end
 
       def resolve_context
-        path_target? ? resolve_path_context : resolve_slug_context
+        (path_target? || numeric_target?) ? resolve_path_context : resolve_slug_context
       end
 
       # Slugs match Stages::SLUG_RE — any /, ~, or . means a path.
@@ -90,6 +84,21 @@ module Hive
         @target.to_s.include?("/") || @target.to_s.start_with?("~", ".")
       end
 
+      # An all-digits target is unambiguously a task id: Stages::SLUG_RE
+      # requires a leading lowercase letter, so no slug can be all digits.
+      #
+      # This /\A\d+\z/ predicate is duplicated, deliberately, in
+      # TaskResolver#numeric_target? and the two MUST stay in lockstep: Drop
+      # uses it to route a target onto the resolver path *before* it can build
+      # the resolver, so a shared instance method isn't reachable here. If the
+      # rule ever changes (signs, base, width caps), change BOTH — otherwise a
+      # target routes one way here and resolves the other way there.
+      def numeric_target?
+        @target.to_s.match?(/\A\d+\z/)
+      end
+
+      # Path/id targets flow through TaskResolver so path validation and
+      # numeric-id lookup stay shared with run/approve/findings.
       def resolve_path_context
         task = Hive::TaskResolver.new(
           @target,
@@ -97,13 +106,28 @@ module Hive
           stage_filter: @stage_filter
         ).resolve
         project_name = project_name_for(task)
-        folders = collect_stage_folders(task.hive_state_path, task.slug, ACTIVE_STAGE_DIRS)
-        # Mirror resolve_slug_context: if the path target landed on the
-        # archive stage (no active folders, but the archive folder exists)
-        # surface the archive match so guard_archived! refuses cleanly
-        # instead of silently dropping nothing.
+        # Re-assert the task's overlay and snapshot its active + terminal stage
+        # dirs under ONE lock hold (TaskResolver already loaded this project via
+        # Task#resolve_workflow). Capturing both here, rather than reading the
+        # live `archive_stage_dirs`/`active_stage_dirs` again at guard time,
+        # closes the window where a concurrent overlay swap could change which
+        # dirs count as archived between the find and guard_archived!'s check —
+        # which would hard-delete a completed task instead of refusing it.
+        active_dirs, archive_dirs = Hive::Workflows::Project.synchronize do
+          Hive::Workflows::Project.load!(task.project_root)
+          [ active_stage_dirs, archive_stage_dirs ]
+        end
+        folders = collect_stage_folders(task.hive_state_path, task.slug, active_dirs)
+        # Same outcome as resolve_slug_context, inverted mechanism: if the
+        # path/id target landed on the archive stage (no active folders, but the
+        # archive folder exists) surface the archive match so guard_archived!
+        # refuses cleanly instead of silently dropping nothing. Here that's an
+        # explicit empty-active fallback (collect against archive_dirs only when
+        # `folders` came back empty); resolve_slug_context reaches the same end
+        # by *not rejecting* the archive folders when no active ones remain
+        # (the `@stage_filter.nil?` keep-archive branch in resolve_slug_context).
         if folders.empty?
-          archived = collect_stage_folders(task.hive_state_path, task.slug, [ ARCHIVE_STAGE ])
+          archived = collect_stage_folders(task.hive_state_path, task.slug, archive_dirs)
           folders = archived unless archived.empty?
         end
         TaskContext.new(
@@ -112,7 +136,8 @@ module Hive
           project_root: task.project_root,
           hive_state_path: task.hive_state_path,
           folders: folders,
-          from_stages: folders.map { |f| f[:stage] }
+          from_stages: folders.map { |f| f[:stage] },
+          archive_stage_dirs: archive_dirs
         )
       end
 
@@ -120,7 +145,17 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         matches_by_project = projects.filter_map do |project|
-          stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
+          # Scan the union of every registered workflow's stage dirs (not just
+          # the coding stages) so a generic task folder is findable by slug.
+          # `Hive::Workflows.stages_for_project` (the shared per-project
+          # resolution rule, also used by Hive::TaskResolver) loads each
+          # project's overlay in turn, then returns the cross-workflow stage-dir
+          # union or the single filtered dir; it tolerates a stage_filter absent
+          # from THIS project so one project's mismatch doesn't abort the slug
+          # scan across healthy projects. Note the active overlay is the LAST
+          # project scanned here, so the matched project's overlay is reloaded
+          # below before any terminal/archive-dir computation.
+          stages = Hive::Workflows.stages_for_project(project, stage_filter: @stage_filter)
           folders = collect_stage_folders(project["hive_state_path"], @target, stages)
           next if folders.empty?
 
@@ -129,6 +164,12 @@ module Hive
 
         if matches_by_project.empty?
           raise_wrong_stage_if_slug_exists_elsewhere!
+          # A `--from` that names no stage in ANY registered project is a usage
+          # error, not a missing slug: surface "unknown stage '<x>'" (the
+          # diagnostic the eager constructor used to emit) instead of the
+          # generic "no task folder for slug" — stages_for_project tolerates a
+          # per-project mismatch and otherwise swallows it.
+          Hive::Workflows.assert_known_stage_filter!(@stage_filter, projects)
           raise Hive::InvalidTaskPath,
                 "no task folder for slug '#{@target}'#{project_hint}"
         end
@@ -143,8 +184,21 @@ module Hive
         end
 
         project, folders = matches_by_project.first
+        # The slug scan above loaded each project's overlay in turn, leaving the
+        # LAST-scanned project's workflows active. Reload the MATCHED project's
+        # overlay and CAPTURE its terminal stage dirs under the SAME lock hold,
+        # so a concurrent `load!(otherProject)` can't swap the overlay between
+        # this reload and guard_archived!'s read — which would recompute the
+        # archive guard against another project's terminal dirs and hard-delete
+        # a completed custom-workflow task instead of refusing it. The captured
+        # set travels in TaskContext and is the ONLY archive-dir source the rest
+        # of the drop consults (no live recomputation downstream).
+        archive_dirs = Hive::Workflows::Project.synchronize do
+          Hive::Workflows::Project.load!(project["path"])
+          archive_stage_dirs
+        end
         if @stage_filter.nil?
-          active_folders = folders.reject { |f| f[:stage] == ARCHIVE_STAGE }
+          active_folders = folders.reject { |f| archive_dirs.include?(f[:stage]) }
           folders = active_folders unless active_folders.empty?
         end
         TaskContext.new(
@@ -153,7 +207,8 @@ module Hive
           project_root: project["path"],
           hive_state_path: project["hive_state_path"],
           folders: folders,
-          from_stages: folders.map { |f| f[:stage] }
+          from_stages: folders.map { |f| f[:stage] },
+          archive_stage_dirs: archive_dirs
         )
       end
 
@@ -179,17 +234,32 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         all_matches = projects.flat_map do |project|
-          collect_stage_folders(project["hive_state_path"], @target, Hive::Stages::DIRS).map do |folder|
+          Hive::Workflows::Project.load!(project["path"])
+          collect_stage_folders(project["hive_state_path"], @target, Hive::Workflows.all_stage_dirs).map do |folder|
             [ project, folder ]
           end
         end
         return if all_matches.empty? || all_matches.map { |project, _| project["name"] }.uniq.size > 1
 
+        matched_project = all_matches.first[0]
         actual_stage = all_matches.first[1][:stage]
+        # The scan loop above left the LAST project's overlay active. Reload the
+        # MATCHED project's overlay so "expected" resolves against the workflow
+        # the slug actually belongs to, not the last one scanned. A filter that
+        # doesn't resolve in the matched project degrades to the raw ref rather
+        # than raising mid-message. (No-op when the matched project was scanned
+        # last: load! short-circuits on unchanged @active_root.)
+        Hive::Workflows::Project.load!(matched_project["path"])
+        expected_stage =
+          begin
+            Hive::Workflows.resolve_stage_ref_across_workflows(@stage_filter)
+          rescue Hive::InvalidTaskPath
+            @stage_filter
+          end
         raise Hive::WrongStage.new(
-          "task is at #{actual_stage} but --from expected #{@stage_filter}",
+          "task is at #{actual_stage} but --from expected #{expected_stage}",
           current_stage: actual_stage,
-          target_stage: @stage_filter
+          target_stage: expected_stage
         )
       end
 
@@ -198,26 +268,22 @@ module Hive
         match ? match["name"] : task.project_name
       end
 
+      # Shares Hive::TaskResolver's formatter so the two not-found hints stay
+      # byte-identical. `@from` IS `@stage_filter` (set equal in the ctor).
       def project_hint
-        hints = []
-        hints << "project '#{@project_filter}'" if @project_filter
-        hints << "stage '#{@stage_filter}'" if @stage_filter
-        hints.empty? ? "" : " in #{hints.join(' and ')}"
-      end
-
-      def resolve_stage_filter(stage)
-        return nil if stage.nil? || stage.to_s.strip.empty?
-
-        Hive::Stages.resolve(stage) ||
-          raise(Hive::InvalidTaskPath,
-                "unknown stage '#{stage}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
-                "or short names #{Hive::Stages::NAMES.join(', ')}")
+        Hive::TaskResolver.project_hint(project_filter: @project_filter, stage_filter: @from)
       end
 
       def guard_archived!(context)
-        return unless context.folders.any? && context.folders.all? { |f| f[:stage] == ARCHIVE_STAGE }
+        # Read the archive set CAPTURED under the overlay lock at resolve time,
+        # not the live `archive_stage_dirs` (which reflects whatever overlay is
+        # active now). This is the half of the fix that makes the capture matter:
+        # a concurrent overlay swap between resolve and here can't reopen the
+        # archived-task hard-delete bug.
+        archive_dirs = context.archive_stage_dirs
+        return unless context.folders.any? && context.folders.all? { |f| archive_dirs.include?(f[:stage]) }
 
-        raise AlreadyArchived, "task #{context.slug} is at #{ARCHIVE_STAGE}; nothing to drop"
+        raise AlreadyArchived, "task #{context.slug} is at #{context.from_stages.uniq.join(', ')}; nothing to drop"
       end
 
       def cleanup_context(context)
@@ -429,9 +495,32 @@ module Hive
       end
 
       def remove_task_folders(context)
-        ACTIVE_STAGE_DIRS.each do |stage|
+        # Remove exactly the stages the task was found in (`from_stages`), not
+        # a fixed coding-only stage sweep — otherwise a generic task whose stage
+        # dir isn't in the coding set would be reported dropped while its folder
+        # survived on disk. `from_stages` is the authoritative found-set (archive
+        # copies are already excluded by the resolver), so this is a no-op for
+        # the same coding rows as before.
+        context.from_stages.each do |stage|
           FileUtils.rm_rf(File.join(context.hive_state_path, "stages", stage, context.slug))
         end
+      end
+
+      # Active stage dirs across EVERY registered workflow (coding + generic),
+      # minus the archive stages — the set `hive drop` may hard-delete from.
+      def active_stage_dirs
+        Hive::Workflows.all_stage_dirs.reject { |stage| archive_stage_dirs.include?(stage) }
+      end
+
+      # Terminal ("archived") stage dir of EVERY registered workflow, not just
+      # coding's 9-done. A completed generic-workflow task sits at its own
+      # terminal dir, so `guard_archived!` must recognize the whole union or it
+      # would hard-delete a finished generic task that `AlreadyArchived` should
+      # refuse. Shares `Hive::Workflows.all_terminal_stage_dirs` with init's
+      # fieldless-task scan, and stays in lockstep with `active_stage_dirs` (the
+      # workflow union minus this set).
+      def archive_stage_dirs
+        Hive::Workflows.all_terminal_stage_dirs
       end
 
       def record_drop_commit!(context)

@@ -103,9 +103,9 @@ module Hive
 
         def extra_title(state)
           case state.stage.to_s
-          when "2-brainstorm" then "brainstorm.md"
-          when "3-plan" then "plan.md"
-          when "4-execute" then "execute log"
+          when "2-brainstorm" then "brainstorm.md" # coding-scoped: TUI idea preview for coding brainstorm artifact
+          when "3-plan" then "plan.md" # coding-scoped: TUI idea preview for coding plan artifact
+          when "4-execute" then "execute log" # coding-scoped: TUI idea preview for coding execute logs
           else "details"
           end
         end

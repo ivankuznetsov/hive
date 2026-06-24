@@ -22,17 +22,31 @@ class ReposController < ApplicationController
   # or a registered project's "Re-run setup".
   def new
     @url = params[:url].to_s.strip
-    @project_name = params[:project].to_s.strip.presence
+    raw_project = params[:project].to_s.strip
+    # File.basename normalizes a crafted `project` param (strips path segments)
+    # for parity with create's hardening — defense in depth, not load-bearing
+    # here: the lookup below is a string-equality find on entry["name"], so a
+    # `../`-laden name simply wouldn't match anyway.
+    @project_name = raw_project.present? ? File.basename(raw_project) : nil
     @suggested_name = params[:name].to_s.strip.presence ||
                       (@project_name || File.basename(@url).delete_suffix(".git") if @url.present? || @project_name)
     @defaults = InitSetup.defaults
+    @workflows = InitSetup.workflows
+    @current_workflow = Hive::Workflows::CODING_ID.to_s
+
+    project = @project_name && registered_projects.find { |entry| entry["name"] == @project_name }
+    return unless project
+
+    @workflows = InitSetup.workflows(project["path"])
+    @current_workflow = persisted_default_workflow(project) || @current_workflow
   end
 
   def create
+    selected_workflow = validated_workflow_param
     if params[:project].present?
       # Re-run setup for an already-registered project (no clone).
       project = find_project!(File.basename(params[:project].to_s.strip))
-      reinit!(project["path"], InitSetup.new(params[:settings]))
+      reinit!(project["path"], InitSetup.new(params[:settings]), workflow: selected_workflow)
       return redirect_to repos_path, notice: "#{project["name"]} settings applied"
     end
 
@@ -63,16 +77,50 @@ class ReposController < ApplicationController
     setup = InitSetup.new(params[:settings])
     clone!(url, target) unless File.directory?(target)
     normalize_origin!(target)
-    reinit!(target, setup)
+    reinit!(target, setup, workflow: selected_workflow)
     redirect_to repos_path, notice: "#{name} is registered"
   end
 
   private
 
+  # The web-supplied workflow id flows into Init → WorkflowSelection.fetch! →
+  # File.join(workflow_dir, "#{id}.yml"); a crafted `../…` would walk that join
+  # into File.file?/parse_file (and leak the resolved path through the
+  # ConfigError). The CLI scaffold path validates against SAFE_SLUG before any
+  # path use — do the same here before handing web input to Init. A nil/blank
+  # selection passes through to the implicit-coding default unchanged; an
+  # unknown-but-well-formed slug still becomes a readable 422 downstream via
+  # WorkflowSelection's UnknownWorkflow handling.
+  def validated_workflow_param
+    workflow = params.dig(:settings, :workflow).presence
+    return if workflow.nil?
+    return workflow if Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(workflow)
+
+    raise Hive::Error, "invalid workflow id"
+  end
+
+  # The persisted `default_workflow` for a registered project's re-run form, or
+  # nil when none is set. A corrupt/unreadable config.yml degrades to nil (the
+  # caller then falls back to coding) — matching the InitSetup.workflows list
+  # rendered just above, which already survives the same broken file via its own
+  # fallback — rather than letting an unrescued Psych::Exception 500 the very
+  # form an operator opens to repair the project. The rescue is narrowed to the
+  # corrupt/unreadable-config classes (the same set Project#workflow_dir_for
+  # degrades on) so a real bug — a NoMethodError, or a Hive::Error other than
+  # ConfigError — still surfaces instead of masquerading as a benign "fell back
+  # to coding". Config.load (lib/hive/config.rb) does not rescue Psych and
+  # ApplicationController only rescues Hive::Error/ParameterMissing.
+  def persisted_default_workflow(project)
+    Hive::Config.load(project["path"])["default_workflow"].presence
+  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+    Rails.logger.warn("default_workflow unreadable for #{project["name"]}: #{e.class}: #{e.message}")
+    nil
+  end
+
   # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
   # indistinguishable from an interactive `hive init`.
-  def reinit!(target, setup)
-    Hive::Commands::Init.new(target, force: true, json: false, prompts: setup).call
+  def reinit!(target, setup, workflow: nil)
+    Hive::Commands::Init.new(target, force: true, json: false, prompts: setup, workflow: workflow).call
   end
 
   # A hung clone (slow network, wedged gh) would otherwise hold a Puma

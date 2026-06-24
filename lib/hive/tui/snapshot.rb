@@ -292,8 +292,7 @@ module Hive
       private
 
       def incoherent_needs_input_row?(row)
-        row.action_key.to_s == Hive::Schemas::TaskActionKind::NEEDS_INPUT &&
-          !Hive::Markers.input_marker?(row.marker)
+        Hive::Markers.incoherent_needs_input?(action: row.action_key, marker: row.marker)
       end
 
       def old_archived_row?(row, now:)

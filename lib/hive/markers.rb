@@ -33,9 +33,10 @@ module Hive
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
 
     # Markers whose NEEDS_INPUT action is a real pending operator question.
-    # Other markers can still reach the needs_input action through legacy
-    # classification paths (see umbrella task 9512), but operator surfaces
-    # must not present those incoherent rows as answerable input.
+    # Other markers can still reach the needs_input action through the
+    # config-driven classification paths (see umbrella task 9512), but
+    # operator surfaces must not present those incoherent rows as
+    # answerable input.
     INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting].freeze
 
     # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
@@ -171,6 +172,19 @@ module Hive
 
     def input_marker?(name)
       INPUT_MARKER_NAMES.include?(name.to_s.downcase.to_sym)
+    end
+
+    # Composite "this needs_input row is incoherent" predicate, shared by
+    # every operator surface (text status, TUI projection, bot proactive
+    # pushes, and the bot's /status & /queue pull replies). Takes plain
+    # values so each boundary can feed its own row shape's action+marker
+    # accessors. A row is incoherent when its action is NEEDS_INPUT but its
+    # marker is not one of INPUT_MARKER_NAMES — the operator can't answer it,
+    # so surfaces suppress it. Previously only the leaf `input_marker?` was
+    # shared and this composite was re-spelled per boundary, risking drift.
+    def incoherent_needs_input?(action:, marker:)
+      action.to_s == Hive::Schemas::TaskActionKind::NEEDS_INPUT &&
+        !input_marker?(marker)
     end
 
     def error_recovery_match_attr(attrs)

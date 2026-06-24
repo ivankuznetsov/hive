@@ -328,6 +328,24 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_empty telegram.messages, "review-triage waiting is also gated by an active conversation"
   end
 
+  # Gate ordering is fixed: suppress_active_conversation? runs BEFORE
+  # suppress_incoherent_needs_input?, so an incoherent row (marker=none)
+  # that ALSO has an active answer conversation short-circuits at the first
+  # gate — logged as :notification_skipped_active_conversation, never
+  # :notification_skipped_incoherent. Both gates suppress (no leak either
+  # way); this pins which audit event fires so a reorder can't silently flip
+  # it without a failing test.
+  def test_incoherent_row_with_active_conversation_logs_only_the_active_conversation_skip
+    d = dispatcher(now: NOW, conversation_store: active_conversation_for("slug-260514-abcd"))
+
+    d.process_rows([ row(marker: "none", action: "needs_input") ])
+
+    assert_empty telegram.messages, "the incoherent + actively-answered row is suppressed either way"
+    skips = logger.events.map(&:first).select { |name| name.to_s.start_with?("notification_skipped_") }
+    assert_equal [ :notification_skipped_active_conversation ], skips,
+                 "exactly one skip event, and it is the active-conversation gate (it runs first)"
+  end
+
   def test_needs_input_alert_fires_with_empty_store_or_nil_store
     d_empty = dispatcher(now: NOW, conversation_store: Hive::Bot::ConversationStore.new(now: -> { NOW }))
     d_empty.process_rows([ row ])

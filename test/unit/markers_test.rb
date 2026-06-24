@@ -165,6 +165,19 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  # On-disk markers are uppercase (KNOWN_NAMES), so the predicate's
+  # `to_s.downcase` normalization is load-bearing — pin it.
+  def test_input_marker_predicate_normalizes_uppercase_names
+    assert Hive::Markers.input_marker?("WAITING"), "uppercase WAITING must normalize to a real input marker"
+    assert Hive::Markers.input_marker?(:EXECUTE_WAITING), "uppercase symbols must normalize too"
+  end
+
+  # The `nil`→false guard is load-bearing: a row with no marker is not an
+  # answerable input row, and `nil.to_s.downcase.to_sym` must not raise.
+  def test_input_marker_predicate_rejects_nil
+    refute Hive::Markers.input_marker?(nil), "nil marker must not be a real input marker"
+  end
+
   def test_input_marker_predicate_rejects_non_input_markers
     %i[
       none complete error agent_working execute_complete review_complete
@@ -176,6 +189,37 @@ class MarkersTest < Minitest::Test
 
     refute Hive::Markers.input_marker?(:unknown_marker)
     refute Hive::Markers.input_marker?("unknown_marker")
+  end
+
+  # The allowlist constants name markers as lowercase symbols; KNOWN_NAMES /
+  # MARKER_RE spell them as uppercase strings. Pin the subset relationship so
+  # a typo'd or non-parseable allowlist entry (one that no marker write/read
+  # could ever produce) fails here rather than silently suppressing a row.
+  def test_input_and_terminal_marker_names_are_subsets_of_known_names
+    known = Hive::Markers::KNOWN_NAMES.map { |n| n.to_s.downcase.to_sym }
+
+    (Hive::Markers::INPUT_MARKER_NAMES - known).tap do |unknown|
+      assert_empty unknown, "INPUT_MARKER_NAMES must be a subset of KNOWN_NAMES; stray: #{unknown.inspect}"
+    end
+    (Hive::Markers::TERMINAL_MARKER_NAMES - known).tap do |unknown|
+      assert_empty unknown, "TERMINAL_MARKER_NAMES must be a subset of KNOWN_NAMES; stray: #{unknown.inspect}"
+    end
+  end
+
+  # The shared composite predicate the four operator surfaces (text status,
+  # TUI projection, bot push dispatch, bot pull replies) feed their own row
+  # shapes into. A row is incoherent only when action is needs_input AND the
+  # marker is not a real input marker.
+  def test_incoherent_needs_input_predicate
+    assert Hive::Markers.incoherent_needs_input?(action: "needs_input", marker: "none"),
+           "needs_input + non-input marker is incoherent"
+    assert Hive::Markers.incoherent_needs_input?(action: "needs_input", marker: "complete")
+    refute Hive::Markers.incoherent_needs_input?(action: "needs_input", marker: "waiting"),
+           "needs_input + real input marker is coherent"
+    refute Hive::Markers.incoherent_needs_input?(action: "needs_input", marker: "EXECUTE_WAITING"),
+           "uppercase input markers are coherent (normalized)"
+    refute Hive::Markers.incoherent_needs_input?(action: "ready_to_plan", marker: "none"),
+           "a non-needs_input action is never incoherent regardless of marker"
   end
 
   def test_set_appends_marker_to_empty_file

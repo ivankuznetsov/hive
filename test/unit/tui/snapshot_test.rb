@@ -529,7 +529,9 @@ class TuiSnapshotTest < Minitest::Test
     complete = sample_task(slug: "complete-row", marker: "complete")
     waiting = sample_task(slug: "waiting-row", marker: "waiting")
     execute_waiting = sample_task(slug: "execute-waiting-row", marker: "execute_waiting")
-    [ none, complete, waiting, execute_waiting ].each do |task|
+    review_waiting = sample_task(slug: "review-waiting-row", marker: "review_waiting")
+    tasks = [ none, complete, waiting, execute_waiting, review_waiting ]
+    tasks.each do |task|
       task["action"] = "needs_input"
       task["action_label"] = "Needs your input"
     end
@@ -539,15 +541,41 @@ class TuiSnapshotTest < Minitest::Test
                                                                    "name" => "alpha",
                                                                    "path" => "/tmp/alpha",
                                                                    "hive_state_path" => "/tmp/alpha/.hive-state",
-                                                                   "tasks" => [ none, complete, waiting, execute_waiting ]
+                                                                   "tasks" => tasks
                                                                  }
                                                                ]))
 
-    assert_equal [ "none-row", "complete-row", "waiting-row", "execute-waiting-row" ],
+    assert_equal [ "none-row", "complete-row", "waiting-row", "execute-waiting-row", "review-waiting-row" ],
                  snapshot.rows.map(&:slug),
                  "raw snapshot preserves the JSON contract for daemon/bot consumers"
 
     visible = snapshot.visible_projection(scope: 0, filter: nil)
-    assert_equal [ "waiting-row", "execute-waiting-row" ], visible.rows.map(&:slug)
+    assert_equal [ "waiting-row", "execute-waiting-row", "review-waiting-row" ], visible.rows.map(&:slug),
+                 "all three real input markers survive; only none/complete are dropped"
+  end
+
+  # Direct coverage for the projection step in isolation — `visible_projection`
+  # chains scope+filter+archive too, so a future caller invoking
+  # `without_incoherent_needs_input` on its own must keep working.
+  def test_without_incoherent_needs_input_drops_only_incoherent_rows
+    none = sample_task(slug: "none-row", marker: "none")
+    review_waiting = sample_task(slug: "review-waiting-row", marker: "review_waiting")
+    [ none, review_waiting ].each do |task|
+      task["action"] = "needs_input"
+      task["action_label"] = "Needs your input"
+    end
+
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+                                                                 {
+                                                                   "name" => "alpha",
+                                                                   "path" => "/tmp/alpha",
+                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
+                                                                   "tasks" => [ none, review_waiting ]
+                                                                 }
+                                                               ]))
+
+    filtered = snapshot.without_incoherent_needs_input
+    assert_equal [ "review-waiting-row" ], filtered.rows.map(&:slug),
+                 "marker=none is dropped; review_waiting is a real input marker and is kept"
   end
 end

@@ -1480,7 +1480,14 @@ module Hive
       end
 
       def actionable_queue_rows(rows)
-        Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
+        Array(rows).reject do |row|
+          %w[archived agent_running].include?(row.action) ||
+            # /status & /queue inherit the same incoherent needs_input
+            # boundary as proactive pushes: a needs_input row whose marker
+            # is not a real input marker (e.g. marker=none / marker=complete)
+            # is not answerable, so it must not render in the pull replies.
+            Hive::Markers.incoherent_needs_input?(action: row.action, marker: row.marker)
+        end
       end
 
       def status_legacy_stage_dirs(fetch_result)

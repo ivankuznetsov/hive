@@ -1446,6 +1446,31 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "running"
   end
 
+  # /status & /queue inherit the same incoherent needs_input boundary as the
+  # proactive push path: a needs_input row whose marker is not a real input
+  # marker (marker=none / marker=complete) is unanswerable and must not render
+  # in the pull reply or its keyboard, while a genuine waiting row still does.
+  def test_render_queue_and_keyboard_drop_incoherent_needs_input_rows
+    genuine = row(slug: "ask-q-260624-aaaa", stage: "2-brainstorm",
+                  action: "needs_input", marker: "waiting", id: 1, display_name: "Ask Q")
+    incoherent_none = row(slug: "leak-none-260624-bbbb", stage: "2-brainstorm",
+                          action: "needs_input", marker: "none", id: 2, display_name: "Leak None")
+    incoherent_complete = row(slug: "leak-complete-260624-cccc", stage: "4-execute",
+                              action: "needs_input", marker: "complete", id: 3, display_name: "Leak Done")
+    rows = [ genuine, incoherent_none, incoherent_complete ]
+
+    text = @supervisor.send(:render_queue, rows)
+    assert_includes text, "1 active task", "only the genuine waiting row is actionable"
+    assert_includes text, "Ask Q"
+    refute_includes text, "Leak None", "marker=none needs_input row must not render in the pull reply"
+    refute_includes text, "Leak Done", "marker=complete needs_input row must not render in the pull reply"
+
+    keyboard = @supervisor.send(:status_keyboard, rows)
+    callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
+    assert_equal [ "answer:hive:ask-q-260624-aaaa" ], callbacks,
+                 "only the genuine waiting row gets a button; incoherent rows are filtered out"
+  end
+
   # The cap path is the fixture most likely to exceed Telegram's 4096-char
   # body limit and to interleave HTML entities with anchors: exercise it
   # with PR links AND HTML-special display names at once.

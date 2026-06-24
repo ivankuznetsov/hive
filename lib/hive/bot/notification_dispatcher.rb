@@ -147,6 +147,15 @@ module Hive
             end
             next if backoff_active?(entry)
 
+            # Grace is checked BEFORE the live-identity hold, so the grace clock
+            # starts (and can fully elapse) while an `agent_running` retry holds
+            # the row below. This is intentional: a long hold means grace is
+            # already satisfied, so the first non-held tick fires "Recovered"
+            # promptly rather than restarting a fresh settling window. It is not
+            # a false-recovered risk — the only way a held row leaves the hold is
+            # by recovering or re-erroring (the intermediate "neither
+            # agent_running nor error" state is unreachable from
+            # TaskAction#universal_action).
             unless absence_passed_grace?(entry, fingerprint)
               next
             end
@@ -277,7 +286,7 @@ module Hive
 
       def live_recovery_identities(rows)
         Array(rows).each_with_object(Set.new) do |row, identities|
-          identities.add(recovery_identity(row)) if row.action.to_s == "agent_running"
+          identities.add(recovery_identity(row)) if row.action.to_s == Hive::Schemas::TaskActionKind::AGENT_RUNNING
         end
       end
 

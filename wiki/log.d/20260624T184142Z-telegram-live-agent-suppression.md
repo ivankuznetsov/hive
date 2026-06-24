@@ -17,8 +17,14 @@ dedupes, and if it succeeds the normal recovered confirmation fires after the
 live identity disappears.
 
 **Tests:** Added `notification_builders_test` coverage for the #9281
-`agent_running` + `error` regression fixture, all stale recovery-marker
-variants under `agent_running`, archived stale markers, unchanged `error` /
-`recover_execute` / `recover_review` notifications, and suppression logging.
-Added `notification_dispatcher_test` lifecycle coverage for live retry holds,
-retry failure dedupe, and retry success recovery confirmation.
+`agent_running` + `error` regression fixture, the parameterized recovery
+markers under `agent_running` (`review_stale`, `execute_stale`, `review_error`,
+`review_ci_stale`; the `error` marker is covered by its own case), an archived
+`error` row, unchanged `error` / `recover_execute` / `recover_review`
+notifications, and suppression logging. Added `notification_dispatcher_test`
+lifecycle coverage for live retry holds, retry failure dedupe, retry success
+recovery confirmation, the cross-layer agent_running contract (builder suppress
++ dispatcher hold), identity-scoped holds (a different slug does not hold an
+unrelated recovery), the archived-vs-agent_running asymmetry (archived can fire
+Recovered), `absent_since` continuity during a hold, and skip-event logging
+across the held retry lifecycle.

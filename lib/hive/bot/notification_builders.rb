@@ -40,9 +40,12 @@ module Hive
       def build(row, logger: nil)
         return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
 
-        # `action` is the live-state signal. A live task lock can make status
-        # report agent_running while the state file still carries a stale
-        # recovery marker from the previous run; those rows must stay silent.
+        # `action` is the live-state signal, so SKIP_ACTIONS rows stay silent:
+        #   - agent_running: a live task lock can make status report
+        #     agent_running while the state file still carries a stale recovery
+        #     marker from the previous run — alerting would announce a failure
+        #     a retry is already clearing.
+        #   - archived: the task is terminal; there is nothing left to announce.
         if SKIP_ACTIONS.include?(row.action)
           logger&.event(:notification_skipped_live_agent,
                         project: row.project, slug: row.slug, stage: row.stage,

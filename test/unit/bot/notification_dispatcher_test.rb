@@ -519,6 +519,130 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
+  # The live-agent skip is the "why no Recovered yet" audit trail. Pin that it
+  # is logged on EVERY tick the row is held by an in-flight agent_running retry,
+  # not just the single-tick case in test_rows_without_notification_are_ignored.
+  def test_skip_event_is_logged_on_every_tick_during_live_retry_hold
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+
+      d.process_rows([ stuck ]) # initial stuck alert — builds, no skip
+      d.process_rows([ live ])  # hold tick 1
+      @clock += 61
+      d.process_rows([ live ])  # hold tick 2 (grace elapsed, still held)
+
+      skips = logger.events.select { |name, _| name == :notification_skipped_live_agent }
+      assert_equal 2, skips.size,
+                   "each held retry tick must log :notification_skipped_live_agent for the audit trail"
+      assert(skips.all? { |_name, attrs| attrs[:action] == "agent_running" },
+             "the skip must record the live agent_running action")
+    end
+  end
+
+  # The grace clock (absent_since) is stamped on the first held tick and must
+  # NOT be reset while the live retry continues to hold the row — otherwise a
+  # long hold would never accumulate enough grace to fire Recovered promptly.
+  # test_live_retry_success_* relies on this implicitly; pin it explicitly.
+  def test_absent_since_is_not_reset_while_live_retry_holds_the_row
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ]) # first held tick stamps absent_since (grace clock)
+      grace_started_at = Hive::Bot::AlertStore.new(path: path).entry(fingerprint).absent_since
+      refute_nil grace_started_at, "the first held tick must stamp absent_since"
+
+      @clock += 61
+      d.process_rows([ live ]) # still held; absent_since must be retained, not reset
+
+      retained = Hive::Bot::AlertStore.new(path: path).entry(fingerprint).absent_since
+      assert_equal grace_started_at, retained,
+                   "absent_since (the grace clock) must NOT be reset while the live retry holds the row"
+    end
+  end
+
+  # Lock the cross-module contract for one agent_running row: the BUILDER
+  # suppresses it (returns nil) AND the DISPATCHER holds the matching stored
+  # recovery fingerprint instead of firing Recovered. A divergence between the
+  # builder's suppression and the dispatcher's hold would otherwise go untested.
+  def test_agent_running_row_suppresses_build_and_holds_matching_recovery
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      assert_nil Hive::Bot::NotificationBuilders.build(live),
+                 "builder layer must suppress the live agent_running row"
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ])
+      @clock += 61
+      d.process_rows([ live ])
+
+      assert_equal 1, telegram.messages.size,
+                   "dispatcher layer must hold Recovered while the matching agent_running row is live"
+      refute_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
+                 "the held recovery entry must be retained, not removed"
+    end
+  end
+
+  # Negative identity scoping: a live agent_running row for a DIFFERENT slug
+  # must NOT hold an unrelated stored recovery. A bug that compared only
+  # `project` (or dropped `stage`) from recovery_identity would wrongly hold it
+  # and suppress this Recovered.
+  def test_live_agent_for_different_slug_does_not_hold_unrelated_recovery
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      unrelated_live = live_retry_row(slug: "other-task-260525-zzzz")
+
+      d.process_rows([ stuck ])
+      d.process_rows([ unrelated_live ])
+      @clock += 61
+      d.process_rows([ unrelated_live ])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "a live agent_running row for a different slug must NOT hold an unrelated recovery"
+      assert_includes recovered.first[:text], "#42 Readable Recovery"
+    end
+  end
+
+  # The archived-vs-agent_running asymmetry: archived suppresses the build (like
+  # agent_running) but — unlike agent_running — does NOT register a live recovery
+  # identity, so it does not hold a stored recovery and Recovered still fires.
+  def test_archived_row_suppresses_build_but_does_not_hold_recovery
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      archived = row(action: "archived", marker: "review_error",
+                     slug: "stuck-task-260525-abcd", stage: "6-review")
+
+      assert_nil Hive::Bot::NotificationBuilders.build(archived),
+                 "builder must suppress the archived row"
+
+      d.process_rows([ stuck ])
+      d.process_rows([ archived ])
+      @clock += 61
+      d.process_rows([ archived ])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "archived suppresses the build but (unlike agent_running) must NOT hold the recovery"
+    end
+  end
+
   def test_non_recovery_row_disappears_silently_drops_entry
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
@@ -781,7 +905,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     dispatcher.process_rows([ row(action: "agent_running", marker: "agent_working") ])
 
     assert_empty telegram.messages
-    assert_equal :notification_skipped_live_agent, logger.events.first.first
+    assert_equal [ :notification_skipped_live_agent ], logger.events.map(&:first),
+                 "the live-agent skip must be the ONLY event emitted — no spurious/duplicate events"
   end
 
   def test_send_failures_are_logged_without_marking_seen

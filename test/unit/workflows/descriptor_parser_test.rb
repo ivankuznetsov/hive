@@ -235,6 +235,25 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     )
 
     assert_includes error.message, 'stage 1 kind "marker" must be agent or terminal'
+
+    # The coding runtime kinds (execute/review_council/finalize) are Ruby-only:
+    # only Workflows::Coding declares them via Stage.new, and parse_kind must keep
+    # rejecting them from YAML descriptors. That rejection is load-bearing — it is
+    # exactly what lets task_action.rb's kind_action route those kinds straight to
+    # the coding-hardcoded helpers with NO coding_id? guard (see its safety
+    # comment). Pin the three exact strings so a future `when "execute"` clause in
+    # parse_kind can't silently widen the YAML kind space and break that invariant.
+    %w[execute review_council finalize].each do |coding_runtime_kind|
+      runtime_error = assert_config_error(
+        { "id" => "bad",
+          "stages" => [ { "name" => "work", "kind" => coding_runtime_kind, "state_file" => "work.md" } ] },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent or terminal),
+                      "YAML descriptors must not be able to declare Ruby-only coding runtime kind " \
+                      "#{coding_runtime_kind.inspect}"
+    end
   end
 
   def test_agent_stage_requires_exactly_one_skill_or_instruction

@@ -4,7 +4,11 @@ default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
 <% unless Hive::Workflows.coding_id?(default_workflow) -%>
-default_workflow: <%= default_workflow %>
+<%# Quoted: YAML.safe_load coerces bare keyword-like ids (yes/on/null/...) to -%>
+<%# booleans/nil. This is the FRESH-RENDER path; the rebind path encodes the -%>
+<%# same invariant in Init#default_workflow_line (lib/hive/commands/init.rb). -%>
+<%# Keep the two quoting sites in sync. -%>
+default_workflow: "<%= default_workflow %>"
 <% end -%>
 
 claude:
@@ -170,8 +174,9 @@ review:
     max_attempts: 2
   max_passes: 2
   # Aggregate wall-clock cap across all phases of one `hive run` on a
-  # 6-review folder. 14400s = 4h, enough for a couple of 1-2h reviewers.
-  max_wall_clock_sec: 14400
+  # 6-review folder. 28800s = 8h — generous headroom so the cap is not hit
+  # on a normal multi-pass review (a couple of 1-2h reviewers + retries).
+  max_wall_clock_sec: 28800
   # Hive's recommended reviewer set: claude /ce-code-review + codex
   # /ce-code-review + claude /pr-review-toolkit:review-pr. Each entry's
   # `name` becomes part of the output filename (`reviews/<name>-<pass>.md`).

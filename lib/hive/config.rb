@@ -284,7 +284,7 @@ module Hive
         # review legitimately takes 1-2h. Each reviewer is bounded by its
         # own timeout, NOT by an even split of this budget, so this only
         # needs to cover the sum (raise it if you run more reviewers).
-        "max_wall_clock_sec" => 14_400
+        "max_wall_clock_sec" => 28_800
       },
       # Hive daemon settings (ADR-024). The daemon polls
       # `hive status --json`, dispatches workflow verbs on tasks the

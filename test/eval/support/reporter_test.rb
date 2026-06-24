@@ -219,6 +219,30 @@ class HiveEvalReporterTest < Minitest::Test
     refute_match(/OptionParser::/, err)
   end
 
+  def test_cli_rejects_abbreviated_long_options_as_usage_errors
+    abbreviated_forms = [
+      [ "--scen", ->(report) { [ "--scen", "s1_status", "--no-judge", "--report", report ] } ],
+      [ "--rep", ->(report) { [ "--scenario", "s1_status", "--no-judge", "--rep", report ] } ],
+      [ "--no-j", ->(report) { [ "--scenario", "s1_status", "--no-j", "--report", report ] } ]
+    ]
+
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      abbreviated_forms.each do |option, build_args|
+        report = File.join(dir, "#{option.delete_prefix("--")}.json")
+
+        _out, err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1" },
+          "bin/hive-eval", *build_args.call(report)
+        )
+
+        refute status.success?, "#{option} must be rejected as an abbreviation"
+        assert_equal 64, status.exitstatus
+        assert_match(/invalid option: #{Regexp.escape(option)}/, err)
+        refute File.exist?(report), "#{option} must fail before creating a report"
+      end
+    end
+  end
+
   def test_cli_rejects_missing_scenario_value_as_usage_error
     _out, err, status = Open3.capture3(
       { "HIVE_EVAL_NO_JUDGE" => "1" },

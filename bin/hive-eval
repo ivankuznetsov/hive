@@ -13,6 +13,7 @@ options = {
 }
 
 parser = OptionParser.new do |opts|
+  opts.require_exact = true
   opts.banner = "Usage: bin/hive-eval [--scenario NAME] [--report PATH] [--no-judge]"
   opts.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
     options[:scenario] = value

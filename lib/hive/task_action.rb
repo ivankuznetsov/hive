@@ -96,8 +96,10 @@ module Hive
       # Used by TWO call sites that today happen to want identical
       # "re-run finalize" semantics:
       #
-      #   1. `artifacts_action` for a real task at 7-artifacts with
-      #      `:complete` — its artifact run is done, finalize is next.
+      #   1. `Coding::ACTION_DISPATCH["artifacts"][:complete]` for a real task
+      #      at 7-artifacts with `:complete` — its artifact run is done,
+      #      finalize is next. (The live route is the table; the legacy
+      #      `artifacts_action` method is now reached only by the parity harness.)
       #   2. `finalize_complete_action` as the fallback when finalize
       #      ran but left the PR as a draft (is_draft != "false") —
       #      operator should re-run finalize.
@@ -208,23 +210,36 @@ module Hive
     # Returns a copy-paste-executable shell command, or nil for actions
     # whose state requires manual recovery (agent_running, archived, error).
     #
-    # Non-coding workflows return early through `generic_command` (below),
-    # which emits `--from <stage>` for `approve` and `--stage <stage>` (only
-    # on a slug-stage collision) for `run` — it never adds `--from` to `run`.
-    #
-    # On the coding path, workflow-verb commands ALWAYS include `--from
-    # <stage>`: that's the idempotency lever — a retry after a successful
-    # advance fails with WRONG_STAGE (4) instead of silently advancing twice.
-    # Coding recovery verbs (findings/accept-finding/reject-finding) only
-    # include `--stage` when slug-stage ambiguity actually exists.
+    # Workflow-verb commands ALWAYS include `--from <stage>`: that's the
+    # idempotency lever — a retry after a successful advance fails with
+    # WRONG_STAGE (4) instead of silently advancing twice. Generic `approve`
+    # rows use the same `--from` assertion, generic `run` rows use `--stage`
+    # only when slug-stage ambiguity exists, and recovery verbs (findings/
+    # accept-finding/reject-finding) also use `--stage` only for ambiguity.
     def command
-      return generic_command unless coding_workflow?
-
       verb = action[:command]
       return nil unless verb
 
+      stage = workflow_stage
+      return nil unless stage
+      stage_ref = command_stage_dir(stage)
+
       parts = command_prefix(verb)
-      parts.concat([ from_or_stage_option(verb), stage_dir ]) if include_stage_filter?(verb)
+      if verb == "approve"
+        parts.concat([ "--from", stage_ref ])
+        # A markerless inert stage has no agent to stamp a terminal marker, so
+        # its forward approve can never satisfy Approve#validate_move!'s
+        # VALID_TERMINAL_MARKERS gate — without --force the daemon would
+        # re-dispatch a WrongStage failure every tick and drain the per-project
+        # daily dispatch cap. `:none` here is reachable only for an inert
+        # non-terminal stage (generic_action routes every other `:none` to a
+        # run command), so the override is scoped exactly to that advance.
+        parts << "--force" if marker.name == :none
+      elsif verb == "run"
+        parts.concat([ "--stage", stage_ref ]) if @stage_collision
+      elsif include_stage_filter?(verb)
+        parts.concat([ from_or_stage_option(verb), stage_ref ])
+      end
       parts.shelljoin
     end
 
@@ -240,6 +255,13 @@ module Hive
     private
 
     def action
+      override = universal_action
+      return override if override
+
+      kind_action
+    end
+
+    def universal_action
       # A live task lock means `hive run` is already inside this task,
       # including pre-stage work such as auto-rebase. It must pre-empt
       # marker-derived workflow advice; otherwise status can offer a
@@ -259,49 +281,66 @@ module Hive
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
 
-      return generic_action unless coding_workflow?
-
-      case task.stage_name
-      when "inbox"
-        ACTIONS.fetch(:inbox)
-      when "brainstorm"
-        marker.name == :complete ? ACTIONS.fetch(:brainstorm_complete) : ACTIONS.fetch(:brainstorm_waiting)
-      when "plan"
-        plan_action
-      when "execute"
-        execute_action
-      when "open-pr"
-        marker.name == :complete ? ACTIONS.fetch(:open_pr_complete) : ACTIONS.fetch(:open_pr_ready)
-      when "review"
-        review_action
-      when "artifacts"
-        artifacts_action
-      when "finalize"
-        finalize_action
-      when "done"
-        ACTIONS.fetch(:done)
-      else
-        ACTIONS.fetch(:error)
-      end
+      nil
     end
 
-    # Routes a row to the coding state machine. A nil workflow — only
-    # reachable from test doubles that don't respond to `#workflow`; a real
-    # `Hive::Task` always resolves one — defaults to the coding path, not the
-    # generic one.
-    def coding_workflow?
-      workflow = task.respond_to?(:workflow) ? task.workflow : nil
-      workflow.nil? || Hive::Workflows.coding_id?(workflow.id)
-    end
-
-    def generic_action
-      # `validate_workflow_stage!` runs at Task construction (task.rb), so a
-      # real `Hive::Task` always resolves a stage here; this guard only
-      # defends test doubles that bypass that construction-time invariant.
+    def kind_action
       stage = workflow_stage
       return ACTIONS.fetch(:error) unless stage
 
-      terminal = stage == task.workflow.stages.last
+      case stage.kind
+      # `:execute`/`:review_council`/`:finalize` route straight to the coding
+      # runtime helpers with NO `coding_id?` guard — unlike the `:agent`/`:inert`
+      # arm below, which gates on `coding_id?` via `coding_table_action`. That
+      # asymmetry is deliberate and safe: these three kinds are coding-only by
+      # construction. `DescriptorParser#parse_kind` rejects them for YAML
+      # descriptors, and only `Workflows::Coding` declares them via `Stage.new`,
+      # so no non-coding workflow can carry one. The helpers hardcode coding
+      # semantics (`finalize`/`plan`/`execute` stage names, coding markers); the
+      # guarantee that they only ever see a coding task lives in the kind space
+      # itself, not in a runtime id check here.
+      when :execute
+        execute_action
+      when :review_council
+        review_action
+      when :finalize
+        finalize_action
+      when :agent, :inert
+        # `|| generic_action(stage)` is the LIVE path for NON-coding
+        # `:agent`/`:inert` workflows: `coding_table_action` returns nil for any
+        # non-coding id. It is dead-for-coding — `coding_test.rb` pins every
+        # coding `:agent`/`:inert` stage to a matching-`:kind` ACTION_DISPATCH
+        # row, so the table always resolves for the only id that reaches it.
+        # Coding `done`/`artifacts` behavior must therefore be edited in
+        # `Coding::ACTION_DISPATCH`/the coding helpers, NOT in `generic_action`.
+        coding_table_action(stage) || generic_action(stage)
+      else
+        generic_action(stage)
+      end
+    end
+
+    def coding_table_action(stage)
+      return nil unless Hive::Workflows.coding_id?(task_workflow.id)
+
+      config = Hive::Workflows::Coding::ACTION_DISPATCH[stage.name]
+      return nil unless config && config.fetch(:kind) == stage.kind
+
+      if config[:handler]
+        send(config.fetch(:handler))
+      elsif marker.name == :complete && config[:complete]
+        ACTIONS.fetch(config.fetch(:complete))
+      else
+        ACTIONS.fetch(config.fetch(:default))
+      end
+    end
+
+    def generic_action(stage = workflow_stage)
+      # `validate_workflow_stage!` runs at Task construction (task.rb), so a
+      # real `Hive::Task` always resolves a stage here; this guard only
+      # defends test doubles that bypass that construction-time invariant.
+      return ACTIONS.fetch(:error) unless stage
+
+      terminal = stage == task_workflow.stages.last
 
       case marker.name
       when :complete
@@ -320,9 +359,9 @@ module Hive
           stage.kind == :inert ? ACTIONS.fetch(:done) : ACTIONS.fetch(:generic_ready_to_run)
         else
           # Auto-advance a markerless inert NON-terminal stage (no agent to run)
-          # past itself. Any non-inert kind (`:agent`, `:marker`, or `nil` — the
-          # gate is `stage.kind == :inert`, which excludes all three) must run
-          # rather than be approved past it. The entry-only restriction is
+          # past itself. Any non-inert kind (`:agent`, coding runtime kinds, or
+          # nil — the gate is `stage.kind == :inert`, which excludes all of
+          # them) must run rather than be approved past it. The entry-only restriction is
           # intentionally dropped: an inert NON-entry middle stage would
           # otherwise strand — `Resolver.resolve` raises `StageError` for
           # `kind: :inert`, so it can neither run nor advance.
@@ -331,32 +370,6 @@ module Hive
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end
-    end
-
-    def generic_command
-      verb = action[:command]
-      return nil unless verb
-
-      # `validate_workflow_stage!` guarantees a stage for a real Hive::Task;
-      # mirror generic_action's guard so a test double whose stage doesn't
-      # resolve returns nil instead of a NoMethodError on stage.dir.
-      stage = workflow_stage
-      return nil unless stage
-
-      parts = command_prefix(verb)
-      parts.concat([ "--stage", stage.dir ]) if verb == "run" && @stage_collision
-      if verb == "approve"
-        parts.concat([ "--from", stage.dir ])
-        # A markerless inert stage has no agent to stamp a terminal marker, so
-        # its forward approve can never satisfy Approve#validate_move!'s
-        # VALID_TERMINAL_MARKERS gate — without --force the daemon would
-        # re-dispatch a WrongStage failure every tick and drain the per-project
-        # daily dispatch cap. `:none` here is reachable only for an inert
-        # non-terminal stage (generic_action routes every other `:none` to a
-        # run command), so the override is scoped exactly to that advance.
-        parts << "--force" if marker.name == :none
-      end
-      parts.shelljoin
     end
 
     def review_action
@@ -427,6 +440,11 @@ module Hive
 
     # Markerless 7-artifacts rows still need their stage runner to write
     # artifact.md and the terminal marker before finalize is allowed.
+    #
+    # Production-dead: 7-artifacts now routes through
+    # `Coding::ACTION_DISPATCH["artifacts"]` (complete/default), not this
+    # method. Retained solely for the parity harness's `LegacyCaseTaskAction`,
+    # which still exercises the old stage-name case path.
     def artifacts_action
       marker.name == :complete ? ACTIONS.fetch(:artifacts_complete) : ACTIONS.fetch(:artifacts_ready)
     end
@@ -620,18 +638,25 @@ module Hive
       Hive::Workflows.workflow_verb?(verb) || @stage_collision
     end
 
-    # `stage_dir` (the coding hot path's "#{index}-#{name}") and
-    # `workflow_stage.dir` (the generic path) are provably equal — Task's
-    # construction-time `validate_workflow_stage!` rejects any task whose folder
-    # stage dir isn't its descriptor's `Stage#dir`. They are kept as two
-    # expressions on purpose so the coding path stays free of a stage lookup and
-    # a nil-guard it can never trip; don't "consolidate" them into one.
-    def stage_dir
-      "#{task.stage_index}-#{task.stage_name}"
+    def command_stage_dir(stage)
+      # For a real coding Task the `"#{index}-#{name}"` string form is provably
+      # equal to `stage.dir`: `validate_workflow_stage!` (task.rb) pins the
+      # task's stage_index/stage_name to the descriptor stage at construction.
+      # The string form is kept on the coding branch so the command echoes the
+      # task's own on-disk stage dir rather than re-deriving it from the
+      # descriptor.
+      return "#{task.stage_index}-#{task.stage_name}" if Hive::Workflows.coding_id?(task_workflow.id)
+
+      stage.dir
     end
 
     def workflow_stage
-      task.workflow.stage_named(task.stage_name)
+      task_workflow.stage_named(task.stage_name)
+    end
+
+    def task_workflow
+      workflow = task.respond_to?(:workflow) ? task.workflow : nil
+      workflow || Hive::Workflows::Registry.default
     end
   end
 end

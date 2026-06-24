@@ -1045,6 +1045,26 @@ def test_wrapper_command_carries_model_and_effort_pins
     end
   end
 
+  # A quota wall stalls the default claude/tmux execute spawn without ever
+  # touching `.done`; the exit_code_only wait must surface it as an :error
+  # carrying the limit message (not drain to the generic stop-hook timeout)
+  # so the execute classifier stamps reason="limits_reached". Mirrors
+  # wait_for_expected_output's limit test.
+  def test_wait_for_done_signal_reports_limit_wall_before_done_signal
+    with_tmp_task do |task|
+      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new(limit_menu)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
+
+      assert_equal :error, result.fetch(:status)
+      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      refute_match(/stop hook did not signal/, result.fetch(:error_message))
+    end
+  end
+
   def test_read_result_json_status_handles_all_fallback_shapes
     with_tmp_task do |task|
       assert_nil Hive::ClaudeLauncher.read_result_json_status(task)

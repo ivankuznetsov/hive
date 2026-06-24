@@ -358,6 +358,34 @@ class SchemaFilesTest < Minitest::Test
     status = Hive::Commands::Status.new
     task_with_pr = status.task_payload(base_row.merge(pr_url: "https://github.com/example/repo/pull/561"))
     task_without_pr = status.task_payload(base_row.merge(slug: "early-task", pr_url: nil))
+    retry_after = "2026-06-24T23:20:00Z"
+    held_task = status.task_payload(base_row.merge(
+                                      slug: "quota-task",
+                                      pr_url: nil,
+                                      marker_name: :error,
+                                      marker_attrs: {
+                                        "reason" => "limits_reached",
+                                        "provider" => "codex",
+                                        "retry_after" => retry_after
+                                      },
+                                      action_key: Hive::Schemas::TaskActionKind::ERROR,
+                                      action_label: "Error",
+                                      suggested_command: nil
+                                    ))
+    # The null variant: an attr-less legacy limit marker emits
+    # `held: {reason: quota, provider: null, retry_after: null}` — the exact
+    # shape the schema declares provider/retry_after nullable for. Validating
+    # it here catches a schema-tightening or a nil→"" producer regression
+    # that the fully-populated case above would pass through green.
+    held_task_null = status.task_payload(base_row.merge(
+                                           slug: "quota-task-bare",
+                                           pr_url: nil,
+                                           marker_name: :error,
+                                           marker_attrs: { "reason" => "limits_reached" },
+                                           action_key: Hive::Schemas::TaskActionKind::ERROR,
+                                           action_label: "Error",
+                                           suggested_command: nil
+                                         ))
 
     payload = {
       "schema" => "hive-status",
@@ -369,7 +397,7 @@ class SchemaFilesTest < Minitest::Test
           "name" => "demo",
           "path" => "/tmp/demo",
           "hive_state_path" => "/tmp/demo/.hive-state",
-          "tasks" => [ task_with_pr, task_without_pr ],
+          "tasks" => [ task_with_pr, task_without_pr, held_task, held_task_null ],
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
         }
@@ -377,10 +405,20 @@ class SchemaFilesTest < Minitest::Test
     }
     errors = schemer.validate(payload).map { |e| e["error"] }
     assert_empty errors,
-                 "populated tasks (dependency fields plus pr_url string + null) must validate against the schema " \
-                 "(errors: #{errors.inspect})"
+                 "populated tasks (dependency fields plus pr_url string + null, held populated + null) " \
+                 "must validate against the schema (errors: #{errors.inspect})"
     assert_equal "https://github.com/example/repo/pull/561", task_with_pr["pr_url"]
     assert_nil task_without_pr["pr_url"]
+    assert_equal({
+      "reason" => "quota",
+      "provider" => "codex",
+      "retry_after" => retry_after
+    }, held_task["held"])
+    assert_equal({
+      "reason" => "quota",
+      "provider" => nil,
+      "retry_after" => nil
+    }, held_task_null["held"])
   end
 
   # `legacy_migrate_command` accepts either "hive migrate" (when
@@ -1028,33 +1066,90 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     expected = %w[
       answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
-      default_branch development_agent enabled_reviewers hive_state_path ok path patrol_mode patrol_reviewers planning_agent
+      default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
       project schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
                  "schema/producer required-key drift in hive-init.v1.json"
 
-    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
-    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
-    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
-    producer = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
-    )
-    assert_equal schema_required, producer.keys.sort,
-                 "Init#success_payload must emit exactly the schema's required keys"
+    # Sandbox the project root: success_payload now drives load_dir against
+    # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
+    # world-shared path. Mirror the twin test_hive_init_success_payload_validates.
+    Dir.mktmpdir("hive-init-keys") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      producer = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+      assert_equal schema_required, producer.keys.sort,
+                   "Init#success_payload must emit exactly the schema's required keys"
+    end
   end
 
   def test_hive_init_success_payload_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    Dir.mktmpdir("hive-init-schema") do |dir|
+      state_path = File.join(dir, ".hive-state")
+      ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
+      entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
+      answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      payload = Hive::Commands::Init.new(dir, json: true).send(
+        :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      )
+
+      assert_equal [
+        {
+          "kind" => "custom_workflow",
+          "command" => "hive workflow new <id>",
+          "message" => "custom workflows live in this project — author one with `hive workflow new <id>`"
+        }
+      ], payload.fetch("hints")
+
+      errors = schemer.validate(payload).map { |e| e["error"] }
+      assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
+    end
+  end
+
+  def test_hive_init_new_workflow_success_payload_validates_with_scaffold_paths
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
     ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
     entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
     answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
     payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
-      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
+      :success_payload, entry: entry, ops: ops, answers: answers, workflow: :writing
+    ).merge(
+      "descriptor_path" => "/tmp/demo/.hive-state/workflows/writing.yml",
+      "instruction_path" => "/tmp/demo/.hive-state/workflows/writing/work.md"
     )
 
     errors = schemer.validate(payload).map { |e| e["error"] }
-    assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
+    assert_empty errors, "hive-init --new-workflow SuccessPayload must validate (errors: #{errors.inspect})"
+    assert_equal "writing", payload.fetch("workflow")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing.yml", payload.fetch("descriptor_path")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing/work.md", payload.fetch("instruction_path")
+  end
+
+  def test_hive_init_new_workflow_already_initialized_payload_validates_with_scaffold_paths
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    ops = Struct.new(:hive_state_path).new("/tmp/demo/.hive-state")
+    descriptor = Struct.new(:id).new(:writing)
+    workflow_choice = Hive::Commands::Init::WorkflowChoice.new(descriptor: descriptor, source: :flag)
+    payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
+      :existing_payload, ops, workflow_choice: workflow_choice
+    ).merge(
+      "descriptor_path" => "/tmp/demo/.hive-state/workflows/writing.yml",
+      "instruction_path" => "/tmp/demo/.hive-state/workflows/writing/work.md"
+    )
+
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "hive-init --new-workflow AlreadyInitializedPayload must validate (errors: #{errors.inspect})"
+    assert_equal true, payload.fetch("already_initialized")
+    assert_equal "writing", payload.fetch("workflow")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing.yml", payload.fetch("descriptor_path")
+    assert_equal "/tmp/demo/.hive-state/workflows/writing/work.md", payload.fetch("instruction_path")
   end
 
   # ── hive-forget ────────────────────────────────────────────────────────

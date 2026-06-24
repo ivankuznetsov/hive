@@ -296,6 +296,38 @@
           "type": "object",
           "additionalProperties": true
         },
+        "held": {
+          "description": "Present only when this task is held because an agent provider quota/usage wall was detected. Distinct from dependency blocking; do not infer from blocked_by.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason",
+            "provider",
+            "retry_after"
+          ],
+          "properties": {
+            "reason": {
+              "type": "string",
+              "enum": [
+                "quota"
+              ]
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "retry_after": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        },
         "mtime": {
           "type": "string",
           "format": "date-time"

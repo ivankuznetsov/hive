@@ -3,7 +3,7 @@ title: Hive::ProtectedFiles
 type: module
 source: lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-06-22
 tags: [security, sha256, integrity, orchestrator]
 ---
 
@@ -26,8 +26,8 @@ Missing files are recorded as `nil` so a deletion is detected as a difference (o
 ## Used by
 
 - **`Stages::Execute.run!`** — wraps the implementation spawn (ADR-013). Tampering yields `EXECUTE_ERROR phase=implementation reason=tampered`.
-- **`Stages::Review.run!#spawn_fix_agent`** — wraps Phase 4. Includes the per-pass `escalations-NN.md` so a fix agent rewriting it (e.g., flipping `[ ]` → `[x]` to short-circuit human review) trips `REVIEW_ERROR phase=fix reason=fix_tampered`.
-- **`Stages::Review::Triage.run!`** — wraps the triage spawn (`PROTECTED_FILES = ORCHESTRATOR_OWNED`). Triage may edit reviewer files in place but must NOT touch plan.md / worktree.yml / task.md. Tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
+- **`Stages::Review.run!#spawn_fix_agent`** — wraps Phase 4. Includes the per-pass `escalations-NN.md`, reviewer infra/error sentinels, fix-success/guardrail sentinels, and `reviews/suppressed.md` so a fix agent rewriting them (e.g., flipping `[ ]` → `[x]` to short-circuit human review, or clearing no-fix suppressions) trips `REVIEW_ERROR phase=fix reason=fix_tampered`.
+- **`Stages::Review::Triage.run!`** — wraps the triage spawn (`TRIAGE_PROTECTED_FILES = ORCHESTRATOR_OWNED + ["reviews/suppressed.md"]`). Triage may edit reviewer files in place but must NOT touch plan.md / worktree.yml / task.md / the suppression list (clearing no-fix suppressions there would defeat convergence — U3/A4). The triage-local addition leaves the shared `ORCHESTRATOR_OWNED` constant untouched; timing is safe because `strip_suppressed!` writes the list before the snapshot and `seed_from_triage!` after it. Tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 - **`Stages::Review::CiFix.run!`** — wraps each CI-fix attempt. Tampering yields `Result.new(status: :error, error_message: "ci fix agent modified protected files: …")` which the runner translates to `REVIEW_ERROR phase=ci`.
 
 ## Why these three files
@@ -36,7 +36,7 @@ Missing files are recorded as `nil` so a deletion is detected as a difference (o
 - `worktree.yml` — the runner's pointer into the project's worktree. Mutating it would re-direct subsequent spawns.
 - `task.md` — carries the marker. The orchestrator owns every terminal marker; a sub-agent writing one would short-circuit the state machine.
 
-Reviewer-owned files (`reviews/<reviewer>-NN.md`) are NOT in this set: triage's job is to edit them in place. The escalations file is added to the snapshot at fix-time so triage owns it but the fix agent cannot touch it.
+Reviewer-owned files (`reviews/<reviewer>-NN.md`) are NOT in this set: triage's job is to edit them in place. The escalations file and suppression list are added to the snapshot at fix-time so the orchestrator/triage own them but the fix agent cannot touch them.
 
 ## Tests
 

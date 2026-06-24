@@ -121,6 +121,58 @@ class RunReviewersTest < Minitest::Test
     assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
   end
 
+  # Minimal ops for reviewer_compare_base_sha, which only reads
+  # project_root to shell `git -C <root> rev-parse`.
+  BaseOps = Struct.new(:project_root)
+
+  def test_reviewer_compare_base_sha_resolves_a_real_ref
+    with_tmp_git_repo do |dir|
+      head = run!("git", "-C", dir, "rev-parse", "--verify", "HEAD").strip
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.reviewer_compare_base_sha(BaseOps.new(dir), "master")
+      end
+
+      assert_equal head, result.sha
+      refute result.degraded, "a ref that resolves is not the degraded fallback"
+      assert_empty err
+    end
+  end
+
+  def test_reviewer_compare_base_sha_falls_back_to_head_when_ref_unresolvable
+    with_tmp_git_repo do |dir|
+      head = run!("git", "-C", dir, "rev-parse", "--verify", "HEAD").strip
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.reviewer_compare_base_sha(BaseOps.new(dir), "no-such-ref")
+      end
+
+      assert_equal head, result.sha, "an unresolvable ref must fall back to the worktree HEAD"
+      assert result.degraded, "the HEAD fallback is the degraded mode that resets suppression each pass"
+      assert_match(/did not resolve/, err)
+      assert_match(/falling back to worktree HEAD/, err)
+    end
+  end
+
+  def test_reviewer_compare_base_sha_uses_unresolved_token_when_head_missing
+    # A brand-new repo with no commits: neither the compare ref nor HEAD
+    # resolves, so the base degrades to a deterministic unresolved-ref token.
+    with_tmp_dir do |dir|
+      run!("git", "-C", dir, "init", "-b", "master", "--quiet")
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.reviewer_compare_base_sha(BaseOps.new(dir), "no-such-ref")
+      end
+
+      assert_match(/\Aunresolved-[0-9a-f]{16}\z/, result.sha)
+      assert result.degraded
+      assert_match(/unresolved-ref token/, err)
+    end
+  end
+
   def test_reviewer_specs_for_normal_task_uses_standard_reviewers
     cfg = {
       "review" => {
@@ -1199,6 +1251,14 @@ class RunReviewersTest < Minitest::Test
     refute Hive::Stages::Review.reviewer_file?("errors-01.md"),
            "errors-NN.md must be classified as orchestrator-owned"
     refute Hive::Stages::Review.reviewer_file?("errors-99.md")
+    refute Hive::Stages::Review.reviewer_file?("suppressed.md"),
+           "suppressed.md must be classified as orchestrator-owned"
+    # The `suppressed.` prefix is dot-terminated, so a reviewer file that
+    # merely begins with `suppressed` is NOT swept into orchestrator-owned.
+    assert Hive::Stages::Review.reviewer_file?("suppressed-checks-01.md"),
+           "suppressed-checks-01.md is a reviewer file, not the suppression doc"
+    assert Hive::Stages::Review.reviewer_file?("suppression-audit-01.md"),
+           "suppression-* must stay an ordinary reviewer file"
     # Sanity: a real reviewer file is still recognized.
     assert Hive::Stages::Review.reviewer_file?("claude-ce-code-review-01.md")
   end

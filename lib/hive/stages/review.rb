@@ -18,6 +18,7 @@ require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
 require "hive/stages/review/orchestrator_owned"
+require "hive/stages/review/suppression"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
@@ -79,6 +80,15 @@ module Hive
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
       AcceptedFindings = Data.define(:text, :count)
+      # Resolved reviewer compare base. `degraded` is true when the
+      # configured compare ref did not resolve and we fell back to the
+      # worktree HEAD (or an unresolved-ref token). The base is resolved
+      # once per `run!` and frozen across the in-memory pass loop, so it
+      # only moves between separate `run!`/resume invocations once HEAD has
+      # advanced past the recorded base — at which point the suppression
+      # list resets and effectively cannot accumulate. The runner surfaces
+      # this per pass so an operator can tell suppression is self-disabled.
+      ReviewerCompareBase = Data.define(:sha, :degraded)
       # Auto-commit scope constants now live on Hive::Stages::AutoCommit
       # (shared with CleanExit). Aliased here as compatibility constants —
       # external readers that referenced them via Review::CONSTANT continue
@@ -157,6 +167,9 @@ module Hive
 
         ops = Hive::GitOps.new(worktree_path)
         default_branch = reviewer_compare_ref(cfg, ops)
+        compare_base = reviewer_compare_base_sha(ops, default_branch)
+        reviewer_compare_base_sha = compare_base.sha
+        @suppression_base_degraded = compare_base.degraded
 
         ctx = Hive::Stages::Review::Context.new(
           worktree_path: worktree_path,
@@ -383,6 +396,18 @@ module Hive
             end
 
             if triage_enabled?(cfg)
+              if @suppression_base_degraded && Hive::Stages::Review::Suppression.enabled?(cfg)
+                warn "[hive.review] suppression base unresolved (compare ref did not resolve); " \
+                     "the list still accumulates across passes within this run but resets across " \
+                     "run!/resume re-invocations once HEAD advances past the recorded base"
+              end
+              stripped = Hive::Stages::Review::Suppression.strip_suppressed!(
+                cfg: cfg,
+                ctx: ctx_pass,
+                base_sha: reviewer_compare_base_sha
+              )
+              warn "[hive.review] suppressed #{stripped} no-fix finding(s) before triage for pass #{format('%02d', pass)}" if stripped.positive?
+
               @current_phase = :triage
               triage_result = run_triage_with_retries(
                 cfg, ctx_pass, task, pass: pass,
@@ -408,6 +433,12 @@ module Hive
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
                          status: :review_error }
               end
+              seeded = Hive::Stages::Review::Suppression.seed_from_triage!(
+                cfg: cfg,
+                ctx: ctx_pass,
+                base_sha: reviewer_compare_base_sha
+              )
+              warn "[hive.review] seeded #{seeded} no-fix suppression(s) from triage for pass #{format('%02d', pass)}" if seeded.positive?
             else
               write_manual_escalations(ctx_pass)
             end
@@ -506,6 +537,12 @@ module Hive
             # fix agent rewriting or deleting it would erase the failure
             # provenance the user relies on for triage.
             "reviews/errors-#{format('%02d', pass)}.md",
+            # reviews/suppressed.md is the orchestrator-owned no-fix
+            # suppression list. A fix agent clearing or rewriting it (e.g.
+            # to un-suppress findings or forge new ones) would defeat the
+            # convergence guarantee — guard it like the other provenance
+            # artifacts. Triage's snapshot protects it too (U3/A4).
+            "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
@@ -723,6 +760,36 @@ module Hive
 
         warn "[hive] origin/#{branch} not found in worktree; reviewers will compare against local #{branch} (diffs may be stale)"
         branch
+      end
+
+      def reviewer_compare_base_sha(ops, ref)
+        out, err, status = Open3.capture3(
+          "git", "-C", ops.project_root,
+          "rev-parse", "--verify", "#{ref}^{commit}"
+        )
+        return ReviewerCompareBase.new(sha: out.strip, degraded: false) if status.success?
+
+        warn "[hive.review] compare ref #{ref.inspect} did not resolve for suppression binding; " \
+             "falling back to worktree HEAD (#{(err.strip.empty? ? out : err).strip})"
+        head_out, head_err, head_status = Open3.capture3(
+          "git", "-C", ops.project_root,
+          "rev-parse", "--verify", "HEAD"
+        )
+        # HEAD changes on every fix commit, so binding suppression to it
+        # (or to the unresolved-ref token below) means reset_if_base_changed!
+        # resets the list across run!/resume re-invocations once HEAD advances
+        # past the recorded base — flag it degraded so the runner can warn that
+        # suppression won't survive a resume. Within a single run! the base is
+        # resolved once and frozen across the pass loop, so the list still
+        # accumulates across passes (see ReviewerCompareBase).
+        return ReviewerCompareBase.new(sha: head_out.strip, degraded: true) if head_status.success?
+
+        warn "[hive.review] worktree HEAD did not resolve for suppression binding; " \
+             "using unresolved-ref token (#{(head_err.strip.empty? ? head_out : head_err).strip})"
+        ReviewerCompareBase.new(
+          sha: "unresolved-#{::Digest::SHA256.hexdigest(ref.to_s)[0, 16]}",
+          degraded: true
+        )
       end
 
       def mark_working(task, phase:, pass:)
@@ -1509,7 +1576,7 @@ module Hive
 
       def auto_fix_finding_line?(line)
         return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX)\b/i
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
 
         true
       end
@@ -1695,8 +1762,10 @@ module Hive
       # Comma-separated reviewer file basenames (sans extension and pass
       # suffix) for the current pass. Surfaced as the `Hive-Reviewer-Sources`
       # trailer so the metric can show which reviewers' findings drove
-      # which fix commits. Excludes orchestrator-owned files (escalations,
-      # ci-blocked, browser-, fix-guardrail-).
+      # which fix commits. Excludes orchestrator-owned files via
+      # `reviewer_file?` — the single-source `ORCHESTRATOR_OWNED_PREFIXES`
+      # list — rather than re-listing the prefixes here (the old inline
+      # list had drifted stale).
       def reviewer_sources_for(ctx)
         sources = Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")]
                   .map { |p| File.basename(p, ".md") }

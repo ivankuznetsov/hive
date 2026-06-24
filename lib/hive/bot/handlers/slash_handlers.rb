@@ -284,10 +284,10 @@ module Hive
         end
 
         def autofix(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /autofix <id|slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /autofix <id|slug>.") if target.empty?
 
-          row, error = resolve_status_row(slug)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
           # Gate on retryable_recovery? exactly as the inline 🔧 Autofix button
@@ -319,10 +319,10 @@ module Hive
         end
 
         def details(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /details <id|slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /details <id|slug>.") if target.empty?
 
-          row, error = resolve_status_row(slug)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
           stage_argv = row.stage ? [ "--stage", row.stage ] : []
@@ -355,9 +355,10 @@ module Hive
         end
 
         def resolve_numeric_target_slug(target)
-          return [ target, nil ] unless numeric_id(target)
+          id = numeric_id(target)
+          return [ target, nil ] unless id
 
-          row, error = resolve_status_row(target)
+          row, error = resolve_status_row(target, id: id)
           return [ nil, error ] if error
 
           [ row.slug, nil ]
@@ -376,11 +377,11 @@ module Hive
         #                           project (slugs are date+hex so this is
         #                           rare, but a silent wrong-project dispatch
         #                           would be worse than asking the operator).
-        def resolve_status_row(target)
+        def resolve_status_row(target, id: numeric_id(target))
           snapshot = @status_snapshot_provider.call
           return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
 
-          if (id = numeric_id(target))
+          if id
             matches = Array(snapshot).select { |row| row.respond_to?(:id) && row.id == id }
             return [ nil, "No active task ##{id} — was it archived?" ] if matches.empty?
 
@@ -396,8 +397,8 @@ module Hive
         rescue StandardError
           # The production provider just reads a cached ivar and cannot raise,
           # but a future provider that does I/O must never crash the poll loop
-          # (an escape here would skip write_last_seen and let Telegram
-          # redeliver the update). Degrade to a soft retry hint instead.
+          # (an escape here would skip write_last_seen_update_id and let
+          # Telegram redeliver the update). Degrade to a soft retry hint instead.
           [ nil, "Status lookup failed — try again in a moment." ]
         end
       end

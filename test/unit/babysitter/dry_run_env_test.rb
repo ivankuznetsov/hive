@@ -139,6 +139,48 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  # Companion to the real-binary canonicalization test above, but for the *interpreter*.
+  # The overlay shim and the stub it hands off to are both Ruby scripts; a
+  # `#!/usr/bin/env ruby` shebang resolves `ruby` from PATH at exec time. With a relative
+  # PATH component and the agent chdir'd into the worktree, a worktree-controlled
+  # `bin/ruby` would be picked as the interpreter and run arbitrary code — defeating the
+  # canonicalized HIVE_BABYSITTER_REAL_* pins entirely. Pinning the shim shebang and the
+  # stub handoff to the running Ruby's absolute path must keep that poison out.
+  def test_overlay_shims_pin_ruby_interpreter_against_worktree_cwd_ruby
+    with_tmp_dir do |dir|
+      parent = File.join(dir, "parent")
+      worktree = File.join(dir, "worktree")
+      parent_bin = File.join(parent, "bin")
+      worktree_bin = File.join(worktree, "bin")
+      FileUtils.mkdir_p([ parent_bin, worktree_bin ])
+      recording_binary(parent_bin, "git")
+      recording_binary(parent_bin, "gh")
+      pwn_ruby = File.join(worktree, "pwn-ruby-ran")
+      executable_touch_binary(worktree_bin, "ruby", pwn_ruby)
+
+      Dir.chdir(parent) do
+        with_env("PATH" => [ "bin", ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+          Hive::Babysitter::DryRunEnv.with_env(worktree) do
+            Dir.chdir(worktree) do
+              _out, git_err, git_status = Open3.capture3("git", "status", "--short")
+              _out, gh_err, gh_status = Open3.capture3("gh", "repo", "view", "owner/repo")
+
+              assert git_status.success?, git_err
+              assert gh_status.success?, gh_err
+            end
+          end
+        end
+      end
+
+      refute_path_exists pwn_ruby,
+                         "worktree-controlled bin/ruby interpreted a dry-run shim or its stub"
+      real_invocations = File.read(File.join(parent_bin, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")

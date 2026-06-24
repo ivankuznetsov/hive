@@ -477,7 +477,7 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_includes result.text, "/status"
-    assert_includes result.text, "/approve <slug>"
+    assert_includes result.text, "/approve <id|slug>"
   end
 
   def test_legacy_callback_update_without_with_still_dispatches

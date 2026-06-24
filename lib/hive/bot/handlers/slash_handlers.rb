@@ -265,8 +265,8 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea [text], /answer <slug>, " \
-                  "/approve <slug>, /autofix <slug>, /details <slug>, /done, /help"
+            text: "Commands: /status [project], /queue, /idea [text], /answer <id|slug>, " \
+                  "/approve <id|slug>, /autofix <id|slug>, /details <id|slug>, /done, /help"
           )
         end
 
@@ -285,7 +285,7 @@ module Hive
 
         def autofix(update)
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /autofix <slug>.") if slug.empty?
+          return @result_class.new(action: :reply, text: "Use /autofix <id|slug>.") if slug.empty?
 
           row, error = resolve_status_row(slug)
           return @result_class.new(action: :reply, text: error) if error
@@ -320,7 +320,7 @@ module Hive
 
         def details(update)
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /details <slug>.") if slug.empty?
+          return @result_class.new(action: :reply, text: "Use /details <id|slug>.") if slug.empty?
 
           row, error = resolve_status_row(slug)
           return @result_class.new(action: :reply, text: error) if error

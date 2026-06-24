@@ -71,6 +71,10 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = @handlers.help(Update.new(text: "/help"))
 
     assert_includes result.text, "/status [project]"
+    assert_includes result.text, "/answer <id|slug>"
+    assert_includes result.text, "/approve <id|slug>"
+    assert_includes result.text, "/autofix <id|slug>"
+    assert_includes result.text, "/details <id|slug>"
   end
 
   def test_status_with_json_flag_sets_format_json
@@ -485,7 +489,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = handlers.autofix(Update.new(text: "/autofix", chat_id: 1))
 
     assert_equal :reply, result.action
-    assert_equal "Use /autofix <slug>.", result.text
+    assert_equal "Use /autofix <id|slug>.", result.text
   end
 
   def test_autofix_with_unknown_slug_replies_with_archive_hint
@@ -586,7 +590,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = handlers.details(Update.new(text: "/details", chat_id: 1))
 
     assert_equal :reply, result.action
-    assert_equal "Use /details <slug>.", result.text
+    assert_equal "Use /details <id|slug>.", result.text
   end
 
   def test_details_with_unknown_slug_replies_with_archive_hint

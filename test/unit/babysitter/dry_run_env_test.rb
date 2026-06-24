@@ -1,5 +1,6 @@
 require "test_helper"
 require "open3"
+require "pty"
 require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
@@ -94,7 +95,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations,
                       "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
                       "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
-                      "-c gpg.ssh.program=false status --short"
+                      "-c gpg.ssh.program=false --no-pager status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
       refute_includes real_invocations, "pwn-git"
       refute_includes real_invocations, "pwn-gh"
@@ -873,16 +874,42 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # rewrite `.git/index` to refresh stat data; the stub sets GIT_OPTIONAL_LOCKS=0 to keep
       # a dry-run read side-effect-free. Record the env the real binary actually receives so
       # deleting that guard (stub: `ENV["GIT_OPTIONAL_LOCKS"] = "0"`) turns this test red.
-      real_git = recording_env_binary(dir, "real-git", %w[GIT_OPTIONAL_LOCKS])
+      real_git = recording_env_binary(dir, "real-git", %w[GIT_OPTIONAL_LOCKS GIT_PAGER PAGER])
       env = {
         "HIVE_BABYSITTER_REAL_GIT" => real_git,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GIT_PAGER" => "touch git-pager-pwned",
+        "PAGER" => "touch pager-pwned"
       }
 
       _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
 
       assert status.success?, err
-      assert_equal "GIT_OPTIONAL_LOCKS=0\n", File.read(File.join(dir, "env.log"))
+      assert_equal "GIT_OPTIONAL_LOCKS=0\nGIT_PAGER=<unset>\nPAGER=<unset>\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_git_stub_forces_no_pager_for_tty_passthrough
+    with_tmp_git_repo do |dir|
+      marker = File.join(dir, "pager-ran")
+      pager = executable_touch_binary(
+        dir,
+        "pager",
+        marker,
+        "STDIN.each_line { |line| STDOUT.write(line) }"
+      )
+      run!("git", "-C", dir, "config", "core.pager", pager)
+
+      env = real_git_env(dir).merge(
+        "GIT_PAGER" => pager,
+        "PAGER" => pager
+      )
+
+      out, status = capture_pty_stub(env, "git", "-C", dir, "log", "--oneline")
+
+      assert status.success?, out
+      assert_includes out, "initial"
+      refute_path_exists marker, "git pager executed during dry-run passthrough"
     end
   end
 
@@ -1174,7 +1201,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       "-c", "gpg.program=false",
       "-c", "gpg.openpgp.program=false",
       "-c", "gpg.x509.program=false",
-      "-c", "gpg.ssh.program=false"
+      "-c", "gpg.ssh.program=false",
+      "--no-pager"
     ] + passthrough).join(' ')}"
   end
 
@@ -1202,6 +1230,31 @@ class BabysitterDryRunEnvTest < Minitest::Test
     RUBY
     FileUtils.chmod("+x", path)
     path
+  end
+
+  def capture_pty_stub(env, binary, *args)
+    output = +""
+    status = nil
+
+    PTY.spawn(env, stub_path(binary), *args) do |reader, writer, pid|
+      writer.close
+      output = Timeout.timeout(STUB_HANG_TIMEOUT_SEC) do
+        buffer = +""
+        begin
+          loop { buffer << reader.readpartial(4096) }
+        rescue EOFError, Errno::EIO
+          # PTY EOF on Linux commonly surfaces as EIO after the child closes the slave.
+        end
+        _pid, status = Process.waitpid2(pid)
+        buffer
+      end
+    rescue Timeout::Error
+      Process.kill("TERM", pid)
+      Process.wait(pid)
+      raise
+    end
+
+    [ output, status ]
   end
 
   def cache_writing_gh_binary(dir, name)

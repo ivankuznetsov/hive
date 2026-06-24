@@ -46,6 +46,10 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
         id: id, display_name: display_name)
   end
 
+  def live_retry_row(slug: "stuck-task-260525-abcd", stage: "6-review", marker: "review_error")
+    row(action: "agent_running", marker: marker, slug: slug, stage: stage)
+  end
+
   def dispatcher(path: nil, now: Time.utc(2026, 5, 25, 10, 0, 0), daemon_enabled: ->(_project) { false },
                  telegram: self.telegram, fresh_install: false, conversation_store: nil)
     @clock = now
@@ -461,6 +465,58 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 1, telegram.messages.size,
                  "Transient agent_running flicker must NOT produce a false Recovered + re-stuck pair"
     refute_match(/Recovered/, telegram.messages.first[:text])
+  end
+
+  def test_live_retry_holds_recovered_and_failure_dedupes_before_final_recovery
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ])
+      @clock += 61
+      d.process_rows([ live ])
+
+      assert_equal 1, telegram.messages.size, "live retry must not send Recovered after grace"
+      refute_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
+                 "suppressed live retry must retain the original alert entry"
+
+      d.process_rows([ stuck ])
+      assert_equal 1, telegram.messages.size, "retry failure must dedupe the original stuck alert"
+
+      d.process_rows([])
+      @clock += 61
+      d.process_rows([])
+
+      assert_equal 2, telegram.messages.size
+      assert_equal "✅ Recovered: \"#42 Readable Recovery\" — Review", telegram.messages.last[:text]
+    end
+  end
+
+  def test_live_retry_success_fires_recovered_once_after_lock_disappears
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ])
+      @clock += 61
+      d.process_rows([ live ])
+      d.process_rows([])
+      d.process_rows([])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size
+      assert_equal "✅ Recovered: \"#42 Readable Recovery\" — Review", recovered.first[:text]
+      assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
+                 "successful Recovered delivery must remove the original alert entry"
+    end
   end
 
   def test_non_recovery_row_disappears_silently_drops_entry

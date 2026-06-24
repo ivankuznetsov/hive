@@ -1,4 +1,5 @@
 require "time"
+require "set"
 require "hive/config"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
@@ -36,6 +37,7 @@ module Hive
       end
 
       def process_rows(rows)
+        live_identities = live_recovery_identities(rows)
         current = current_notifications(rows)
         if @alert_store.fresh_install?
           immediate, seedable = current.partition do |_fingerprint, payload|
@@ -46,7 +48,7 @@ module Hive
           process_current(immediate)
           return
         end
-        process_recoveries(current)
+        process_recoveries(current, live_identities)
         process_current(current)
       end
 
@@ -130,7 +132,7 @@ module Hive
         @logger.event(:fresh_install_seeded, fingerprint_count: current.size)
       end
 
-      def process_recoveries(current)
+      def process_recoveries(current, live_identities)
         @alert_store.each_fingerprint do |fingerprint|
           next if current.key?(fingerprint)
 
@@ -148,6 +150,9 @@ module Hive
             unless absence_passed_grace?(entry, fingerprint)
               next
             end
+            # NotificationBuilders suppresses agent_running rows, so a retry in
+            # flight is absent from `current` even though it has not recovered.
+            next if live_identities.include?(recovery_identity(row))
 
             if send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
@@ -268,6 +273,12 @@ module Hive
 
       def recovery_identity(row)
         [ row.project.to_s, row.slug.to_s, row.stage.to_s ]
+      end
+
+      def live_recovery_identities(rows)
+        Array(rows).each_with_object(Set.new) do |row, identities|
+          identities.add(recovery_identity(row)) if row.action.to_s == "agent_running"
+        end
       end
 
       def reminder_due?(entry, row)

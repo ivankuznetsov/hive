@@ -357,6 +357,14 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     refute_includes result.text, "No diagnostic available"
   end
 
+  def test_show_details_default_snapshot_provider_replies_gracefully
+    result = @handlers.handle(:callback_show_details, update("details:alpha:gone-task-260518-dead"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "no longer active"
+    refute_includes result.text, "No diagnostic available"
+  end
+
   def test_show_details_replies_soft_retry_when_snapshot_is_loading
     handlers = handlers_with_snapshot(nil)
 

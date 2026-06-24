@@ -368,6 +368,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
   end
 
+  def test_details_reply_truncates_oversized_summary_without_diagnostic
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", display_name: "x" * 6000,
+          workflow: "dispatch", stage: "2-gather", diagnostic: nil)
+    )
+
+    assert_operator text.length, :<=, Hive::Bot::NotificationBuilders::TELEGRAM_MESSAGE_MAX_CHARS
+    assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
+  end
+
   def test_compacted_callback_round_trips
     long_slug = "slug-" + ("a" * 80)
     notification = Hive::Bot::NotificationBuilders.build(

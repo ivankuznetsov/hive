@@ -412,7 +412,7 @@ module Hive
       end
 
       def details_hint(row)
-        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" && row.marker.to_s == "waiting"
+        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" && row.marker.to_s == "waiting" # coding-scoped: plan approval pause only exists in coding workflow
           plan = present_value(row, :state_file) || File.join(present_value(row, :folder).to_s, "plan.md")
           return "Plan draft: #{plan}\nApprove when ready with /approve #{row.slug}."
         end
@@ -432,7 +432,7 @@ module Hive
           return "Open on a laptop to inspect the fix before continuing."
         end
 
-        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
+        if Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting" # coding-scoped: Telegram answer flow edits coding brainstorm.md
           return "Reply /answer #{row.slug} to provide input."
         end
 

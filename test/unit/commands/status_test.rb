@@ -270,6 +270,8 @@ class CommandsStatusTest < Minitest::Test
                    "marker=none is incoherent needs_input, not a pending brainstorm question"
       assert_equal "needs_input", tasks.fetch(done_slug).fetch("action")
       assert_equal "complete", tasks.fetch(done_slug).fetch("marker")
+      assert_equal 0, tasks.fetch(done_slug).fetch("unanswered_questions"),
+                   "marker=complete is incoherent needs_input, not a pending brainstorm question"
       assert_equal "needs_input", tasks.fetch(waiting_slug).fetch("action")
       assert_equal 1, tasks.fetch(waiting_slug).fetch("unanswered_questions")
 
@@ -281,6 +283,40 @@ class CommandsStatusTest < Minitest::Test
       assert_includes out, waiting_slug
       refute_includes out, none_slug
       refute_includes out, done_slug
+    end
+  end
+
+  # When a project's ONLY task is an incoherent needs_input row, the text
+  # renderer's emptiness guard now keys on render_rows (post-incoherent
+  # filter), so the project reports "no active tasks" and the slug never
+  # appears. The companion test above always keeps a genuine waiting row,
+  # so this sole-incoherent branch (status.rb's render_rows.empty? guard)
+  # needs its own coverage.
+  def test_text_status_reports_no_active_tasks_when_only_incoherent_rows
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      none_slug = "brainstorm-only-incoherent-260624-aaaa"
+      none_folder = File.join(hive_state, "stages", "2-brainstorm", none_slug)
+      FileUtils.mkdir_p(none_folder)
+      File.write(File.join(none_folder, "brainstorm.md"),
+                 "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+
+      project = status_project(project_root, hive_state)
+      # Precondition: the sole row really is an incoherent needs_input row.
+      tasks = Hive::Commands::Status.new.json_payload([ project ])
+                                   .fetch("projects").first.fetch("tasks")
+      assert_equal 1, tasks.size, "fixture must produce exactly one task"
+      assert_equal "needs_input", tasks.first.fetch("action")
+      assert_equal "none", tasks.first.fetch("marker")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+
+      assert_includes out, "no active tasks",
+                      "a project whose only row is incoherent reports no active tasks"
+      refute_includes out, none_slug, "the incoherent row's slug must not render"
+      refute_includes out, "Needs your input", "no answer group when every row is filtered"
     end
   end
 
@@ -727,7 +763,12 @@ class CommandsStatusTest < Minitest::Test
     with_tmp_dir do |dir|
       path = File.join(dir, "brainstorm.md")
       File.write(path, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n")
+      # marker_name must be a real input marker (and workflow coding /
+      # stage 2-brainstorm) so the guards in unanswered_question_count pass
+      # and execution reaches the BrainstormParser.parse stub — otherwise the
+      # method short-circuits to 0 before the rescue path it pins is exercised.
       row = { action_key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+              marker_name: "waiting", workflow: "coding",
               stage: "2-brainstorm", state_file: path }
       with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise "boom" }) do
         assert_equal 0, Hive::Commands::Status.new.send(:unanswered_question_count, row)

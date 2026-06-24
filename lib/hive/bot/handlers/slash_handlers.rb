@@ -319,14 +319,7 @@ module Hive
           row, error = resolve_status_row(slug)
           return @result_class.new(action: :reply, text: error) if error
 
-          stage_argv = row.stage ? [ "--stage", row.stage ] : []
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: row.project,
-            slug: row.slug,
-            command_argv: [ "hive", "status", "--diagnose", row.slug,
-                            "--project", row.project, *stage_argv, "--json" ]
-          )
+          @result_class.new(action: :reply, text: Hive::Bot::NotificationBuilders.details_reply(row))
         end
 
         private

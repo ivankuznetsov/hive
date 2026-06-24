@@ -103,7 +103,9 @@ class HiveBotSlashHandlersTest < Minitest::Test
     def clear(chat_id:, slug:) = (@cleared << [ chat_id, slug ])
   end
 
-  Row = Struct.new(:project, :slug, :stage, :marker, :attrs, :diagnostic, keyword_init: true)
+  Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :attrs, :folder, :state_file,
+                   :action, :action_label, :suggested_command, :next_action, :diagnostic,
+                   :display_name, keyword_init: true)
 
   def autofix_handlers(snapshot)
     Hive::Bot::Handlers::SlashHandlers.new(
@@ -119,8 +121,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
     project: "hive",
     slug: "stuck-260525-abcd",
     stage: "6-review",
+    workflow: "coding",
     marker: "review_error",
     attrs: { "phase" => "fix", "pass" => "2" },
+    folder: "/tmp/stuck-260525-abcd",
+    action: "recover_review",
+    action_label: "Needs recovery",
     diagnostic: { "suggested_next_action" => { "kind" => "retry" } }
   ).freeze
 
@@ -128,8 +134,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
     project: "hive",
     slug: "stale-260525-abcd",
     stage: "4-execute",
+    workflow: "coding",
     marker: "execute_stale",
     attrs: {},
+    folder: "/tmp/stale-260525-abcd",
+    action: "recover_execute",
+    action_label: "Needs recovery",
     diagnostic: nil
   ).freeze
 
@@ -320,15 +330,49 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(%r{/details norefry-260525-abcd}, result.text)
   end
 
-  def test_details_dispatches_status_diagnose_argv
+  def test_details_replies_with_rendered_row_summary
     handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
 
     result = handlers.details(Update.new(text: "/details stuck-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal "hive", result.project
-    assert_equal [ "hive", "status", "--diagnose", "stuck-260525-abcd",
-                   "--project", "hive", "--stage", "6-review", "--json" ], result.command_argv
+    assert_equal :reply, result.action
+    assert_nil result.command_argv
+    assert_includes result.text, "Stuck… — hive/stuck-260525-abcd (6-review)"
+    assert_includes result.text, "Action: Needs recovery"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_details_for_plan_waiting_slug_points_at_plan_draft
+    plan_row = Row.new(
+      project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
+      state_file: "/tmp/plan-task-260525-abcd/plan.md",
+      action: "needs_input", action_label: "Needs your input", diagnostic: nil
+    )
+    handlers = autofix_handlers([ plan_row ])
+
+    result = handlers.details(Update.new(text: "/details plan-task-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Plan draft: /tmp/plan-task-260525-abcd/plan.md"
+    assert_includes result.text, "/approve plan-task-260525-abcd"
+    refute_match(/diagnostic/i, result.text)
+  end
+
+  def test_details_for_recovery_slug_appends_diagnostic
+    diagnostic_row = Row.new(
+      project: "hive", slug: "stuck-260525-abcd", stage: "6-review", workflow: "coding",
+      marker: "review_error", attrs: { "pass" => "2" }, folder: "/tmp/stuck-260525-abcd",
+      action: "recover_review", action_label: "Needs recovery",
+      diagnostic: { "summary" => "REVIEW_ERROR pass=2", "detail" => "review fix failed" }
+    )
+    handlers = autofix_handlers([ diagnostic_row ])
+
+    result = handlers.details(Update.new(text: "/details stuck-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "REVIEW_ERROR pass=2"
+    assert_includes result.text, "review fix failed"
   end
 
   def test_details_without_slug_arg_replies_with_usage_hint

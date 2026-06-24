@@ -6,12 +6,14 @@ module Hive
   module Bot
     class Logger
       SCHEMA = "hive-bot-log".freeze
-      SCHEMA_VERSION = 2
+      SCHEMA_VERSION = 3
+      LEVEL_NAMES = %i[debug info warn error].freeze
 
       EVENTS = %i[
         bot_started
         bot_stopping
         poll_failure
+        poll_unhealthy
         poll_schema_skew
         update_received
         update_rejected_unauthorized
@@ -43,6 +45,28 @@ module Hive
         fatal
       ].freeze
 
+      LEVELS = {
+        notification_skipped_dedupe: :debug,
+        notification_skipped_backoff: :debug,
+        poll_failure: :warn,
+        poll_unhealthy: :warn,
+        poll_schema_skew: :warn,
+        update_rejected_unauthorized: :warn,
+        dispatch_result_rejected_unauthorized: :warn,
+        answer_lock_contention: :warn,
+        answer_slot_missing: :warn,
+        envelope_parse_failure: :warn,
+        send_failure: :warn,
+        callback_malformed: :warn,
+        pid_file_corrupted: :warn,
+        unknown_stage_label: :warn,
+        alert_store_corrupt: :warn,
+        deprecated_config: :warn,
+        update_nudge_error: :warn,
+        transcription_failed: :warn,
+        fatal: :error
+      }.freeze
+
       attr_reader :path
 
       def initialize(path:, max_bytes: 10_485_760, max_files: 5)
@@ -58,17 +82,24 @@ module Hive
         warn "hive bot: log file #{path} is unwritable (#{e.message}); falling back to stderr"
       end
 
-      def event(name, **attrs)
+      def event(name, level: nil, category: nil, **attrs)
         unless EVENTS.include?(name)
           raise ArgumentError, "unknown bot log event: #{name.inspect} (valid: #{EVENTS.inspect})"
+        end
+
+        level = (level || LEVELS.fetch(name, :info)).to_sym
+        unless LEVEL_NAMES.include?(level)
+          raise ArgumentError, "invalid bot log level: #{level.inspect} (valid: #{LEVEL_NAMES.inspect})"
         end
 
         payload = {
           ts: Time.now.utc.iso8601,
           schema: SCHEMA,
           schema_version: SCHEMA_VERSION,
-          event: name.to_s
+          event: name.to_s,
+          level: level.to_s
         }.merge(attrs.transform_keys(&:to_sym))
+        payload[:category] = category.to_s unless category.nil?
 
         line = JSON.generate(payload)
         if @stderr_fallback

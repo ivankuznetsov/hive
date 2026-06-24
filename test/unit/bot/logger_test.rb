@@ -25,8 +25,9 @@ class HiveBotLoggerTest < Minitest::Test
       assert_equal 2, lines.size
       first = JSON.parse(lines[0])
       assert_equal "hive-bot-log", first["schema"]
-      assert_equal 2, first["schema_version"]
+      assert_equal 3, first["schema_version"]
       assert_equal "bot_started", first["event"]
+      assert_equal "info", first["level"]
       assert_equal "0.1.0", first["version"]
       assert_match(/^\d{4}-\d{2}-\d{2}T/, first["ts"])
     end
@@ -40,7 +41,7 @@ class HiveBotLoggerTest < Minitest::Test
   end
 
   def test_every_documented_event_is_accepted_and_schema_valid
-    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__))))
+    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v3.json", __dir__))))
 
     with_log do |logger, path|
       Hive::Bot::Logger::EVENTS.each { |event| logger.event(event) }
@@ -52,6 +53,51 @@ class HiveBotLoggerTest < Minitest::Test
         payload = JSON.parse(line)
         assert schema.valid?(payload), "bot log line should match schema: #{payload.inspect}"
       end
+    end
+  end
+
+  def test_v2_schema_remains_for_back_compat
+    schema_doc = JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__)))
+    schema = JSONSchemer.schema(schema_doc)
+    historical_line = {
+      "ts" => "2026-06-01T12:00:00Z",
+      "schema" => "hive-bot-log",
+      "schema_version" => 2,
+      "event" => "poll_failure"
+    }
+
+    assert_equal 2, schema_doc.fetch("properties").fetch("schema_version").fetch("const")
+    refute_includes schema_doc.fetch("properties").fetch("event").fetch("enum"), "poll_unhealthy"
+    assert schema.valid?(historical_line), "historical v2 bot log line should remain valid"
+  end
+
+  def test_default_levels_come_from_event_map
+    with_log do |logger, path|
+      logger.event(:poll_failure)
+      logger.event(:notification_skipped_dedupe)
+      logger.event(:bot_started)
+      logger.close
+
+      levels = File.read(path).lines.map { |line| JSON.parse(line).fetch("level") }
+      assert_equal %w[warn debug info], levels
+    end
+  end
+
+  def test_explicit_level_and_category_override_defaults
+    with_log do |logger, path|
+      logger.event(:poll_failure, level: :debug, category: :noise)
+      logger.close
+
+      payload = JSON.parse(File.read(path))
+      assert_equal "debug", payload["level"]
+      assert_equal "noise", payload["category"]
+    end
+  end
+
+  def test_invalid_level_raises_argument_error
+    with_log do |logger, _path|
+      err = assert_raises(ArgumentError) { logger.event(:bot_started, level: :verbose) }
+      assert_match(/invalid bot log level/, err.message)
     end
   end
 

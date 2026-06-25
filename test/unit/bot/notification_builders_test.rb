@@ -325,9 +325,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   end
 
   def test_archived_error_marker_is_suppressed
+    logger = StubLogger.new
     assert_nil Hive::Bot::NotificationBuilders.build(
-      row(action: "archived", marker: "error", stage: "9-done")
+      row(action: "archived", marker: "error", stage: "9-done"), logger: logger
     )
+    # The archived contradiction must stay diagnosable: the skip log fires with
+    # the row's own action ("archived"), not a hardcoded "agent_running". A
+    # regression that narrowed the log gate to agent_running, or hardcoded the
+    # action, would drop this — line coverage alone (shared with the
+    # agent_running gate) would not catch it.
+    assert_live_agent_skip_logged(logger, marker: "error", action: "archived", stage: "9-done")
   end
 
   def test_bug_9281_agent_running_error_fixture_is_suppressed_and_logged_once

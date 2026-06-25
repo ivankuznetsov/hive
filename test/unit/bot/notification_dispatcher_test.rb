@@ -254,6 +254,12 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
     assert_equal 4, telegram.messages.size,
                  "execute_waiting rows are genuine input markers and must not be suppressed"
+    telegram.messages.each do |m|
+      assert_includes m[:text], "Execute paused",
+                      "execute_waiting rows must be rephrased to the operator-facing label, not just counted"
+      refute_includes m[:text], "execute_waiting",
+                      "the raw execute_waiting marker name must not re-leak into the message text"
+    end
     skipped = logger.events.select { |name, _attrs| name == :notification_skipped_incoherent }
     assert_equal 23, skipped.size, "22 none rows plus 1 complete row should be skipped"
     assert_equal({ "none" => 22, "complete" => 1 }, skipped.map { |_name, attrs| attrs[:marker] }.tally)

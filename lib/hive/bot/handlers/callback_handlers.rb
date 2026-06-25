@@ -114,8 +114,45 @@ module Hive
           # reclassifies as ready_to_develop on the next status poll, so it
           # resurfaces driveable rather than stranding. The command shape is
           # validated BEFORE the flip (PlanApproval.rewrite_to_develop), so a
-          # malformed row leaves the marker at `:waiting` for inspection.
-          argv = Shellwords.split(Hive::Daemon::PlanApproval.prepare(command, row.state_file))
+          # malformed row leaves the marker at `:waiting` for inspection. A row
+          # that already raced to `:complete` carries a `hive develop ...`
+          # command, which prepare accepts idempotently and dispatches.
+          #
+          # The local rescues wrap ONLY prepare (not split_callback above), so a
+          # malformed callback still routes to handle's generic "Bot got
+          # confused" while corrupt plan state gets its own actionable reply.
+          begin
+            argv = Shellwords.split(Hive::Daemon::PlanApproval.prepare(command, row.state_file))
+          rescue Hive::Daemon::PlanApproval::NotApprovable
+            return @result_class.new(action: :reply, text: "Plan is no longer waiting for approval. Reopen /queue.")
+          rescue ArgumentError => e
+            # A corrupt plan.md (invalid UTF-8 bytes break Hive::Markers.current)
+            # or a malformed queued command (rewrite_to_develop rejects a verb
+            # that is neither plan nor develop) — both raise BEFORE the marker
+            # flip, so the plan marker is still `:waiting` and inspectable.
+            # Distinguish this corrupt-state from the handler-level malformed-
+            # callback generic so the operator gets an actionable next step.
+            @logger&.event(:callback_plan_state_corrupt, project: project, slug: slug, stage: stage,
+                                                         error_class: e.class.name, message: e.message)
+            return @result_class.new(
+              action: :reply,
+              text: "Couldn't read this plan's approval state — plan.md may be corrupt or its queued " \
+                    "command is malformed. Open it on a laptop."
+            )
+          rescue SystemCallError, IOError => e
+            # The marker write itself failed (read-only / full state dir). Without
+            # this, the error escapes to the poll loop's generic rescue, which
+            # logs :fatal and sends nothing — the operator sees the acked spinner
+            # clear, then silence. Reply with an actionable next step instead.
+            @logger&.event(:callback_marker_write_failed, project: project, slug: slug, stage: stage,
+                                                           error_class: e.class.name, message: e.message)
+            return @result_class.new(
+              action: :reply,
+              text: "Couldn't record the approval (#{e.class}) - the task's state dir may be read-only or full. " \
+                    "Open it on a laptop."
+            )
+          end
+
           ensure_flag!(argv, "--project", project)
           argv << "--json" unless argv.include?("--json")
           @result_class.new(
@@ -123,20 +160,6 @@ module Hive
             project: project,
             slug: slug,
             command_argv: argv
-          )
-        rescue Hive::Daemon::PlanApproval::NotApprovable
-          @result_class.new(action: :reply, text: "Plan is no longer waiting for approval. Reopen /queue.")
-        rescue SystemCallError, IOError => e
-          # The marker write itself failed (read-only / full state dir). Without
-          # this, the error escapes to the poll loop's generic rescue, which
-          # logs :fatal and sends nothing — the operator sees the acked spinner
-          # clear, then silence. Reply with an actionable next step instead.
-          @logger&.event(:callback_marker_write_failed, project: project, slug: slug, stage: stage,
-                                                         error_class: e.class.name, message: e.message)
-          @result_class.new(
-            action: :reply,
-            text: "Couldn't record the approval (#{e.class}) - the task's state dir may be read-only or full. " \
-                  "Open it on a laptop."
           )
         end
 

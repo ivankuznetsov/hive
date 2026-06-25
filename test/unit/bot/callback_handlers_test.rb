@@ -370,16 +370,67 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     end
   end
 
-  def test_approve_plan_callback_allows_already_complete_marker
-    with_plan_row(:complete) do |row, state_file|
+  def test_approve_plan_callback_dispatches_develop_for_already_advanced_row
+    # Realistic race: between rendering the plan-waiting Approve button and the
+    # operator tapping it, the plan advanced to :complete (daemon auto-approve
+    # or a manual advance). TaskAction then reclassifies the row as
+    # ready_to_develop, so its suggested_command is now `hive develop ...`.
+    # The stale Approve tap must dispatch that valid develop, not fall to
+    # handle's generic "Bot got confused" rescue. (The previous fixture used an
+    # impossible :complete row carrying a `hive plan` command.)
+    Dir.mktmpdir("bot-plan-approve-advanced") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :complete)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+        marker: "complete", attrs: {}, state_file: state_file,
+        action: "ready_to_develop", action_label: "Ready to develop",
+        suggested_command: "hive develop plan-task-260624-abcd --from 3-plan --project hive"
+      )
+
       result = handlers_with_rows([ row ]).handle(
         :callback_approve_plan,
         update("approve_plan:hive:plan-task-260624-abcd:3-plan")
       )
 
       assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-abcd", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv
+      )
       assert_equal :complete, Hive::Markers.current(state_file).name
-      assert_equal "develop", result.command_argv[1]
+    end
+  end
+
+  def test_approve_plan_keeps_waiting_marker_and_replies_corrupt_on_malformed_command
+    # validate-before-flip invariant: a row whose suggested_command is neither
+    # `hive plan` nor `hive develop` (corrupt state) is rejected by
+    # rewrite_to_develop BEFORE the marker flip, so the plan marker must stay
+    # :waiting for inspection and the operator gets an actionable corrupt-state
+    # reply — not the generic "Bot got confused".
+    Dir.mktmpdir("bot-plan-approve-corrupt") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input",
+        suggested_command: "hive review plan-task-260624-abcd --from 3-plan --project hive"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :reply, result.action
+      assert_match(/plan\.md may be corrupt/, result.text)
+      assert_equal :waiting, Hive::Markers.current(state_file).name,
+                   "command validation must happen before the marker flip"
+      assert(@logger.events.any? { |e| e[:name] == :callback_plan_state_corrupt },
+             "a corrupt-state approval must be logged for an audit trail")
     end
   end
 

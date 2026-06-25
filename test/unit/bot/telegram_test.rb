@@ -240,6 +240,10 @@ class HiveBotTelegramTest < Minitest::Test
     attrs = unhealthy_events.first.last
     assert_equal :warn, attrs[:level]
     assert_equal 2, attrs[:consecutive_failures]
+    # 0 because the injected clock is frozen across all three polls — this
+    # escalation is driven by the consecutive-failure threshold, not silence,
+    # so the elapsed-silence value is incidental here (the meaningful
+    # seconds_since_success == 11 assertion lives in the silence test below).
     assert_equal 0, attrs[:seconds_since_success]
     assert_equal "consecutive", attrs[:reason]
   end
@@ -311,6 +315,31 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal "silence", attrs[:reason]
     assert_equal 1, attrs[:consecutive_failures]
     assert_equal 11, attrs[:seconds_since_success]
+  end
+
+  def test_build_update_parse_failures_never_escalate_poll_health
+    # A per-update parse failure happens AFTER a successful get_updates fetch,
+    # so it must NOT count toward poll-health (see the deliberate comment in
+    # Telegram#build_update's rescue). Inject a low threshold + frozen clock and
+    # feed several malformed updates in ONE poll: if a refactor ever routed the
+    # build_update rescue through emit_poll_unhealthy_if_needed, the 2nd failure
+    # would trip max_consecutive and page. Pin that it never does while
+    # poll_failure is still logged per malformed update.
+    exploding = Class.new do
+      def update_id
+        raise RuntimeError, "cannot decode"
+      end
+    end
+    api = FakeApi.new(updates: [ exploding.new, exploding.new, exploding.new ])
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+
+    assert_equal [], telegram(api, poll_health: health).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal %i[poll_failure poll_failure poll_failure], logger.events.map(&:first),
+                 "each malformed update must log poll_failure"
+    assert_empty logger.events.select { |name, _attrs| name == :poll_unhealthy },
+                 "build_update parse failures must never escalate poll-health, even past max_consecutive"
   end
 
   def test_poll_updates_accepts_object_shaped_updates

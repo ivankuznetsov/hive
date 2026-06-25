@@ -867,6 +867,34 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 2, events_named(:notification_skipped_backoff).size
   end
 
+  # Counterpart to the "row leaves current" re-arm above: when a persistent
+  # fingerprint NEVER leaves `current`, a SECOND backoff episode (the retry
+  # fails again, re-arming a fresh, longer backoff window) does NOT re-log the
+  # skip line. @backoff_logged is pruned only on disappearance (see
+  # reconcile_skip_log_state), so the within-`current` state cycle stays
+  # throttled to the first transition. This is the deliberate U3 tradeoff
+  # (in-memory Sets, no explicit cross-clearing on retry/recovery): pin `== 1`,
+  # not `== 2`. Changing this would require cross-clearing the Sets.
+  def test_backoff_skip_stays_suppressed_across_a_second_episode_within_current
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+    waiting = row
+
+    d.process_rows([ waiting ]) # tick 1: send fails → episode 1, 60s backoff
+    logger.events.clear
+    d.process_rows([ waiting ]) # tick 2: within backoff → skip logged ONCE
+    @clock += 61
+    d.process_rows([ waiting ]) # tick 3: backoff expired → retry fails → episode 2, 120s backoff
+    @clock += 30
+    d.process_rows([ waiting ]) # tick 4: within the 2nd backoff window → skip SUPPRESSED
+
+    assert_equal 1, events_named(:notification_skipped_backoff).size,
+                 "a second backoff episode for a fingerprint that never left `current` must not " \
+                 "re-log the skip — the throttle Set is pruned only on disappearance"
+    assert_equal 2, flaky_telegram.calls,
+                 "both episodes attempted a real send (the suppression is of the log line, not the retry)"
+  end
+
   def test_ready_action_uses_config_fallback_when_no_daemon_probe
     projects = []
     loads = []

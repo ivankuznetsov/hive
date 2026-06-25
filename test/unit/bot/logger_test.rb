@@ -56,6 +56,29 @@ class HiveBotLoggerTest < Minitest::Test
     end
   end
 
+  # `event` validates `name` against EVENTS, but `LEVELS.fetch(name, :info)`
+  # silently ignores a stale or misspelled LEVELS key — a wrong/orphaned entry
+  # never surfaces at runtime. Pin LEVELS ⊆ EVENTS so a typo'd or removed event
+  # name left behind in LEVELS fails here instead.
+  def test_levels_map_keys_are_a_subset_of_events
+    orphans = Hive::Bot::Logger::LEVELS.keys - Hive::Bot::Logger::EVENTS
+    assert_empty orphans,
+                 "LEVELS has keys absent from EVENTS (stale/misspelled, silently ignored " \
+                 "by LEVELS.fetch): #{orphans.inspect}"
+  end
+
+  # `test_every_documented_event_is_accepted_and_schema_valid` proves the
+  # forward direction (every EVENTS entry validates against the schema enum).
+  # This pins the reverse: an extra enum value with no EVENTS entry (a stale,
+  # typo'd, or removed event the producer can never emit) would pass green and
+  # mislead non-Ruby consumers. A strict equality closes the remaining gap.
+  def test_schema_event_enum_is_a_strict_bijection_with_events
+    schema_doc = JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v3.json", __dir__)))
+    schema_enum = schema_doc.dig("properties", "event", "enum")
+    assert_equal Hive::Bot::Logger::EVENTS.map(&:to_s).sort, schema_enum.sort,
+                 "hive-bot-log.v3 event enum must mirror Logger::EVENTS exactly (no schema-side drift)"
+  end
+
   def test_v2_schema_remains_for_back_compat
     schema_doc = JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__)))
     schema = JSONSchemer.schema(schema_doc)
@@ -104,7 +127,7 @@ class HiveBotLoggerTest < Minitest::Test
       payloads = File.read(path).lines.map { |line| JSON.parse(line) }
       info = payloads.select { |payload| payload.fetch("level") == "info" }
       noise_in_info = info.select do |payload|
-        payload["category"] == "noise" ||
+        payload["category"] == Hive::Bot::Logger::CATEGORY_NOISE.to_s ||
           %w[poll_failure notification_skipped_dedupe notification_skipped_backoff].include?(payload.fetch("event"))
       end
 

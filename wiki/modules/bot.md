@@ -53,7 +53,7 @@ hive bot start
             └─ reaper loop: ChildSupervisor.reap_all → Telegram reply
 ```
 
-Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <display_name>` when both are present, plain `display_name` when only the name is available, and `TitleFormatter.title_from_slug(slug)` as the legacy fallback. Human text and `/status`/queue/detail rows use that title, but callback data and slash-command arguments remain slug-based.
+Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <display_name>` when both are present, plain `display_name` when only the name is available, and `TitleFormatter.title_from_slug(slug)` as the legacy fallback. Human text and `/status`/queue/detail rows use that title. Inline callback data remains slug-based, while typeable `/answer`, `/approve`, `/autofix`, and `/details` slash commands accept either that numeric id (with or without `#`) or the slug; numeric targets resolve through the current `StatusWatcher` snapshot before the existing slug-based action runs.
 
 `Router::Result` is the handoff API between pure routing and side
 effects. The normal command actions remain `reply`,

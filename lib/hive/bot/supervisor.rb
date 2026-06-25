@@ -39,10 +39,10 @@ module Hive
         { command: "idea",    description: "Capture a new idea with optional files" },
         { command: "status",  description: "Show active tasks" },
         { command: "queue",   description: "Show queued and waiting tasks" },
-        { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },
-        { command: "approve", description: "Approve a task at its current stage: /approve <slug>" },
-        { command: "autofix", description: "Retry a stuck task: /autofix <slug>" },
-        { command: "details", description: "Show diagnostic detail: /details <slug>" },
+        { command: "answer",  description: "Answer brainstorm questions: /answer <id|slug>" },
+        { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
+        { command: "autofix", description: "Retry a stuck task: /autofix <id|slug>" },
+        { command: "details", description: "Show diagnostic detail: /details <id|slug>" },
         { command: "done",    description: "Mark a brainstorm as done after answering" },
         { command: "help",    description: "Show available commands" }
       ].freeze

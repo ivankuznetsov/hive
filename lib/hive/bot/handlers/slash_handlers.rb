@@ -370,6 +370,10 @@ module Hive
         #                           we never sync-fetch here (see
         #                           Supervisor#latest_status_rows for why)
         #   - id zero matches     → id not found / archived
+        #   - id multi-match      → ids are globally unique, so we take the
+        #                           head row with no ambiguity guard (unlike
+        #                           the slug arm below); a duplicate id would
+        #                           mean a corrupt snapshot, not a real choice
         #   - slug zero matches   → slug not found / archived
         #   - slug multi-match    → ambiguous across projects. A slash
         #                           command carries no project, so we refuse

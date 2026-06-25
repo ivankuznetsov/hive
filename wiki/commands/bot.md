@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-18
+updated: 2026-06-24
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -273,9 +273,9 @@ bumped `$id` and a synchronized `schema_version` constant — exactly what
 the v1 → v2 retirement did. Downstream consumers that pin on the `$id`
 URL must therefore tolerate unknown event values; that's the read-side
 compat invariant.
-Events include `bot_started`, `poll_failure`, `update_received`,
-`notification_sent`, `dispatched_command`, `command_completed`,
-`answer_written`, `reconnect_summary`, and `fatal`.
+Events include `bot_started`, `poll_failure`, `poll_unhealthy`,
+`update_received`, `notification_sent`, `dispatched_command`,
+`command_completed`, `answer_written`, `reconnect_summary`, and `fatal`.
 
 ## Forward-tolerant `hive status` schema-version skew
 

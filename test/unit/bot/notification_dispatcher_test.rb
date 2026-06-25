@@ -298,6 +298,51 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal :notification_skipped_dedupe, logger.events.last.first
   end
 
+  def test_dedupe_skip_is_logged_once_while_fingerprint_is_unchanged
+    d = dispatcher
+    waiting = row
+
+    d.process_rows([ waiting ])
+    logger.events.clear
+
+    d.process_rows([ waiting ])
+    d.process_rows([ waiting ])
+
+    events = events_named(:notification_skipped_dedupe)
+    assert_equal 1, events.size
+    assert_equal :debug, events.first.last[:level]
+    assert_equal :noise, events.first.last[:category]
+  end
+
+  def test_new_fingerprint_gets_its_own_once_logged_dedupe_skip
+    d = dispatcher
+    first = row(attrs: { "round" => "1" })
+    changed = row(attrs: { "round" => "2" })
+
+    d.process_rows([ first ])
+    logger.events.clear
+    d.process_rows([ first ])
+    d.process_rows([ first ])
+    d.process_rows([ changed ])
+    d.process_rows([ changed ])
+
+    assert_equal 2, events_named(:notification_skipped_dedupe).size
+  end
+
+  def test_dedupe_skip_logs_again_after_row_leaves_current_set
+    d = dispatcher
+    waiting = row
+
+    d.process_rows([ waiting ])
+    logger.events.clear
+    d.process_rows([ waiting ])
+    d.process_rows([])
+    d.process_rows([ waiting ])
+    d.process_rows([ waiting ])
+
+    assert_equal 2, events_named(:notification_skipped_dedupe).size
+  end
+
   def test_recovery_row_disappears_sends_recovered_message_and_removes_entry
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
@@ -964,6 +1009,10 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     dispatcher.instance_variable_get(:@alert_store)
   end
 
+  def events_named(name)
+    logger.events.select { |event_name, _attrs| event_name == name }
+  end
+
   def test_ninety_minute_reminder_fires_with_minutes_label
     d = Hive::Bot::NotificationDispatcher.new(
       telegram: telegram,
@@ -1175,6 +1224,82 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     @clock += 60
     d.process_rows([ row ])
     assert_equal 2, flaky_telegram.calls
+  end
+
+  def test_backoff_skip_is_logged_once_while_fingerprint_is_unchanged
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+
+    d.process_rows([ row ])
+    logger.events.clear
+    d.process_rows([ row ])
+    d.process_rows([ row ])
+    d.process_rows([ row ])
+
+    events = events_named(:notification_skipped_backoff)
+    assert_equal 1, events.size
+    assert_equal :debug, events.first.last[:level]
+    assert_equal :noise, events.first.last[:category]
+    assert_equal 1, flaky_telegram.calls
+  end
+
+  def test_new_fingerprint_gets_its_own_once_logged_backoff_skip
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+    first = row(attrs: { "round" => "1" })
+    changed = row(attrs: { "round" => "2" })
+
+    d.process_rows([ first ])
+    logger.events.clear
+    d.process_rows([ first ])
+    d.process_rows([ first ])
+    d.process_rows([ changed ])
+    d.process_rows([ changed ])
+
+    assert_equal 2, events_named(:notification_skipped_backoff).size
+  end
+
+  def test_backoff_skip_logs_again_after_row_leaves_current_set
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+    waiting = row
+
+    d.process_rows([ waiting ])
+    logger.events.clear
+    d.process_rows([ waiting ])
+    d.process_rows([])
+    d.process_rows([ waiting ])
+    d.process_rows([ waiting ])
+
+    assert_equal 2, events_named(:notification_skipped_backoff).size
+  end
+
+  # Counterpart to the "row leaves current" re-arm above: when a persistent
+  # fingerprint NEVER leaves `current`, a SECOND backoff episode (the retry
+  # fails again, re-arming a fresh, longer backoff window) does NOT re-log the
+  # skip line. @backoff_logged is pruned only on disappearance (see
+  # reconcile_skip_log_state), so the within-`current` state cycle stays
+  # throttled to the first transition. This is the deliberate U3 tradeoff
+  # (in-memory Sets, no explicit cross-clearing on retry/recovery): pin `== 1`,
+  # not `== 2`. Changing this would require cross-clearing the Sets.
+  def test_backoff_skip_stays_suppressed_across_a_second_episode_within_current
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+    waiting = row
+
+    d.process_rows([ waiting ]) # tick 1: send fails → episode 1, 60s backoff
+    logger.events.clear
+    d.process_rows([ waiting ]) # tick 2: within backoff → skip logged ONCE
+    @clock += 61
+    d.process_rows([ waiting ]) # tick 3: backoff expired → retry fails → episode 2, 120s backoff
+    @clock += 30
+    d.process_rows([ waiting ]) # tick 4: within the 2nd backoff window → skip SUPPRESSED
+
+    assert_equal 1, events_named(:notification_skipped_backoff).size,
+                 "a second backoff episode for a fingerprint that never left `current` must not " \
+                 "re-log the skip — the throttle Set is pruned only on disappearance"
+    assert_equal 2, flaky_telegram.calls,
+                 "both episodes attempted a real send (the suppression is of the log line, not the retry)"
   end
 
   def test_ready_action_uses_config_fallback_when_no_daemon_probe

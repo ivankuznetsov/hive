@@ -25,8 +25,9 @@ class HiveBotLoggerTest < Minitest::Test
       assert_equal 2, lines.size
       first = JSON.parse(lines[0])
       assert_equal "hive-bot-log", first["schema"]
-      assert_equal 2, first["schema_version"]
+      assert_equal 3, first["schema_version"]
       assert_equal "bot_started", first["event"]
+      assert_equal "info", first["level"]
       assert_equal "0.1.0", first["version"]
       assert_match(/^\d{4}-\d{2}-\d{2}T/, first["ts"])
     end
@@ -40,7 +41,7 @@ class HiveBotLoggerTest < Minitest::Test
   end
 
   def test_every_documented_event_is_accepted_and_schema_valid
-    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__))))
+    schema = JSONSchemer.schema(JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v3.json", __dir__))))
 
     with_log do |logger, path|
       Hive::Bot::Logger::EVENTS.each { |event| logger.event(event) }
@@ -52,6 +53,115 @@ class HiveBotLoggerTest < Minitest::Test
         payload = JSON.parse(line)
         assert schema.valid?(payload), "bot log line should match schema: #{payload.inspect}"
       end
+    end
+  end
+
+  # `event` validates `name` against EVENTS, but `LEVELS.fetch(name, :info)`
+  # silently ignores a stale or misspelled LEVELS key — a wrong/orphaned entry
+  # never surfaces at runtime. Pin LEVELS ⊆ EVENTS so a typo'd or removed event
+  # name left behind in LEVELS fails here instead.
+  def test_levels_map_keys_are_a_subset_of_events
+    orphans = Hive::Bot::Logger::LEVELS.keys - Hive::Bot::Logger::EVENTS
+    assert_empty orphans,
+                 "LEVELS has keys absent from EVENTS (stale/misspelled, silently ignored " \
+                 "by LEVELS.fetch): #{orphans.inspect}"
+  end
+
+  # `test_every_documented_event_is_accepted_and_schema_valid` proves the
+  # forward direction (every EVENTS entry validates against the schema enum).
+  # This pins the reverse: an extra enum value with no EVENTS entry (a stale,
+  # typo'd, or removed event the producer can never emit) would pass green and
+  # mislead non-Ruby consumers. A strict equality closes the remaining gap.
+  def test_schema_event_enum_is_a_strict_bijection_with_events
+    schema_doc = JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v3.json", __dir__)))
+    schema_enum = schema_doc.dig("properties", "event", "enum")
+    assert_equal Hive::Bot::Logger::EVENTS.map(&:to_s).sort, schema_enum.sort,
+                 "hive-bot-log.v3 event enum must mirror Logger::EVENTS exactly (no schema-side drift)"
+  end
+
+  def test_v2_schema_remains_for_back_compat
+    schema_doc = JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__)))
+    schema = JSONSchemer.schema(schema_doc)
+    historical_line = {
+      "ts" => "2026-06-01T12:00:00Z",
+      "schema" => "hive-bot-log",
+      "schema_version" => 2,
+      "event" => "poll_failure"
+    }
+
+    assert_equal 2, schema_doc.fetch("properties").fetch("schema_version").fetch("const")
+    refute_includes schema_doc.fetch("properties").fetch("event").fetch("enum"), "poll_unhealthy"
+    assert schema.valid?(historical_line), "historical v2 bot log line should remain valid"
+  end
+
+  def test_default_levels_come_from_event_map
+    with_log do |logger, path|
+      logger.event(:poll_failure)
+      logger.event(:poll_unhealthy)
+      logger.event(:notification_skipped_dedupe)
+      logger.event(:bot_started)
+      logger.event(:notification_skipped_active_conversation)
+      logger.event(:notification_skipped_daemon_plan_pause)
+      logger.close
+
+      levels = File.read(path).lines.map { |line| JSON.parse(line).fetch("level") }
+      assert_equal %w[warn warn debug info info info], levels
+    end
+  end
+
+  def test_info_stream_excludes_noise_events_under_repeated_poll_and_dedupe_chatter
+    # The high-frequency events are emitted with NO explicit level, so their
+    # severity comes from the production LEVELS map (poll_failure → warn,
+    # notification_skipped_dedupe → debug) — not from tags the test supplies.
+    # This makes the acceptance criterion non-circular: regressing
+    # LEVELS[:poll_failure] or LEVELS[:notification_skipped_dedupe] to :info
+    # would leak them into the info view and fail `info.size`.
+    with_log do |logger, path|
+      20.times { |i| logger.event(:notification_sent, sequence: i) }
+      100.times do |i|
+        logger.event(:poll_failure, error_class: "Faraday::TimeoutError", message: "slow #{i}")
+        logger.event(:notification_skipped_dedupe, project: "hive", slug: "slug", marker: "waiting")
+      end
+      logger.close
+
+      payloads = File.read(path).lines.map { |line| JSON.parse(line) }
+      info = payloads.select { |payload| payload.fetch("level") == "info" }
+      noise_in_info = info.select do |payload|
+        payload["category"] == Hive::Bot::Logger::CATEGORY_NOISE.to_s ||
+          %w[poll_failure notification_skipped_dedupe notification_skipped_backoff].include?(payload.fetch("event"))
+      end
+
+      assert_equal 20, info.size
+      assert_equal 0, noise_in_info.size
+    end
+  end
+
+  def test_explicit_level_and_category_override_defaults
+    with_log do |logger, path|
+      logger.event(:poll_failure, level: :debug, category: :noise)
+      logger.close
+
+      payload = JSON.parse(File.read(path))
+      assert_equal "debug", payload["level"]
+      assert_equal "noise", payload["category"]
+    end
+  end
+
+  def test_string_keyed_level_attr_cannot_overwrite_the_validated_level
+    with_log do |logger, path|
+      logger.event(:bot_started, **{ "level" => "verbose" })
+      logger.close
+
+      payload = JSON.parse(File.read(path))
+      assert_equal "info", payload["level"],
+                   "a string-keyed level attr must not overwrite the validated level"
+    end
+  end
+
+  def test_invalid_level_raises_argument_error
+    with_log do |logger, _path|
+      err = assert_raises(ArgumentError) { logger.event(:bot_started, level: :verbose) }
+      assert_match(/invalid bot log level/, err.message)
     end
   end
 

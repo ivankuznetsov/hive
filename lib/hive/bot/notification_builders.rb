@@ -137,13 +137,10 @@ module Hive
         when "review_waiting"
           review_waiting(row)
         else
-          # Authoritative suppression of incoherent needs_input markers
-          # (marker=none / marker=complete) lives in the dispatcher gate
-          # (NotificationDispatcher#suppress_incoherent_needs_input?), which
-          # drops them before `build` is ever called. This `else` is layered
-          # defense for the remaining genuine fall-through (a `waiting` marker
-          # outside coding's 2-brainstorm/3-plan stages), not the incoherent
-          # path — that no longer reaches here.
+          # Defense-in-depth: incoherent needs_input rows (marker not in
+          # INPUT_MARKER_NAMES, e.g. none/complete) are dropped by the
+          # dispatcher gate (NotificationDispatcher#suppress_incoherent_needs_input?)
+          # before `build` runs, so only the three input markers above reach here.
           default_needs_input(row)
         end
       end
@@ -164,9 +161,8 @@ module Hive
       end
 
       # Shared shape for the three "needs_input, no dedicated answer flow"
-      # notifications (default / execute-waiting / plan-waiting): a header,
-      # one custom sentence, and a single Show-details button. Each caller
-      # owns only its sentence so the keyboard construction lives in one place.
+      # notifications (default / execute-waiting / plan-waiting): header, one
+      # custom sentence, one Show-details button. Callers own only the sentence.
       def details_only(row, sentence)
         Notification.new(
           text: header(row) + "\n" + sentence,

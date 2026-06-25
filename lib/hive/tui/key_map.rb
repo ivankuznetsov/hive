@@ -208,11 +208,9 @@ module Hive
         when "recover_review" then Messages::RecoverReview.new(row: row)
         when "needs_input"
           # Defense-in-depth: `Snapshot#visible_projection` already strips
-          # incoherent needs_input rows (marker not input_marker?) via
-          # `without_incoherent_needs_input`, so in the live path the cursor
-          # never lands on one and the false branch is unreachable. Kept as a
-          # redundant guard (and exercised directly by the unit test) — not
-          # load-bearing; do not treat it as the only suppression.
+          # incoherent needs_input rows (marker not input_marker?), so the
+          # false branch is unreachable in the live path. Kept as a redundant
+          # guard exercised by the unit test — not the only suppression.
           input_marker?(row) ? needs_input_message(row) : enter_fallback_message(row)
         else enter_fallback_message(row)
         end

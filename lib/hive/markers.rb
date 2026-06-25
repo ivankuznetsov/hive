@@ -1,4 +1,5 @@
 require "securerandom"
+require "hive" # defines Hive::Schemas, referenced by incoherent_needs_input?
 
 module Hive
   module Markers
@@ -33,10 +34,12 @@ module Hive
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
 
     # Markers whose NEEDS_INPUT action is a real pending operator question.
-    # Other markers can still reach the needs_input action through the
-    # config-driven classification paths (see umbrella task 9512), but
-    # operator surfaces must not present those incoherent rows as
-    # answerable input.
+    # Markerless (`none`) and terminal (`complete`) rows can still reach the
+    # needs_input action through the hardcoded `TaskAction#plan_action` /
+    # `#finalize_action` paths (lib/hive/task_action.rb), which classify any
+    # non-complete plan/finalize row as NEEDS_INPUT — see wiki/modules/markers.md
+    # ("Historical/upstream classification"). Those rows are incoherent:
+    # operator surfaces must not present them as answerable input.
     INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting].freeze
 
     # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =

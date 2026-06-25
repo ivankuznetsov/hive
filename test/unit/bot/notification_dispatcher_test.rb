@@ -305,7 +305,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal :noise, events.first.last[:category]
   end
 
-  def test_dedupe_skip_logs_again_when_fingerprint_changes
+  def test_new_fingerprint_gets_its_own_once_logged_dedupe_skip
     d = dispatcher
     first = row(attrs: { "round" => "1" })
     changed = row(attrs: { "round" => "2" })
@@ -836,7 +836,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 1, flaky_telegram.calls
   end
 
-  def test_backoff_skip_logs_again_when_fingerprint_changes
+  def test_new_fingerprint_gets_its_own_once_logged_backoff_skip
     flaky_telegram = AlwaysFailingTelegram.new
     d = dispatcher(telegram: flaky_telegram)
     first = row(attrs: { "round" => "1" })

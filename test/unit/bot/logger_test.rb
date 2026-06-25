@@ -74,6 +74,7 @@ class HiveBotLoggerTest < Minitest::Test
   def test_default_levels_come_from_event_map
     with_log do |logger, path|
       logger.event(:poll_failure)
+      logger.event(:poll_unhealthy)
       logger.event(:notification_skipped_dedupe)
       logger.event(:bot_started)
       logger.event(:notification_skipped_active_conversation)
@@ -81,7 +82,7 @@ class HiveBotLoggerTest < Minitest::Test
       logger.close
 
       levels = File.read(path).lines.map { |line| JSON.parse(line).fetch("level") }
-      assert_equal %w[warn debug info info info], levels
+      assert_equal %w[warn warn debug info info info], levels
     end
   end
 

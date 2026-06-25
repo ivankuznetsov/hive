@@ -266,6 +266,33 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal "consecutive", attrs[:reason]
   end
 
+  def test_poll_updates_re_arms_escalation_after_a_successful_poll
+    # Cross-layer wiring for the re-arm seam: a successful get_updates calls
+    # @poll_health.record_success, which clears the unhealthy latch so a SECOND
+    # sustained outage escalates again. Without record_success in poll_updates,
+    # the first episode would latch poll_unhealthy off forever.
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+    bot = telegram(api, poll_health: health)
+
+    # First outage: second failure escalates.
+    2.times { bot.poll_updates(timeout: 25, since_update_id: nil) }
+
+    # A successful poll re-arms escalation.
+    api.raise_on_get_updates = nil
+    bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    # Second outage: must escalate again, not stay latched off.
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    2.times { bot.poll_updates(timeout: 25, since_update_id: nil) }
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 2, unhealthy_events.size,
+                 "a successful poll must re-arm escalation so a second outage escalates again"
+  end
+
   def test_poll_updates_emits_poll_unhealthy_with_silence_reason
     # Silence escalation (no successful poll for max_silence_sec) is the other
     # PollHealth reason; pin its Telegram-layer emission with an injected clock.

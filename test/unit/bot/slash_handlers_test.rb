@@ -3,6 +3,7 @@ require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
 require "hive/bot/notification_builders"
+require "hive/bot/status_watcher"
 
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
@@ -103,9 +104,11 @@ class HiveBotSlashHandlersTest < Minitest::Test
     def clear(chat_id:, slug:) = (@cleared << [ chat_id, slug ])
   end
 
-  Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :attrs, :folder, :state_file,
-                   :action, :action_label, :suggested_command, :next_action, :diagnostic,
-                   :display_name, keyword_init: true)
+  # Use the real renderer input type rather than a hand-maintained Struct dup:
+  # the production resolver only ever hands NotificationBuilders a
+  # StatusWatcher::Row, and a Struct copy silently diverges as Row gains fields
+  # (callback_handlers_test.rb already binds the real Row for the same reason).
+  Row = Hive::Bot::StatusWatcher::Row
 
   def autofix_handlers(snapshot)
     Hive::Bot::Handlers::SlashHandlers.new(

@@ -59,26 +59,40 @@ module Hive
 
       def current_notifications(rows)
         Array(rows).each_with_object({}) do |row, out|
-          next if suppress_ready_action?(row)
-          next if suppress_daemon_plan_pause?(row)
-          next if suppress_active_conversation?(row)
-
-          notification = build_notification(row)
-          next unless notification
-
-          fingerprint = NotificationBuilders.fingerprint(row)
-          out[fingerprint] ||= { row: row, notification: notification }
+          add_notification(row, out)
+        rescue StandardError => e
+          # Isolate the WHOLE per-row body, not just the build: a suppress
+          # predicate or fingerprint call hitting a NoMethodError/TypeError on a
+          # malformed attrs/workflow value must drop only this row, not abort the
+          # tick via status_loop's :fatal rescue (which would silently drop every
+          # push this poll, recurring every tick). Log with row attribution.
+          @logger.event(:notification_build_failed, project: row.project, slug: row.slug,
+                                                     marker: row.marker, action: row.action,
+                                                     error_class: e.class.name, message: e.message)
         end
+      end
+
+      def add_notification(row, out)
+        return if suppress_ready_action?(row)
+        return if suppress_daemon_plan_pause?(row)
+        return if suppress_active_conversation?(row)
+
+        notification = build_notification(row)
+        return unless notification
+
+        fingerprint = NotificationBuilders.fingerprint(row)
+        out[fingerprint] ||= { row: row, notification: notification }
       end
 
       # Build one row's notification, isolating a malformed row so it can't
       # abort the whole tick. A typo'd/unmapped action role surfaces as an
       # ArgumentError at RowActions::Action construction (the closed ROLES
-      # boundary) or a KeyError in label_for_action; either way we log and
-      # skip just this row rather than dropping every push this poll.
+      # boundary), a KeyError in label_for_action, or any other StandardError
+      # from the builder; either way we log and skip just this row rather than
+      # dropping every push this poll.
       def build_notification(row)
         NotificationBuilders.build(row, logger: @logger)
-      rescue ArgumentError, KeyError => e
+      rescue StandardError => e
         @logger.event(:notification_build_failed, project: row.project, slug: row.slug,
                                                    marker: row.marker, action: row.action,
                                                    error_class: e.class.name, message: e.message)

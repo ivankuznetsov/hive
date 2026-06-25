@@ -1655,7 +1655,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     # A non-manual recovery row with no retry diagnostic resolves to a Details
     # primary that is NOT terminal_details? (not manual-only, not fix_guardrail),
-    # so next_step_hint falls through to the generic laptop hint (case else).
+    # so next_step_hint resolves via the explicit :details branch to the laptop
+    # hint (the catch-all else now raises on an unmapped primary role).
     details_only = row(slug: "rec-260624-abcd", stage: "6-review", action: "recover_review",
                        marker: "review_error", attrs: { "phase" => "fix", "pass" => "2", "reason" => "timeout" },
                        diagnostic: nil)

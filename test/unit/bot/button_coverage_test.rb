@@ -11,16 +11,16 @@ require "hive/workflows"
 class HiveBotButtonCoverageTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
-  MARKERS = (
-    Hive::Markers::TERMINAL_MARKER_NAMES +
-    Hive::Stages::Base::PAUSE_MARKERS +
-    %i[
-      none waiting complete agent_working error review_waiting review_working
-      review_error review_stale review_ci_stale execute_waiting execute_stale
-    ]
-  ).map(&:to_s).uniq.freeze
+  # Derived from the closed marker registry (KNOWN_NAMES — which includes
+  # manual_steering) plus the marker-absent `none` state, so a newly added
+  # marker is swept across every (action, stage, workflow) without a hand-edit
+  # here. KNOWN_NAMES already subsumes TERMINAL_MARKER_NAMES and PAUSE_MARKERS.
+  MARKERS = (Hive::Markers::KNOWN_NAMES.map(&:downcase) + %w[none]).uniq.freeze
 
-  WORKFLOWS = %w[coding content].freeze
+  # Derived from the closed workflow registry so a third workflow extends the
+  # "every (action, marker, stage, workflow)" guarantee automatically instead
+  # of escaping the sweep.
+  WORKFLOWS = Hive::Workflows::Registry.all.map { |descriptor| descriptor.id.to_s }.freeze
 
   def row(action:, marker:, stage:, workflow: "coding", attrs: {}, diagnostic: nil)
     Row.new(
@@ -46,6 +46,7 @@ class HiveBotButtonCoverageTest < Minitest::Test
     rows.each do |candidate|
       resolution = Hive::Bot::RowActions.resolve(candidate)
       assert_status_surface_matches_resolver(candidate, resolution)
+      assert_next_step_hint_present(candidate)
       next if resolution.suppress || resolution.actions.empty?
 
       primary = resolution.actions.find(&:primary) || resolution.actions.first
@@ -68,8 +69,8 @@ class HiveBotButtonCoverageTest < Minitest::Test
 
     assert_equal [ :approve_plan, :details ], roles(cases.fetch("plan_waiting"))
     assert_equal [ :rerun, :details ], roles(cases.fetch("execute_waiting"))
-    assert_equal [ :run, :details ], roles(cases.fetch("finalize_waiting"))
-    assert_equal [ :run ], roles(cases.fetch("generic_needs_input"))
+    assert_equal [ :rerun, :details ], roles(cases.fetch("finalize_waiting"))
+    assert_equal [ :rerun ], roles(cases.fetch("generic_needs_input"))
     assert Hive::Bot::RowActions.resolve(cases.fetch("none")).suppress
     assert Hive::Bot::RowActions.resolve(cases.fetch("complete")).suppress
   end
@@ -150,6 +151,16 @@ class HiveBotButtonCoverageTest < Minitest::Test
       return nil if marker.to_s == "execute_stale"
 
       { "suggested_next_action" => { "kind" => "retry", "command" => "hive run slug --json" } }
+    end
+
+    # next_step_hint now fails loud (raises) on a primary role it has no hint
+    # for, instead of silently degrading a new role to the laptop hint. Sweep
+    # every representative row through it so a new primary-capable role added
+    # without a hint is caught here rather than shipped.
+    def assert_next_step_hint_present(candidate)
+      hint = Hive::Bot::Supervisor.allocate.send(:next_step_hint, candidate)
+      assert_kind_of String, hint, "next_step_hint must map a hint for #{label(candidate)}"
+      refute_empty hint, "next_step_hint must not be blank for #{label(candidate)}"
     end
 
     def assert_status_surface_matches_resolver(candidate, resolution)

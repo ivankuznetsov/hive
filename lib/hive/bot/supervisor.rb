@@ -1459,10 +1459,11 @@ module Hive
         action = resolution.primary
         title = nb.display_title(row)
         nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
-      rescue ArgumentError, KeyError => e
+      rescue StandardError => e
         # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
-        # boundary, or an unmapped status_action_emoji key) so it drops just its
-        # own /status button instead of aborting the whole keyboard's filter_map.
+        # boundary, an unmapped status_action_emoji key, or any NoMethodError/
+        # TypeError on a bad attrs/workflow value) so it drops just its own
+        # /status button instead of aborting the whole keyboard's filter_map.
         @logger&.event(:status_button_failed, project: row.project, slug: row.slug,
                                                marker: row.marker, action: row.action,
                                                error_class: e.class.name, message: e.message)
@@ -1475,11 +1476,9 @@ module Hive
           approve: "✅",
           approve_plan: "✅",
           findings_accept: "✅",
-          findings_reject: "✅",
           autofix: "🔧",
           details: "🔍",
-          rerun: "▶️",
-          run: "▶️"
+          rerun: "▶️"
         }.fetch(role)
       end
 
@@ -1520,20 +1519,35 @@ module Hive
         when :findings_accept
           "Next: tap Accept all or Reject all to triage findings."
         when :rerun
-          "Next: tap Re-run to re-run #{action.verb}."
-        when :run
-          # The generic-stage run verb is the literal "run"; naming it would
-          # read "to run run", so describe it as the stage instead.
-          action.verb == "run" ? "Next: tap Run to run this stage." : "Next: tap Run to run #{action.verb}."
+          rerun_hint(action.verb)
         when :autofix
           "Next: tap Autofix to retry the stage cleanly."
-        else
+        when :details
+          # A non-terminal recovery row (not manual-only, no retry suggestion):
+          # the only chat affordance is Show details. terminal details already
+          # returned the laptop hint above.
           "Next: open on a laptop to inspect."
+        else
+          # Fail loud on a new primary-capable role rather than silently
+          # degrading to the laptop hint — button_coverage_test sweeps every
+          # representative row's primary role through here.
+          raise KeyError, "next_step_hint has no hint for primary role #{action.role.inspect}"
+        end
+      end
+
+      # Paused-stage re-run hint, mirroring NotificationBuilders.rerun_label's
+      # verb split: develop already ran ("Re-run"), finalize/run have not
+      # ("Run"). The literal "run" verb reads as the stage to avoid "run run".
+      def rerun_hint(verb)
+        case verb.to_s
+        when "develop" then "Next: tap Re-run to re-run develop."
+        when "run" then "Next: tap Run to run this stage."
+        else "Next: tap Run to run #{verb}."
         end
       end
 
       def result_stage(result)
-        result.respond_to?(:stage) ? result.stage : nil
+        result.stage
       end
 
       def actionable_queue_rows(rows)

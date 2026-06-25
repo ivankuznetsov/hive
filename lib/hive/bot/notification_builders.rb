@@ -149,8 +149,16 @@ module Hive
           execute_waiting(row, actions: resolution.actions)
         when :finalize_waiting
           finalize_waiting(row, actions: resolution.actions)
-        else
+        when :generic_needs_input
           default_needs_input(row, actions: resolution.actions)
+        else
+          # A catch-all `else default_needs_input` would silently re-route a new
+          # needs_input KIND to the generic copy — the exact misroute the kind
+          # tag exists to prevent. Fail loud instead: every needs_input surface
+          # must be wired explicitly here.
+          raise ArgumentError,
+                "needs_input received an unexpected resolution kind #{resolution.kind.inspect} " \
+                "(RowActions.resolve must map every needs_input row to a known surface)"
         end
       end
 
@@ -392,28 +400,36 @@ module Hive
 
       def keyboard_for_actions(actions)
         actions = Array(actions)
+        buttons = actions.map { |action| button(label_for_action(action), action.callback) }
         if actions.first(2).map(&:role) == [ :findings_accept, :findings_reject ]
-          return [
-            actions.first(2).map { |action| button(label_for_action(action), action.callback) },
-            *actions.drop(2).map { |action| [ button(label_for_action(action), action.callback) ] }
-          ]
+          # Review triage: Accept all / Reject all share the top row; any
+          # trailing action (Show details) stacks one-per-row beneath them.
+          return [ buttons.first(2), *buttons.drop(2).map { |btn| [ btn ] } ]
         end
 
-        actions.map { |action| [ button(label_for_action(action), action.callback) ] }
+        buttons.map { |btn| [ btn ] }
       end
 
       def label_for_action(action)
+        return rerun_label(action.verb) if action.role == :rerun
+
         {
           answer: "Answer in chat",
           approve: "Approve",
           approve_plan: "Approve",
           findings_accept: "Accept all",
           findings_reject: "Reject all",
-          rerun: "Re-run",
-          run: "Run",
           autofix: "🔧 Autofix",
           details: "Show details"
         }.fetch(action.role)
+      end
+
+      # A paused-stage re-run button reuses the single `:rerun` role for every
+      # verb; the label reads "Re-run" once an agent has already run the stage
+      # (develop, paused mid-execute) and "Run" for stages that have not yet
+      # completed (finalize, generic run).
+      def rerun_label(verb)
+        verb.to_s == "develop" ? "Re-run" : "Run"
       end
 
       def callback_with_stage(prefix, row)

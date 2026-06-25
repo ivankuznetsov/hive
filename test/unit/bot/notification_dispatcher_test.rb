@@ -127,6 +127,34 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
            "the unbuildable row must be logged as :notification_build_failed")
   end
 
+  def test_a_fingerprint_failure_outside_build_does_not_abort_the_whole_tick
+    # The fingerprint/suppress predicates run OUTSIDE NotificationBuilders.build,
+    # so the per-row isolation has to wrap the whole body — not just the build —
+    # or a malformed-attrs row raising at fingerprint time aborts the tick.
+    # Force a non-Argument/Key error (RuntimeError) from fingerprint for one row.
+    d = dispatcher
+    good = row(slug: "good-task-260525-cccc")
+    bad = row(slug: "bad-task-260525-dddd")
+
+    original = Hive::Bot::NotificationBuilders.method(:fingerprint)
+    Hive::Bot::NotificationBuilders.define_singleton_method(:fingerprint) do |candidate|
+      raise "boom in fingerprint" if candidate.slug == "bad-task-260525-dddd"
+
+      original.call(candidate)
+    end
+    begin
+      d.process_rows([ bad, good ])
+    ensure
+      Hive::Bot::NotificationBuilders.singleton_class.send(:remove_method, :fingerprint)
+      Hive::Bot::NotificationBuilders.define_singleton_method(:fingerprint, &original)
+    end
+
+    assert_equal 1, telegram.messages.size,
+                 "the good row must still deliver even though the bad row raised at fingerprint time"
+    assert(logger.events.any? { |name, attrs| name == :notification_build_failed && attrs[:slug] == "bad-task-260525-dddd" },
+           "the row that raised outside build must still be logged and isolated")
+  end
+
   # AC-05 (#261): the bot's queue dispatch path deliberately does NOT reset
   # the alert at enqueue time — the daemon clears the marker later. The
   # supervisor test pins "reset_task not called"; this pins the property

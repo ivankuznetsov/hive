@@ -352,6 +352,12 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes labels, "Accept all"
     assert_includes labels, "Reject all"
     assert_includes labels, "Show details"
+
+    # Pin the un-flattened row structure so a regression to one-per-row or
+    # all-on-one-row fails: Accept all / Reject all share the top row, Show
+    # details sits on its own row beneath them.
+    row_labels = notification.keyboard.map { |keyboard_row| keyboard_row.map { |button| button[:text] } }
+    assert_equal [ [ "Accept all", "Reject all" ], [ "Show details" ] ], row_labels
   end
 
   def test_recovery_match_attr_review_stale_uses_pass_reason

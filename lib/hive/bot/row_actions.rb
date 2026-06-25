@@ -1,5 +1,12 @@
 require "hive"
 require "hive/workflows"
+# RowActions and NotificationBuilders are mutually recursive at runtime
+# (RowActions.resolve calls the recovery/verb predicates below;
+# NotificationBuilders.needs_input calls RowActions.resolve). Declaring the
+# require here makes `require "hive/bot/row_actions"` self-sufficient — without
+# it, resolving a recovery row in isolation raised NameError. Neither file
+# references the other at load time, so the require cycle is safe.
+require "hive/bot/notification_builders"
 
 module Hive
   module Bot
@@ -19,20 +26,34 @@ module Hive
         recovery
       ].freeze
 
-      Resolution = Data.define(:actions, :suppress, :kind) do
-        def initialize(actions: [], suppress: false, kind: :none)
+      Resolution = Data.define(:actions, :kind) do
+        def initialize(actions: [], kind: :none)
           unless KINDS.include?(kind)
             raise ArgumentError, "unknown resolution kind #{kind.inspect} (expected one of #{KINDS.inspect})"
           end
 
-          super(actions: actions.freeze, suppress: suppress, kind: kind)
+          primaries = actions.count(&:primary)
+          if !actions.empty? && primaries != 1
+            raise ArgumentError,
+                  "resolution must declare exactly one primary action, got #{primaries} (kind=#{kind.inspect})"
+          end
+
+          super(actions: actions.freeze, kind: kind)
+        end
+
+        # True when this row should push no notification and render no button.
+        # Derived from the kind so the suppressed state has a single
+        # representation — a separate `suppress` flag could drift into a
+        # contradictory `(suppress: true, kind: :plan_waiting)` pair.
+        def suppress
+          kind == :suppressed
         end
 
         # The action the bot renders as the primary keyboard button / status
-        # hint. Construction flags exactly one action primary; falling back to
-        # the first keeps a malformed resolution renderable rather than nil.
+        # hint. Construction guarantees exactly one primary for a non-empty
+        # resolution, so this is unambiguous; an empty resolution has none.
         def primary
-          actions.find(&:primary) || actions.first
+          actions.find(&:primary)
         end
       end
 
@@ -43,7 +64,7 @@ module Hive
       # Hash#fetch KeyError in one of those tables.
       ROLES = %i[
         answer approve approve_plan findings_accept findings_reject
-        rerun run autofix details
+        rerun autofix details
       ].freeze
 
       Action = Data.define(:role, :callback, :primary, :verb) do
@@ -51,13 +72,21 @@ module Hive
           unless ROLES.include?(role)
             raise ArgumentError, "unknown action role #{role.inspect} (expected one of #{ROLES.inspect})"
           end
+          if callback.nil? || callback.to_s.empty?
+            raise ArgumentError, "action #{role.inspect} requires a callback"
+          end
+          # `:rerun` renders a verb-derived label/hint ("Re-run develop" /
+          # "Run finalize"); a nil verb would render "tap Re-run to re-run ."
+          if role == :rerun && (verb.nil? || verb.to_s.empty?)
+            raise ArgumentError, "action :rerun requires a verb (the workflow verb to re-run)"
+          end
 
           super
         end
       end
 
       def resolve(row)
-        return Resolution.new(suppress: true, kind: :suppressed) if suppressed_needs_input?(row)
+        return Resolution.new(kind: :suppressed) if suppressed_needs_input?(row)
 
         if needs_input?(row)
           return needs_input_actions(row)
@@ -95,11 +124,11 @@ module Hive
         end
 
         if coding_stage?(row, "8-finalize") # coding-scoped: coding finalize stage re-run pause
-          return with_details(row, action(:run, rerun_callback(row, "finalize"), primary: true, verb: "finalize"),
+          return with_details(row, action(:rerun, rerun_callback(row, "finalize"), primary: true, verb: "finalize"),
                               kind: :finalize_waiting)
         end
 
-        Resolution.new(actions: [ action(:run, rerun_callback(row, "run"), primary: true, verb: "run") ],
+        Resolution.new(actions: [ action(:rerun, rerun_callback(row, "run"), primary: true, verb: "run") ],
                        kind: :generic_needs_input)
       end
 

@@ -54,8 +54,8 @@ class HiveBotRowActionsTest < Minitest::Test
   def test_non_coding_brainstorm_named_waiting_uses_universal_run
     r = row(stage: "2-brainstorm", workflow: "blank")
 
-    assert_equal [ :run ], roles(r)
-    assert_equal :run, primary_role(r)
+    assert_equal [ :rerun ], roles(r)
+    assert_equal :rerun, primary_role(r)
     assert_equal [ "rerun:hive:slug-260624-abcd:2-brainstorm:run" ], callbacks(r)
   end
 
@@ -104,8 +104,8 @@ class HiveBotRowActionsTest < Minitest::Test
   def test_finalize_waiting_runs_finalize_then_shows_details
     r = row(marker: "waiting", stage: "8-finalize")
 
-    assert_equal [ :run, :details ], roles(r)
-    assert_equal :run, primary_role(r)
+    assert_equal [ :rerun, :details ], roles(r)
+    assert_equal :rerun, primary_role(r)
     assert_equal [
       "rerun:hive:slug-260624-abcd:8-finalize:finalize",
       "details:hive:slug-260624-abcd:8-finalize"
@@ -115,8 +115,8 @@ class HiveBotRowActionsTest < Minitest::Test
   def test_generic_needs_input_runs_universal_stage_agent
     r = row(marker: "agent_waiting", stage: "2-gather", workflow: "dispatch")
 
-    assert_equal [ :run ], roles(r)
-    assert_equal :run, primary_role(r)
+    assert_equal [ :rerun ], roles(r)
+    assert_equal :rerun, primary_role(r)
     assert_equal [ "rerun:hive:slug-260624-abcd:2-gather:run" ], callbacks(r)
   end
 
@@ -151,7 +151,7 @@ class HiveBotRowActionsTest < Minitest::Test
     assert_match(/unknown resolution kind :bogus/, error.message)
   end
 
-  def test_resolution_primary_prefers_flagged_action_then_first
+  def test_resolution_primary_returns_the_single_flagged_action
     flagged = Hive::Bot::RowActions::Resolution.new(
       actions: [
         Hive::Bot::RowActions.action(:details, "details:hive:slug"),
@@ -160,12 +160,49 @@ class HiveBotRowActionsTest < Minitest::Test
       kind: :stage_approval
     )
     assert_equal :approve, flagged.primary.role
+  end
 
-    unflagged = Hive::Bot::RowActions::Resolution.new(
-      actions: [ Hive::Bot::RowActions.action(:details, "details:hive:slug") ],
-      kind: :recovery
-    )
-    assert_equal :details, unflagged.primary.role
+  def test_resolution_requires_exactly_one_primary_when_actions_present
+    # No fallback to actions.first: a resolver path forgetting `primary: true`
+    # (or flagging two) is a construction bug, not a silently-tolerated state.
+    zero = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions::Resolution.new(
+        actions: [ Hive::Bot::RowActions.action(:details, "details:hive:slug") ],
+        kind: :recovery
+      )
+    end
+    assert_match(/exactly one primary/, zero.message)
+
+    two = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions::Resolution.new(
+        actions: [
+          Hive::Bot::RowActions.action(:details, "details:hive:slug", primary: true),
+          Hive::Bot::RowActions.action(:approve, "approve:plan:hive:slug:3-plan", primary: true)
+        ],
+        kind: :stage_approval
+      )
+    end
+    assert_match(/exactly one primary/, two.message)
+  end
+
+  def test_empty_resolution_has_no_primary
+    empty = Hive::Bot::RowActions::Resolution.new(kind: :none)
+    assert_nil empty.primary
+    assert_empty empty.actions
+  end
+
+  def test_rerun_action_requires_a_verb
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions.action(:rerun, "rerun:hive:slug:4-execute:develop")
+    end
+    assert_match(/:rerun requires a verb/, error.message)
+  end
+
+  def test_action_requires_a_callback
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions.action(:details, "")
+    end
+    assert_match(/requires a callback/, error.message)
   end
 
   def test_recovery_uses_existing_autofix_and_details_callbacks

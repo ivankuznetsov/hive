@@ -37,7 +37,6 @@ module Hive
       end
 
       def process_rows(rows)
-        live_identities = live_recovery_identities(rows)
         current = current_notifications(rows)
         if @alert_store.fresh_install?
           immediate, seedable = current.partition do |_fingerprint, payload|
@@ -48,7 +47,10 @@ module Hive
           process_current(immediate)
           return
         end
-        process_recoveries(current, live_identities)
+        # live_recovery_identities is consulted only by process_recoveries (to
+        # hold a stored recovery while its retry is in flight), so compute it at
+        # its single use — the fresh-install early return above skips the pass.
+        process_recoveries(current, live_recovery_identities(rows))
         process_current(current)
       end
 
@@ -151,11 +153,14 @@ module Hive
             # starts (and can fully elapse) while an `agent_running` retry holds
             # the row below. This is intentional: a long hold means grace is
             # already satisfied, so the first non-held tick fires "Recovered"
-            # promptly rather than restarting a fresh settling window. It is not
-            # a false-recovered risk — the only way a held row leaves the hold is
-            # by recovering or re-erroring (the intermediate "neither
-            # agent_running nor error" state is unreachable from
-            # TaskAction#universal_action).
+            # promptly rather than restarting a fresh settling window. This is
+            # not a false-recovered risk: a held row leaves the hold only by
+            # ceasing to be `agent_running`, which means the retry finished and
+            # the stuck error is gone. It may resolve straight to a live
+            # non-error state — `manual_steering` (TaskAction#universal_action)
+            # or `needs_input`/`ready_*` (TaskAction#kind_action) — without a
+            # fresh `error` re-occurring; "Recovered" is still truthful there,
+            # because the agent is no longer running and the error has cleared.
             unless absence_passed_grace?(entry, fingerprint)
               next
             end

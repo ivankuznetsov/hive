@@ -905,8 +905,9 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     dispatcher.process_rows([ row(action: "agent_running", marker: "agent_working") ])
 
     assert_empty telegram.messages
-    assert_equal [ :notification_skipped_live_agent ], logger.events.map(&:first),
-                 "the live-agent skip must be the ONLY event emitted — no spurious/duplicate events"
+    assert_empty logger.events,
+                 "a healthy live agent (agent_working marker) is not a stale-marker contradiction — " \
+                 "it must be fully silent, no :notification_skipped_live_agent churn every poll tick"
   end
 
   def test_send_failures_are_logged_without_marking_seen

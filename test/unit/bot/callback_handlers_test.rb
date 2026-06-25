@@ -403,6 +403,23 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal :reply, result.action
     assert_includes result.text, "Status lookup failed"
     refute_includes result.text, "No diagnostic available"
+    logged = @logger.events.find { |event| event[:name] == :details_lookup_failed }
+    refute_nil logged, "a swallowed snapshot-provider fault must be logged, not silently degraded"
+    assert_equal "alpha", logged[:payload][:project]
+    assert_equal "red-task-260518-aaaa", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_show_details_skips_non_conforming_snapshot_rows
+    # resolve_details_row's row.respond_to?(:project)/:slug guard must skip a
+    # snapshot entry that doesn't quack like a Row instead of crashing the
+    # match — then resolve the one conforming row normally.
+    handlers = handlers_with_snapshot([ Object.new, status_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Red Task — alpha/red-task-260518-aaaa (6-review)"
   end
 
   def test_show_details_appends_existing_row_diagnostic

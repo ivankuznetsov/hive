@@ -274,7 +274,12 @@ module Hive
           when 1 then [ matches.first, nil ]
           else [ nil, "That task is ambiguous — send /status to pick the current task." ]
           end
-        rescue StandardError
+        rescue StandardError => e
+          # Log before degrading: a recurring snapshot-provider fault (e.g. a
+          # future I/O-backed status_snapshot_provider) would otherwise be
+          # invisible in bot.log, mirroring the :callback_malformed rescue above.
+          @logger&.event(:details_lookup_failed, project: project, slug: slug,
+                                                  error_class: e.class.name, message: e.message)
           [ nil, "Status lookup failed — try again in a moment." ]
         end
 

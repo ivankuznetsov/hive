@@ -64,16 +64,10 @@ module Hive
 
         def approve(data)
           _prefix, verb, project, slug, stage = split_callback(data, 5)
-          # `hive run` (the generic-stage agent, from a `ready_to_run` row)
-          # scopes the slug lookup with --stage and has no --from; every
-          # other advance/approve verb asserts the source stage with --from.
-          stage_flag = verb == "run" ? "--stage" : "--from"
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: project,
-            slug: slug,
-            command_argv: [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
-          )
+          # `hive run` (the generic-stage agent, from a `ready_to_run` row) is
+          # the only verb here that scopes with --stage and has no --from;
+          # every other advance/approve verb asserts the source stage.
+          dispatch_stage_verb(verb: verb, project: project, slug: slug, stage: stage)
         end
 
         def rerun(data)
@@ -84,6 +78,15 @@ module Hive
           # it acts as the same stage filter the plan called for and avoids
           # the source-stage terminal-marker gate. The generic `run` verb
           # scopes with --stage.
+          dispatch_stage_verb(verb: verb, project: project, slug: slug, stage: stage)
+        end
+
+        # Build the dispatch Result for a single `hive <verb> <slug>` against a
+        # stage. The generic `run` verb scopes with --stage (no --from); every
+        # workflow advance/retry verb asserts the source stage with --from.
+        # Shared by approve (ready-row Approve button) and rerun (paused-row
+        # Re-run/Run buttons) so the argv shape can't drift between them.
+        def dispatch_stage_verb(verb:, project:, slug:, stage:)
           stage_flag = verb == "run" ? "--stage" : "--from"
           @result_class.new(
             action: :dispatch_then_reply,
@@ -103,6 +106,15 @@ module Hive
 
           command = row.respond_to?(:suggested_command) ? row.suggested_command.to_s : ""
           command = "hive plan #{Shellwords.escape(slug)} --from #{Shellwords.escape(stage)} --project #{Shellwords.escape(project)}" if command.empty?
+          # `PlanApproval.prepare` flips the plan marker `:waiting` → `:complete`
+          # on disk HERE, before the develop dispatch is durably enqueued (the
+          # supervisor enqueues the returned Result later). This is a deliberate
+          # advance-then-resurface window: if that enqueue fails, the supervisor
+          # surfaces a "couldn't queue" reply and the now-`:complete` 3-plan row
+          # reclassifies as ready_to_develop on the next status poll, so it
+          # resurfaces driveable rather than stranding. The command shape is
+          # validated BEFORE the flip (PlanApproval.rewrite_to_develop), so a
+          # malformed row leaves the marker at `:waiting` for inspection.
           argv = Shellwords.split(Hive::Daemon::PlanApproval.prepare(command, row.state_file))
           ensure_flag!(argv, "--project", project)
           argv << "--json" unless argv.include?("--json")
@@ -114,6 +126,18 @@ module Hive
           )
         rescue Hive::Daemon::PlanApproval::NotApprovable
           @result_class.new(action: :reply, text: "Plan is no longer waiting for approval. Reopen /queue.")
+        rescue SystemCallError, IOError => e
+          # The marker write itself failed (read-only / full state dir). Without
+          # this, the error escapes to the poll loop's generic rescue, which
+          # logs :fatal and sends nothing — the operator sees the acked spinner
+          # clear, then silence. Reply with an actionable next step instead.
+          @logger&.event(:callback_marker_write_failed, project: project, slug: slug, stage: stage,
+                                                         error_class: e.class.name, message: e.message)
+          @result_class.new(
+            action: :reply,
+            text: "Couldn't record the approval (#{e.class}) - the task's state dir may be read-only or full. " \
+                  "Open it on a laptop."
+          )
         end
 
         def clear_and_retry(data)

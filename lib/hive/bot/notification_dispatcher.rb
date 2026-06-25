@@ -63,12 +63,26 @@ module Hive
           next if suppress_daemon_plan_pause?(row)
           next if suppress_active_conversation?(row)
 
-          notification = NotificationBuilders.build(row, logger: @logger)
+          notification = build_notification(row)
           next unless notification
 
           fingerprint = NotificationBuilders.fingerprint(row)
           out[fingerprint] ||= { row: row, notification: notification }
         end
+      end
+
+      # Build one row's notification, isolating a malformed row so it can't
+      # abort the whole tick. A typo'd/unmapped action role surfaces as an
+      # ArgumentError at RowActions::Action construction (the closed ROLES
+      # boundary) or a KeyError in label_for_action; either way we log and
+      # skip just this row rather than dropping every push this poll.
+      def build_notification(row)
+        NotificationBuilders.build(row, logger: @logger)
+      rescue ArgumentError, KeyError => e
+        @logger.event(:notification_build_failed, project: row.project, slug: row.slug,
+                                                   marker: row.marker, action: row.action,
+                                                   error_class: e.class.name, message: e.message)
+        nil
       end
 
       # Suppress the proactive "X is waiting for your input" push for a

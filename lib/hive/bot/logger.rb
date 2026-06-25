@@ -33,6 +33,9 @@ module Hive
         envelope_parse_failure
         send_failure
         callback_malformed
+        callback_marker_write_failed
+        notification_build_failed
+        status_button_failed
         pid_file_corrupted
         unknown_stage_label
         alert_store_corrupt

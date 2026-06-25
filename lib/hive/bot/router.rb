@@ -43,6 +43,7 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        callback_expired
         idea_voice
         idea_voice_during_draft
         idea_voice_edit_text
@@ -233,6 +234,13 @@ module Hive
         when /\Afindings:accept_all:/ then :callback_findings_accept_all
         when /\Afindings:reject_all:/ then :callback_findings_reject_all
         when /\Aidea_project_new:/ then :callback_idea_project_new
+        # A `#`-prefixed token that survived resolve_callback is a compacted
+        # callback whose registry entry is gone (bot restart, or TTL/size
+        # eviction) — the long approve_plan:/rerun: callbacks on this project's
+        # slugs routinely exceed Telegram's 64-byte cap and rely on that
+        # registry. Tell the operator the button expired instead of the
+        # generic "I did not understand that".
+        when /\A#/ then :callback_expired
         else :unknown
         end
       end
@@ -298,6 +306,8 @@ module Hive
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
+        when :callback_expired
+          Result.new(action: :reply, text: "That button expired — reopen /queue to get a fresh one.")
         when :unknown then Result.new(action: :reply, text: "I did not understand that. Send /help for commands.")
         else @callback_handlers.handle(intent, update)
         end

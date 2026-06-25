@@ -396,6 +396,113 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     end
   end
 
+  def test_approve_plan_replies_when_row_not_in_snapshot
+    # The common stale-button tap: the snapshot has advanced (or the task was
+    # archived) so the row the callback names is gone. Must steer back to
+    # /queue rather than crash or dispatch a phantom develop. @handlers uses the
+    # default empty status_snapshot_provider, so this also exercises that path.
+    result = @handlers.handle(
+      :callback_approve_plan,
+      update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Task status changed - reopen \/queue\./, result.text)
+  end
+
+  def test_approve_plan_appends_project_flag_when_suggested_command_omits_it
+    Dir.mktmpdir("bot-plan-approve-noproj") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-noproj", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input",
+        suggested_command: "hive plan plan-task-260624-noproj --from 3-plan"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-noproj:3-plan")
+      )
+
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-noproj", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv,
+        "a suggested_command missing --project must get it appended via ensure_flag!"
+      )
+    end
+  end
+
+  def test_approve_plan_replies_when_state_file_unavailable
+    row = StatusRow.new(
+      project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, state_file: "",
+      action: "needs_input", action_label: "Needs input",
+      suggested_command: "hive plan plan-task-260624-abcd --from 3-plan --project hive"
+    )
+
+    result = handlers_with_rows([ row ]).handle(
+      :callback_approve_plan,
+      update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Plan state is unavailable - reopen \/queue\./, result.text)
+  end
+
+  def test_approve_plan_synthesizes_develop_command_when_suggested_command_blank
+    Dir.mktmpdir("bot-plan-approve-blank") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-wxyz", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input", suggested_command: nil
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-wxyz:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-wxyz", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv,
+        "a blank suggested_command must synthesize `hive plan <slug> --from <stage>`, rewritten to develop"
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_replies_when_marker_write_fails
+    # A read-only / full state dir makes the marker write (PlanApproval.prepare
+    # → Markers.set) raise a SystemCallError. Without the rescue it would escape
+    # to the poll loop's generic rescue and the operator would see the acked
+    # spinner clear then silence; instead reply with an actionable next step.
+    with_plan_row(:waiting) do |row, _state_file|
+      handlers = handlers_with_rows([ row ])
+      # Singleton-override prepare to raise a SystemCallError (minitest/mock
+      # isn't bundled); restore it afterwards.
+      original = Hive::Daemon::PlanApproval.method(:prepare)
+      Hive::Daemon::PlanApproval.define_singleton_method(:prepare) { |*| raise Errno::EACCES, "plan.md" }
+      result = begin
+        handlers.handle(:callback_approve_plan, update("approve_plan:hive:plan-task-260624-abcd:3-plan"))
+      ensure
+        Hive::Daemon::PlanApproval.singleton_class.send(:remove_method, :prepare)
+        Hive::Daemon::PlanApproval.define_singleton_method(:prepare, &original)
+      end
+
+      assert_equal :reply, result.action
+      assert_match(/Couldn't record the approval/, result.text)
+      assert(@logger.events.any? { |e| e[:name] == :callback_marker_write_failed },
+             "a failed marker write must be logged for an audit trail")
+    end
+  end
+
   def test_unknown_rerun_verb_uses_confused_fallback
     result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:doctor"))
 

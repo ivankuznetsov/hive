@@ -14,9 +14,9 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   RECOVERED_MESSAGE = "✅ Recovered: \"#42 Readable Recovery\" — Review".freeze
 
   def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          id: nil, display_name: nil, pr_url: nil, workflow: "coding")
+          id: nil, display_name: nil, pr_url: nil, workflow: "coding", project: "hive")
     Row.new(
-      project: "hive",
+      project: project,
       slug: slug,
       id: id,
       display_name: display_name,
@@ -51,8 +51,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
         id: id, display_name: display_name)
   end
 
-  def live_retry_row(slug: "stuck-task-260525-abcd", stage: "6-review", marker: "review_error")
-    row(action: "agent_running", marker: marker, slug: slug, stage: stage)
+  def live_retry_row(slug: "stuck-task-260525-abcd", stage: "6-review", marker: "review_error", project: "hive")
+    row(action: "agent_running", marker: marker, slug: slug, stage: stage, project: project)
   end
 
   def dispatcher(path: nil, now: Time.utc(2026, 5, 25, 10, 0, 0), daemon_enabled: ->(_project) { false },
@@ -513,12 +513,15 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d.process_rows([ live ])
       @clock += 61
       d.process_rows([ live ])
-      d.process_rows([])
+      d.process_rows([]) # lock gone — the settling window restarts now (grace is re-armed during the hold)
+      @clock += 61       # let the post-hold grace window elapse
       d.process_rows([])
 
       recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
       assert_equal 1, recovered.size
       assert_equal RECOVERED_MESSAGE, recovered.first[:text]
+      assert_equal 2, telegram.messages.size,
+                   "only the original stuck alert and the single Recovered may be sent — no spurious extra push"
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
                  "successful Recovered delivery must remove the original alert entry"
     end
@@ -547,11 +550,13 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
-  # The grace clock (absent_since) is stamped on the first held tick and must
-  # NOT be reset while the live retry continues to hold the row — otherwise a
-  # long hold would never accumulate enough grace to fire Recovered promptly.
-  # test_live_retry_success_* relies on this implicitly; pin it explicitly.
-  def test_absent_since_is_not_reset_while_live_retry_holds_the_row
+  # The grace clock (absent_since) is RE-ARMED — kept un-started (nil) — for
+  # every tick a live retry holds the row, so the settling window can only
+  # begin once the hold genuinely lifts. This is what stops a transient
+  # one-tick drop of the agent_running row (a per-project status degrade) from
+  # looking like a completed retry and releasing the hold: the next held tick
+  # clears any grace the drop started. See process_recoveries.
+  def test_grace_clock_is_rearmed_every_tick_while_live_retry_holds_the_row
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
       d = dispatcher(path: path)
@@ -560,16 +565,49 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
 
       d.process_rows([ stuck ])
-      d.process_rows([ live ]) # first held tick stamps absent_since (grace clock)
-      grace_started_at = Hive::Bot::AlertStore.new(path: path).entry(fingerprint).absent_since
-      refute_nil grace_started_at, "the first held tick must stamp absent_since"
+      d.process_rows([ live ]) # held: the grace clock must NOT start while the retry runs
+      assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint).absent_since,
+                 "the grace clock must not start while the live retry holds the row"
 
       @clock += 61
-      d.process_rows([ live ]) # still held; absent_since must be retained, not reset
+      d.process_rows([ live ]) # still held; the grace clock must stay un-started
 
-      retained = Hive::Bot::AlertStore.new(path: path).entry(fingerprint).absent_since
-      assert_equal grace_started_at, retained,
-                   "absent_since (the grace clock) must NOT be reset while the live retry holds the row"
+      assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint).absent_since,
+                 "absent_since (the grace clock) must stay re-armed (nil) for every held tick"
+    end
+  end
+
+  # A transient per-project status degrade can drop the still-running
+  # agent_running row from a SINGLE snapshot while top-level status stays
+  # ok:true — so process_rows runs with the live identity momentarily absent.
+  # Because grace is re-armed while held, that one-tick drop must NOT fire a
+  # premature Recovered, and the held entry must be retained: the row reappears
+  # next tick and re-arms again. This is the A5 guard the grace/hold ordering
+  # exists for.
+  def test_mid_hold_single_tick_identity_drop_does_not_fire_premature_recovered
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ]) # held
+      @clock += 61
+      d.process_rows([ live ]) # held; grace would have elapsed under the old ordering
+      @clock += 61
+      d.process_rows([])       # transient one-tick degrade: live identity absent, retry still running
+      @clock += 61
+      d.process_rows([ live ]) # row reappears — the retry never finished
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_empty recovered,
+                   "a single-tick identity drop mid-hold must NOT fire a premature Recovered (A5)"
+      assert_equal 1, telegram.messages.size,
+                   "only the original stuck alert may have been sent during the held retry"
+      refute_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
+                 "the held recovery entry must be retained across a transient identity drop"
     end
   end
 
@@ -623,6 +661,62 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
+  # The dominant production retry has already CLEARED its stale recovery marker
+  # but still holds the lock: action=agent_running, marker=agent_working (a
+  # non-recovery marker). The hold keys on action only (live_recovery_identities),
+  # so it must hold the stored recovery regardless of the marker. Every other
+  # hold test uses a recovery-marker holder, so a "tidy-up" refactor that gated
+  # the hold on NotificationBuilders.recovery?(row) would silently fire a
+  # premature Recovered in exactly this clean-retry window and still pass the
+  # rest of the suite. Pin marker-independence here.
+  def test_clean_agent_working_retry_holds_recovery_independent_of_marker
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      clean_retry = live_retry_row(marker: "agent_working") # marker already cleared, lock still held
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      d.process_rows([ stuck ])
+      d.process_rows([ clean_retry ])
+      @clock += 61
+      d.process_rows([ clean_retry ])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_empty recovered,
+                   "a clean agent_running+agent_working retry must hold the recovery, not fire Recovered"
+      assert_equal 1, telegram.messages.size,
+                   "only the original stuck alert may have been sent while the clean retry holds"
+      refute_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
+                 "the held recovery entry must be retained while the clean retry runs"
+    end
+  end
+
+  # Negative identity scoping on the PROJECT component: a live agent_running row
+  # with the SAME slug+stage but a DIFFERENT project must NOT hold the stored
+  # recovery. recovery_identity is [project, slug, stage]; every other fixture
+  # uses project "hive", so a refactor dropping project would let a retry in
+  # project B hold/supersede a same-slug+stage recovery in project A while the
+  # slug- and stage-scoping siblings still pass.
+  def test_live_agent_for_different_project_does_not_hold_same_slug_recovery
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")  # project "hive"
+      other_project_live = live_retry_row(project: "other-project")    # same slug+stage, different project
+
+      d.process_rows([ stuck ])
+      d.process_rows([ other_project_live ])
+      @clock += 61
+      d.process_rows([ other_project_live ])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "a live agent_running row in a different project must NOT hold a same-slug recovery"
+      assert_includes recovered.first[:text], "#42 Readable Recovery"
+    end
+  end
+
   # The archived-vs-agent_running asymmetry: archived suppresses the build (like
   # agent_running) but — unlike agent_running — does NOT register a live recovery
   # identity, so it does not hold a stored recovery and Recovered still fires.
@@ -645,6 +739,10 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
       assert_equal 1, recovered.size,
                    "archived suppresses the build but (unlike agent_running) must NOT hold the recovery"
+      assert_equal RECOVERED_MESSAGE, recovered.first[:text],
+                   "the Recovered body must match exactly, not merely contain the word 'Recovered'"
+      assert_equal 2, telegram.messages.size,
+                   "only the original stuck alert and the single Recovered may be sent — no spurious extra push"
     end
   end
 
@@ -670,11 +768,16 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       assert_equal 1, telegram.messages.size, "the live retry must hold Recovered while it runs"
 
       d.process_rows([ resolved ]) # retry resolves to a live, non-error, non-running state
+      @clock += 61                 # the settling window restarts once the hold lifts; let it elapse
+      d.process_rows([ resolved ])
 
       recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
       assert_equal 1, recovered.size,
                    "resolution to manual_steering fires Recovered once (error cleared, agent no longer running)"
       assert_equal RECOVERED_MESSAGE, recovered.first[:text]
+      assert_equal 2, telegram.messages.size,
+                   "manual_steering produces no notification of its own — only the stuck alert and the single " \
+                   "Recovered may be sent, so an extra push can't slip past the recovered.size == 1 check"
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
                  "Recovered delivery must remove the held recovery entry"
     end
@@ -698,6 +801,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d.process_rows([ live ])
       @clock += 61
       d.process_rows([ live ])
+      d.process_rows([ resolved ]) # resolves out of the hold; the new needs_input state alerts immediately
+      @clock += 61                 # the settling window restarts once the hold lifts; let it elapse
       d.process_rows([ resolved ])
 
       recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }

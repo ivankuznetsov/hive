@@ -147,26 +147,37 @@ module Hive
               @alert_store.remove(fingerprint)
               next
             end
-            next if backoff_active?(entry)
-
-            # Grace is checked BEFORE the live-identity hold, so the grace clock
-            # starts (and can fully elapse) while an `agent_running` retry holds
-            # the row below. This is intentional: a long hold means grace is
-            # already satisfied, so the first non-held tick fires "Recovered"
-            # promptly rather than restarting a fresh settling window. This is
-            # not a false-recovered risk: a held row leaves the hold only by
-            # ceasing to be `agent_running`, which means the retry finished and
-            # the stuck error is gone. It may resolve straight to a live
-            # non-error state — `manual_steering` (TaskAction#universal_action)
-            # or `needs_input`/`ready_*` (TaskAction#kind_action) — without a
-            # fresh `error` re-occurring; "Recovered" is still truthful there,
-            # because the agent is no longer running and the error has cleared.
-            unless absence_passed_grace?(entry, fingerprint)
+            # A live `agent_running` retry holds the stored recovery from
+            # firing a premature "Recovered": NotificationBuilders suppresses
+            # agent_running rows, so a retry in flight is absent from `current`
+            # even though the stage has NOT recovered. The hold is checked
+            # BEFORE grace and re-arms the settling window each held tick
+            # (clears absent_since) so the grace clock can only start ticking
+            # once the hold genuinely lifts.
+            #
+            # This ordering is load-bearing: the live identity can vanish from a
+            # SINGLE status snapshot without the retry finishing. A per-project
+            # status degrade (commands/status.rb keeps the top-level status
+            # `ok:true` while emptying a project whose dir check fails —
+            # missing_project_path / not_initialised; status_watcher's
+            # `extract_rows` skips a project with an `error`; the supervisor
+            # still calls `process_rows` because `result.ok`) drops the
+            # still-running agent_running row for one tick. Re-arming here means
+            # that one-tick drop re-arms again as soon as the row reappears,
+            # instead of looking like a completed retry and releasing the hold —
+            # so a transient blip can no longer fire a false "Recovered"
+            # mid-retry (A5). Recovered only fires once the lock is gone for a
+            # full grace window. Resolution straight to a live non-error state
+            # (`manual_steering`/`needs_input`/`ready_*`) is still truthful then,
+            # because the agent has stopped and the error has cleared.
+            if live_identities.include?(recovery_identity(row))
+              @alert_store.mark_present(fingerprint)
               next
             end
-            # NotificationBuilders suppresses agent_running rows, so a retry in
-            # flight is absent from `current` even though it has not recovered.
-            next if live_identities.include?(recovery_identity(row))
+
+            next if backoff_active?(entry)
+
+            next unless absence_passed_grace?(entry, fingerprint)
 
             if send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
@@ -291,7 +302,7 @@ module Hive
 
       def live_recovery_identities(rows)
         Array(rows).each_with_object(Set.new) do |row, identities|
-          identities.add(recovery_identity(row)) if row.action.to_s == Hive::Schemas::TaskActionKind::AGENT_RUNNING
+          identities.add(recovery_identity(row)) if row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
         end
       end
 

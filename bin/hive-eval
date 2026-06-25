@@ -72,6 +72,13 @@ def option_value_missing?(value)
   value.to_s.empty? || value.start_with?("-")
 end
 
+# Snapshot ARGV before parse! mutates it in place. The rescue scan below relies
+# on the original tokens: when --scenario swallows a following --report as its
+# value (e.g. `--scenario --report /tmp/x.json`), parse! removes that --report
+# token from ARGV, so scanning the post-parse ARGV would miss the report the
+# user named and leave it behind. Scanning the snapshot still sees it.
+argv_snapshot = ARGV.dup
+
 begin
   remaining = parser.parse!
   raise OptionParser::MissingArgument, "--report" if option_value_missing?(options[:report])
@@ -83,10 +90,13 @@ rescue OptionParser::ParseError => e
   # So clear here, covering both ways the selected report can be named:
   #   * OptionParser captured it into options (exact --report only; abbreviations
   #     are rejected via require_exact, matching the manual scan).
-  #   * an invalid option raised before --report was reached, leaving it in ARGV
-  #     (the manual scan recognizes the exact --report/--report= forms).
+  #   * the report token never reached options — an invalid option raised before
+  #     it, or --scenario consumed it as its value — leaving it in the pre-parse
+  #     ARGV snapshot (the manual scan recognizes the exact --report/--report=
+  #     forms). parse! may have stripped it from the live ARGV, so we scan the
+  #     snapshot, not ARGV.
   [ expanded_report_path(root, options.fetch(:report)),
-    selected_report_path(root, ARGV, options.fetch(:report)) ].compact.each do |path|
+    selected_report_path(root, argv_snapshot, options.fetch(:report)) ].compact.each do |path|
     FileUtils.rm_f(path)
   end
   warn "hive-eval: #{e.message}"

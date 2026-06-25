@@ -296,6 +296,33 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_scenario_consuming_report_flag_and_clears_named_report
+    # `--scenario --report <path>` makes --scenario swallow the --report flag
+    # itself, leaving <path> a stray positional. parse! strips the consumed
+    # --report token from ARGV, so the rescue cleanup must scan the pre-parse
+    # ARGV snapshot — not the mutated ARGV — to still recognize and delete the
+    # report the user named.
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      with_fake_bundle do |env, marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--scenario", "--report", report
+        )
+
+        refute status.success?
+        assert_equal 64, status.exitstatus
+        assert_match(/hive-eval: missing argument: --scenario/, err)
+        assert_match(%r{Usage: bin/hive-eval}, err)
+        refute_match(/OptionParser::/, err)
+        refute File.exist?(report), "usage errors must not leave the named eval report behind"
+        refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+      end
+    end
+  end
+
   def test_cli_rejects_unexpected_positional_arguments
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "unexpected.json")

@@ -82,7 +82,7 @@ module Hive
         @poll_health.record_success
         Array(raw_updates).filter_map { |raw| build_update(raw) }
       rescue *BENIGN_POLL_ERRORS => e
-        @logger.event(:poll_failure, level: :debug, category: :noise,
+        @logger.event(:poll_failure, level: :debug, category: Logger::CATEGORY_NOISE,
                                      error_class: e.class.name, message: e.message)
         emit_poll_unhealthy_if_needed
         []

@@ -1,6 +1,7 @@
 require "time"
 require "set"
 require "hive/config"
+require "hive/bot/logger"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
 require "hive/bot/title_formatter"
@@ -220,6 +221,12 @@ module Hive
         end
       end
 
+      # Throttle the debug/noise dedupe + backoff skip lines to state
+      # transitions. The two in-memory Sets hold the fingerprints already
+      # logged this episode; pruning them to `current` here re-arms a
+      # fingerprint only when it leaves the current set (entry / fingerprint
+      # change / leave-and-return). This is distinct from the AlertStore's
+      # persistent delivery dedup — these Sets govern log noise, not delivery.
       def reconcile_skip_log_state(current)
         @dedupe_logged.keep_if { |fingerprint| current.key?(fingerprint) }
         @backoff_logged.keep_if { |fingerprint| current.key?(fingerprint) }
@@ -229,7 +236,7 @@ module Hive
         return if @backoff_logged.include?(fingerprint)
 
         @backoff_logged.add(fingerprint)
-        @logger.event(:notification_skipped_backoff, level: :debug, category: :noise,
+        @logger.event(:notification_skipped_backoff, level: :debug, category: Logger::CATEGORY_NOISE,
                                                       project: row.project, slug: row.slug,
                                                       marker: row.marker,
                                                       consecutive_failures: entry.consecutive_failures.to_i)
@@ -239,7 +246,7 @@ module Hive
         return if @dedupe_logged.include?(fingerprint)
 
         @dedupe_logged.add(fingerprint)
-        @logger.event(:notification_skipped_dedupe, level: :debug, category: :noise,
+        @logger.event(:notification_skipped_dedupe, level: :debug, category: Logger::CATEGORY_NOISE,
                                                      project: row.project,
                                                      slug: row.slug,
                                                      marker: row.marker)

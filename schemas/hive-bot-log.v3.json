@@ -58,7 +58,8 @@
       "enum": ["debug", "info", "warn", "error"]
     },
     "category": {
-      "type": "string"
+      "type": "string",
+      "description": "Optional open-set tag. The only convention-bearing value is \"noise\", marking high-frequency, low-signal lines (benign poll-transport failures, dedupe/backoff skips). Nothing in the producer gem filters on it — it is a downstream-only contract for a log viewer or forwarder to drop category=noise lines."
     }
   }
 }

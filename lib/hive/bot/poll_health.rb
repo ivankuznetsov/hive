@@ -8,6 +8,12 @@ module Hive
       # failure escalates a fresh unhealthy episode, so `escalate?` derives from
       # it. Dropping a separate `escalate` boolean makes the contradictory
       # `escalate: false, reason: :silence` state unrepresentable.
+      #
+      # `consecutive_failures` and `seconds_since_success` are only meaningful
+      # on the escalation path (when `escalate?` is true): they exist to
+      # populate the `poll_unhealthy` event. On a non-escalating failure they
+      # still carry their raw counters, but no caller should read them — the
+      # numbers describe an outage that isn't being reported.
       Result = Data.define(:reason, :consecutive_failures, :seconds_since_success) do
         def escalate?
           !reason.nil?

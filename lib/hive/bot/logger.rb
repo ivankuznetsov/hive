@@ -45,10 +45,19 @@ module Hive
         fatal
       ].freeze
 
+      # The one load-bearing category value. The bot's producers tag
+      # high-frequency, low-signal lines (benign poll-transport failures,
+      # dedupe/backoff skips) with `CATEGORY_NOISE`. Extracted as a constant so
+      # the single significant category is greppable while the category field
+      # itself stays open-set (see below).
+      CATEGORY_NOISE = :noise
+
       # Unlike `level` (a closed enum guarded against LEVEL_NAMES below),
       # `category` is intentionally open-set: the v3 schema specifies it as
       # free-form `type: string`, so new categories can be introduced without a
-      # schema bump. The noise-suppression filter keys on the literal "noise".
+      # schema bump. `noise` is a downstream-only convention: nothing in this
+      # gem filters on it — the contract is for an external log viewer or
+      # forwarder to drop `category=noise` lines.
       LEVELS = {
         notification_skipped_dedupe: :debug,
         notification_skipped_backoff: :debug,

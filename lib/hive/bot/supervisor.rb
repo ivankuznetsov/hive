@@ -990,10 +990,12 @@ module Hive
         # through the daemon's dispatch-request queue so there is one
         # writer of those verbs — the daemon — and the
         # post-completion mtime baseline stays current. Plan
-        # 2026-05-28-002. Read-only verbs (status/--diagnose, new,
-        # approve) keep the in-process spawn path because they don't
-        # bump task state-file mtime and don't cause the dual-writer
-        # bug.
+        # 2026-05-28-002. The remaining in-process verbs (status, new,
+        # approve, and the surviving `status --diagnose --write --force`
+        # refresh) keep the in-process spawn path because none of them
+        # bump the task state-file mtime — the diagnose refresh only
+        # writes a diagnostics artifact — so they don't cause the
+        # dual-writer bug.
         if queue_routable?(result.command_argv)
           return enqueue_dispatch_request(result, update)
         end
@@ -1273,12 +1275,16 @@ module Hive
           diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
           slug = envelope["slug"] || child.slug
           # Show details renders directly from the cached status row now.
-          # This remains defensive for refresh_diagnose and manual diagnose
-          # child paths that can still return an empty success envelope.
+          # This remains defensive for the refresh_diagnose child path, the
+          # sole producer of this envelope, which can still return an empty
+          # success envelope.
           return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
-          return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
-                 "Tap Show details to dump it here."
+          # The freshly written verdict isn't in the cached snapshot row until
+          # the next poll, and Show details renders a summary, not a raw dump —
+          # so the copy promises a summarized render, not "dump it here".
+          return "Refreshed diagnosis for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
+                 "Tap Show details for the summary (updates on the next status refresh)."
         end
 
         kind = envelope["error_kind"].to_s.strip

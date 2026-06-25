@@ -316,7 +316,8 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis is available for "Red task…". Tap Show details to dump it here.', text
+    assert_equal 'Refreshed diagnosis for "Red task…". ' \
+                 "Tap Show details for the summary (updates on the next status refresh).", text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"

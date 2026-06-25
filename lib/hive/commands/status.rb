@@ -438,11 +438,11 @@ module Hive
         end
 
         hidden_rows, visible_rows = rows.partition { |row| hide_archived_row?(row) }
-        render_rows = visible_rows.reject { |row| incoherent_needs_input?(row) }
+        incoherent_rows, render_rows = visible_rows.partition { |row| incoherent_needs_input_row?(row) }
         legacy = detect_legacy_stage_dirs(hive_state)
         puts project["name"]
         render_legacy_stage_warning(legacy) unless legacy.empty?
-        if render_rows.empty? && hidden_rows.empty?
+        if render_rows.empty? && hidden_rows.empty? && incoherent_rows.empty?
           puts "  no active tasks" if legacy.empty?
           return
         end
@@ -459,10 +459,11 @@ module Hive
                  "#{state.ljust(24)} #{command} #{r[:age]}"
           end
         end
+        render_incoherent_hidden_summary(incoherent_rows.size) unless incoherent_rows.empty?
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
       end
 
-      def incoherent_needs_input?(row)
+      def incoherent_needs_input_row?(row)
         Hive::Markers.incoherent_needs_input?(action: row[:action_key], marker: row[:marker_name])
       end
 
@@ -497,6 +498,17 @@ module Hive
 
       def render_archived_hidden_summary(hidden_count)
         puts "  … and #{hidden_count} archived >3d ago (hive archive to view)"
+      end
+
+      # Muted breadcrumb for needs_input rows whose marker is not a real input
+      # gate (marker=none / marker=complete). Such rows are not rendered as
+      # pending (the operator can't answer them), but a present-but-stuck task
+      # must not vanish silently: mirror render_archived_hidden_summary with a
+      # count line pointing at `--json` (and bot.log's notification_skipped_incoherent
+      # event) so the row stays discoverable from a human surface.
+      def render_incoherent_hidden_summary(hidden_count)
+        noun = hidden_count == 1 ? "task" : "tasks"
+        puts "  … and #{hidden_count} #{noun} hidden — needs_input with no answerable marker (see `--json`)"
       end
 
       # Identity column = `#id  #PR display-name`, padded to `width` visible

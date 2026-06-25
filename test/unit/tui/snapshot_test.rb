@@ -578,4 +578,30 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "review-waiting-row" ], filtered.rows.map(&:slug),
                  "marker=none is dropped; review_waiting is a real input marker and is kept"
   end
+
+  # Mirror of hidden_old_archived_count: counts the needs_input rows
+  # without_incoherent_needs_input suppresses, so a TUI surface can muted-
+  # breadcrumb a present-but-stuck incoherent task the way `hive status` text
+  # does, instead of letting it vanish silently.
+  def test_hidden_incoherent_needs_input_count
+    none = sample_task(slug: "none-row", marker: "none")
+    complete = sample_task(slug: "complete-row", marker: "complete")
+    waiting = sample_task(slug: "waiting-row", marker: "waiting")
+    [ none, complete, waiting ].each do |task|
+      task["action"] = "needs_input"
+      task["action_label"] = "Needs your input"
+    end
+
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+                                                                 {
+                                                                   "name" => "alpha",
+                                                                   "path" => "/tmp/alpha",
+                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
+                                                                   "tasks" => [ none, complete, waiting ]
+                                                                 }
+                                                               ]))
+
+    assert_equal 2, snapshot.hidden_incoherent_needs_input_count,
+                 "marker=none and marker=complete are incoherent; the real waiting row is not"
+  end
 end

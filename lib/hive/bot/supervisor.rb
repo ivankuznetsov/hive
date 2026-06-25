@@ -6,6 +6,7 @@ require "stringio"
 require "time"
 require "hive"
 require "hive/config"
+require "hive/markers" # incoherent_needs_input? in actionable_queue_rows; explicit so a require reorder can't NameError
 require "hive/commands/new"
 require "hive/bot/logger"
 require "hive/bot/telegram"
@@ -1484,8 +1485,14 @@ module Hive
           %w[archived agent_running].include?(row.action) ||
             # /status & /queue inherit the same incoherent needs_input
             # boundary as proactive pushes: a needs_input row whose marker
-            # is not a real input marker (e.g. marker=none / marker=complete)
-            # is not answerable, so it must not render in the pull replies.
+            # is not a real input marker (typically marker=none; marker=complete
+            # is the rarer execute_action-else/defensive case) is not answerable,
+            # so it must not render in the pull replies.
+            #
+            # `/details` (render_details above) is deliberately exempt from this
+            # gate — it can still pull up an incoherent row's diagnostic content.
+            # That presentation is deferred to task 9399, so the exemption is
+            # intentional, not an oversight.
             Hive::Markers.incoherent_needs_input?(action: row.action, marker: row.marker)
         end
       end

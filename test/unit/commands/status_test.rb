@@ -283,16 +283,27 @@ class CommandsStatusTest < Minitest::Test
       assert_includes out, waiting_slug
       refute_includes out, none_slug
       refute_includes out, done_slug
+      # U3 no-leak invariant on the CLI surface (was only pinned on the bot
+      # builder): internal marker names of the suppressed rows must never leak
+      # into the text output.
+      refute_includes out, "none", "raw marker=none must not leak into text status"
+      refute_includes out, "complete", "raw marker=complete must not leak into text status"
+      # The two suppressed rows (marker=none + marker=complete) surface only as
+      # a muted hidden-count breadcrumb pointing at --json, so a present-but-
+      # stuck task stays discoverable without rendering as pending.
+      assert_includes out, "2 tasks hidden", "suppressed incoherent rows get a count breadcrumb"
+      assert_includes out, "--json", "the breadcrumb points the operator at the JSON surface"
     end
   end
 
   # When a project's ONLY task is an incoherent needs_input row, the text
-  # renderer's emptiness guard now keys on render_rows (post-incoherent
-  # filter), so the project reports "no active tasks" and the slug never
-  # appears. The companion test above always keeps a genuine waiting row,
-  # so this sole-incoherent branch (status.rb's render_rows.empty? guard)
-  # needs its own coverage.
-  def test_text_status_reports_no_active_tasks_when_only_incoherent_rows
+  # renderer must NOT report "no active tasks" — that all-clear masked a
+  # present-but-stuck task. Instead the emptiness guard keys on render_rows AND
+  # incoherent_rows, so a sole-incoherent project emits the muted hidden-count
+  # breadcrumb (pointing at --json) while still never rendering the row as
+  # pending. This branch (status.rb's render_rows/hidden/incoherent emptiness
+  # guard) needs its own coverage.
+  def test_text_status_emits_breadcrumb_when_only_incoherent_rows
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       none_slug = "brainstorm-only-incoherent-260624-aaaa"
@@ -313,10 +324,44 @@ class CommandsStatusTest < Minitest::Test
         Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
       end
 
-      assert_includes out, "no active tasks",
-                      "a project whose only row is incoherent reports no active tasks"
-      refute_includes out, none_slug, "the incoherent row's slug must not render"
+      assert_includes out, "1 task hidden",
+                      "a sole incoherent row surfaces a hidden-count breadcrumb (singular)"
+      assert_includes out, "--json", "the breadcrumb points the operator at the JSON surface"
+      refute_includes out, "no active tasks",
+                      "a present-but-stuck incoherent task must not read as all-clear"
+      refute_includes out, none_slug, "the incoherent row's slug must not render as pending"
       refute_includes out, "Needs your input", "no answer group when every row is filtered"
+    end
+  end
+
+  # Characterize the deliberate bot-vs-CLI divergence for a GENUINE
+  # execute_waiting row (coherent input marker, NOT suppressed): the bot
+  # rewords it to "Execute paused — needs your input." (notification_builders),
+  # while `hive status` text renders the raw `execute_waiting` marker label.
+  # Pin the raw label so a future "reword/suppress everywhere" change is a
+  # conscious decision rather than an accidental drift between surfaces.
+  def test_text_status_renders_raw_execute_waiting_label_diverging_from_bot
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      ew_slug = "execute-paused-260624-eeee"
+      write_status_task(hive_state, "4-execute", ew_slug, state_file: "task.md", marker: "EXECUTE_WAITING")
+
+      project = status_project(project_root, hive_state)
+      tasks = Hive::Commands::Status.new.json_payload([ project ])
+                                   .fetch("projects").first.fetch("tasks")
+      assert_equal "needs_input", tasks.first.fetch("action"),
+                   "precondition: execute_waiting is a coherent needs_input row"
+      assert_equal "execute_waiting", tasks.first.fetch("marker")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+
+      assert_includes out, ew_slug, "a genuine execute_waiting row must still render"
+      assert_includes out, "execute_waiting",
+                      "CLI text pins the raw execute_waiting label (the bot rewords it)"
+      refute_includes out, "Execute paused",
+                      "the bot's rephrasing must not bleed into the CLI text surface"
     end
   end
 

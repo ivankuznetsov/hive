@@ -207,11 +207,16 @@ module Hive
         when "error" then error_message(row)
         when "recover_review" then Messages::RecoverReview.new(row: row)
         when "needs_input"
-          # Defense-in-depth: `Snapshot#visible_projection` already strips
-          # incoherent needs_input rows (marker not input_marker?), so the
-          # false branch is unreachable in the live path. Kept as a redundant
-          # guard exercised by the unit test — not the only suppression.
-          input_marker?(row) ? needs_input_message(row) : enter_fallback_message(row)
+          # Defense-in-depth: `Snapshot#visible_projection` (via
+          # `Snapshot#without_incoherent_needs_input`) already strips incoherent
+          # needs_input rows before they reach the grid, so the incoherent branch
+          # is unreachable in the live path today. It is kept to protect a future
+          # caller that reaches `message_for` while bypassing `visible_projection`
+          # (e.g. a new entry point mapping a raw row): without it, Enter on a
+          # marker=none / marker=complete row would open the input editor on an
+          # unanswerable row. Equivalent to `!input_marker?(row.marker)` here
+          # because this branch already guarantees action_key == needs_input.
+          incoherent_needs_input_row?(row) ? enter_fallback_message(row) : needs_input_message(row)
         else enter_fallback_message(row)
         end
       end
@@ -307,8 +312,11 @@ module Hive
         Messages::OpenInputEditor.new(row: row)
       end
 
-      def input_marker?(row)
-        Hive::Markers.input_marker?(row.marker)
+      # Per-surface row adapter for the shared incoherent-needs_input gate,
+      # named to match `Status#incoherent_needs_input_row?` and
+      # `Snapshot#incoherent_needs_input_row?` so all three grep together.
+      def incoherent_needs_input_row?(row)
+        Hive::Markers.incoherent_needs_input?(action: row.action_key, marker: row.marker)
       end
 
       def run_next_action?(row)

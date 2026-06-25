@@ -138,7 +138,8 @@ module Hive
           review_waiting(row)
         else
           # Defense-in-depth: incoherent needs_input rows (marker not in
-          # INPUT_MARKER_NAMES, e.g. none/complete) are dropped by the
+          # INPUT_MARKER_NAMES — typically marker=none; marker=complete is the
+          # rarer execute_action-else/defensive case) are dropped by the
           # dispatcher gate (NotificationDispatcher#suppress_incoherent_needs_input?)
           # before `build` runs, so only the three input markers above reach here.
           default_needs_input(row)
@@ -165,7 +166,7 @@ module Hive
       # custom sentence, one Show-details button. Callers own only the sentence.
       def details_only(row, sentence)
         Notification.new(
-          text: header(row) + "\n" + sentence,
+          text: "#{header(row)}\n#{sentence}",
           keyboard: [
             [ button("Show details", details_callback(row)) ]
           ]

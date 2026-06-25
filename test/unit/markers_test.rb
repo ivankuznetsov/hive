@@ -206,6 +206,31 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  # Producer-side drift guard for the inverse bug class. The subset test
+  # above only checks INPUT_MARKER_NAMES ⊆ KNOWN_NAMES; it would NOT catch a
+  # new genuine `*_WAITING` operator-gate marker added to KNOWN_NAMES (and
+  # routed to action=needs_input by TaskAction) but forgotten in
+  # INPUT_MARKER_NAMES — that row would then be silently suppressed as
+  # "incoherent" at every operator surface. Pin the forward direction: every
+  # KNOWN marker whose name denotes a waiting-for-operator gate must be a real
+  # input marker. (The `complete`/`none` rows that also reach needs_input are
+  # NOT *_WAITING markers — they hit needs_input through TaskAction fallbacks
+  # and are deliberately incoherent, so they correctly stay out of the
+  # allowlist and out of this assertion.)
+  def test_every_known_waiting_marker_is_a_real_input_marker
+    waiting_markers = Hive::Markers::KNOWN_NAMES
+                      .map { |name| name.to_s.downcase.to_sym }
+                      .select { |name| name.to_s.end_with?("waiting") }
+    refute_empty waiting_markers, "fixture sanity: KNOWN_NAMES must contain *_WAITING gates"
+
+    waiting_markers.each do |marker|
+      assert Hive::Markers.input_marker?(marker),
+             "#{marker.inspect} is a *_WAITING operator gate but is missing from " \
+             "INPUT_MARKER_NAMES; its needs_input action would be suppressed as " \
+             "incoherent at every surface"
+    end
+  end
+
   # The shared composite predicate the four operator surfaces (text status,
   # TUI projection, bot push dispatch, bot pull replies) feed their own row
   # shapes into. A row is incoherent only when action is needs_input AND the

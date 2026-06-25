@@ -33,7 +33,7 @@ tags: [marker, protocol, flock]
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
 
-`INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting]` defines the only marker names whose `needs_input` action should be surfaced as a pending question. Historical/upstream classification can still emit `action=needs_input` for markerless (`none`) or terminal (`complete`) rows; bot/status/TUI presentation boundaries use `Markers.input_marker?` to suppress those incoherent rows instead of showing internal marker names to operators.
+`INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting]` defines the only marker names whose `needs_input` action should be surfaced as a pending question. `TaskAction` can still emit `action=needs_input` for markerless (`none`) rows (a stage's `*_waiting` fallback) or terminal (`complete`) rows (`execute_action`'s `else` branch classifies a non-`execute_*` marker as `execute_waiting`/`needs_input`); bot/status/TUI presentation boundaries use the shared `Markers.incoherent_needs_input?(action:, marker:)` predicate (built on `Markers.input_marker?`) to suppress those incoherent rows instead of showing internal marker names to operators.
 
 `ERROR` markers written through `Markers.set` receive a generated `marker_id` attr unless the caller supplies one. This is the high-cardinality recovery discriminator for `hive markers clear --match-attr marker_id=...`; legacy rows without it fall back to observed attrs such as `reason=exit_code,exit_code=143`.
 

@@ -1,5 +1,4 @@
 require "securerandom"
-require "hive" # defines Hive::Schemas, referenced by incoherent_needs_input?
 
 module Hive
   module Markers
@@ -35,12 +34,23 @@ module Hive
 
     # Markers whose NEEDS_INPUT action is a real pending operator question.
     # Markerless (`none`) and terminal (`complete`) rows can still reach the
-    # needs_input action through the hardcoded `TaskAction#plan_action` /
-    # `#finalize_action` paths (lib/hive/task_action.rb), which classify any
-    # non-complete plan/finalize row as NEEDS_INPUT — see wiki/modules/markers.md
-    # ("Historical/upstream classification"). Those rows are incoherent:
-    # operator surfaces must not present them as answerable input.
+    # needs_input action through hardcoded fallbacks in `Hive::TaskAction`
+    # (lib/hive/task_action.rb): a markerless (`none`) plan/execute/finalize row
+    # classifies as that stage's `*_waiting`/NEEDS_INPUT action, and a `complete`
+    # row in the 4-execute stage hits `execute_action`'s `else` branch
+    # (task_action.rb:408-409) and classifies as `execute_waiting`/NEEDS_INPUT —
+    # see wiki/modules/markers.md ("Historical/upstream classification"). Those
+    # rows are incoherent: the marker is not a real input gate, so operator
+    # surfaces must not present them as answerable input.
     INPUT_MARKER_NAMES = %i[waiting execute_waiting review_waiting].freeze
+
+    # Canonical NEEDS_INPUT action value, inlined from
+    # `Hive::Schemas::TaskActionKind::NEEDS_INPUT` (lib/hive.rb) so this leaf
+    # vocabulary module — required independently by 25+ files — needn't depend
+    # on the top-level `hive` entrypoint just to read one string. The action
+    # kinds are a closed frozen enum; if the schema value ever changes, update
+    # both.
+    NEEDS_INPUT_ACTION = "needs_input".freeze
 
     # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
     # SIGKILL, 143 = SIGTERM). Only ERROR markers shaped as
@@ -174,7 +184,7 @@ module Hive
     end
 
     def input_marker?(name)
-      INPUT_MARKER_NAMES.include?(name.to_s.downcase.to_sym)
+      INPUT_MARKER_NAMES.include?(name.to_s.strip.downcase.to_sym)
     end
 
     # Composite "this needs_input row is incoherent" predicate, shared by
@@ -185,9 +195,13 @@ module Hive
     # marker is not one of INPUT_MARKER_NAMES — the operator can't answer it,
     # so surfaces suppress it. Previously only the leaf `input_marker?` was
     # shared and this composite was re-spelled per boundary, risking drift.
+    #
+    # `action` is matched against the canonical lowercase NEEDS_INPUT_ACTION
+    # value; unlike `marker` it is NOT re-normalized (no `.downcase`) because
+    # every caller already passes lowercase action keys from the status JSON
+    # contract. Keep feeding lowercase action keys if a new caller is added.
     def incoherent_needs_input?(action:, marker:)
-      action.to_s == Hive::Schemas::TaskActionKind::NEEDS_INPUT &&
-        !input_marker?(marker)
+      action.to_s == NEEDS_INPUT_ACTION && !input_marker?(marker)
     end
 
     def error_recovery_match_attr(attrs)

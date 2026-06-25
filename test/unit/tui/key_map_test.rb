@@ -977,6 +977,18 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  # The other incoherent variant: action=needs_input with a terminal
+  # marker=complete (an execute_action-else/defensive row) is just as
+  # unanswerable as marker=none, so Enter must not open the input editor.
+  def test_enter_on_complete_incoherent_needs_input_row_is_not_input_affordance
+    row = make_row(action_key: "needs_input", action_label: "Needs your input",
+                   marker: "complete", suggested_command: nil)
+
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_enter_on_waiting_needs_input_row_still_opens_input_editor
     row = make_row(action_key: "needs_input", action_label: "Needs your input",
                    marker: "waiting", suggested_command: nil)

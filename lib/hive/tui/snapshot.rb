@@ -247,6 +247,14 @@ module Hive
         rows.count { |row| old_archived_row?(row, now: now) }
       end
 
+      # Count of needs_input rows suppressed by `without_incoherent_needs_input`
+      # (marker not a real input gate). Mirrors `hidden_old_archived_count` so a
+      # TUI surface can muted-breadcrumb a present-but-stuck incoherent task the
+      # same way `hive status` text does, instead of letting it vanish silently.
+      def hidden_incoherent_needs_input_count
+        rows.count { |row| incoherent_needs_input_row?(row) }
+      end
+
       # `n == 0` is "all projects" (returns self). `n` between 1 and
       # projects.size returns a single-project snapshot (1-indexed). Out
       # of range returns an empty-projects snapshot so the renderer can

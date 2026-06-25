@@ -1012,8 +1012,9 @@ module Hive
           slug: result.slug
         )
         # No "Queued command pid=..." ack — that's operational chatter the
-        # operator does not need. The reaper still surfaces failures (and
-        # diagnose replies still fire for Show details), so silence here
+        # operator does not need. The reaper still surfaces failures (and the
+        # Refresh diagnosis reply still fires for `refresh_diagnose`; Show
+        # details now renders in-process via render_details), so silence here
         # is signal-preserving.
         pid
       end
@@ -1279,8 +1280,8 @@ module Hive
           slug = envelope["slug"] || child.slug
           return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
-          return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
-                 "Tap Show details to dump it here."
+          return "Diagnosis refreshed for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
+                 "Tap Refresh again to re-run it, or open the task on a laptop for the full report."
         end
 
         kind = envelope["error_kind"].to_s.strip
@@ -1386,8 +1387,12 @@ module Hive
       def inferred_success_slug(verb, argv)
         case verb
         when "status"
-          idx = argv.index("--diagnose")
-          idx ? argv[idx + 1].to_s : ""
+          # Plain `hive status --json` (Show details / /details) is rendered
+          # in-process by render_details and never reaches success-text
+          # inference; a `--diagnose` child short-circuits via
+          # diagnose_reply_for_child. So a status child here carries no
+          # inferable slug.
+          ""
         when "markers"
           argv[3].to_s
         else
@@ -1451,9 +1456,17 @@ module Hive
         resolution = Hive::Bot::RowActions.resolve(row)
         return nil if resolution.suppress || resolution.actions.empty?
 
-        action = resolution.actions.find(&:primary) || resolution.actions.first
+        action = resolution.primary
         title = nb.display_title(row)
         nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
+      rescue ArgumentError, KeyError => e
+        # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
+        # boundary, or an unmapped status_action_emoji key) so it drops just its
+        # own /status button instead of aborting the whole keyboard's filter_map.
+        @logger&.event(:status_button_failed, project: row.project, slug: row.slug,
+                                               marker: row.marker, action: row.action,
+                                               error_class: e.class.name, message: e.message)
+        nil
       end
 
       def status_action_emoji(role)
@@ -1491,10 +1504,13 @@ module Hive
       end
 
       def next_step_hint(row)
-        resolution = Hive::Bot::RowActions.resolve(row)
-        action = resolution.actions.find(&:primary) || resolution.actions.first
+        action = Hive::Bot::RowActions.resolve(row).primary
         return "Next: open on a laptop to inspect." unless action
-        return "Next: open on a laptop to inspect." if action.role == :details
+        # A row whose only chat action is a terminal Show-details (manual-only
+        # recovery or a tripped review fix-guardrail) has no in-chat next step.
+        # RowActions owns that predicate so the hint and the button-coverage
+        # guard agree on what "terminal" means.
+        return "Next: open on a laptop to inspect." if action.role == :details && Hive::Bot::RowActions.terminal_details?(row)
 
         case action.role
         when :answer
@@ -1504,9 +1520,11 @@ module Hive
         when :findings_accept
           "Next: tap Accept all or Reject all to triage findings."
         when :rerun
-          "Next: tap Re-run to re-run #{action.callback.split(':').last}."
+          "Next: tap Re-run to re-run #{action.verb}."
         when :run
-          "Next: tap Run to run #{action.callback.split(':').last}."
+          # The generic-stage run verb is the literal "run"; naming it would
+          # read "to run run", so describe it as the stage instead.
+          action.verb == "run" ? "Next: tap Run to run this stage." : "Next: tap Run to run #{action.verb}."
         when :autofix
           "Next: tap Autofix to retry the stage cleanly."
         else

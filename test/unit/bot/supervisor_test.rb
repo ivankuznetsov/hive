@@ -316,7 +316,8 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis is available for "Red task…". Tap Show details to dump it here.', text
+    assert_equal 'Diagnosis refreshed for "Red task…". ' \
+                 "Tap Refresh again to re-run it, or open the task on a laptop for the full report.", text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"
@@ -1369,15 +1370,20 @@ class HiveBotSupervisorTest < Minitest::Test
                  "a verb that splits to no words must fall back to the literal 'Command' label"
   end
 
-  def test_inferred_success_slug_resolves_status_diagnose_target
+  def test_status_success_text_does_not_infer_a_diagnose_slug
+    # Plain `hive status --json` (Show details / /details) is rendered
+    # in-process by render_details and never reaches success-text inference;
+    # a `--diagnose` child short-circuits via diagnose_reply_for_child. The
+    # old `--diagnose` slug lookup was therefore dead and has been dropped —
+    # a status child carries no inferable slug, so only the project qualifies.
     text = @supervisor.send(
       :command_success_text,
       command_argv: [ "hive", "status", "--diagnose", "diag-slug", "--json" ],
       project: "hive", slug: ""
     )
 
-    assert_equal "Status check completed for hive/diag-slug.", text,
-                 "a blank slug on a status --diagnose run must be inferred from the argv that follows --diagnose"
+    assert_equal "Status check completed for hive.", text,
+                 "status runs no longer infer a slug from the removed --diagnose lookup"
   end
 
   def test_inferred_success_slug_resolves_markers_target_from_argv3
@@ -1617,6 +1623,63 @@ class HiveBotSupervisorTest < Minitest::Test
                             ], "hive", "stale", stage: "4-execute")
 
     assert_includes text, "Next: open on a laptop to inspect."
+  end
+
+  def test_render_details_run_hint_names_the_verb_and_avoids_run_run
+    finalize = row(slug: "fin-260624-abcd", stage: "8-finalize", action: "needs_input", marker: "waiting")
+    generic = row(slug: "gen-260624-abcd", stage: "1-intake", workflow: "blank",
+                  action: "needs_input", marker: "waiting")
+
+    fin_text = @supervisor.send(:render_details, [ finalize ], "hive", "fin-260624-abcd")
+    assert_includes fin_text, "Next: tap Run to run finalize."
+
+    gen_text = @supervisor.send(:render_details, [ generic ], "hive", "gen-260624-abcd")
+    assert_includes gen_text, "Next: tap Run to run this stage."
+    refute_includes gen_text, "run run", "the generic run verb must not render as 'run run'"
+  end
+
+  def test_render_details_hints_cover_each_primary_role
+    answer = row(slug: "ans-260624-abcd", stage: "2-brainstorm", action: "needs_input", marker: "waiting")
+    assert_includes @supervisor.send(:render_details, [ answer ], "hive", "ans-260624-abcd"),
+                    "Next: tap Answer to answer in chat."
+
+    triage = row(slug: "tri-260624-abcd", stage: "6-review", action: "needs_input", marker: "review_waiting")
+    assert_includes @supervisor.send(:render_details, [ triage ], "hive", "tri-260624-abcd"),
+                    "Next: tap Accept all or Reject all to triage findings."
+
+    retryable = row(slug: "fix-260624-abcd", stage: "6-review", action: "recover_review",
+                    marker: "review_error", attrs: { "phase" => "fix", "pass" => "2", "reason" => "timeout" },
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    assert_includes @supervisor.send(:render_details, [ retryable ], "hive", "fix-260624-abcd"),
+                    "Next: tap Autofix to retry the stage cleanly."
+
+    # A non-manual recovery row with no retry diagnostic resolves to a Details
+    # primary that is NOT terminal_details? (not manual-only, not fix_guardrail),
+    # so next_step_hint falls through to the generic laptop hint (case else).
+    details_only = row(slug: "rec-260624-abcd", stage: "6-review", action: "recover_review",
+                       marker: "review_error", attrs: { "phase" => "fix", "pass" => "2", "reason" => "timeout" },
+                       diagnostic: nil)
+    assert_includes @supervisor.send(:render_details, [ details_only ], "hive", "rec-260624-abcd"),
+                    "Next: open on a laptop to inspect."
+  end
+
+  def test_status_action_button_isolates_a_resolver_failure
+    # A row whose resolution raises (typo'd/unmapped role at the RowActions
+    # boundary, or an unmapped status_action_emoji key) must drop only its own
+    # /status button, not abort the whole keyboard's filter_map.
+    bad = row(slug: "boom-260624-abcd", action: "ready_to_develop", marker: "complete")
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_r| raise KeyError, "boom" }
+    button = begin
+      @supervisor.send(:status_action_button, bad)
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_nil button, "a row whose resolution raises drops only its own button"
+    assert(@logger.events.any? { |e| e[:name] == :status_button_failed },
+           "the dropped button must be logged for an audit trail")
   end
 
   def test_execute_dispatch_renders_status_queue_without_spawning_child

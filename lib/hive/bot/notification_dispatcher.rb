@@ -36,7 +36,7 @@ module Hive
       end
 
       def process_rows(rows)
-        current = current_notifications(rows)
+        current, present_unbuilt = current_notifications(rows)
         if @alert_store.fresh_install?
           immediate, seedable = current.partition do |_fingerprint, payload|
             immediate_on_fresh_install?(payload.fetch(:row))
@@ -46,7 +46,7 @@ module Hive
           process_current(immediate)
           return
         end
-        process_recoveries(current)
+        process_recoveries(current, present_unbuilt)
         process_current(current)
       end
 
@@ -57,30 +57,53 @@ module Hive
 
       private
 
+      # Returns [current, present_unbuilt]: `current` is the fingerprint=>payload
+      # map of buildable notifications process_current sends; `present_unbuilt`
+      # is the set of fingerprints for rows that WERE present this tick but
+      # failed to build (or raised mid-body). process_recoveries needs the
+      # latter so a still-broken row that deterministically fails to build isn't
+      # mistaken for "gone" and given a false "✅ Recovered".
       def current_notifications(rows)
-        Array(rows).each_with_object({}) do |row, out|
-          add_notification(row, out)
-        rescue StandardError => e
-          # Isolate the WHOLE per-row body, not just the build: a suppress
-          # predicate or fingerprint call hitting a NoMethodError/TypeError on a
-          # malformed attrs/workflow value must drop only this row, not abort the
-          # tick via status_loop's :fatal rescue (which would silently drop every
-          # push this poll, recurring every tick). Log with row attribution.
-          @logger.event(:notification_build_failed, project: row.project, slug: row.slug,
-                                                     marker: row.marker, action: row.action,
-                                                     error_class: e.class.name, message: e.message)
+        present_unbuilt = []
+        current = Array(rows).each_with_object({}) do |row, out|
+          # Capture attribution into locals BEFORE the begin so the rescue's log
+          # line can't re-raise (and re-abort the tick) on a row whose own
+          # top-level readers are malformed.
+          project = row.project
+          slug = row.slug
+          marker = row.marker
+          action = row.action
+          begin
+            add_notification(row, out, present_unbuilt)
+          rescue StandardError => e
+            # Isolate the WHOLE per-row body, not just the build: a suppress
+            # predicate or fingerprint call hitting a NoMethodError/TypeError on
+            # a malformed attrs/workflow value must drop only this row, not abort
+            # the tick via status_loop's :fatal rescue (which would silently drop
+            # every push this poll, recurring every tick). Record the fingerprint
+            # (when computable) as present so a row that raised here isn't read as
+            # "recovered" next tick. Log with row attribution.
+            record_present_fingerprint(row, present_unbuilt)
+            @logger.event(:notification_build_failed, project: project, slug: slug,
+                                                       marker: marker, action: action,
+                                                       error_class: e.class.name, message: e.message)
+          end
         end
+        [ current, present_unbuilt ]
       end
 
-      def add_notification(row, out)
+      def add_notification(row, out, present_unbuilt)
         return if suppress_ready_action?(row)
         return if suppress_daemon_plan_pause?(row)
         return if suppress_active_conversation?(row)
 
-        notification = build_notification(row)
+        # Fingerprint depends only on the row, not the notification, so compute
+        # it before the build — that way a build failure can still record this
+        # row as present-this-tick (see build_notification).
+        fingerprint = NotificationBuilders.fingerprint(row)
+        notification = build_notification(row, fingerprint: fingerprint, present_unbuilt: present_unbuilt)
         return unless notification
 
-        fingerprint = NotificationBuilders.fingerprint(row)
         out[fingerprint] ||= { row: row, notification: notification }
       end
 
@@ -90,12 +113,36 @@ module Hive
       # boundary), a KeyError in label_for_action, or any other StandardError
       # from the builder; either way we log and skip just this row rather than
       # dropping every push this poll.
-      def build_notification(row)
-        NotificationBuilders.build(row, logger: @logger)
-      rescue StandardError => e
-        @logger.event(:notification_build_failed, project: row.project, slug: row.slug,
-                                                   marker: row.marker, action: row.action,
-                                                   error_class: e.class.name, message: e.message)
+      def build_notification(row, fingerprint:, present_unbuilt:)
+        # Capture attribution into locals BEFORE the begin so the rescue's log
+        # line can't re-raise on a malformed row.
+        project = row.project
+        slug = row.slug
+        marker = row.marker
+        action = row.action
+        begin
+          NotificationBuilders.build(row, logger: @logger)
+        rescue StandardError => e
+          # A row that DETERMINISTICALLY fails to build (a persistently malformed
+          # attrs/workflow value) would drop from `current`; process_recoveries
+          # would then read its stored fingerprint as gone and fire a false
+          # "✅ Recovered" for a still-broken task. Record it as present-this-tick
+          # so recovery is skipped — the row is still dropped from the push.
+          present_unbuilt << fingerprint
+          @logger.event(:notification_build_failed, project: project, slug: slug,
+                                                     marker: marker, action: action,
+                                                     error_class: e.class.name, message: e.message)
+          nil
+        end
+      end
+
+      # Record a present-but-unbuildable row's fingerprint. fingerprint(row) can
+      # itself raise on a sufficiently malformed row; when it does there is
+      # nothing to record (and no stored alert could match it anyway), so the
+      # row falls through to the normal absence path.
+      def record_present_fingerprint(row, present_unbuilt)
+        present_unbuilt << NotificationBuilders.fingerprint(row)
+      rescue StandardError
         nil
       end
 
@@ -158,9 +205,13 @@ module Hive
         @logger.event(:fresh_install_seeded, fingerprint_count: current.size)
       end
 
-      def process_recoveries(current)
+      def process_recoveries(current, present_unbuilt)
         @alert_store.each_fingerprint do |fingerprint|
           next if current.key?(fingerprint)
+          # A row that is still present this tick but failed to build is NOT
+          # gone — skip it so a deterministically-malformed row doesn't earn a
+          # false "✅ Recovered" while it is still broken.
+          next if present_unbuilt.include?(fingerprint)
 
           entry = @alert_store.entry(fingerprint)
           row = entry&.row

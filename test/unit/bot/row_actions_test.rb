@@ -191,6 +191,24 @@ class HiveBotRowActionsTest < Minitest::Test
     assert_empty empty.actions
   end
 
+  def test_resolution_rejects_empty_actions_for_a_surface_kind
+    # A needs-input / approval / recovery kind must carry >= 1 action: an empty
+    # one slips construction but silently drops the push downstream
+    # (NotificationBuilders.needs_input and Supervisor#status_action_button both
+    # bail on actions.empty?). Encode "a real surface kind carries an action".
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions::Resolution.new(actions: [], kind: :plan_waiting)
+    end
+    assert_match(/requires at least one action/, error.message)
+  end
+
+  def test_resolution_allows_empty_actions_only_for_none_and_suppressed
+    %i[none suppressed].each do |kind|
+      resolution = Hive::Bot::RowActions::Resolution.new(actions: [], kind: kind)
+      assert_empty resolution.actions, "kind=#{kind} must allow an empty action list"
+    end
+  end
+
   def test_rerun_action_requires_a_verb
     error = assert_raises(ArgumentError) do
       Hive::Bot::RowActions.action(:rerun, "rerun:hive:slug:4-execute:develop")

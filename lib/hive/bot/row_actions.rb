@@ -27,9 +27,23 @@ module Hive
       ].freeze
 
       Resolution = Data.define(:actions, :kind) do
+        # Only the inert :none and the :suppressed kinds may carry an empty
+        # action list; every needs-input / approval / recovery kind must declare
+        # at least one action. NotificationBuilders.needs_input and
+        # Supervisor#status_action_button both drop a row on `actions.empty?`, so
+        # an empty needs-input resolution would silently suppress the push —
+        # encode "a real surface kind carries >= 1 action" here instead.
+        EMPTY_KINDS = %i[none suppressed].freeze
+
         def initialize(actions: [], kind: :none)
           unless KINDS.include?(kind)
             raise ArgumentError, "unknown resolution kind #{kind.inspect} (expected one of #{KINDS.inspect})"
+          end
+
+          if actions.empty? && !EMPTY_KINDS.include?(kind)
+            raise ArgumentError,
+                  "resolution kind #{kind.inspect} requires at least one action " \
+                  "(only #{EMPTY_KINDS.inspect} may be empty)"
           end
 
           primaries = actions.count(&:primary)

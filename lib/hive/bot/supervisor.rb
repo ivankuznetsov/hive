@@ -973,7 +973,7 @@ module Hive
           if result.slug
             safe_send_message(
               chat_id: update.chat_id,
-              text: render_details(rows, result.project, result.slug, stage: result_stage(result))
+              text: render_details(rows, result.project, result.slug, stage: result.stage)
             )
           else
             safe_send_message(chat_id: update.chat_id,
@@ -1387,11 +1387,10 @@ module Hive
       def inferred_success_slug(verb, argv)
         case verb
         when "status"
-          # Plain `hive status --json` (Show details / /details) is rendered
-          # in-process by render_details and never reaches success-text
-          # inference; a `--diagnose` child short-circuits via
-          # diagnose_reply_for_child. So a status child here carries no
-          # inferable slug.
+          # Any plain `hive status --json` is rendered in-process by
+          # render_details and never reaches success-text inference; a
+          # `--diagnose` child short-circuits via diagnose_reply_for_child. So a
+          # status child here carries no inferable slug.
           ""
         when "markers"
           argv[3].to_s
@@ -1453,21 +1452,30 @@ module Hive
       # action. Labels carry the task title so the operator can tell rows apart.
       def status_action_button(row)
         nb = Hive::Bot::NotificationBuilders
-        resolution = Hive::Bot::RowActions.resolve(row)
-        return nil if resolution.suppress || resolution.actions.empty?
+        # Capture attribution into locals before the begin so the rescue's log
+        # line can't re-raise (and re-abort the keyboard's filter_map) on a row
+        # whose own top-level readers are malformed.
+        project = row.project
+        slug = row.slug
+        marker = row.marker
+        row_action = row.action
+        begin
+          resolution = Hive::Bot::RowActions.resolve(row)
+          return nil if resolution.suppress || resolution.actions.empty?
 
-        action = resolution.primary
-        title = nb.display_title(row)
-        nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
-      rescue StandardError => e
-        # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
-        # boundary, an unmapped status_action_emoji key, or any NoMethodError/
-        # TypeError on a bad attrs/workflow value) so it drops just its own
-        # /status button instead of aborting the whole keyboard's filter_map.
-        @logger&.event(:status_button_failed, project: row.project, slug: row.slug,
-                                               marker: row.marker, action: row.action,
-                                               error_class: e.class.name, message: e.message)
-        nil
+          action = resolution.primary
+          title = nb.display_title(row)
+          nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
+        rescue StandardError => e
+          # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
+          # boundary, an unmapped status_action_emoji key, or any NoMethodError/
+          # TypeError on a bad attrs/workflow value) so it drops just its own
+          # /status button instead of aborting the whole keyboard's filter_map.
+          @logger&.event(:status_button_failed, project: project, slug: slug,
+                                                 marker: marker, action: row_action,
+                                                 error_class: e.class.name, message: e.message)
+          nil
+        end
       end
 
       def status_action_emoji(role)
@@ -1476,6 +1484,7 @@ module Hive
           approve: "✅",
           approve_plan: "✅",
           findings_accept: "✅",
+          findings_reject: "🚫",
           autofix: "🔧",
           details: "🔍",
           rerun: "▶️"
@@ -1510,44 +1519,40 @@ module Hive
         # RowActions owns that predicate so the hint and the button-coverage
         # guard agree on what "terminal" means.
         return "Next: open on a laptop to inspect." if action.role == :details && Hive::Bot::RowActions.terminal_details?(row)
+        # :rerun renders a verb-derived hint ("Re-run develop" / "Run finalize");
+        # every other role maps to a static line below.
+        return rerun_hint(action.verb) if action.role == :rerun
 
-        case action.role
-        when :answer
-          "Next: tap Answer to answer in chat."
-        when :approve, :approve_plan
-          "Next: tap Approve to advance this task."
-        when :findings_accept
-          "Next: tap Accept all or Reject all to triage findings."
-        when :rerun
-          rerun_hint(action.verb)
-        when :autofix
-          "Next: tap Autofix to retry the stage cleanly."
-        when :details
-          # A non-terminal recovery row (not manual-only, no retry suggestion):
-          # the only chat affordance is Show details. terminal details already
-          # returned the laptop hint above.
-          "Next: open on a laptop to inspect."
-        else
-          # Fail loud on a new primary-capable role rather than silently
-          # degrading to the laptop hint — button_coverage_test sweeps every
-          # representative row's primary role through here.
-          raise KeyError, "next_step_hint has no hint for primary role #{action.role.inspect}"
-        end
+        # Static per-role hints, mirroring status_action_emoji: a `.fetch` so a
+        # new primary-capable role added to RowActions::ROLES without a hint
+        # fails loud (KeyError) here instead of silently degrading to the laptop
+        # hint. button_coverage_test sweeps every representative row's primary
+        # role through here. A non-terminal :details recovery row (not manual-
+        # only, no retry suggestion) gets the laptop hint; terminal details
+        # already returned above.
+        {
+          answer: "Next: tap Answer to answer in chat.",
+          approve: "Next: tap Approve to advance this task.",
+          approve_plan: "Next: tap Approve to advance this task.",
+          findings_accept: "Next: tap Accept all or Reject all to triage findings.",
+          findings_reject: "Next: tap Accept all or Reject all to triage findings.",
+          autofix: "Next: tap Autofix to retry the stage cleanly.",
+          details: "Next: open on a laptop to inspect."
+        }.fetch(action.role)
       end
 
       # Paused-stage re-run hint, mirroring NotificationBuilders.rerun_label's
-      # verb split: develop already ran ("Re-run"), finalize/run have not
-      # ("Run"). The literal "run" verb reads as the stage to avoid "run run".
+      # purely lexical verb split: the "develop" verb reads "Re-run", every
+      # other verb (finalize, generic run) reads "Run". The split is lexical,
+      # not an execution-history claim — a "finalize" rerun is only produced for
+      # a finalize agent that already ran and paused. The literal "run" verb
+      # reads as the stage to avoid "run run".
       def rerun_hint(verb)
         case verb.to_s
         when "develop" then "Next: tap Re-run to re-run develop."
         when "run" then "Next: tap Run to run this stage."
         else "Next: tap Run to run #{verb}."
         end
-      end
-
-      def result_stage(result)
-        result.stage
       end
 
       def actionable_queue_rows(rows)

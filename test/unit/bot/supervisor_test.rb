@@ -1683,6 +1683,41 @@ class HiveBotSupervisorTest < Minitest::Test
            "the dropped button must be logged for an audit trail")
   end
 
+  def test_status_action_emoji_covers_every_row_action_role
+    # status_action_emoji renders the primary /status button; `.fetch` raises on
+    # an unmapped role and status_action_button's rescue swallows it (silently
+    # dropping the button). `:findings_reject` is structurally never the primary
+    # today, so button_coverage_test's primary-role sweep never reaches it —
+    # this parity sweep is what pins the table to the closed RowActions::ROLES
+    # vocabulary if a future refactor ever promotes it to primary.
+    Hive::Bot::RowActions::ROLES.each do |role|
+      emoji = @supervisor.send(:status_action_emoji, role)
+      assert_kind_of String, emoji, "status_action_emoji must map #{role.inspect}"
+      refute_empty emoji, "status_action_emoji must not be blank for #{role.inspect}"
+    end
+  end
+
+  def test_next_step_hint_maps_findings_reject_primary
+    # Mirror of the emoji parity above for next_step_hint: `:findings_reject` is
+    # never the primary today (review_waiting makes findings_accept primary), so
+    # only a stubbed promotion exercises the grouped arm. Pin it so the closed-
+    # vocabulary `else` raise can't surprise a future refactor.
+    reject = Hive::Bot::RowActions.action(
+      :findings_reject, "findings:reject_all:hive:tri-260624-abcd:6-review", primary: true
+    )
+    resolution = Hive::Bot::RowActions::Resolution.new(actions: [ reject ], kind: :review_waiting)
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_r| resolution }
+    hint = begin
+      @supervisor.send(:next_step_hint, row(stage: "6-review", action: "needs_input", marker: "review_waiting"))
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_equal "Next: tap Accept all or Reject all to triage findings.", hint
+  end
+
   def test_execute_dispatch_renders_status_queue_without_spawning_child
     rows = [ row(slug: "alpha") ]
     @status_watcher.result = StatusResult.new(ok: true, rows: rows)

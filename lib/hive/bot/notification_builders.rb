@@ -425,9 +425,10 @@ module Hive
       end
 
       # A paused-stage re-run button reuses the single `:rerun` role for every
-      # verb; the label reads "Re-run" once an agent has already run the stage
-      # (develop, paused mid-execute) and "Run" for stages that have not yet
-      # completed (finalize, generic run).
+      # verb. The label is chosen purely lexically: the "develop" verb renders
+      # "Re-run", every other verb (finalize, generic run) renders "Run". The
+      # rule is lexical, not an execution-history claim — a "finalize" rerun is
+      # only produced for a finalize agent that already ran and paused.
       def rerun_label(verb)
         verb.to_s == "develop" ? "Re-run" : "Run"
       end

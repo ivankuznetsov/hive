@@ -371,6 +371,47 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
+  def test_persistently_unbuildable_recovery_row_does_not_self_heal_falsely
+    # A previously-alerted recovery row that LATER deterministically fails to
+    # build is still broken — present, not gone. It must not earn a false
+    # "✅ Recovered": current_notifications records its fingerprint as present-
+    # this-tick so process_recoveries skips it even past the grace window.
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(slug: "stuck-task-260525-abcd")
+
+      # Tick 1: the row builds and alerts normally, seeding the stored entry.
+      d.process_rows([ stuck ])
+      assert_equal 1, telegram.messages.size
+
+      # The SAME row (identical fingerprint) now deterministically fails to
+      # build while still present in the status output.
+      original = Hive::Bot::NotificationBuilders.method(:build)
+      Hive::Bot::NotificationBuilders.define_singleton_method(:build) do |candidate, **|
+        raise KeyError, "malformed" if candidate.slug == "stuck-task-260525-abcd"
+
+        original.call(candidate)
+      end
+      begin
+        d.process_rows([ stuck ]) # present-but-unbuilt → absence must NOT start
+        @clock += 1_000           # well past recovery_grace_sec
+        d.process_rows([ stuck ]) # still present-but-unbuilt
+      ensure
+        Hive::Bot::NotificationBuilders.singleton_class.send(:remove_method, :build)
+        Hive::Bot::NotificationBuilders.define_singleton_method(:build, &original)
+      end
+
+      refute(telegram.messages.any? { |m| m[:text].to_s.include?("Recovered") },
+             "a still-broken row that fails to build must not get a false Recovered")
+      refute_nil Hive::Bot::AlertStore.new(path: path).entry(
+        Hive::Bot::NotificationBuilders.fingerprint(stuck)
+      ), "the alert entry must remain while the row is still present-but-unbuildable"
+      assert(logger.events.any? { |name, attrs| name == :notification_build_failed && attrs[:slug] == "stuck-task-260525-abcd" },
+             "the unbuildable row must still be logged each tick")
+    end
+  end
+
   def test_recovered_message_send_failure_retries_after_backoff_without_duplicate
     # Telegram is down when the row first heals — Recovered cannot send.
     # The entry must stay in the store, backoff must apply, and the next

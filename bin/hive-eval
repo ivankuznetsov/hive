@@ -38,6 +38,12 @@ end
 # matching keeps both paths in agreement.
 parser.require_exact = true
 
+def expanded_report_path(root, value)
+  return nil if value.to_s.empty?
+
+  File.expand_path(value, root)
+end
+
 def selected_report_path(root, argv, default_report)
   report = default_report
   index = 0
@@ -59,11 +65,17 @@ def selected_report_path(root, argv, default_report)
     index += 1
   end
 
-  File.expand_path(report, root)
+  expanded_report_path(root, report)
+end
+
+def option_value_missing?(value)
+  value.to_s.empty? || value.start_with?("-")
 end
 
 begin
   remaining = parser.parse!
+  raise OptionParser::MissingArgument, "--report" if option_value_missing?(options[:report])
+  raise OptionParser::MissingArgument, "--scenario" if options[:scenario] && option_value_missing?(options[:scenario])
 rescue OptionParser::ParseError => e
   # A usage error must not leave a stale report behind. We can't clear before
   # parsing, because the --help/-h switch prints help and exits 0 inside parse!,
@@ -73,14 +85,16 @@ rescue OptionParser::ParseError => e
   #     are rejected via require_exact, matching the manual scan).
   #   * an invalid option raised before --report was reached, leaving it in ARGV
   #     (the manual scan recognizes the exact --report/--report= forms).
-  FileUtils.rm_f(File.expand_path(options.fetch(:report), root))
-  FileUtils.rm_f(selected_report_path(root, ARGV, options.fetch(:report)))
+  [ expanded_report_path(root, options.fetch(:report)),
+    selected_report_path(root, ARGV, options.fetch(:report)) ].compact.each do |path|
+    FileUtils.rm_f(path)
+  end
   warn "hive-eval: #{e.message}"
   warn parser
   exit 64
 end
 
-report_path = File.expand_path(options.fetch(:report), root)
+report_path = expanded_report_path(root, options.fetch(:report))
 FileUtils.rm_f(report_path)
 
 unless remaining.empty?

@@ -243,6 +243,59 @@ class HiveEvalReporterTest < Minitest::Test
     refute_match(/OptionParser::/, err)
   end
 
+  def test_cli_rejects_report_value_that_looks_like_option
+    with_fake_bundle do |env, marker|
+      _out, err, status = Open3.capture3(
+        env,
+        "bin/hive-eval", "--report", "--no-judge"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/hive-eval: missing argument: --report/, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+    end
+  end
+
+  def test_cli_rejects_report_value_that_consumes_scenario_flag
+    with_fake_bundle do |env, marker|
+      _out, err, status = Open3.capture3(
+        env,
+        "bin/hive-eval", "--report", "--scenario", "s1_status"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/hive-eval: missing argument: --report/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+    end
+  end
+
+  def test_cli_rejects_scenario_value_that_looks_like_option_and_clears_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      with_fake_bundle do |env, marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--scenario", "--no-judge", "--report", report
+        )
+
+        refute status.success?
+        assert_equal 64, status.exitstatus
+        assert_match(/hive-eval: missing argument: --scenario/, err)
+        assert_match(%r{Usage: bin/hive-eval}, err)
+        refute_match(/OptionParser::/, err)
+        refute File.exist?(report), "usage errors must not leave stale eval reports behind"
+        refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+      end
+    end
+  end
+
   def test_cli_rejects_unexpected_positional_arguments
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "unexpected.json")
@@ -380,6 +433,28 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal 64, status.exitstatus
       assert_match(/scenario basename must not contain path separators/, err)
       refute File.exist?(report)
+    end
+  end
+
+  private
+
+  def with_fake_bundle
+    Dir.mktmpdir("hive-eval-fake-bundle") do |dir|
+      bin_dir = File.join(dir, "bin")
+      marker = File.join(dir, "bundle-called")
+      bundle = File.join(bin_dir, "bundle")
+      FileUtils.mkdir_p(bin_dir)
+      File.write(bundle, <<~RUBY)
+        #!/usr/bin/env ruby
+        File.write(ENV.fetch("HIVE_EVAL_FAKE_BUNDLE_MARKER"), ARGV.join("\\n"))
+      RUBY
+      FileUtils.chmod("+x", bundle)
+
+      env = {
+        "HIVE_EVAL_FAKE_BUNDLE_MARKER" => marker,
+        "PATH" => [ bin_dir, ENV.fetch("PATH") ].join(File::PATH_SEPARATOR)
+      }
+      yield env, marker
     end
   end
 end

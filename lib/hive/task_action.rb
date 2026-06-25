@@ -400,6 +400,9 @@ module Hive
       when :complete
         ACTIONS.fetch(:brainstorm_complete)
       when :none
+        # Markerless (:none) = nothing ran at this stage yet, so it's runnable
+        # rather than an input gate; a genuine pause carries a real `:waiting`
+        # marker (U6 — stops the phantom needs-input surface).
         ACTIONS.fetch(:generic_ready_to_run)
       else
         ACTIONS.fetch(:brainstorm_waiting)
@@ -417,6 +420,8 @@ module Hive
 
         ACTIONS.fetch(:execute_waiting)
       when :none
+        # Markerless (:none) = nothing ran at this stage yet → runnable, not an
+        # input gate; a real pause carries an `:execute_waiting` marker (U6).
         ACTIONS.fetch(:generic_ready_to_run)
       else
         if Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
@@ -434,13 +439,15 @@ module Hive
       ACTIONS.fetch(:plan_waiting)
     end
 
-      def finalize_action
-        return ACTIONS.fetch(:error) if finalize_missing_pr_md?
-        return finalize_complete_action if marker.name == :complete
-        return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
+    def finalize_action
+      return ACTIONS.fetch(:error) if finalize_missing_pr_md?
+      return finalize_complete_action if marker.name == :complete
+      # Markerless (:none) = nothing ran at this stage yet → runnable, not an
+      # input gate; a real pause carries a `:waiting` marker (U6).
+      return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
 
-        ACTIONS.fetch(:finalize_waiting)
-      end
+      ACTIONS.fetch(:finalize_waiting)
+    end
 
     def finalize_complete_action
       return ACTIONS.fetch(:error) if finalize_missing_pr_url?

@@ -101,6 +101,28 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive open-pr demo-260426-aaaa --from 4-execute", action.command
   end
 
+  def test_execute_stage_stray_terminal_marker_is_error
+    # A terminal marker that doesn't belong to the execute stage (e.g. a
+    # mis-stamped :review_complete) is structurally incoherent here: there's
+    # no runnable next step, so execute_action's else-branch must classify it
+    # as :error rather than collapsing back to a runnable :generic_ready_to_run
+    # against a structurally-wrong marker.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:review_complete))
+    assert_equal "error", action.key
+    assert_nil action.command, "an incoherent execute-stage terminal marker offers no runnable command"
+  end
+
+  def test_execute_stage_non_terminal_foreign_marker_stays_runnable
+    # A NON-terminal foreign marker at the execute stage (e.g. a stray
+    # :waiting) is recoverable: execute_action's else-branch keeps it runnable
+    # (:generic_ready_to_run) rather than dead-ending at :error.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:waiting))
+    assert_equal "ready_to_run", action.key
+    assert_equal "hive run demo-260426-aaaa", action.command
+  end
+
   def test_open_pr_complete_is_ready_for_review
     task = fake_task(stage_name: "open-pr", stage_index: 5)
     action = Hive::TaskAction.for(task, marker(:complete))

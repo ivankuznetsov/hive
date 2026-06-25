@@ -40,6 +40,35 @@ module Hive
       def build(row, logger: nil)
         return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
 
+        # `action` is the live-state signal, so SKIP_ACTIONS rows stay silent:
+        #   - agent_running: a live task lock can make status report
+        #     agent_running while the state file still carries a stale recovery
+        #     marker from the previous run — alerting would announce a failure
+        #     a retry is already clearing.
+        #   - archived: the task is terminal; there is nothing left to announce.
+        if SKIP_ACTIONS.include?(row.action)
+          # Only log the live-vs-stale-marker contradiction — a recovery/error
+          # marker on a row whose live status reports as agent_running/archived.
+          # That contradiction is what this suppression must keep diagnosable
+          # (see wiki/log.d/20260624T184142Z-telegram-live-agent-suppression.md):
+          # the alert is silenced, so the skip log is the only audit trail of a
+          # stale marker hidden behind a live lock. A healthy `agent_working`
+          # live agent or a normal terminal `archived` (9-done) row is NOT a
+          # contradiction; logging those on every poll tick (default 30s,
+          # operator-tunable down to a 5s floor) would flood the audit JSONL
+          # with non-events and dilute the stale-marker signal. For these rows
+          # `recovery?` reduces to the marker check: `row.action` is
+          # agent_running/archived here, so recovery?'s action clause
+          # (recover_execute/recover_review/error) can never match and only its
+          # recovery/error marker test can be true.
+          if recovery?(row)
+            logger&.event(:notification_skipped_live_agent,
+                          project: row.project, slug: row.slug, stage: row.stage,
+                          marker: row.marker, action: row.action)
+          end
+          return nil
+        end
+
         if READY_ACTIONS.include?(row.action)
           stage_approval(row)
         elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT

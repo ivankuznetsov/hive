@@ -50,7 +50,10 @@ module Hive
           process_current(immediate)
           return
         end
-        process_recoveries(current)
+        # live_recovery_identities is consulted only by process_recoveries (to
+        # hold a stored recovery while its retry is in flight), so compute it at
+        # its single use — the fresh-install early return above skips the pass.
+        process_recoveries(current, live_recovery_identities(rows))
         process_current(current)
       end
 
@@ -134,7 +137,7 @@ module Hive
         @logger.event(:fresh_install_seeded, fingerprint_count: current.size)
       end
 
-      def process_recoveries(current)
+      def process_recoveries(current, live_identities)
         @alert_store.each_fingerprint do |fingerprint|
           next if current.key?(fingerprint)
 
@@ -147,11 +150,37 @@ module Hive
               @alert_store.remove(fingerprint)
               next
             end
-            next if backoff_active?(entry)
-
-            unless absence_passed_grace?(entry, fingerprint)
+            # A live `agent_running` retry holds the stored recovery from
+            # firing a premature "Recovered": NotificationBuilders suppresses
+            # agent_running rows, so a retry in flight is absent from `current`
+            # even though the stage has NOT recovered. The hold is checked
+            # BEFORE grace and re-arms the settling window each held tick
+            # (clears absent_since) so the grace clock can only start ticking
+            # once the hold genuinely lifts.
+            #
+            # This ordering is load-bearing: the live identity can vanish from a
+            # SINGLE status snapshot without the retry finishing. A per-project
+            # status degrade (commands/status.rb keeps the top-level status
+            # `ok:true` while emptying a project whose dir check fails —
+            # missing_project_path / not_initialised; status_watcher's
+            # `extract_rows` skips a project with an `error`; the supervisor
+            # still calls `process_rows` because `result.ok`) drops the
+            # still-running agent_running row for one tick. Re-arming here means
+            # that one-tick drop re-arms again as soon as the row reappears,
+            # instead of looking like a completed retry and releasing the hold —
+            # so a transient blip can no longer fire a false "Recovered"
+            # mid-retry (A5). Recovered only fires once the lock is gone for a
+            # full grace window. Resolution straight to a live non-error state
+            # (`manual_steering`/`needs_input`/`ready_*`) is still truthful then,
+            # because the agent has stopped and the error has cleared.
+            if live_identities.include?(recovery_identity(row))
+              @alert_store.mark_present(fingerprint)
               next
             end
+
+            next if backoff_active?(entry)
+
+            next unless absence_passed_grace?(entry, fingerprint)
 
             if send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
@@ -301,6 +330,12 @@ module Hive
 
       def recovery_identity(row)
         [ row.project.to_s, row.slug.to_s, row.stage.to_s ]
+      end
+
+      def live_recovery_identities(rows)
+        Array(rows).each_with_object(Set.new) do |row, identities|
+          identities.add(recovery_identity(row)) if row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
+        end
       end
 
       def reminder_due?(entry, row)

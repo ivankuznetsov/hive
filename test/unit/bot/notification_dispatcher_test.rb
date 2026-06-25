@@ -8,6 +8,11 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   Row = Hive::Bot::StatusWatcher::Row
 
+  # The canonical Recovered headline for the id-42 "Readable Recovery" row at
+  # the 6-review stage, shared across the recovery tests so a harmless reword
+  # of recovered_message's format only touches one place.
+  RECOVERED_MESSAGE = "✅ Recovered: \"#42 Readable Recovery\" — Review".freeze
+
   def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
           id: nil, display_name: nil, pr_url: nil, workflow: "coding")
     Row.new(
@@ -310,7 +315,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d.process_rows([])
 
       assert_equal 2, telegram.messages.size
-      assert_equal "✅ Recovered: \"#42 Readable Recovery\" — Review", telegram.messages.last[:text]
+      assert_equal RECOVERED_MESSAGE, telegram.messages.last[:text]
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(
         Hive::Bot::NotificationBuilders.fingerprint(named)
       )
@@ -492,7 +497,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d.process_rows([])
 
       assert_equal 2, telegram.messages.size
-      assert_equal "✅ Recovered: \"#42 Readable Recovery\" — Review", telegram.messages.last[:text]
+      assert_equal RECOVERED_MESSAGE, telegram.messages.last[:text]
     end
   end
 
@@ -513,7 +518,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
       recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
       assert_equal 1, recovered.size
-      assert_equal "✅ Recovered: \"#42 Readable Recovery\" — Review", recovered.first[:text]
+      assert_equal RECOVERED_MESSAGE, recovered.first[:text]
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
                  "successful Recovered delivery must remove the original alert entry"
     end
@@ -640,6 +645,121 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
       assert_equal 1, recovered.size,
                    "archived suppresses the build but (unlike agent_running) must NOT hold the recovery"
+    end
+  end
+
+  # A held agent_running retry that resolves to manual_steering leaves the hold
+  # via TaskAction#universal_action (NOT a re-error). Because the agent stopped
+  # running and the error cleared, Recovered fires exactly once — the documented,
+  # defensible recovery semantics. manual_steering produces no notification of
+  # its own, so Recovered is the only message after resolution.
+  def test_live_retry_resolving_to_manual_steering_fires_recovered_once
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      resolved = row(action: "manual_steering", marker: "manual_steering",
+                     slug: "stuck-task-260525-abcd", stage: "6-review")
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(stuck)
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ])
+      @clock += 61
+      d.process_rows([ live ])
+      assert_equal 1, telegram.messages.size, "the live retry must hold Recovered while it runs"
+
+      d.process_rows([ resolved ]) # retry resolves to a live, non-error, non-running state
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "resolution to manual_steering fires Recovered once (error cleared, agent no longer running)"
+      assert_equal RECOVERED_MESSAGE, recovered.first[:text]
+      assert_nil Hive::Bot::AlertStore.new(path: path).entry(fingerprint),
+                 "Recovered delivery must remove the held recovery entry"
+    end
+  end
+
+  # The companion resolution path via TaskAction#kind_action: a held
+  # agent_running retry resolves to a needs_input row. Recovered still fires
+  # once for the cleared error, and — because needs_input is itself an
+  # alertable state — the new row raises its own independent alert. This is
+  # the realistic production resolution the process_recoveries comment documents.
+  def test_live_retry_resolving_to_needs_input_fires_recovered_once_and_alerts_new_state
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery")
+      live = live_retry_row
+      resolved = row(action: "needs_input", marker: "waiting",
+                     slug: "stuck-task-260525-abcd", stage: "6-review")
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ])
+      @clock += 61
+      d.process_rows([ live ])
+      d.process_rows([ resolved ])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "resolution to needs_input fires Recovered once (error cleared, agent no longer running)"
+      assert_equal RECOVERED_MESSAGE, recovered.first[:text]
+      assert(telegram.messages.any? { |msg| msg[:text].include?("Needs input") },
+             "the new needs_input state raises its own independent alert")
+    end
+  end
+
+  # Negative identity scoping on the STAGE component: a live agent_running row
+  # with the SAME project+slug but a DIFFERENT stage must NOT hold the stored
+  # recovery. recovery_identity includes stage, so a stage-B live row must not
+  # mask a stage-A stuck alert. The slug-varying sibling above leaves the stage
+  # component unguarded — a bug that dropped stage from recovery_identity would
+  # still differ by slug there and pass, but would wrongly hold this one.
+  def test_live_agent_for_different_stage_does_not_hold_same_slug_recovery
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(id: 42, display_name: "Readable Recovery") # stage 6-review
+      other_stage_live = live_retry_row(stage: "4-execute")           # same slug, different stage
+
+      d.process_rows([ stuck ])
+      d.process_rows([ other_stage_live ])
+      @clock += 61
+      d.process_rows([ other_stage_live ])
+
+      recovered = telegram.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "a live agent_running row at a different stage must NOT hold a same-slug recovery"
+      assert_includes recovered.first[:text], "#42 Readable Recovery"
+    end
+  end
+
+  # Supersede DURING a live hold: a stuck review_error (pass 2) is held by an
+  # agent_running retry, then the retry resolves into a DIFFERENT error marker
+  # (pass 3). The held alert is superseded silently — current's same-identity
+  # recovery removes the held fingerprint with NO false Recovered — while the
+  # new error fires its own alert. The plain attr-change supersede is covered
+  # elsewhere; this pins it combined with the live hold.
+  def test_supersede_during_live_hold_is_silent_then_renotifies_without_recovered
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(attrs: { "pass" => "2" })
+      live = live_retry_row
+      superseded = recovery_row(attrs: { "pass" => "3" })
+
+      d.process_rows([ stuck ])
+      d.process_rows([ live ])
+      @clock += 61
+      d.process_rows([ live ])
+      d.process_rows([ superseded ])
+
+      assert_equal 2, telegram.messages.size,
+                   "the held alert is superseded by the new error — two stuck alerts, no Recovered"
+      assert(telegram.messages.all? { |msg| msg[:text].include?("Review stuck") },
+             "both messages are stuck alerts for the superseding errors")
+      refute_match(/Recovered/, telegram.messages.map { |msg| msg[:text] }.join("\n"),
+                   "a supersede during the hold must NOT emit a false Recovered")
     end
   end
 

@@ -192,6 +192,17 @@ class HiveBotSlashHandlersTest < Minitest::Test
     end
   end
 
+  def test_approve_with_missing_numeric_id_having_leading_zeroes_reports_normalized_id
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    result = handlers.approve(Update.new(text: "/approve 04242", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "No active task #4242 — was it archived?", result.text,
+                 "an id miss must echo the normalized id (leading zeroes stripped), not the raw 04242"
+    assert_nil result.command_argv
+  end
+
   def test_approve_with_cold_snapshot_replies_still_loading_for_numeric_id
     handlers = Hive::Bot::Handlers::SlashHandlers.new(
       projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
@@ -322,7 +333,15 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_equal "No active task #4242 — was it archived?", result.text
-    assert_nil result.commands
+    # `commands` is only non-nil on the dispatch path, so contrast it: the
+    # SAME handler resolving a matching id (#9281) populates the recovery
+    # sequence, while the miss path must leave it nil rather than dispatch
+    # against an unintended row. (Bare `assert_nil` here would pass for any
+    # :reply regardless of correctness.)
+    refute_nil handlers.autofix(Update.new(text: "/autofix #9281", chat_id: 1)).commands,
+               "control: a matching id populates the recovery commands"
+    assert_nil result.commands,
+               "a missing id must not populate the recovery commands the success path sets"
   end
 
   def test_autofix_numeric_target_does_not_match_nil_id_rows
@@ -343,6 +362,26 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = handlers.autofix(Update.new(text: "/autofix 09281", chat_id: 1))
 
     assert_review_error_autofix_result(result)
+  end
+
+  def test_autofix_numeric_id_boundaries_fall_through_to_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    # id 0 (`0`/`#0`) and a Bignum id all parse as numeric ids that no
+    # snapshot row matches, so each takes the id-miss path and echoes the
+    # normalized id — benign, but pinned so a regex/normalization regression
+    # can't silently start dispatching against the snapshot head.
+    {
+      "0" => "#0",
+      "#0" => "#0",
+      "999999999999999999999" => "#999999999999999999999"
+    }.each do |target, expected|
+      result = handlers.autofix(Update.new(text: "/autofix #{target}", chat_id: 1))
+
+      assert_equal :reply, result.action, "boundary id #{target} must reply, not dispatch"
+      assert_equal "No active task #{expected} — was it archived?", result.text
+      assert_nil result.commands, "boundary id #{target} must not dispatch a recovery sequence"
+    end
   end
 
   def test_autofix_hash_without_digits_stays_on_slug_path

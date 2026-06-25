@@ -134,50 +134,39 @@ module Hive
         return nil if resolution.suppress
         return nil if resolution.actions.empty?
 
-        case resolution.actions.map(&:role)
-        when [ :answer ]
+        # Dispatch on the resolver's declared surface kind, not on the exact
+        # role array. The role-array match silently fell through to the
+        # neutral default whenever RowActions reordered or added an action;
+        # the kind tag makes the intended surface explicit.
+        case resolution.kind
+        when :brainstorm_waiting
           brainstorm_waiting(row, actions: resolution.actions)
-        when [ :approve_plan, :details ]
+        when :plan_waiting
           plan_waiting(row, actions: resolution.actions)
-        when [ :findings_accept, :findings_reject, :details ], [ :details ]
+        when :review_waiting
           review_waiting(row, actions: resolution.actions)
-        when [ :rerun, :details ]
+        when :execute_waiting
           execute_waiting(row, actions: resolution.actions)
-        when [ :run, :details ]
+        when :finalize_waiting
           finalize_waiting(row, actions: resolution.actions)
         else
           default_needs_input(row, actions: resolution.actions)
         end
       end
 
-      # A `waiting` marker is used by BOTH the coding 2-brainstorm stage
-      # (genuine operator questions) and the coding 3-plan stage (a
-      # plan-draft/approval pause); each gets its own label so a plan pause
-      # isn't mis-announced as "Brainstorm questions" (it isn't, and the daemon
-      # usually auto-approves it — see suppress_daemon_plan_pause?). Only the
-      # coding workflow has those two stages, so a `waiting` marker from any
-      # other workflow — or any other coding stage — falls through to the
-      # neutral default below.
-      def waiting_input(row)
-        return plan_waiting(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: plan approval pause only exists in coding workflow
-        return brainstorm_waiting(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" # coding-scoped: brainstorm Q&A answer flow is coding-specific
-
-        default_needs_input(row)
-      end
-
-      def default_needs_input(row, actions: nil)
+      def default_needs_input(row, actions:)
         Notification.new(
           text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
-          keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:details, details_callback(row)) ])
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
-      def brainstorm_waiting(row, actions: nil)
+      def brainstorm_waiting(row, actions:)
         Notification.new(
           text: header(row) + "\n" \
                 "Brainstorm questions are waiting. " \
                 "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
-          keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:answer, "answer:#{row.project}:#{row.slug}") ])
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
@@ -185,31 +174,29 @@ module Hive
       # brainstorm Q&A round. When the daemon is enabled it auto-approves
       # this and the bot suppresses the push entirely
       # (`suppress_daemon_plan_pause?`); this notification is for the
-      # daemon-OFF case, where the operator reviews the draft and advances
-      # it from the CLI — so it points at the plan, not the `/answer` flow.
-      def plan_waiting(row, actions: nil)
+      # daemon-OFF case. The operator can now tap Approve in chat (the
+      # keyboard is Approve + Details, supplied by `RowActions`) or advance
+      # the draft from the CLI — either way it points at the plan, not the
+      # `/answer` flow.
+      def plan_waiting(row, actions:)
         Notification.new(
           text: header(row) + "\nPlan draft is ready for your review.",
-          keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:details, details_callback(row)) ])
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
-      def review_waiting(row, actions: nil)
+      def review_waiting(row, actions:)
         normalized_attrs = row.attrs.to_h.transform_keys(&:to_s)
         if normalized_attrs["reason"] == "fix_guardrail"
           return Notification.new(
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
-            keyboard: keyboard_for_actions(actions || [ Hive::Bot::RowActions.action(:details, details_callback(row)) ])
+            keyboard: keyboard_for_actions(actions)
           )
         end
 
         Notification.new(
           text: header(row) + "\nReview triage is waiting.",
-          keyboard: keyboard_for_actions(actions || [
-            Hive::Bot::RowActions.action(:findings_accept, "findings:accept_all:#{row.project}:#{row.slug}:#{row.stage}"),
-            Hive::Bot::RowActions.action(:findings_reject, "findings:reject_all:#{row.project}:#{row.slug}:#{row.stage}"),
-            Hive::Bot::RowActions.action(:details, details_callback(row))
-          ])
+          keyboard: keyboard_for_actions(actions)
         )
       end
 

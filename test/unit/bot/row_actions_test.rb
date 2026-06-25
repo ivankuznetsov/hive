@@ -137,6 +137,37 @@ class HiveBotRowActionsTest < Minitest::Test
     assert_equal [ "approve:finalize:hive:slug-260624-abcd:7-artifacts" ], callbacks(r)
   end
 
+  def test_action_rejects_unknown_role_at_construction
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions::Action.new(role: :bogus, callback: "x:y")
+    end
+    assert_match(/unknown action role :bogus/, error.message)
+  end
+
+  def test_resolution_rejects_unknown_kind_at_construction
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::RowActions::Resolution.new(kind: :bogus)
+    end
+    assert_match(/unknown resolution kind :bogus/, error.message)
+  end
+
+  def test_resolution_primary_prefers_flagged_action_then_first
+    flagged = Hive::Bot::RowActions::Resolution.new(
+      actions: [
+        Hive::Bot::RowActions.action(:details, "details:hive:slug"),
+        Hive::Bot::RowActions.action(:approve, "approve:plan:hive:slug:3-plan", primary: true)
+      ],
+      kind: :stage_approval
+    )
+    assert_equal :approve, flagged.primary.role
+
+    unflagged = Hive::Bot::RowActions::Resolution.new(
+      actions: [ Hive::Bot::RowActions.action(:details, "details:hive:slug") ],
+      kind: :recovery
+    )
+    assert_equal :details, unflagged.primary.role
+  end
+
   def test_recovery_uses_existing_autofix_and_details_callbacks
     retryable = row(action: "recover_review", marker: "review_error", stage: "6-review",
                     attrs: { "pass" => "2" }, diagnostic: retry_diagnostic)

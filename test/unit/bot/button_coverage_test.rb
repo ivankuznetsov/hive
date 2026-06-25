@@ -74,9 +74,33 @@ class HiveBotButtonCoverageTest < Minitest::Test
     assert Hive::Bot::RowActions.resolve(cases.fetch("complete")).suppress
   end
 
+  # `recovery?` fires for ANY action when the marker is one of these (and for
+  # the recover_*/error actions regardless of marker). Excluding them from the
+  # "does this kind map?" sweep is what makes the guard sound: otherwise every
+  # kind — including a genuinely inert one — resolves via the incidental
+  # error-marker recovery path and the guard passes vacuously.
+  RECOVERY_MARKERS = %w[review_error review_stale review_ci_stale execute_stale error].freeze
+
+  # Kinds with no actionable chat surface of their own. They legitimately
+  # resolve ONLY via a recovery marker; on every coherent (non-recovery)
+  # marker they must be non-actionable. A future inert kind has to be listed
+  # here AND proven non-actionable below — it can no longer ride the
+  # error-marker recovery path into the mapped set unnoticed.
+  INERT_KINDS = %w[agent_running archived manual_steering].freeze
+
   def test_new_task_action_kind_requires_row_action_decision
+    expected = %w[
+      needs_input recover_execute recover_review error ready_to_brainstorm
+      ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
+      ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance
+      ready_to_run agent_running archived manual_steering
+    ]
+    assert_equal expected.sort, Hive::Schemas::TaskActionKind::ALL.sort,
+                 "a new TaskActionKind must be classified as actionable or inert below"
+
+    non_recovery = MARKERS - RECOVERY_MARKERS
     mapped = Hive::Schemas::TaskActionKind::ALL.select do |action|
-      MARKERS.any? do |marker|
+      non_recovery.any? do |marker|
         stages.any? do |stage|
           resolution = Hive::Bot::RowActions.resolve(row(action: action, marker: marker, stage: stage))
           resolution.suppress || !resolution.actions.empty?
@@ -84,14 +108,21 @@ class HiveBotButtonCoverageTest < Minitest::Test
       end
     end
 
-    expected = %w[
-      needs_input recover_execute recover_review error ready_to_brainstorm
-      ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
-      ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance
-      ready_to_run agent_running archived manual_steering
-    ]
-    assert_equal expected.sort, Hive::Schemas::TaskActionKind::ALL.sort
-    assert_equal expected.sort, mapped.sort
+    # Every NON-inert kind must earn its place through a coherent (non-recovery)
+    # marker — its own needs_input / ready / recovery-by-action decision — not
+    # the incidental error-marker recovery path.
+    assert_equal (expected - INERT_KINDS).sort, mapped.sort,
+                 "actionable kinds must resolve via their own surface, not only via an error marker"
+
+    # Inert kinds must be genuinely non-actionable on coherent markers, so a
+    # future inert kind can't slip through by resolving only on error markers.
+    INERT_KINDS.each do |action|
+      non_recovery.product(stages).each do |marker, stage|
+        resolution = Hive::Bot::RowActions.resolve(row(action: action, marker: marker, stage: stage))
+        refute resolution.suppress, "inert #{action} must not suppress on coherent marker=#{marker}"
+        assert_empty resolution.actions, "inert #{action} must offer no action on coherent marker=#{marker}"
+      end
+    end
   end
 
   private

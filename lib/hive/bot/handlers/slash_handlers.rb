@@ -335,10 +335,16 @@ module Hive
         def render_details_reply(row)
           Hive::Bot::NotificationBuilders.details_reply(row)
         rescue StandardError => e
-          @logger&.event(:details_render_failed, project: row.project, slug: row.slug,
-                                                  error_class: e.class.name, message: e.message,
-                                                  backtrace: Array(e.backtrace).first(3))
-          "Status lookup failed — try again in a moment."
+          # resolve_status_row matches on :slug alone, so a slug-only provider
+          # row need not respond to :project (or even :slug). Guard both reads
+          # here — an unguarded row.project would re-raise and defeat this very
+          # soft-degrade path.
+          @logger&.event(:details_render_failed,
+                         project: (row.project if row.respond_to?(:project)),
+                         slug: (row.slug if row.respond_to?(:slug)),
+                         error_class: e.class.name, message: e.message,
+                         backtrace: Array(e.backtrace).first(3))
+          Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
         end
 
         # Operator-facing refusal for a /autofix on a non-retryable row.
@@ -367,7 +373,7 @@ module Hive
         #                           would be worse than asking the operator).
         def resolve_status_row(slug)
           snapshot = @status_snapshot_provider.call
-          return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
+          return [ nil, Hive::Bot::NotificationBuilders::STATUS_STILL_LOADING_REPLY ] if snapshot.nil?
 
           matches = Array(snapshot).select { |row| row.respond_to?(:slug) && row.slug == slug }
           case matches.length
@@ -384,7 +390,7 @@ module Hive
           @logger&.event(:status_lookup_failed, slug: slug,
                                                  error_class: e.class.name, message: e.message,
                                                  backtrace: Array(e.backtrace).first(3))
-          [ nil, "Status lookup failed — try again in a moment." ]
+          [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
       end
     end

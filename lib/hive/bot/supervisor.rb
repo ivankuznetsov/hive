@@ -1488,7 +1488,7 @@ module Hive
                                                 project: project, slug: slug,
                                                 error_class: e.class.name, message: e.message,
                                                 backtrace: Array(e.backtrace).first(3))
-        "Status lookup failed — try again in a moment."
+        Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
       end
 
       def actionable_queue_rows(rows)

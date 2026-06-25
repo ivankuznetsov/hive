@@ -111,7 +111,7 @@ module Hive
           row, error = resolve_details_row(project: project, slug: slug, stage: stage)
           return @result_class.new(action: :reply, text: error) if error
 
-          @result_class.new(action: :reply, text: render_details_reply(project: project, slug: slug, row: row))
+          @result_class.new(action: :reply, text: render_details_reply(project: project, slug: slug, stage: stage, row: row))
         end
 
         # details_reply renders from a live Row and never raises today, but it
@@ -122,13 +122,16 @@ module Hive
         # leave the tap with no reply at all — the very dead end the Show-details
         # flow exists to prevent. Degrade to the same soft retry hint the lookup
         # path uses, and log (with a backtrace) so the fault stays diagnosable.
-        def render_details_reply(project:, slug:, row:)
+        def render_details_reply(project:, slug:, stage:, row:)
           Hive::Bot::NotificationBuilders.details_reply(row)
         rescue StandardError => e
-          @logger&.event(:details_render_failed, project: project, slug: slug,
+          # Carry stage (already in scope from show_details, and what
+          # resolve_details_row matched on) so a render fault recurring for a
+          # single stage of a duplicated slug stays attributable in bot.log.
+          @logger&.event(:details_render_failed, project: project, slug: slug, stage: stage,
                                                   error_class: e.class.name, message: e.message,
                                                   backtrace: Array(e.backtrace).first(3))
-          "Status lookup failed — try again in a moment."
+          Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
         end
 
         def refresh_diagnose(data)
@@ -279,7 +282,7 @@ module Hive
 
         def resolve_details_row(project:, slug:, stage:)
           snapshot = @status_snapshot_provider.call
-          return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
+          return [ nil, Hive::Bot::NotificationBuilders::STATUS_STILL_LOADING_REPLY ] if snapshot.nil?
 
           matches = Array(snapshot).select do |row|
             row.respond_to?(:project) && row.respond_to?(:slug) &&
@@ -301,7 +304,7 @@ module Hive
           @logger&.event(:details_lookup_failed, project: project, slug: slug,
                                                   error_class: e.class.name, message: e.message,
                                                   backtrace: Array(e.backtrace).first(3))
-          [ nil, "Status lookup failed — try again in a moment." ]
+          [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
 
         # The recovery callbacks (autofix / clear_and_retry) carry up to two

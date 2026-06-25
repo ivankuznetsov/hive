@@ -40,6 +40,14 @@ module Hive
       TELEGRAM_MESSAGE_MAX_CHARS = 4096
       DETAILS_TRUNCATION_MARKER = "\n... [truncated]".freeze
 
+      # Soft-degrade replies shared across every Show-details surface (the
+      # inline button, the /details and /autofix slash commands, and the
+      # /status <slug> intercept). Promoted to shared frozen constants so a
+      # future wording change stays in lockstep and can't drift between the
+      # lookup-failed and still-loading paths across the handlers.
+      STATUS_LOOKUP_FAILED_REPLY = "Status lookup failed — try again in a moment.".freeze
+      STATUS_STILL_LOADING_REPLY = "Status is still loading — try again in a moment.".freeze
+
       def build(row, logger: nil)
         return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
 
@@ -449,9 +457,10 @@ module Hive
           plan = present_value(row, :state_file)
           folder = present_value(row, :folder)
           plan ||= File.join(folder, "plan.md") if folder
-          # Only name the draft when a path actually resolves; with neither a
-          # state_file nor a folder, File.join would emit a bogus bare/absolute
-          # "plan.md" — drop the line rather than point the operator at it.
+          # Only name the draft when a path actually resolves. The File.join
+          # above is guarded by `if folder`, so with neither a state_file nor a
+          # folder `plan` simply stays nil — we drop the line rather than point
+          # the operator at a path we couldn't build.
           return [ ("Plan draft: #{plan}" if plan), "Approve when ready with /approve #{row.slug}." ].compact.join("\n")
         end
 
@@ -490,9 +499,11 @@ module Hive
       # only the detail without a lossy join-then-resplit. `text` is the
       # untruncated rendering used on the happy path.
       Diagnostic = Data.define(:summary, :detail) do
-        # Coerce members at the type boundary (like sibling Notification's
-        # validate-in-initialize) so `summary`/`detail` are always strings and
-        # `#text`'s reject(&:empty?) can't NoMethodError on a nil member.
+        # Coerce members at the type boundary so `summary`/`detail` are always
+        # strings and `#text`'s reject(&:empty?) can't NoMethodError on a nil
+        # member. Sibling Notification also validates in initialize, but it
+        # *raises* on a bad parse_mode; this type *coerces* instead — lenient on
+        # purpose, since a render-path type must never crash a reply.
         def initialize(summary:, detail:)
           super(summary: summary.to_s, detail: detail.to_s)
         end

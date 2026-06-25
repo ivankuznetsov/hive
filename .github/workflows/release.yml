@@ -270,29 +270,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # The mac experience is Docker Desktop running the SAME linux image — what
-  # can differ per-OS is the VM layer (bind mounts, port forwarding, arm64).
-  # Verify the published arm64 image on a real macOS arm host via colima
-  # (hosted runners have no Docker Desktop). Post-publish by necessity:
-  # multi-arch manifests only exist in the registry.
-  hivebox-smoke-macos:
-    name: hivebox image smoke (macOS arm64, colima)
-    runs-on: macos-15
+  # The published image is a multi-arch manifest; this verifies the arm64
+  # variant actually boots from the registry post-publish (multi-arch manifests
+  # only exist after push). It runs on a native arm64 *Linux* runner with
+  # native Docker — NOT macOS/colima: hosted macOS runners are Apple M-series
+  # with nested virtualization disabled, so colima (VZ or QEMU+HVF) cannot boot
+  # a VM there at all (#463 — even setup-docker-macos-action refuses with
+  # "Detected M-series processor runner without nested virtualization
+  # support"). arm64 Linux pulls the arm64 image and runs it with no VM layer.
+  hivebox-smoke-arm64:
+    name: hivebox image smoke (arm64, native docker)
+    runs-on: ubuntu-24.04-arm
     needs: hivebox-image
     permissions:
       packages: read
     steps:
       - uses: actions/checkout@v7
-      - name: Install and start colima
-        run: |
-          brew install colima docker
-          colima start --cpu 2 --memory 4
       - name: Log in to ghcr
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Smoke the published image (arm64 pulled native)
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          packaging/docker/smoke.sh "ghcr.io/${{ github.repository_owner }}/hivebox:${version}"
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Smoke the published arm64 image (pulled native)
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: packaging/docker/smoke.sh "ghcr.io/${OWNER}/hivebox:${GITHUB_REF_NAME#v}"
 
   aur-publish:
     name: Publish AUR hive-bin

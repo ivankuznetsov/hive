@@ -556,6 +556,33 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     refute_includes text, "Logs/artifacts:"
   end
 
+  def test_details_reply_for_auto_recoverable_recovery_row_falls_through_to_generic_hint
+    # A recovery row that is auto-recoverable (review_error outside the fix
+    # phase) is NOT manual-only, so details_hint must skip the manual-only
+    # branch and fall through to the generic advance hint — never the
+    # "no automatic recovery" line, which belongs only to manual-only states.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          attrs: { "phase" => "triage", "pass" => "1" })
+    )
+
+    assert_includes text, "Open on a laptop to advance."
+    refute_includes text, "no automatic recovery"
+  end
+
+  def test_details_reply_for_dirty_worktree_error_renders_actionable_git_hint
+    # The actionable manual-recovery hint must reach the Show-details surface,
+    # not only RecoverySequence: a dirty_worktree error row degrades to the
+    # git-repair hint, never the generic "open it on a laptop" arm.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "error", marker: "error", stage: "8-finalize",
+          attrs: { "reason" => "dirty_worktree" })
+    )
+
+    assert_includes text, "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
+    refute_includes text, "Hive has no automatic recovery for this state - open it on a laptop."
+  end
+
   def test_compacted_callback_round_trips
     long_slug = "slug-" + ("a" * 80)
     notification = Hive::Bot::NotificationBuilders.build(

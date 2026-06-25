@@ -19,6 +19,8 @@ module Hive
         @now = now
         @max_consecutive = max_consecutive
         @max_silence_sec = max_silence_sec
+        # Seed the silence window to construction (bot start) time so the first
+        # record_failure can't instantly read as a :silence outage.
         @last_success_at = @now.call
         @consecutive_failures = 0
         @unhealthy_latched = false
@@ -37,9 +39,10 @@ module Hive
         reason = unhealthy_reason(seconds_since_success)
         should_escalate = !reason.nil? && !@unhealthy_latched
         @unhealthy_latched = true if should_escalate
+        reason = nil unless should_escalate
 
         Result.new(
-          reason: should_escalate ? reason : nil,
+          reason: reason,
           consecutive_failures: @consecutive_failures,
           seconds_since_success: seconds_since_success.round
         )

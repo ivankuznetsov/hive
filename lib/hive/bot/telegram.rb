@@ -61,6 +61,9 @@ module Hive
 
       attr_reader :client
 
+      # `now:` only seeds the clock of the default `poll_health:` collaborator;
+      # Telegram never stores or reads it directly. Inject a fully-built
+      # `poll_health:` to govern health tracking (and its clock) explicitly.
       def initialize(token:, logger:, client: nil, base_url: "https://api.telegram.org",
                      http_client: nil, now: -> { Time.now }, poll_health: PollHealth.new(now: now))
         @token = token
@@ -193,6 +196,10 @@ module Hive
           media_group_id: callback ? nil : value(message, :media_group_id)
         )
       rescue StandardError => e
+        # Intentionally does NOT call emit_poll_unhealthy_if_needed (unlike the
+        # two poll_updates rescues): a per-update parse failure occurs AFTER a
+        # successful get_updates fetch, so it must not count toward poll-health
+        # or trip the outage escalator.
         already_seen = @build_update_error_classes_seen.key?(e.class)
         @build_update_error_classes_seen[e.class] = true
         attrs = { error_class: e.class.name, message: e.message }

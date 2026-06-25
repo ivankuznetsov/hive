@@ -45,6 +45,10 @@ module Hive
         fatal
       ].freeze
 
+      # Unlike `level` (a closed enum guarded against LEVEL_NAMES below),
+      # `category` is intentionally open-set: the v3 schema specifies it as
+      # free-form `type: string`, so new categories can be introduced without a
+      # schema bump. The noise-suppression filter keys on the literal "noise".
       LEVELS = {
         notification_skipped_dedupe: :debug,
         notification_skipped_backoff: :debug,

@@ -1558,13 +1558,34 @@ class HiveBotSupervisorTest < Minitest::Test
 
     text = @supervisor.send(:render_details, rows, "hive", "task")
 
-    assert_equal Hive::Bot::NotificationBuilders.details_reply(rows.first), text
+    # The adjacent assert_includes lines below pin the rendered delegation;
+    # a self-comparison to details_reply(rows.first) would only restate the
+    # method render_details delegates to, proving nothing.
     assert_includes text, "hive/task (3-plan)"
     assert_includes text, "Action: ready_to_develop"
     assert_includes text, "Marker: none"
     assert_includes text, "Attrs: a=1 z=9"
     refute_includes text, "No diagnostic available"
     assert_equal "No active row found for hive/missing.", @supervisor.send(:render_details, rows, "hive", "missing")
+  end
+
+  def test_render_details_degrades_and_logs_when_render_raises
+    # render_details renders details_reply from a live Row outside any rescue;
+    # the /status-intercept branch that calls it skips write_last_seen on a
+    # raise. A render-time fault must degrade to the soft hint and log, never
+    # escape to the :fatal poll handler. Inject a row whose attrs read raises.
+    raising_row = Class.new do
+      def project = "hive"
+      def slug = "boom-260525-abcd"
+      def attrs = raise("render boom")
+    end.new
+
+    text = @supervisor.send(:render_details, [ raising_row ], "hive", "boom-260525-abcd")
+
+    assert_includes text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault must be logged, not a silent dead end"
+    assert_equal "RuntimeError", logged[:payload][:error_class]
   end
 
   def test_execute_dispatch_renders_status_queue_without_spawning_child

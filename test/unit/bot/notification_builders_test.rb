@@ -295,6 +295,34 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     refute_includes text, "Open on a laptop to advance."
   end
 
+  def test_details_reply_structured_next_action_command_wins_over_flat_suggested_command
+    # next_step_hint precedence contract: a present structured
+    # next_action["command"] wins over the flat suggested_command. Set BOTH to
+    # different non-blank values so an inverted-precedence refactor fails here
+    # (each single-field test alone would still pass after such a flip).
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", workflow: "research", stage: "2-gather",
+          next_action: { "kind" => "run", "command" => "hive run STRUCTURED" },
+          suggested_command: "hive run FLAT")
+    )
+
+    assert_includes text, "Next step: hive run STRUCTURED"
+    refute_includes text, "hive run FLAT"
+  end
+
+  def test_details_reply_falls_back_to_flat_command_when_structured_next_action_lacks_command
+    # next_step_hint's "present next_action Hash but blank/missing command →
+    # fall back to flat suggested_command" branch: only the nil-next_action
+    # fallback was exercised before.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", workflow: "research", stage: "2-gather",
+          next_action: { "kind" => "run" },
+          suggested_command: "hive run slug-260514-abcd")
+    )
+
+    assert_includes text, "Next step: hive run slug-260514-abcd"
+  end
+
   def test_details_reply_for_coding_brainstorm_waiting_points_to_answer
     text = Hive::Bot::NotificationBuilders.details_reply(
       row(action: "needs_input", marker: "waiting", stage: "2-brainstorm", workflow: "coding")
@@ -313,6 +341,24 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes text, "Plan draft: /tmp/slug-260514-abcd/plan.md"
     assert_includes text, "Approve when ready with /approve slug-260514-abcd."
     refute_match(/diagnostic/i, text)
+  end
+
+  def test_details_reply_for_plan_waiting_still_appends_present_diagnostic
+    # Plan rows carry nil diagnostics in practice, so the refute_match above
+    # passes trivially. details_reply appends a present diagnostic regardless
+    # of surface (plan U1 step 3): pin that a plan_waiting row WITH a populated
+    # diagnostic still gets it appended, so the nil-only guard above can't mask
+    # a regression in that surface-independent contract.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", stage: "3-plan", workflow: "coding",
+          state_file: "/tmp/slug-260514-abcd/plan.md",
+          diagnostic: { "summary" => "PLAN_DIAG summary", "detail" => "plan diagnostic detail" })
+    )
+
+    assert_includes text, "Plan draft: /tmp/slug-260514-abcd/plan.md"
+    assert_includes text, "Approve when ready with /approve slug-260514-abcd."
+    assert_includes text, "PLAN_DIAG summary"
+    assert_includes text, "plan diagnostic detail"
   end
 
   def test_details_reply_for_review_waiting_fix_guardrail_has_fix_hint

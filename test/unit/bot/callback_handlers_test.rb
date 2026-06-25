@@ -410,6 +410,29 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal "RuntimeError", logged[:payload][:error_class]
   end
 
+  def test_show_details_degrades_and_logs_when_render_raises
+    # details_reply renders OUTSIDE resolve_details_row's degrade rescue and the
+    # callback was already ack'd, so a render-time fault must degrade + log, not
+    # escape to the :fatal poll handler and leave the tap with no reply. The
+    # row resolves cleanly (project/slug match) but raises when rendered.
+    raising_row = Class.new do
+      def project = "alpha"
+      def slug = "boom-260518-aaaa"
+      def attrs = raise("render boom")
+    end.new
+    handlers = handlers_with_snapshot([ raising_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:boom-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault after the callback ack must be logged, not a silent dead end"
+    assert_equal "alpha", logged[:payload][:project]
+    assert_equal "boom-260518-aaaa", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
   def test_show_details_skips_non_conforming_snapshot_rows
     # resolve_details_row's row.respond_to?(:project)/:slug guard must skip a
     # snapshot entry that doesn't quack like a Row instead of crashing the

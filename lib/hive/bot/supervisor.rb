@@ -1479,6 +1479,16 @@ module Hive
         return "No active row found for #{project}/#{slug}." unless row
 
         Hive::Bot::NotificationBuilders.details_reply(row)
+      rescue StandardError => e
+        # Same soft-degrade as the Show-details handlers: details_reply renders
+        # from a live Row and never raises today, but a render-time fault here
+        # would escape execute_dispatch's /status-intercept branch to the :fatal
+        # poll handler and skip write_last_seen, denying the operator any reply.
+        @logger&.event(:details_render_failed, source: "render_details",
+                                                project: project, slug: slug,
+                                                error_class: e.class.name, message: e.message,
+                                                backtrace: Array(e.backtrace).first(3))
+        "Status lookup failed — try again in a moment."
       end
 
       def actionable_queue_rows(rows)

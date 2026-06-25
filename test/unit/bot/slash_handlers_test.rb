@@ -26,6 +26,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
     end
   end
 
+  FakeLogger = Struct.new(:events, keyword_init: true) do
+    def event(name, **payload)
+      events << { name: name, payload: payload }
+    end
+  end
+
   def setup
     @handlers = Hive::Bot::Handlers::SlashHandlers.new(
       projects_provider: -> { [] },
@@ -243,6 +249,24 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(/Status lookup failed/, result.text)
   end
 
+  def test_resolve_status_row_logs_swallowed_provider_fault
+    # The broad rescue must not silently swallow a recurring snapshot-provider
+    # fault: when a logger is wired it logs :status_lookup_failed before
+    # degrading, so the fault stays visible in bot.log.
+    logger = FakeLogger.new(events: [])
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { raise "boom" }, logger: logger
+    )
+
+    handlers.details(Update.new(text: "/details any-260526-zzzz", chat_id: 1))
+
+    logged = logger.events.find { |event| event[:name] == :status_lookup_failed }
+    refute_nil logged, "a swallowed provider fault must be logged, not silently degraded"
+    assert_equal "any-260526-zzzz", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
   def test_autofix_without_slug_arg_replies_with_usage_hint_and_no_dispatch
     handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
 
@@ -362,6 +386,28 @@ class HiveBotSlashHandlersTest < Minitest::Test
     refute_match(/diagnostic/i, result.text)
   end
 
+  def test_details_for_plan_waiting_slug_still_appends_present_diagnostic
+    # The nil-diagnostic case above makes refute_match(/diagnostic/i) pass
+    # trivially; details_reply appends any present diagnostic regardless of
+    # surface, so a plan_waiting row WITH a populated diagnostic still surfaces
+    # it on the slash /details surface too.
+    plan_row = Row.new(
+      project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
+      state_file: "/tmp/plan-task-260525-abcd/plan.md",
+      action: "needs_input", action_label: "Needs your input",
+      diagnostic: { "summary" => "PLAN_DIAG summary", "detail" => "plan diagnostic detail" }
+    )
+    handlers = autofix_handlers([ plan_row ])
+
+    result = handlers.details(Update.new(text: "/details plan-task-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Plan draft: /tmp/plan-task-260525-abcd/plan.md"
+    assert_includes result.text, "PLAN_DIAG summary"
+    assert_includes result.text, "plan diagnostic detail"
+  end
+
   def test_details_for_recovery_slug_appends_diagnostic
     diagnostic_row = Row.new(
       project: "hive", slug: "stuck-260525-abcd", stage: "6-review", workflow: "coding",
@@ -376,6 +422,33 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal :reply, result.action
     assert_includes result.text, "REVIEW_ERROR pass=2"
     assert_includes result.text, "review fix failed"
+  end
+
+  def test_details_degrades_and_logs_when_render_raises
+    # details_reply renders OUTSIDE resolve_status_row's degrade rescue; a
+    # render-time fault would escape the poll loop and skip write_last_seen,
+    # leaving the operator with no reply. The row resolves cleanly (slug match)
+    # but raises when rendered — degrade to the soft hint and log instead.
+    raising_row = Class.new do
+      def project = "hive"
+      def slug = "boom-260525-abcd"
+      def attrs = raise("render boom")
+    end.new
+    logger = FakeLogger.new(events: [])
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { [ raising_row ] }, logger: logger
+    )
+
+    result = handlers.details(Update.new(text: "/details boom-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    logged = logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault on /details must be logged, not a silent no-reply"
+    assert_equal "hive", logged[:payload][:project]
+    assert_equal "boom-260525-abcd", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
   end
 
   def test_details_without_slug_arg_replies_with_usage_hint

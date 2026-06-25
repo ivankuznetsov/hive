@@ -167,9 +167,10 @@ module Hive
       # Coding-workflow `waiting`/`review_waiting` classifications shared by the
       # push-notification builders (waiting_input/review_waiting) and the
       # Show-details hint (details_hint), so tap-time copy mirrors build-time
-      # and the two trees can't drift after a future stage/marker change. The
-      # marker is part of each predicate (not just implied by the caller) so
-      # details_hint — which runs against arbitrary rows — can't misfire.
+      # and the two trees can't drift after a future stage/marker change. Each
+      # predicate re-checks the marker itself (not just the stage implied by the
+      # caller); keep that marker check when editing so the two trees stay
+      # aligned across whatever rows a future caller routes through here.
       def plan_pause?(row)
         Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" && row.marker.to_s == "waiting" # coding-scoped: plan approval pause only exists in coding workflow
       end
@@ -360,8 +361,12 @@ module Hive
       def details_summary(row)
         attrs = sorted_attr_pairs(row).map { |key, value| "#{key}=#{value}" }
         # The renderer only ever receives a real StatusWatcher::Row (stale
-        # buttons resolve against the live snapshot), so read the always-present
-        # Data members directly instead of guarding them with respond_to?.
+        # buttons resolve against the live snapshot), so read the core members
+        # (action/action_label/marker, plus stage/project/slug below) directly
+        # here. This is NOT a license to strip the respond_to? guards in the
+        # sibling hint helpers (next_step_hint/diagnostic_detail/present_value):
+        # those guard genuinely optional, nil-by-default fields and normalize
+        # their absence — keep them guarded.
         action = row.action_label.to_s.empty? ? row.action : row.action_label
         marker = row.marker.to_s.empty? ? "none" : row.marker
         [
@@ -380,7 +385,7 @@ module Hive
         diagnostic = diagnostic_detail(row)
         text = (sections + [ diagnostic&.text ].compact).join("\n\n")
         return text if text.length <= TELEGRAM_MESSAGE_MAX_CHARS
-        return truncate_diagnostic_reply(sections, diagnostic) if diagnostic
+        return truncate_diagnostic_reply(sections, diagnostic, text) if diagnostic
 
         truncate_text(text)
       end
@@ -485,6 +490,13 @@ module Hive
       # only the detail without a lossy join-then-resplit. `text` is the
       # untruncated rendering used on the happy path.
       Diagnostic = Data.define(:summary, :detail) do
+        # Coerce members at the type boundary (like sibling Notification's
+        # validate-in-initialize) so `summary`/`detail` are always strings and
+        # `#text`'s reject(&:empty?) can't NoMethodError on a nil member.
+        def initialize(summary:, detail:)
+          super(summary: summary.to_s, detail: detail.to_s)
+        end
+
         def text
           [ summary, detail ].reject(&:empty?).join("\n")
         end
@@ -501,15 +513,20 @@ module Hive
         Diagnostic.new(summary: summary, detail: detail)
       end
 
-      def truncate_diagnostic_reply(sections, diagnostic)
-        prefix = (sections + [ diagnostic.summary ]).reject(&:empty?).join("\n\n")
-        return truncate_text((sections + [ diagnostic.text ]).join("\n\n")) if diagnostic.detail.empty?
+      # `full_text` is the untruncated reply details_reply already composed
+      # ((sections + [diagnostic.text]).join); both whole-text fallbacks reuse
+      # it instead of recomposing the join. `sections` (details_summary +
+      # details_hint) are always non-empty, so the only blank reject(&:empty?)
+      # can drop is a summary-less diagnostic — hence it guards only summary.
+      def truncate_diagnostic_reply(sections, diagnostic, full_text)
+        return truncate_text(full_text) if diagnostic.detail.empty?
 
+        prefix = (sections + [ diagnostic.summary ].reject(&:empty?)).join("\n\n")
         available = TELEGRAM_MESSAGE_MAX_CHARS - prefix.length - 1 - DETAILS_TRUNCATION_MARKER.length
-        return truncate_text((sections + [ diagnostic.text ]).join("\n\n")) unless available.positive?
+        return truncate_text(full_text) unless available.positive?
 
         truncated_detail = diagnostic.detail[0, available].to_s.rstrip + DETAILS_TRUNCATION_MARKER
-        [ prefix, truncated_detail ].reject(&:empty?).join("\n")
+        [ prefix, truncated_detail ].join("\n")
       end
 
       def truncate_text(text)

@@ -34,6 +34,8 @@ module Hive
         send_failure
         callback_malformed
         details_lookup_failed
+        details_render_failed
+        status_lookup_failed
         pid_file_corrupted
         unknown_stage_label
         alert_store_corrupt

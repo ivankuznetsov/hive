@@ -12,7 +12,8 @@ module Hive
                        idea_draft_store: nil, idea_attachment_policy: nil,
                        max_attachment_bytes: nil, max_attachment_count: nil,
                        now: -> { Time.now },
-                       status_snapshot_provider: -> { [] })
+                       status_snapshot_provider: -> { [] },
+                       logger: nil)
           @projects_provider = projects_provider
           @pending_ideas = pending_ideas
           @last_project = last_project
@@ -23,6 +24,7 @@ module Hive
           @max_attachment_count = max_attachment_count
           @now = now
           @status_snapshot_provider = status_snapshot_provider
+          @logger = logger
         end
 
         def status(update)
@@ -319,10 +321,25 @@ module Hive
           row, error = resolve_status_row(slug)
           return @result_class.new(action: :reply, text: error) if error
 
-          @result_class.new(action: :reply, text: Hive::Bot::NotificationBuilders.details_reply(row))
+          @result_class.new(action: :reply, text: render_details_reply(row))
         end
 
         private
+
+        # details_reply renders from a live Row and never raises today, but it
+        # runs OUTSIDE resolve_status_row's degrade rescue. A render-time fault
+        # (e.g. a row whose attrs aren't a Hash) would escape to the poll loop
+        # and leave the operator with no reply — and skip write_last_seen, so
+        # Telegram redelivers the update. Degrade to the soft retry hint and log
+        # (with a backtrace) so the fault stays diagnosable.
+        def render_details_reply(row)
+          Hive::Bot::NotificationBuilders.details_reply(row)
+        rescue StandardError => e
+          @logger&.event(:details_render_failed, project: row.project, slug: row.slug,
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
+          "Status lookup failed — try again in a moment."
+        end
 
         # Operator-facing refusal for a /autofix on a non-retryable row.
         # Manual-only states (execute_stale, fix_tampered) point at a laptop;
@@ -358,11 +375,15 @@ module Hive
           when 1 then [ matches.first, nil ]
           else [ nil, "Multiple active tasks match #{slug}; open on a laptop to pick the right project." ]
           end
-        rescue StandardError
+        rescue StandardError => e
           # The production provider just reads a cached ivar and cannot raise,
           # but a future provider that does I/O must never crash the poll loop
           # (an escape here would skip write_last_seen and let Telegram
-          # redeliver the update). Degrade to a soft retry hint instead.
+          # redeliver the update). Log before degrading — otherwise a recurring
+          # fault stays invisible in bot.log — then return a soft retry hint.
+          @logger&.event(:status_lookup_failed, slug: slug,
+                                                 error_class: e.class.name, message: e.message,
+                                                 backtrace: Array(e.backtrace).first(3))
           [ nil, "Status lookup failed — try again in a moment." ]
         end
       end

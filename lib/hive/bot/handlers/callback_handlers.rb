@@ -111,7 +111,24 @@ module Hive
           row, error = resolve_details_row(project: project, slug: slug, stage: stage)
           return @result_class.new(action: :reply, text: error) if error
 
-          @result_class.new(action: :reply, text: Hive::Bot::NotificationBuilders.details_reply(row))
+          @result_class.new(action: :reply, text: render_details_reply(project: project, slug: slug, row: row))
+        end
+
+        # details_reply renders from a live Row and never raises today, but it
+        # runs OUTSIDE resolve_details_row's degrade rescue. process_update
+        # already ack'd this callback and skips write_last_seen on a raise, so a
+        # render-time fault (e.g. a row whose attrs aren't a Hash) would escape
+        # past handle's ArgumentError-only rescue to the :fatal poll handler and
+        # leave the tap with no reply at all — the very dead end the Show-details
+        # flow exists to prevent. Degrade to the same soft retry hint the lookup
+        # path uses, and log (with a backtrace) so the fault stays diagnosable.
+        def render_details_reply(project:, slug:, row:)
+          Hive::Bot::NotificationBuilders.details_reply(row)
+        rescue StandardError => e
+          @logger&.event(:details_render_failed, project: project, slug: slug,
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
+          "Status lookup failed — try again in a moment."
         end
 
         def refresh_diagnose(data)
@@ -277,9 +294,13 @@ module Hive
         rescue StandardError => e
           # Log before degrading: a recurring snapshot-provider fault (e.g. a
           # future I/O-backed status_snapshot_provider) would otherwise be
-          # invisible in bot.log, mirroring the :callback_malformed rescue above.
+          # invisible in bot.log. Mirrors handle's :callback_malformed logging.
+          # The backtrace lets a deterministic programming error (e.g. a
+          # NoMethodError from the match block) be told apart from a transient
+          # I/O blip despite the shared "try again" degrade copy.
           @logger&.event(:details_lookup_failed, project: project, slug: slug,
-                                                  error_class: e.class.name, message: e.message)
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
           [ nil, "Status lookup failed — try again in a moment." ]
         end
 

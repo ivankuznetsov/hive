@@ -1,5 +1,7 @@
 require "time"
+require "set"
 require "hive/config"
+require "hive/bot/logger"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
 require "hive/bot/title_formatter"
@@ -33,6 +35,8 @@ module Hive
         # operator is already answering). nil = no suppression (older
         # wiring / tests that don't inject it).
         @conversation_store = conversation_store
+        @dedupe_logged = Set.new
+        @backoff_logged = Set.new
       end
 
       def process_rows(rows)
@@ -175,6 +179,8 @@ module Hive
       end
 
       def process_current(current)
+        reconcile_skip_log_state(current)
+
         current.each do |fingerprint, payload|
           row = payload.fetch(:row)
           entry = @alert_store.entry(fingerprint)
@@ -192,9 +198,7 @@ module Hive
               @alert_store.record_send_failure(fingerprint, @now.call)
             end
           elsif backoff_active?(entry)
-            @logger.event(:notification_skipped_backoff, project: row.project, slug: row.slug,
-                                                          marker: row.marker,
-                                                          consecutive_failures: entry.consecutive_failures.to_i)
+            log_backoff_skip_once(fingerprint, row, entry)
           elsif (pending = pending_chat_ids(entry)).any?
             newly_delivered = send_notification(payload.fetch(:notification), to: pending)
             if newly_delivered.any?
@@ -212,11 +216,40 @@ module Hive
               @alert_store.record_send_failure(fingerprint, @now.call)
             end
           else
-            @logger.event(:notification_skipped_dedupe, project: row.project,
-                                                         slug: row.slug,
-                                                         marker: row.marker)
+            log_dedupe_skip_once(fingerprint, row)
           end
         end
+      end
+
+      # Throttle the debug/noise dedupe + backoff skip lines to state
+      # transitions. The two in-memory Sets hold the fingerprints already
+      # logged this episode; pruning them to `current` here re-arms a
+      # fingerprint only when it leaves the current set (entry / fingerprint
+      # change / leave-and-return). This is distinct from the AlertStore's
+      # persistent delivery dedup — these Sets govern log noise, not delivery.
+      def reconcile_skip_log_state(current)
+        @dedupe_logged.keep_if { |fingerprint| current.key?(fingerprint) }
+        @backoff_logged.keep_if { |fingerprint| current.key?(fingerprint) }
+      end
+
+      def log_backoff_skip_once(fingerprint, row, entry)
+        return if @backoff_logged.include?(fingerprint)
+
+        @backoff_logged.add(fingerprint)
+        @logger.event(:notification_skipped_backoff, level: :debug, category: Logger::CATEGORY_NOISE,
+                                                      project: row.project, slug: row.slug,
+                                                      marker: row.marker,
+                                                      consecutive_failures: entry.consecutive_failures.to_i)
+      end
+
+      def log_dedupe_skip_once(fingerprint, row)
+        return if @dedupe_logged.include?(fingerprint)
+
+        @dedupe_logged.add(fingerprint)
+        @logger.event(:notification_skipped_dedupe, level: :debug, category: Logger::CATEGORY_NOISE,
+                                                     project: row.project,
+                                                     slug: row.slug,
+                                                     marker: row.marker)
       end
 
       def backoff_active?(entry)

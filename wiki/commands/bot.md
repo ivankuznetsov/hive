@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-18
+updated: 2026-06-24
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -252,13 +252,18 @@ the bot after rotating).
 ## Structured log
 
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
-`hive-bot-log.v2` (`SCHEMA_VERSION = 2`). The event enum is closed in
-`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
+`hive-bot-log.v3` (`SCHEMA_VERSION = 3`). The event enum is closed in
+`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site. Every v3
+line carries `level` (`debug`, `info`, `warn`, or `error`) and may carry
+`category` for cross-cutting tags such as `noise`.
 
-`v2` was introduced when the Telegram "Codex draft-assist" feature was
-retired: it drops the `codex_spawned` / `codex_succeeded` / `codex_failed`
-events from the enum. `schemas/hive-bot-log.v1.json` is kept as-is for
-historical log lines emitted before the bump.
+`v3` keeps event names stable and adds severity. Benign Telegram long-poll
+transport timeouts still emit `poll_failure`, but at `debug`/`noise`; real poll
+failures remain `warn`, and sustained outages also emit `poll_unhealthy` at
+`warn`. `notification_skipped_dedupe` and `notification_skipped_backoff` are
+debug/noise and are logged only on skip-state transitions. `v2` was introduced
+when the Telegram "Codex draft-assist" feature was retired; `schemas/hive-bot-log.v1.json`
+and `schemas/hive-bot-log.v2.json` are kept as-is for historical log lines.
 
 The schema evolves additively: new event values may be appended to the
 current version without changing `schema_version`. Breaking changes
@@ -268,9 +273,9 @@ bumped `$id` and a synchronized `schema_version` constant — exactly what
 the v1 → v2 retirement did. Downstream consumers that pin on the `$id`
 URL must therefore tolerate unknown event values; that's the read-side
 compat invariant.
-Events include `bot_started`, `poll_failure`, `update_received`,
-`notification_sent`, `dispatched_command`, `command_completed`,
-`answer_written`, `reconnect_summary`, and `fatal`.
+Events include `bot_started`, `poll_failure`, `poll_unhealthy`,
+`update_received`, `notification_sent`, `dispatched_command`,
+`command_completed`, `answer_written`, `reconnect_summary`, and `fatal`.
 
 ## Forward-tolerant `hive status` schema-version skew
 
@@ -278,7 +283,7 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 on a `hive-status` `schema_version` mismatch — that would hard-crash
 `/status` whenever the `hive` gem is bumped under a running bot. A newer
 payload is parsed best-effort (additive-envelope contract) and logs a
-`poll_failure` skew warning; an older payload (stale binary on PATH) or a
+`poll_schema_skew` skew warning; an older payload (stale binary on PATH) or a
 newer payload that genuinely fails to parse returns an actionable
 `failure(...)` result telling the operator to restart the bot or
 update/reinstall the binary. The full classification (`:match` /

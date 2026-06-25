@@ -424,11 +424,14 @@ module Hive
         # input gate; a real pause carries an `:execute_waiting` marker (U6).
         ACTIONS.fetch(:generic_ready_to_run)
       else
-        if Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
-          ACTIONS.fetch(:error)
-        else
-          ACTIONS.fetch(:generic_ready_to_run)
-        end
+        # Any other marker at the execute stage is foreign/incoherent: the
+        # runner only ever stamps execute_waiting/execute_complete/execute_stale/
+        # :none here, and universal markers (agent_working/error/manual_steering)
+        # are intercepted earlier. Fail loud rather than auto-running `hive run`
+        # against a marker we don't recognize — for a foreign marker (terminal
+        # OR non-terminal alike) "no auto-run" is strictly safer for the daemon
+        # Policy than presuming the stage is runnable.
+        ACTIONS.fetch(:error)
       end
     end
 

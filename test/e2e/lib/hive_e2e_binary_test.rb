@@ -293,6 +293,19 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/run_id must be a safe basename/, payload["message"])
   end
 
+  def test_replay_invalid_byte_name_emits_usage_error_when_json_requested
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "bad\xFF".b, "scenario")
+    assert_equal 64, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+    assert_match(/invalid byte sequence/, payload["message"])
+  end
+
   def test_clean_rejects_invalid_retention_values
     Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
       out, err, status = Open3.capture3(

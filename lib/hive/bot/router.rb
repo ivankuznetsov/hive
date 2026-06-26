@@ -91,7 +91,8 @@ module Hive
           idea_attachment_policy: Hive::Bot::IdeaAttachmentPolicy,
           max_attachment_bytes: bot_config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024),
           max_attachment_count: bot_config.fetch("idea_attachment_max_count", 10),
-          status_snapshot_provider: status_snapshot_provider
+          status_snapshot_provider: status_snapshot_provider,
+          logger: @logger
         )
         @callback_handlers = Handlers::CallbackHandlers.new(
           pending_ideas: @pending_ideas,
@@ -100,6 +101,7 @@ module Hive
           result_class: Result,
           idea_draft_store: @idea_draft_store,
           projects_provider: @projects_provider,
+          status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
           logger: @logger
         )

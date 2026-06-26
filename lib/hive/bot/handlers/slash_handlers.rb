@@ -12,7 +12,8 @@ module Hive
                        idea_draft_store: nil, idea_attachment_policy: nil,
                        max_attachment_bytes: nil, max_attachment_count: nil,
                        now: -> { Time.now },
-                       status_snapshot_provider: -> { [] })
+                       status_snapshot_provider: -> { [] },
+                       logger: nil)
           @projects_provider = projects_provider
           @pending_ideas = pending_ideas
           @last_project = last_project
@@ -23,6 +24,7 @@ module Hive
           @max_attachment_count = max_attachment_count
           @now = now
           @status_snapshot_provider = status_snapshot_provider
+          @logger = logger
         end
 
         def status(update)
@@ -325,17 +327,31 @@ module Hive
           row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
-          stage_argv = row.stage ? [ "--stage", row.stage ] : []
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: row.project,
-            slug: row.slug,
-            command_argv: [ "hive", "status", "--diagnose", row.slug,
-                            "--project", row.project, *stage_argv, "--json" ]
-          )
+          @result_class.new(action: :reply, text: render_details_reply(row))
         end
 
         private
+
+        # details_reply renders from a live Row and never raises today, but it
+        # runs OUTSIDE resolve_status_row's degrade rescue. A render-time fault
+        # (e.g. a row whose attrs aren't a Hash) would escape to the poll loop
+        # and leave the operator with no reply — and skip write_last_seen, so
+        # Telegram redelivers the update. Degrade to the soft retry hint and log
+        # (with a backtrace) so the fault stays diagnosable.
+        def render_details_reply(row)
+          Hive::Bot::NotificationBuilders.details_reply(row)
+        rescue StandardError => e
+          # resolve_status_row matches on :slug alone, so a slug-only provider
+          # row need not respond to :project (or even :slug). Guard both reads
+          # here — an unguarded row.project would re-raise and defeat this very
+          # soft-degrade path.
+          @logger&.event(:details_render_failed,
+                         project: (row.project if row.respond_to?(:project)),
+                         slug: (row.slug if row.respond_to?(:slug)),
+                         error_class: e.class.name, message: e.message,
+                         backtrace: Array(e.backtrace).first(3))
+          Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
+        end
 
         # Operator-facing refusal for a /autofix on a non-retryable row.
         # Manual-only states (execute_stale, fix_tampered) point at a laptop;
@@ -383,7 +399,7 @@ module Hive
         #                           would be worse than asking the operator).
         def resolve_status_row(target, id: numeric_id(target))
           snapshot = @status_snapshot_provider.call
-          return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
+          return [ nil, Hive::Bot::NotificationBuilders::STATUS_STILL_LOADING_REPLY ] if snapshot.nil?
 
           if id
             matches = Array(snapshot).select { |row| row.respond_to?(:id) && row.id == id }
@@ -398,12 +414,16 @@ module Hive
           when 1 then [ matches.first, nil ]
           else [ nil, "Multiple active tasks match #{target}; open on a laptop to pick the right project." ]
           end
-        rescue StandardError
+        rescue StandardError => e
           # The production provider just reads a cached ivar and cannot raise,
           # but a future provider that does I/O must never crash the poll loop
           # (an escape here would skip write_last_seen_update_id and let
-          # Telegram redeliver the update). Degrade to a soft retry hint instead.
-          [ nil, "Status lookup failed — try again in a moment." ]
+          # Telegram redeliver the update). Log before degrading — otherwise a
+          # recurring fault stays invisible in bot.log — then return a soft retry hint.
+          @logger&.event(:status_lookup_failed, slug: target,
+                                                 error_class: e.class.name, message: e.message,
+                                                 backtrace: Array(e.backtrace).first(3))
+          [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
       end
     end

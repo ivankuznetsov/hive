@@ -1,3 +1,4 @@
+require "hive/bot/notification_builders"
 require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
 
@@ -8,6 +9,7 @@ module Hive
         def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:,
                        idea_draft_store: nil,
                        projects_provider: -> { [] },
+                       status_snapshot_provider: -> { [] },
                        last_project: -> { nil },
                        logger: nil)
           @pending_ideas = pending_ideas
@@ -16,6 +18,7 @@ module Hive
           @result_class = result_class
           @idea_draft_store = idea_draft_store
           @projects_provider = projects_provider
+          @status_snapshot_provider = status_snapshot_provider
           @last_project = last_project
           @logger = logger
         end
@@ -105,19 +108,30 @@ module Hive
 
         def show_details(data)
           _prefix, project, slug, stage = split_callback(data, [ 3, 4 ])
-          stage_argv = stage ? [ "--stage", stage ] : []
-          # Replace the previous full-status dump with a targeted
-          # `hive status --diagnose <slug>` so the bot reply renders the
-          # bounded Diagnostic envelope (summary + detail) instead of
-          # the whole snapshot. `--stage` disambiguates duplicate slugs
-          # in the same project. See PR #84 review row 24.
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: project,
-            slug: slug,
-            command_argv: [ "hive", "status", "--diagnose", slug,
-                            "--project", project, *stage_argv, "--json" ]
-          )
+          row, error = resolve_details_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: error) if error
+
+          @result_class.new(action: :reply, text: render_details_reply(project: project, slug: slug, stage: stage, row: row))
+        end
+
+        # details_reply renders from a live Row and never raises today, but it
+        # runs OUTSIDE resolve_details_row's degrade rescue. process_update
+        # already ack'd this callback and skips write_last_seen on a raise, so a
+        # render-time fault (e.g. a row whose attrs aren't a Hash) would escape
+        # past handle's ArgumentError-only rescue to the :fatal poll handler and
+        # leave the tap with no reply at all — the very dead end the Show-details
+        # flow exists to prevent. Degrade to the same soft retry hint the lookup
+        # path uses, and log (with a backtrace) so the fault stays diagnosable.
+        def render_details_reply(project:, slug:, stage:, row:)
+          Hive::Bot::NotificationBuilders.details_reply(row)
+        rescue StandardError => e
+          # Carry stage (already in scope from show_details, and what
+          # resolve_details_row matched on) so a render fault recurring for a
+          # single stage of a duplicated slug stays attributable in bot.log.
+          @logger&.event(:details_render_failed, project: project, slug: slug, stage: stage,
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
+          Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
         end
 
         def refresh_diagnose(data)
@@ -264,6 +278,33 @@ module Hive
           raise ArgumentError, "malformed callback" unless counts.include?(parts.length)
 
           parts
+        end
+
+        def resolve_details_row(project:, slug:, stage:)
+          snapshot = @status_snapshot_provider.call
+          return [ nil, Hive::Bot::NotificationBuilders::STATUS_STILL_LOADING_REPLY ] if snapshot.nil?
+
+          matches = Array(snapshot).select do |row|
+            row.respond_to?(:project) && row.respond_to?(:slug) &&
+              row.project == project && row.slug == slug &&
+              (stage.nil? || row.stage.to_s == stage)
+          end
+          case matches.length
+          when 0 then [ nil, "That task is no longer active — send /status to see current tasks." ]
+          when 1 then [ matches.first, nil ]
+          else [ nil, "That task is ambiguous — send /status to pick the current task." ]
+          end
+        rescue StandardError => e
+          # Log before degrading: a recurring snapshot-provider fault (e.g. a
+          # future I/O-backed status_snapshot_provider) would otherwise be
+          # invisible in bot.log. Mirrors handle's :callback_malformed logging.
+          # The backtrace lets a deterministic programming error (e.g. a
+          # NoMethodError from the match block) be told apart from a transient
+          # I/O blip despite the shared "try again" degrade copy.
+          @logger&.event(:details_lookup_failed, project: project, slug: slug,
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
+          [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
 
         # The recovery callbacks (autofix / clear_and_retry) carry up to two

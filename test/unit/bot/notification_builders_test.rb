@@ -6,7 +6,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
-          diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding")
+          diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding",
+          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -16,10 +17,12 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       workflow: workflow,
       marker: marker,
       attrs: attrs,
-      folder: "/tmp/#{slug}",
+      folder: folder,
+      state_file: state_file,
       action: action,
       action_label: "label",
-      suggested_command: nil,
+      suggested_command: suggested_command,
+      next_action: next_action,
       diagnostic: diagnostic,
       pr_url: pr_url
     )
@@ -277,6 +280,318 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     assert_equal [ "Show details" ], labels,
                  "the only useful action for an unknown waiting marker is Show details"
+  end
+
+  def test_details_reply_for_default_needs_input_has_summary_and_laptop_hint
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" },
+          workflow: "dispatch", stage: "2-gather", diagnostic: nil)
+    )
+
+    assert_includes text, "Slug… — hive/slug-260514-abcd (2-gather)"
+    assert_includes text, "Action: label"
+    assert_includes text, "Marker: agent_waiting"
+    assert_includes text, "Attrs: reason=operator"
+    assert_includes text, "Open on a laptop to advance."
+    refute_includes text, "No diagnostic available"
+  end
+
+  def test_details_reply_prefers_structured_next_step_when_available
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", workflow: "research", stage: "2-gather",
+          next_action: { "kind" => "run", "command" => "hive run slug-260514-abcd" })
+    )
+
+    assert_includes text, "Next step: hive run slug-260514-abcd"
+    refute_includes text, "Open on a laptop to advance."
+  end
+
+  def test_details_reply_structured_next_action_command_wins_over_flat_suggested_command
+    # next_step_hint precedence contract: a present structured
+    # next_action["command"] wins over the flat suggested_command. Set BOTH to
+    # different non-blank values so an inverted-precedence refactor fails here
+    # (each single-field test alone would still pass after such a flip).
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", workflow: "research", stage: "2-gather",
+          next_action: { "kind" => "run", "command" => "hive run STRUCTURED" },
+          suggested_command: "hive run FLAT")
+    )
+
+    assert_includes text, "Next step: hive run STRUCTURED"
+    refute_includes text, "hive run FLAT"
+  end
+
+  def test_details_reply_falls_back_to_flat_command_when_structured_next_action_lacks_command
+    # next_step_hint's "present next_action Hash but blank/missing command →
+    # fall back to flat suggested_command" branch: only the nil-next_action
+    # fallback was exercised before.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", workflow: "research", stage: "2-gather",
+          next_action: { "kind" => "run" },
+          suggested_command: "hive run slug-260514-abcd")
+    )
+
+    assert_includes text, "Next step: hive run slug-260514-abcd"
+  end
+
+  def test_details_reply_for_coding_brainstorm_waiting_points_to_answer
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", stage: "2-brainstorm", workflow: "coding")
+    )
+
+    assert_includes text, "Reply /answer slug-260514-abcd to provide input."
+    refute_includes text, "No diagnostic available"
+  end
+
+  def test_details_reply_for_plan_waiting_points_to_plan_and_approval
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", stage: "3-plan", workflow: "coding",
+          state_file: "/tmp/slug-260514-abcd/plan.md")
+    )
+
+    assert_includes text, "Plan draft: /tmp/slug-260514-abcd/plan.md"
+    assert_includes text, "Approve when ready with /approve slug-260514-abcd."
+    refute_match(/diagnostic/i, text)
+  end
+
+  def test_details_reply_for_plan_waiting_still_appends_present_diagnostic
+    # Plan rows carry nil diagnostics in practice, so the refute_match above
+    # passes trivially. details_reply appends a present diagnostic regardless
+    # of surface (plan U1 step 3): pin that a plan_waiting row WITH a populated
+    # diagnostic still gets it appended, so the nil-only guard above can't mask
+    # a regression in that surface-independent contract.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", stage: "3-plan", workflow: "coding",
+          state_file: "/tmp/slug-260514-abcd/plan.md",
+          diagnostic: { "summary" => "PLAN_DIAG summary", "detail" => "plan diagnostic detail" })
+    )
+
+    assert_includes text, "Plan draft: /tmp/slug-260514-abcd/plan.md"
+    assert_includes text, "Approve when ready with /approve slug-260514-abcd."
+    assert_includes text, "PLAN_DIAG summary"
+    assert_includes text, "plan diagnostic detail"
+  end
+
+  def test_details_reply_for_review_waiting_fix_guardrail_has_fix_hint
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "review_waiting", stage: "6-review",
+          attrs: { "reason" => "fix_guardrail" })
+    )
+
+    assert_includes text, "Open on a laptop to inspect the fix before continuing."
+  end
+
+  def test_details_reply_for_manual_recovery_includes_cause_manual_hint_folder_and_diagnostic
+    diagnostic = {
+      "summary" => "EXECUTE_STALE pass=1",
+      "detail" => "execute log tail"
+    }
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_execute", marker: "execute_stale", stage: "4-execute",
+          folder: "/tmp/slug-260514-abcd", diagnostic: diagnostic)
+    )
+
+    assert_includes text, "The execute agent stalled before it could finish."
+    assert_includes text, "Hive has no automatic recovery for this state - open it on a laptop."
+    assert_includes text, "Logs/artifacts: /tmp/slug-260514-abcd"
+    assert_includes text, "EXECUTE_STALE pass=1"
+    assert_includes text, "execute log tail"
+  end
+
+  def test_details_reply_appends_diagnostic_only_when_present
+    diagnostic = { "summary" => "REVIEW_ERROR pass=2", "detail" => "review detail" }
+    with_diagnostic = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: diagnostic)
+    )
+    without_diagnostic = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: nil)
+    )
+
+    assert_includes with_diagnostic, "REVIEW_ERROR pass=2"
+    assert_includes with_diagnostic, "review detail"
+    refute_includes without_diagnostic, "REVIEW_ERROR pass=2"
+    assert_includes without_diagnostic, "Slug… — hive/slug-260514-abcd (6-review)"
+  end
+
+  def test_details_reply_truncates_oversized_diagnostic_detail_to_telegram_limit
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "REVIEW_ERROR pass=2", "detail" => "x" * 6000 })
+    )
+
+    assert_operator text.length, :<=, Hive::Bot::NotificationBuilders::TELEGRAM_MESSAGE_MAX_CHARS
+    assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
+  end
+
+  def test_details_reply_truncates_oversized_summary_without_diagnostic
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", display_name: "x" * 6000,
+          workflow: "dispatch", stage: "2-gather", diagnostic: nil)
+    )
+
+    assert_operator text.length, :<=, Hive::Bot::NotificationBuilders::TELEGRAM_MESSAGE_MAX_CHARS
+    assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
+  end
+
+  def test_details_reply_truncation_preserves_summary_prefix
+    # Trimming the oversized detail must keep the (short) summary intact — the
+    # length/marker checks above don't prove the prefix survives.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "REVIEW_ERROR pass=2", "detail" => "x" * 6000 })
+    )
+
+    assert_operator text.length, :<=, Hive::Bot::NotificationBuilders::TELEGRAM_MESSAGE_MAX_CHARS
+    assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
+    assert_includes text, "REVIEW_ERROR pass=2",
+                    "the summary prefix must survive when only the detail is trimmed"
+  end
+
+  def test_details_reply_truncates_summary_only_oversized_diagnostic
+    # Exercises truncate_diagnostic_reply's detail-empty early return: a
+    # summary-only diagnostic has no detail to trim, so it falls back to
+    # whole-text truncation.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "y" * 6000, "detail" => "" })
+    )
+
+    assert_operator text.length, :<=, Hive::Bot::NotificationBuilders::TELEGRAM_MESSAGE_MAX_CHARS
+    assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
+  end
+
+  def test_details_reply_truncates_when_summary_alone_exhausts_budget
+    # Exercises truncate_diagnostic_reply's available-not-positive early return:
+    # the summary prefix already overruns the Telegram limit, leaving no room
+    # for any detail, so it falls back to whole-text truncation.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "z" * 5000, "detail" => "tail detail" })
+    )
+
+    assert_operator text.length, :<=, Hive::Bot::NotificationBuilders::TELEGRAM_MESSAGE_MAX_CHARS
+    assert text.end_with?(Hive::Bot::NotificationBuilders::DETAILS_TRUNCATION_MARKER)
+  end
+
+  def test_details_reply_renders_summary_only_diagnostic
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "REVIEW_ERROR pass=2", "detail" => "" })
+    )
+
+    assert_includes text, "REVIEW_ERROR pass=2"
+  end
+
+  def test_details_reply_renders_detail_only_diagnostic
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "", "detail" => "only the detail body" })
+    )
+
+    assert_includes text, "only the detail body"
+  end
+
+  def test_details_reply_appends_no_section_for_blank_diagnostic
+    # A diagnostic hash whose summary and detail are both blank appends no
+    # diagnostic section — byte-identical to a nil diagnostic (the
+    # reject(&:empty?) / summary-and-detail-blank guards).
+    blank = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: { "summary" => "", "detail" => "" })
+    )
+    none = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          diagnostic: nil)
+    )
+
+    assert_equal none, blank
+  end
+
+  def test_details_reply_uses_flat_suggested_command_when_no_structured_next_action
+    # next_step_hint's suggested_command fallback (:446): with no structured
+    # next_action, the flat suggested_command sources the "Next step:" line.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", workflow: "research", stage: "2-gather",
+          next_action: nil, suggested_command: "hive run slug-260514-abcd")
+    )
+
+    assert_includes text, "Next step: hive run slug-260514-abcd"
+  end
+
+  def test_details_reply_treats_dash_command_sentinel_as_no_hint
+    # next_step_hint's `== "-"` sentinel (:448): a "-" command yields no hint,
+    # so the reply falls through to the laptop fallback.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "agent_waiting", workflow: "research", stage: "2-gather",
+          suggested_command: "-")
+    )
+
+    refute_includes text, "Next step:"
+    assert_includes text, "Open on a laptop to advance."
+  end
+
+  def test_details_reply_for_plan_waiting_derives_plan_path_from_folder
+    # state_file nil → the hint falls back to <folder>/plan.md, the realistic
+    # production shape (folder is always present on live rows).
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", stage: "3-plan", workflow: "coding",
+          state_file: nil, folder: "/tmp/plan-task-260514-abcd")
+    )
+
+    assert_includes text, "Plan draft: /tmp/plan-task-260514-abcd/plan.md"
+    assert_includes text, "Approve when ready with /approve slug-260514-abcd."
+  end
+
+  def test_details_reply_for_plan_waiting_without_any_path_omits_plan_draft
+    # With neither state_file nor folder, File.join would emit a bogus bare
+    # "plan.md" — the hint must drop the "Plan draft:" line entirely.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", stage: "3-plan", workflow: "coding",
+          state_file: nil, folder: nil)
+    )
+
+    refute_includes text, "Plan draft:"
+    assert_includes text, "Approve when ready with /approve slug-260514-abcd."
+  end
+
+  def test_details_reply_for_manual_recovery_without_folder_omits_logs_line
+    # Manual-only recovery hint with no folder (:426) must skip the
+    # "Logs/artifacts:" line rather than emit a blank path.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_execute", marker: "execute_stale", stage: "4-execute", folder: nil)
+    )
+
+    assert_includes text, "Hive has no automatic recovery for this state - open it on a laptop."
+    refute_includes text, "Logs/artifacts:"
+  end
+
+  def test_details_reply_for_auto_recoverable_recovery_row_falls_through_to_generic_hint
+    # A recovery row that is auto-recoverable (review_error outside the fix
+    # phase) is NOT manual-only, so details_hint must skip the manual-only
+    # branch and fall through to the generic advance hint — never the
+    # "no automatic recovery" line, which belongs only to manual-only states.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "recover_review", marker: "review_error", stage: "6-review",
+          attrs: { "phase" => "triage", "pass" => "1" })
+    )
+
+    assert_includes text, "Open on a laptop to advance."
+    refute_includes text, "no automatic recovery"
+  end
+
+  def test_details_reply_for_dirty_worktree_error_renders_actionable_git_hint
+    # The actionable manual-recovery hint must reach the Show-details surface,
+    # not only RecoverySequence: a dirty_worktree error row degrades to the
+    # git-repair hint, never the generic "open it on a laptop" arm.
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "error", marker: "error", stage: "8-finalize",
+          attrs: { "reason" => "dirty_worktree" })
+    )
+
+    assert_includes text, "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
+    refute_includes text, "Hive has no automatic recovery for this state - open it on a laptop."
   end
 
   def test_agent_running_error_marker_is_suppressed_and_logged

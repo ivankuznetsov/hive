@@ -990,10 +990,12 @@ module Hive
         # through the daemon's dispatch-request queue so there is one
         # writer of those verbs — the daemon — and the
         # post-completion mtime baseline stays current. Plan
-        # 2026-05-28-002. Read-only verbs (status/--diagnose, new,
-        # approve) keep the in-process spawn path because they don't
-        # bump task state-file mtime and don't cause the dual-writer
-        # bug.
+        # 2026-05-28-002. The remaining in-process verbs (status, new,
+        # approve, and the surviving `status --diagnose --write --force`
+        # refresh) keep the in-process spawn path because none of them
+        # bump the task state-file mtime — the diagnose refresh only
+        # writes a diagnostics artifact — so they don't cause the
+        # dual-writer bug.
         if queue_routable?(result.command_argv)
           return enqueue_dispatch_request(result, update)
         end
@@ -1272,10 +1274,17 @@ module Hive
         if envelope["ok"] == true
           diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
           slug = envelope["slug"] || child.slug
+          # Show details renders directly from the cached status row now.
+          # This remains defensive for the refresh_diagnose child path, the
+          # sole producer of this envelope, which can still return an empty
+          # success envelope.
           return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
-          return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
-                 "Tap Show details to dump it here."
+          # The freshly written verdict isn't in the cached snapshot row until
+          # the next poll, and Show details renders a summary, not a raw dump —
+          # so the copy promises a summarized render, not "dump it here".
+          return "Refreshed diagnosis for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
+                 "Tap Show details for the summary (updates on the next status refresh)."
         end
 
         kind = envelope["error_kind"].to_s.strip
@@ -1469,14 +1478,17 @@ module Hive
         row = Array(rows).find { |candidate| candidate.project == project && candidate.slug == slug }
         return "No active row found for #{project}/#{slug}." unless row
 
-        attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-                   .map { |key, value| "#{key}=#{value}" }
-        [
-          "#{Hive::Bot::NotificationBuilders.display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
-          "Action: #{row.action_label || row.action}",
-          "Marker: #{row.marker || 'none'}",
-          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
-        ].compact.join("\n")
+        Hive::Bot::NotificationBuilders.details_reply(row)
+      rescue StandardError => e
+        # Same soft-degrade as the Show-details handlers: details_reply renders
+        # from a live Row and never raises today, but a render-time fault here
+        # would escape execute_dispatch's /status-intercept branch to the :fatal
+        # poll handler and skip write_last_seen, denying the operator any reply.
+        @logger&.event(:details_render_failed, source: "render_details",
+                                                project: project, slug: slug,
+                                                error_class: e.class.name, message: e.message,
+                                                backtrace: Array(e.backtrace).first(3))
+        Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
       end
 
       def actionable_queue_rows(rows)

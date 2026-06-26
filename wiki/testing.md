@@ -1,9 +1,9 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, config/brakeman.ignore
+source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-22
+updated: 2026-06-25
 tags: [test, minitest, fixtures]
 ---
 
@@ -193,14 +193,17 @@ owner-gated with a 302. The image's runtime Docker `HEALTHCHECK` is deeper
 than that smoke and hits `/health?deep=1`, so a stale/missing daemon pidfile
 turns the container unhealthy even when Rails is still serving.
 `.github/workflows/release.yml` runs that smoke against the amd64 image before
-any GHCR push, then is intended to pull the published arm64 image on `macos-15`
-under Colima and smoke it again. Current `.github/workflows/ci.yml` does not
+any GHCR push. After publish, `hivebox-smoke-arm64` runs on
+`ubuntu-24.04-arm`, logs into GHCR, pulls
+`ghcr.io/<owner>/hivebox:${GITHUB_REF_NAME#v}`, and runs the same smoke against
+the native arm64 Linux image without a VM layer. Commit `54fd3455` replaced the
+previous hosted macOS/Colima check after proving hosted Apple Silicon runners
+cannot provide the nested virtualization Colima needs; its commit message
+records a green validation against the live `ghcr.io/ivankuznetsov/hivebox:0.3.1`
+arm64 image on a real arm64 runner. Current `.github/workflows/ci.yml` does not
 build or smoke a local hivebox Docker image on push/PR; it covers the Rails web
 tests, the golden-path browser E2E, and the Windows installer-script harness.
-Commit `abb62aae` records a current hosted-runner failure before the macOS
-Docker smoke starts: `colima start --cpu 2 --memory 4` can die when Lima's VZ VM
-exits, so the macOS leg remains a verification gap until a qemu fallback/retry
-or passing run artifact exists. The Windows CI surface is
+The Windows CI surface is
 `packaging/docker/test-install-box.ps1`: real PowerShell
 syntax, `$LASTEXITCODE` behavior, and failure-output capture with a stubbed
 Docker CLI for missing-Docker diagnostics, happy-path pull/run argv including

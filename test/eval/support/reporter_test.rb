@@ -287,6 +287,28 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_invalid_byte_report_value_clears_selected_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale\xFF.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      with_fake_bundle do |env, marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--report=#{report}", "--no-judge"
+        )
+
+        refute status.success?
+        assert_equal 64, status.exitstatus
+        assert_match(/hive-eval: invalid byte sequence in UTF-8/, err)
+        assert_match(%r{Usage: bin/hive-eval}, err)
+        refute_match(/ArgumentError/, err)
+        refute File.exist?(report), "usage errors must not leave invalid-byte selected reports behind"
+        refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+      end
+    end
+  end
+
   def test_cli_rejects_report_value_that_consumes_scenario_flag
     with_fake_bundle do |env, marker|
       _out, err, status = Open3.capture3(

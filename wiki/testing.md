@@ -155,8 +155,8 @@ missing argument errors, top-level version output, command-local help after
 command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
 replay path safety, missing, non-executable, and symlinked replay artifact
-validation, cleanup retention validation, and the single-dispatch invariant for
-successful JSON commands.
+validation, including symlinked parent directories, cleanup retention
+validation, and the single-dispatch invariant for successful JSON commands.
 
 The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
 runs `packaging/verify-release.sh --version=v0.1.0` against the published
@@ -216,7 +216,7 @@ credentials inside a running box.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
-`test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, replay path validation, missing/non-executable/symlinked replay artifact errors (`missing_repro` / `unusable_repro`, exit `78`), and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
+`test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, replay path validation, missing/non-executable/symlinked replay artifact errors (`missing_repro` / `unusable_repro`, exit `78`) including symlinked parent directories, and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
 
 ## Live Claude tmux dogfood
 

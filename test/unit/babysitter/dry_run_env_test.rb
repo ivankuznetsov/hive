@@ -181,6 +181,41 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_does_not_load_caller_rubylib
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "rubylib")
+      FileUtils.mkdir_p(poison_dir)
+      marker = File.join(dir, "rubylib-loaded")
+      %w[tmpdir uri].each do |feature|
+        File.write(File.join(poison_dir, "#{feature}.rb"), "File.write(#{marker.dump}, #{feature.dump})\n")
+      end
+
+      env = {
+        "RUBYLIB" => poison_dir,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] gh pr comment 42 --body hi skipped"
+      refute_path_exists marker, "gh stub loaded caller-controlled Ruby before the skip gate"
+
+      real_gh = recording_binary(dir, "real-gh")
+      _out, err, status = Open3.capture3(
+        env.merge("HIVE_BABYSITTER_REAL_GH" => real_gh),
+        stub_path("gh"),
+        "repo",
+        "view",
+        "owner/repo"
+      )
+
+      assert status.success?, err
+      assert_includes File.read(File.join(dir, "real.log")), "real-gh repo view owner/repo"
+      refute_path_exists marker, "gh stub loaded caller-controlled Ruby before passthrough"
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")

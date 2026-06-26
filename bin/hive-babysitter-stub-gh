@@ -45,7 +45,7 @@ def escape_control_chars(arg)
   arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
-argv = ARGV.dup
+argv = ARGV.map(&:b)
 
 # `gh --repo`/`-R` accept `[HOST/]OWNER/REPO`, a full URL, or an scp-style
 # `git@host:owner/repo`; only the bare `OWNER/REPO` slug (exactly one slash and
@@ -431,6 +431,10 @@ if real.empty?
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
   exit 127
 end
+unless File.absolute_path?(real)
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH must be an absolute path; refusing to exec #{real.inspect}"
+  exit 127
+end
 
 # The argv gate (host_override?) only inspects argv; gh also reads the target host,
 # repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
@@ -453,4 +457,10 @@ end
 config_home = Dir.mktmpdir("hive-babysitter-gh")
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
-exec(real, *argv)
+
+begin
+  exec real, *argv
+rescue SystemCallError => e
+  warn "hive-babysitter dry-run: cannot exec real gh at #{real.inspect}: #{e.message}"
+  exit 127
+end

@@ -243,6 +243,115 @@ class HiveEvalReporterTest < Minitest::Test
     refute_match(/OptionParser::/, err)
   end
 
+  def test_cli_rejects_report_value_that_looks_like_option
+    with_fake_bundle do |env, marker|
+      _out, err, status = Open3.capture3(
+        env,
+        "bin/hive-eval", "--report", "--no-judge"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/hive-eval: missing argument: --report/, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+    end
+  end
+
+  def test_cli_usage_error_clears_default_report_for_option_looking_value
+    # When --report's value is option-looking or empty (`--report --no-judge`,
+    # `--report=`), parse! overwrites options[:report] with that junk token before
+    # raising the missing-argument error. The usage-error cleanup must fall back to
+    # the true default report path and clear a stale report there, honouring the
+    # "no stale report" contract — not chase the junk token to a path that never
+    # held a report.
+    root = File.expand_path("../../..", __dir__)
+    default_report = File.join(root, "tmp", "hive-eval-report.json")
+    FileUtils.mkdir_p(File.dirname(default_report))
+
+    [ [ "--report", "--no-judge" ], [ "--report=" ] ].each do |argv|
+      preserve_path(default_report) do
+        File.write(default_report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+        with_fake_bundle do |env, marker|
+          _out, err, status = Open3.capture3(env, "bin/hive-eval", *argv)
+
+          refute status.success?, "#{argv.inspect} must be a usage error"
+          assert_equal 64, status.exitstatus, err
+          assert_match(/hive-eval: missing argument: --report/, err)
+          refute File.exist?(default_report),
+                 "#{argv.inspect}: usage error must clear the stale default report, not a junk token"
+          refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+        end
+      end
+    end
+  end
+
+  def test_cli_rejects_report_value_that_consumes_scenario_flag
+    with_fake_bundle do |env, marker|
+      _out, err, status = Open3.capture3(
+        env,
+        "bin/hive-eval", "--report", "--scenario", "s1_status"
+      )
+
+      refute status.success?
+      assert_equal 64, status.exitstatus
+      assert_match(/hive-eval: missing argument: --report/, err)
+      assert_match(%r{Usage: bin/hive-eval}, err)
+      refute_match(/OptionParser::/, err)
+      refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+    end
+  end
+
+  def test_cli_rejects_scenario_value_that_looks_like_option_and_clears_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      with_fake_bundle do |env, marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--scenario", "--no-judge", "--report", report
+        )
+
+        refute status.success?
+        assert_equal 64, status.exitstatus
+        assert_match(/hive-eval: missing argument: --scenario/, err)
+        assert_match(%r{Usage: bin/hive-eval}, err)
+        refute_match(/OptionParser::/, err)
+        refute File.exist?(report), "usage errors must not leave stale eval reports behind"
+        refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+      end
+    end
+  end
+
+  def test_cli_rejects_scenario_consuming_report_flag_and_clears_named_report
+    # `--scenario --report <path>` makes --scenario swallow the --report flag
+    # itself, leaving <path> a stray positional. parse! strips the consumed
+    # --report token from ARGV, so the rescue cleanup must scan the pre-parse
+    # ARGV snapshot — not the mutated ARGV — to still recognize and delete the
+    # report the user named.
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      with_fake_bundle do |env, marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--scenario", "--report", report
+        )
+
+        refute status.success?
+        assert_equal 64, status.exitstatus
+        assert_match(/hive-eval: missing argument: --scenario/, err)
+        assert_match(%r{Usage: bin/hive-eval}, err)
+        refute_match(/OptionParser::/, err)
+        refute File.exist?(report), "usage errors must not leave the named eval report behind"
+        refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
+      end
+    end
+  end
+
   def test_cli_rejects_unexpected_positional_arguments
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "unexpected.json")
@@ -380,6 +489,45 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal 64, status.exitstatus
       assert_match(/scenario basename must not contain path separators/, err)
       refute File.exist?(report)
+    end
+  end
+
+  private
+
+  # Run the block with `path` safe to clobber, restoring whatever was there
+  # before (or removing the file if it did not exist). Lets a test exercise the
+  # hardcoded default report location without leaking into a developer's checkout.
+  def preserve_path(path)
+    existed = File.exist?(path)
+    backup = "#{path}.preserve-#{Process.pid}-#{object_id}"
+    FileUtils.cp(path, backup) if existed
+    yield
+  ensure
+    if existed
+      FileUtils.cp(backup, path)
+    else
+      FileUtils.rm_f(path)
+    end
+    FileUtils.rm_f(backup)
+  end
+
+  def with_fake_bundle
+    Dir.mktmpdir("hive-eval-fake-bundle") do |dir|
+      bin_dir = File.join(dir, "bin")
+      marker = File.join(dir, "bundle-called")
+      bundle = File.join(bin_dir, "bundle")
+      FileUtils.mkdir_p(bin_dir)
+      File.write(bundle, <<~RUBY)
+        #!/usr/bin/env ruby
+        File.write(ENV.fetch("HIVE_EVAL_FAKE_BUNDLE_MARKER"), ARGV.join("\\n"))
+      RUBY
+      FileUtils.chmod("+x", bundle)
+
+      env = {
+        "HIVE_EVAL_FAKE_BUNDLE_MARKER" => marker,
+        "PATH" => [ bin_dir, ENV.fetch("PATH") ].join(File::PATH_SEPARATOR)
+      }
+      yield env, marker
     end
   end
 end

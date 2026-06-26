@@ -186,6 +186,13 @@ def json_requested?(argv)
   JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
+def reject_invalid_argv_encoding!(argv)
+  idx = argv.index { |arg| !arg.valid_encoding? }
+  return unless idx
+
+  raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
+end
+
 def reject_unsupported_json_assignments!(argv)
   text_start_idx = new_text_start_index(argv)
   arg = argv.each_with_index.find do |candidate, idx|
@@ -238,6 +245,7 @@ rescue Errno::EPIPE, JSON::GeneratorError
 end
 
 begin
+  reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_json_options!(ARGV)
   rewrite_help_flag!(ARGV)

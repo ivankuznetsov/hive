@@ -1,0 +1,5 @@
+## [2026-06-25T09:49:24Z] testing - hive-eval clears the default report when --report value is junk
+
+**Action:** Extended the [[testing]] "no stale report" contract for `bin/hive-eval`. When `--report` is followed by an option-looking or empty value (`--report --no-judge`, `--report=`, `--report=-x`), `OptionParser#parse!` overwrites `options[:report]` with that junk token before the missing-argument error is raised, so the usage-error cleanup had been deleting the junk path instead of the stale default report. The default report path is now held in a standalone `default_report` local; the rescue (and `selected_report_path`'s inline-`--report=` branch) fall back to it whenever the captured value is option-looking/empty, so a stale `tmp/hive-eval-report.json` is cleared on these usage errors too.
+
+**Tests:** Added `test_cli_usage_error_clears_default_report_for_option_looking_value` (with a `preserve_path` helper that safely exercises the hardcoded default location) in `test/eval/support/reporter_test.rb`; verified it fails on the pre-fix binary and passes after, and ran the full `bundle exec ruby -Itest -Itest/eval test/eval/support/reporter_test.rb`.

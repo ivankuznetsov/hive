@@ -15,8 +15,7 @@ module Hive
         },
         "brainstorm" => {
           kind: :agent,
-          complete: :brainstorm_complete,
-          default: :brainstorm_waiting
+          handler: :brainstorm_action
         },
         "plan" => {
           kind: :agent,

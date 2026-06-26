@@ -31,15 +31,20 @@ class HiveBotScenarioQueueTest < Minitest::Test
 
     # Actionable rows now carry inline callback buttons (Telegram text links
     # can't carry the slug). brainstorm-a/-b → answer; pr-a → approve;
-    # review-a (review_waiting) and archived-a get no button.
+    # review-a (review_waiting) → Accept all (its RowActions primary, U1); the
+    # full push keyboard also carries Reject all + Show details. archived-a gets
+    # no button. This supersedes the old "review_waiting has no button" parity
+    # with the dead text-link surface, which left those rows actionless.
     keyboard = telegram.messages.last[:reply_markup]
     refute_nil keyboard, "actionable /queue rows must carry inline buttons"
     callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
     assert_includes callbacks, "answer:hive:brainstorm-a"
     assert_includes callbacks, "answer:hive:brainstorm-b"
     assert_includes callbacks, "approve:finalize:hive:pr-a:2-brainstorm"
-    refute(callbacks.any? { |cb| cb.include?("review-a") },
-           "review_waiting has no /status button (parity with the prior text-link surface)")
+    assert(callbacks.any? { |cb| cb.start_with?("findings:accept_all:hive:review-a:") },
+           "review_waiting must carry its Accept-all primary button on /queue")
+    refute(callbacks.any? { |cb| cb.include?("archived-a") },
+           "archived rows are never actionable and carry no button")
   end
 
   def test_s3_queue_caps_at_10_rows_and_shows_more_affordance

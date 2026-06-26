@@ -373,6 +373,17 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil result.question_n
   end
 
+  def test_answer_voice_without_context_hints_id_or_slug
+    # The classifier only routes :answer_voice when answer_context is present,
+    # so the defensive no-context branch is unreachable via classify. Drive it
+    # directly to pin the operator hint copy: a silent revert to the old
+    # `<slug>`-only phrasing must fail here.
+    result = @router.send(:answer_voice, update(voice: { file_id: "voice", file_size: 1 }))
+
+    assert_equal :reply, result.action
+    assert_match(%r{/answer <id\|slug>}, result.text)
+  end
+
   def test_slash_answer_returns_start_answer_action_not_immediate_start
     result = @router.handle(update(text: "/answer slug-260514-abcd"))
 
@@ -439,6 +450,8 @@ class HiveBotRouterTest < Minitest::Test
   def test_classifies_all_callback_prefixes
     cases = {
       "reject:anything" => :callback_reject,
+      "approve_plan:hive:slug-260514-abcd:3-plan" => :callback_approve_plan,
+      "rerun:hive:slug-260514-abcd:4-execute:develop" => :callback_rerun,
       "autofix:hive:slug-260514-abcd:6-review:REVIEW_ERROR" => :callback_autofix,
       "open_laptop:hive:slug-260514-abcd" => :callback_open_laptop,
       "details:hive:slug-260514-abcd" => :callback_show_details,
@@ -465,6 +478,20 @@ class HiveBotRouterTest < Minitest::Test
     end
   end
 
+  def test_unresolved_compacted_callback_classifies_as_expired_button
+    # A `#`-prefixed compacted token whose registry entry is gone (bot
+    # restart, or TTL/size eviction) survives resolve_callback unchanged and
+    # must route to the actionable "button expired" reply rather than the
+    # generic "I did not understand that".
+    expired = "#approve_plan:deadbeefdeadbeef"
+    assert_equal :callback_expired, @router.classify(update(callback_data: expired))
+
+    result = @router.handle(update(callback_data: expired))
+    assert_equal :reply, result.action
+    assert_match(/button expired/i, result.text)
+    assert_match(%r{/queue}, result.text)
+  end
+
   def test_slash_approve_dispatches_approve_command
     result = @router.handle(update(text: "/approve slug-260514-abcd"))
 
@@ -477,7 +504,7 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_includes result.text, "/status"
-    assert_includes result.text, "/approve <slug>"
+    assert_includes result.text, "/approve <id|slug>"
   end
 
   def test_legacy_callback_update_without_with_still_dispatches

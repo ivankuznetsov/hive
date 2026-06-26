@@ -38,6 +38,17 @@ module Hive
         archived
       ].freeze
 
+      TELEGRAM_MESSAGE_MAX_CHARS = 4096
+      DETAILS_TRUNCATION_MARKER = "\n... [truncated]".freeze
+
+      # Soft-degrade replies shared across every Show-details surface (the
+      # inline button, the /details and /autofix slash commands, and the
+      # /status <slug> intercept). Promoted to shared frozen constants so a
+      # future wording change stays in lockstep and can't drift between the
+      # lookup-failed and still-loading paths across the handlers.
+      STATUS_LOOKUP_FAILED_REPLY = "Status lookup failed — try again in a moment.".freeze
+      STATUS_STILL_LOADING_REPLY = "Status is still loading — try again in a moment.".freeze
+
       def build(row, logger: nil)
         return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
 
@@ -110,8 +121,15 @@ module Hive
       def fingerprint(row)
         return legacy_stage_dirs_fingerprint(row) if legacy_stage_dirs?(row)
 
-        normalized_attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-        ::Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, normalized_attrs ]))
+        ::Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, sorted_attr_pairs(row) ]))
+      end
+
+      # Sorted [key, value] pairs of a row's attrs with stringified keys — the
+      # single basis for both the fingerprint payload and the `key=value`
+      # attr strings rendered in details/marker copy, so the three call sites
+      # can't drift in ordering or key normalization.
+      def sorted_attr_pairs(row)
+        row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
       end
 
       def legacy_stage_dirs_fingerprint(row)
@@ -191,6 +209,26 @@ module Hive
         end
       end
 
+      # Coding-workflow `waiting`/`review_waiting` classifications used by the
+      # Show-details hint (details_hint), so tap-time copy mirrors the
+      # push-notification surfaces and the two trees can't drift after a future
+      # stage/marker change. Each predicate re-checks the marker itself (not
+      # just the stage implied by the caller); keep that marker check when
+      # editing so the two trees stay aligned across whatever rows a future
+      # caller routes through here.
+      def plan_pause?(row)
+        Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" && row.marker.to_s == "waiting" # coding-scoped: plan approval pause only exists in coding workflow
+      end
+
+      def brainstorm_qna?(row)
+        Hive::Workflows.coding_row?(row) && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting" # coding-scoped: brainstorm Q&A answer flow is coding-specific
+      end
+
+      def fix_guardrail_review?(row)
+        row.marker.to_s == "review_waiting" &&
+          row.attrs.to_h.transform_keys(&:to_s)["reason"].to_s == "fix_guardrail"
+      end
+
       def default_needs_input(row, actions:)
         Notification.new(
           text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
@@ -223,8 +261,7 @@ module Hive
       end
 
       def review_waiting(row, actions:)
-        normalized_attrs = row.attrs.to_h.transform_keys(&:to_s)
-        if normalized_attrs["reason"] == "fix_guardrail"
+        if fix_guardrail_review?(row)
           return Notification.new(
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
             keyboard: keyboard_for_actions(actions)
@@ -368,6 +405,38 @@ module Hive
         suggested.is_a?(Hash) ? suggested : nil
       end
 
+      def details_summary(row)
+        attrs = sorted_attr_pairs(row).map { |key, value| "#{key}=#{value}" }
+        # The renderer only ever receives a real StatusWatcher::Row (stale
+        # buttons resolve against the live snapshot), so read the core members
+        # (action/action_label/marker, plus stage/project/slug below) directly
+        # here. This is NOT a license to strip the respond_to? guards in the
+        # sibling hint helpers (next_step_hint/diagnostic_detail/present_value):
+        # those guard genuinely optional, nil-by-default fields and normalize
+        # their absence — keep them guarded.
+        action = row.action_label.to_s.empty? ? row.action : row.action_label
+        marker = row.marker.to_s.empty? ? "none" : row.marker
+        [
+          "#{display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
+          "Action: #{action}",
+          "Marker: #{marker}",
+          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
+        ].compact.join("\n")
+      end
+
+      def details_reply(row)
+        # details_summary / details_hint always return non-nil strings, so the
+        # array needs no compaction; diagnostic_detail may be nil, so only that
+        # tail is compacted before joining.
+        sections = [ details_summary(row), details_hint(row) ]
+        diagnostic = diagnostic_detail(row)
+        text = (sections + [ diagnostic&.text ].compact).join("\n\n")
+        return text if text.length <= TELEGRAM_MESSAGE_MAX_CHARS
+        return truncate_diagnostic_reply(sections, diagnostic, text) if diagnostic
+
+        truncate_text(text)
+      end
+
       def recovery_match_attr(row)
         attrs = row.attrs.to_h.transform_keys(&:to_s)
         keys = case row.marker.to_s.downcase
@@ -418,9 +487,108 @@ module Hive
       end
 
       def marker_with_attrs(row)
-        normalized = row.attrs.to_h.transform_keys(&:to_s)
-        attrs = normalized.to_a.sort_by(&:first).map { |key, value| "#{key}=#{value}" }.join(" ")
+        attrs = sorted_attr_pairs(row).map { |key, value| "#{key}=#{value}" }.join(" ")
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
+      end
+
+      def details_hint(row)
+        if plan_pause?(row)
+          plan = present_value(row, :state_file)
+          folder = present_value(row, :folder)
+          plan ||= File.join(folder, "plan.md") if folder
+          # Only name the draft when a path actually resolves. The File.join
+          # above is guarded by `if folder`, so with neither a state_file nor a
+          # folder `plan` simply stays nil — we drop the line rather than point
+          # the operator at a path we couldn't build.
+          return [ ("Plan draft: #{plan}" if plan), "Approve when ready with /approve #{row.slug}." ].compact.join("\n")
+        end
+
+        if recovery?(row) && manual_only_recovery?(row)
+          folder = present_value(row, :folder)
+          lines = [
+            cause_sentence_for(row),
+            manual_only_reply(marker: row.marker, attrs: row.attrs)
+          ]
+          lines << "Logs/artifacts: #{folder}" if folder
+          return lines.join("\n")
+        end
+
+        return "Open on a laptop to inspect the fix before continuing." if fix_guardrail_review?(row)
+
+        return "Reply /answer #{row.slug} to provide input." if brainstorm_qna?(row)
+
+        next_step_hint(row) || "Open on a laptop to advance."
+      end
+
+      # Precedence: the structured next_action["command"] wins over the flat
+      # suggested_command; the flat field is consulted only when the structured
+      # command is blank. A "-" sentinel (or a blank) yields no hint.
+      def next_step_hint(row)
+        next_action = row.respond_to?(:next_action) ? row.next_action : nil
+        command = next_action.is_a?(Hash) ? next_action["command"] : nil
+        command = present_value(row, :suggested_command) if command.to_s.strip.empty?
+        command = command.to_s.strip
+        return nil if command.empty? || command == "-"
+
+        "Next step: #{command}"
+      end
+
+      # A rendered diagnostic with its summary and detail kept structurally
+      # separate, so the truncation path can keep the summary intact and trim
+      # only the detail without a lossy join-then-resplit. `text` is the
+      # untruncated rendering used on the happy path.
+      Diagnostic = Data.define(:summary, :detail) do
+        # Coerce members at the type boundary so `summary`/`detail` are always
+        # strings and `#text`'s reject(&:empty?) can't NoMethodError on a nil
+        # member. Sibling Notification also validates in initialize, but it
+        # *raises* on a bad parse_mode; this type *coerces* instead — lenient on
+        # purpose, since a render-path type must never crash a reply.
+        def initialize(summary:, detail:)
+          super(summary: summary.to_s, detail: detail.to_s)
+        end
+
+        def text
+          [ summary, detail ].reject(&:empty?).join("\n")
+        end
+      end
+
+      def diagnostic_detail(row)
+        diagnostic = row.respond_to?(:diagnostic) ? row.diagnostic : nil
+        return nil unless diagnostic.is_a?(Hash) && !diagnostic.empty?
+
+        summary = diagnostic["summary"].to_s.strip
+        detail = diagnostic["detail"].to_s.strip
+        return nil if summary.empty? && detail.empty?
+
+        Diagnostic.new(summary: summary, detail: detail)
+      end
+
+      # `full_text` is the untruncated reply details_reply already composed
+      # ((sections + [diagnostic.text]).join); both whole-text fallbacks reuse
+      # it instead of recomposing the join. `sections` (details_summary +
+      # details_hint) are always non-empty, so the only blank reject(&:empty?)
+      # can drop is a summary-less diagnostic — hence it guards only summary.
+      def truncate_diagnostic_reply(sections, diagnostic, full_text)
+        return truncate_text(full_text) if diagnostic.detail.empty?
+
+        prefix = (sections + [ diagnostic.summary ].reject(&:empty?)).join("\n\n")
+        available = TELEGRAM_MESSAGE_MAX_CHARS - prefix.length - 1 - DETAILS_TRUNCATION_MARKER.length
+        return truncate_text(full_text) unless available.positive?
+
+        truncated_detail = diagnostic.detail[0, available].to_s.rstrip + DETAILS_TRUNCATION_MARKER
+        [ prefix, truncated_detail ].join("\n")
+      end
+
+      def truncate_text(text)
+        limit = TELEGRAM_MESSAGE_MAX_CHARS - DETAILS_TRUNCATION_MARKER.length
+        text[0, limit].to_s.rstrip + DETAILS_TRUNCATION_MARKER
+      end
+
+      def present_value(row, key)
+        return nil unless row.respond_to?(key)
+
+        value = row.public_send(key).to_s.strip
+        value.empty? ? nil : value
       end
 
       def details_callback(row)

@@ -316,8 +316,8 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis refreshed for "Red task…". ' \
-                 "Tap Refresh again to re-run it, or open the task on a laptop for the full report.", text
+    assert_equal 'Refreshed diagnosis for "Red task…". ' \
+                 "Tap Show details for the summary (updates on the next status refresh).", text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"
@@ -1602,73 +1602,34 @@ class HiveBotSupervisorTest < Minitest::Test
 
     text = @supervisor.send(:render_details, rows, "hive", "task")
 
+    # The adjacent assert_includes lines below pin the rendered delegation;
+    # a self-comparison to details_reply(rows.first) would only restate the
+    # method render_details delegates to, proving nothing.
     assert_includes text, "hive/task (3-plan)"
     assert_includes text, "Action: ready_to_develop"
     assert_includes text, "Marker: none"
     assert_includes text, "Attrs: a=1 z=9"
-    assert_includes text, "Next: tap Approve to advance this task."
+    refute_includes text, "No diagnostic available"
     assert_equal "No active row found for hive/missing.", @supervisor.send(:render_details, rows, "hive", "missing")
   end
 
-  def test_render_details_filters_by_stage_and_hints_next_action
-    rows = [
-      row(slug: "same", stage: "3-plan", action: "needs_input", marker: "waiting"),
-      row(slug: "same", stage: "4-execute", action: "needs_input", marker: "execute_waiting")
-    ]
+  def test_render_details_degrades_and_logs_when_render_raises
+    # render_details renders details_reply from a live Row outside any rescue;
+    # the /status-intercept branch that calls it skips write_last_seen on a
+    # raise. A render-time fault must degrade to the soft hint and log, never
+    # escape to the :fatal poll handler. Inject a row whose attrs read raises.
+    raising_row = Class.new do
+      def project = "hive"
+      def slug = "boom-260525-abcd"
+      def attrs = raise("render boom")
+    end.new
 
-    text = @supervisor.send(:render_details, rows, "hive", "same", stage: "4-execute")
+    text = @supervisor.send(:render_details, [ raising_row ], "hive", "boom-260525-abcd")
 
-    assert_includes text, "hive/same (4-execute)"
-    assert_includes text, "Marker: execute_waiting"
-    assert_includes text, "Next: tap Re-run to re-run develop."
-  end
-
-  def test_render_details_manual_only_hint_points_to_laptop
-    text = @supervisor.send(:render_details, [
-                              row(slug: "stale", stage: "4-execute", action: "recover_execute",
-                                  marker: "execute_stale")
-                            ], "hive", "stale", stage: "4-execute")
-
-    assert_includes text, "Next: open on a laptop to inspect."
-  end
-
-  def test_render_details_run_hint_names_the_verb_and_avoids_run_run
-    finalize = row(slug: "fin-260624-abcd", stage: "8-finalize", action: "needs_input", marker: "waiting")
-    generic = row(slug: "gen-260624-abcd", stage: "1-intake", workflow: "blank",
-                  action: "needs_input", marker: "waiting")
-
-    fin_text = @supervisor.send(:render_details, [ finalize ], "hive", "fin-260624-abcd")
-    assert_includes fin_text, "Next: tap Run to run finalize."
-
-    gen_text = @supervisor.send(:render_details, [ generic ], "hive", "gen-260624-abcd")
-    assert_includes gen_text, "Next: tap Run to run this stage."
-    refute_includes gen_text, "run run", "the generic run verb must not render as 'run run'"
-  end
-
-  def test_render_details_hints_cover_each_primary_role
-    answer = row(slug: "ans-260624-abcd", stage: "2-brainstorm", action: "needs_input", marker: "waiting")
-    assert_includes @supervisor.send(:render_details, [ answer ], "hive", "ans-260624-abcd"),
-                    "Next: tap Answer to answer in chat."
-
-    triage = row(slug: "tri-260624-abcd", stage: "6-review", action: "needs_input", marker: "review_waiting")
-    assert_includes @supervisor.send(:render_details, [ triage ], "hive", "tri-260624-abcd"),
-                    "Next: tap Accept all or Reject all to triage findings."
-
-    retryable = row(slug: "fix-260624-abcd", stage: "6-review", action: "recover_review",
-                    marker: "review_error", attrs: { "phase" => "fix", "pass" => "2", "reason" => "timeout" },
-                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
-    assert_includes @supervisor.send(:render_details, [ retryable ], "hive", "fix-260624-abcd"),
-                    "Next: tap Autofix to retry the stage cleanly."
-
-    # A non-manual recovery row with no retry diagnostic resolves to a Details
-    # primary that is NOT terminal_details? (not manual-only, not fix_guardrail),
-    # so next_step_hint resolves via the explicit :details branch to the laptop
-    # hint (the catch-all else now raises on an unmapped primary role).
-    details_only = row(slug: "rec-260624-abcd", stage: "6-review", action: "recover_review",
-                       marker: "review_error", attrs: { "phase" => "fix", "pass" => "2", "reason" => "timeout" },
-                       diagnostic: nil)
-    assert_includes @supervisor.send(:render_details, [ details_only ], "hive", "rec-260624-abcd"),
-                    "Next: open on a laptop to inspect."
+    assert_includes text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault must be logged, not a silent dead end"
+    assert_equal "RuntimeError", logged[:payload][:error_class]
   end
 
   def test_status_action_button_isolates_a_resolver_failure
@@ -1899,7 +1860,6 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
 
     assert_includes @telegram.messages.last.fetch(:text), "hive/alpha (3-plan)"
-    assert_includes @telegram.messages.last.fetch(:text), "Next: tap Approve to advance this task."
   end
 
   def test_execute_dispatch_dry_run_does_not_spawn_child

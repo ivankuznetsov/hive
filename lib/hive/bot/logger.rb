@@ -40,6 +40,9 @@ module Hive
         callback_plan_state_corrupt
         notification_build_failed
         status_button_failed
+        details_lookup_failed
+        details_render_failed
+        status_lookup_failed
         pid_file_corrupted
         unknown_stage_label
         alert_store_corrupt

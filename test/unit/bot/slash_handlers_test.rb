@@ -3,6 +3,7 @@ require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
 require "hive/bot/notification_builders"
+require "hive/bot/status_watcher"
 
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
@@ -22,6 +23,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
   FakeAttachmentPolicy = Struct.new(:result, keyword_init: true) do
     def classify(_update, _draft, max_bytes:, max_count:)
       result
+    end
+  end
+
+  FakeLogger = Struct.new(:events, keyword_init: true) do
+    def event(name, **payload)
+      events << { name: name, payload: payload }
     end
   end
 
@@ -107,7 +114,11 @@ class HiveBotSlashHandlersTest < Minitest::Test
     def clear(chat_id:, slug:) = (@cleared << [ chat_id, slug ])
   end
 
-  Row = Struct.new(:project, :slug, :id, :stage, :marker, :attrs, :diagnostic, keyword_init: true)
+  # Use the real renderer input type rather than a hand-maintained Struct dup:
+  # the production resolver only ever hands NotificationBuilders a
+  # StatusWatcher::Row, and a Struct copy silently diverges as Row gains fields
+  # (callback_handlers_test.rb already binds the real Row for the same reason).
+  Row = Hive::Bot::StatusWatcher::Row
 
   def autofix_handlers(snapshot)
     Hive::Bot::Handlers::SlashHandlers.new(
@@ -124,8 +135,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
     slug: "stuck-260525-abcd",
     id: 9281,
     stage: "6-review",
+    workflow: "coding",
     marker: "review_error",
     attrs: { "phase" => "fix", "pass" => "2" },
+    folder: "/tmp/stuck-260525-abcd",
+    action: "recover_review",
+    action_label: "Needs recovery",
     diagnostic: { "suggested_next_action" => { "kind" => "retry" } }
   ).freeze
 
@@ -134,8 +149,12 @@ class HiveBotSlashHandlersTest < Minitest::Test
     slug: "stale-260525-abcd",
     id: 9282,
     stage: "4-execute",
+    workflow: "coding",
     marker: "execute_stale",
     attrs: {},
+    folder: "/tmp/stale-260525-abcd",
+    action: "recover_execute",
+    action_label: "Needs recovery",
     diagnostic: nil
   ).freeze
 
@@ -405,18 +424,17 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "9281-260525-abcd", result.slug
   end
 
-  def test_details_dispatches_status_diagnose_argv_for_numeric_id
+  def test_details_renders_in_process_for_numeric_id
     handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
 
     [ "9281", "#9281" ].each do |target|
       result = handlers.details(Update.new(text: "/details #{target}", chat_id: 1))
 
-      assert_equal :dispatch_then_reply, result.action
-      assert_equal "hive", result.project
-      assert_equal "stuck-260525-abcd", result.slug
-      assert_equal [ "hive", "status", "--diagnose", "stuck-260525-abcd",
-                     "--project", "hive", "--stage", "6-review", "--json" ], result.command_argv
-      assert_nil result.text, "a resolved numeric id dispatches diagnose silently — no operator reply text"
+      assert_equal :reply, result.action,
+                   "/details renders the row in-process (same as the inline button) rather than dispatching a subprocess"
+      assert_nil result.command_argv, "in-process /details renders directly — no diagnose subprocess dispatch"
+      assert_includes result.text, "stuck-260525-abcd",
+                      "numeric id #{target} must resolve to its row and render that row's details"
     end
   end
 
@@ -452,8 +470,9 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.details(Update.new(text: "/details nil-id-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal "nil-id-260525-abcd", result.slug
+    assert_equal :reply, result.action
+    assert_includes result.text, "nil-id-260525-abcd",
+                    "a nil-id row must still resolve by slug and render its details in-process"
   end
 
   def test_details_numeric_target_accepts_leading_zeroes
@@ -461,8 +480,9 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.details(Update.new(text: "/details 09281", chat_id: 1))
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal "stuck-260525-abcd", result.slug
+    assert_equal :reply, result.action
+    assert_includes result.text, "stuck-260525-abcd",
+                    "leading-zero numeric id must resolve to its row and render in-process"
   end
 
   def assert_review_error_autofix_result(result)
@@ -539,6 +559,24 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_match(/Status lookup failed/, result.text)
+  end
+
+  def test_resolve_status_row_logs_swallowed_provider_fault
+    # The broad rescue must not silently swallow a recurring snapshot-provider
+    # fault: when a logger is wired it logs :status_lookup_failed before
+    # degrading, so the fault stays visible in bot.log.
+    logger = FakeLogger.new(events: [])
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { raise "boom" }, logger: logger
+    )
+
+    handlers.details(Update.new(text: "/details any-260526-zzzz", chat_id: 1))
+
+    logged = logger.events.find { |event| event[:name] == :status_lookup_failed }
+    refute_nil logged, "a swallowed provider fault must be logged, not silently degraded"
+    assert_equal "any-260526-zzzz", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
   end
 
   def test_autofix_without_slug_arg_replies_with_usage_hint_and_no_dispatch
@@ -631,16 +669,98 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(%r{/details norefry-260525-abcd}, result.text)
   end
 
-  def test_details_dispatches_cached_status_details_render
+  def test_details_replies_with_rendered_row_summary
     handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
 
     result = handlers.details(Update.new(text: "/details stuck-260525-abcd", chat_id: 1))
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal "hive", result.project
-    assert_equal "stuck-260525-abcd", result.slug
-    assert_equal "6-review", result.stage
-    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :reply, result.action
+    assert_nil result.command_argv
+    assert_includes result.text, "Stuck… — hive/stuck-260525-abcd (6-review)"
+    assert_includes result.text, "Action: Needs recovery"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_details_for_plan_waiting_slug_points_at_plan_draft
+    plan_row = Row.new(
+      project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
+      state_file: "/tmp/plan-task-260525-abcd/plan.md",
+      action: "needs_input", action_label: "Needs your input", diagnostic: nil
+    )
+    handlers = autofix_handlers([ plan_row ])
+
+    result = handlers.details(Update.new(text: "/details plan-task-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Plan draft: /tmp/plan-task-260525-abcd/plan.md"
+    assert_includes result.text, "/approve plan-task-260525-abcd"
+    refute_match(/diagnostic/i, result.text)
+  end
+
+  def test_details_for_plan_waiting_slug_still_appends_present_diagnostic
+    # The nil-diagnostic case above makes refute_match(/diagnostic/i) pass
+    # trivially; details_reply appends any present diagnostic regardless of
+    # surface, so a plan_waiting row WITH a populated diagnostic still surfaces
+    # it on the slash /details surface too.
+    plan_row = Row.new(
+      project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
+      state_file: "/tmp/plan-task-260525-abcd/plan.md",
+      action: "needs_input", action_label: "Needs your input",
+      diagnostic: { "summary" => "PLAN_DIAG summary", "detail" => "plan diagnostic detail" }
+    )
+    handlers = autofix_handlers([ plan_row ])
+
+    result = handlers.details(Update.new(text: "/details plan-task-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Plan draft: /tmp/plan-task-260525-abcd/plan.md"
+    assert_includes result.text, "PLAN_DIAG summary"
+    assert_includes result.text, "plan diagnostic detail"
+  end
+
+  def test_details_for_recovery_slug_appends_diagnostic
+    diagnostic_row = Row.new(
+      project: "hive", slug: "stuck-260525-abcd", stage: "6-review", workflow: "coding",
+      marker: "review_error", attrs: { "pass" => "2" }, folder: "/tmp/stuck-260525-abcd",
+      action: "recover_review", action_label: "Needs recovery",
+      diagnostic: { "summary" => "REVIEW_ERROR pass=2", "detail" => "review fix failed" }
+    )
+    handlers = autofix_handlers([ diagnostic_row ])
+
+    result = handlers.details(Update.new(text: "/details stuck-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "REVIEW_ERROR pass=2"
+    assert_includes result.text, "review fix failed"
+  end
+
+  def test_details_degrades_and_logs_when_render_raises
+    # details_reply renders OUTSIDE resolve_status_row's degrade rescue; a
+    # render-time fault would escape the poll loop and skip write_last_seen,
+    # leaving the operator with no reply. The row resolves cleanly (slug match)
+    # but raises when rendered — degrade to the soft hint and log instead.
+    raising_row = Class.new do
+      def project = "hive"
+      def slug = "boom-260525-abcd"
+      def attrs = raise("render boom")
+    end.new
+    logger = FakeLogger.new(events: [])
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { [ raising_row ] }, logger: logger
+    )
+
+    result = handlers.details(Update.new(text: "/details boom-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    logged = logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault on /details must be logged, not a silent no-reply"
+    assert_equal "hive", logged[:payload][:project]
+    assert_equal "boom-260525-abcd", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
   end
 
   def test_details_without_slug_arg_replies_with_usage_hint

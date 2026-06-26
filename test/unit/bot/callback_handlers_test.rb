@@ -4,10 +4,11 @@ require "hive/bot/idea_draft_store"
 require "hive/bot/status_watcher"
 require "hive/markers"
 
-# Pins the dispatch shape emitted by CallbackHandlers for callbacks that
-# fan out to `hive` subprocess invocations. The router exposes one Result
-# struct per callback; this test exercises the per-callback methods so
-# changes to argv shape cannot regress silently.
+# Pins the descriptors emitted by CallbackHandlers for callbacks that
+# either reply in-process or fan out to `hive` subprocess invocations.
+# The router exposes one Result struct per callback; this test exercises
+# the per-callback methods so changes to reply/argv shape cannot regress
+# silently.
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
@@ -66,6 +67,35 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       result_class: Result,
       logger: @logger,
       status_snapshot_provider: -> { rows }
+    )
+  end
+
+  def handlers_with_snapshot(snapshot)
+    Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil,
+      result_class: Result,
+      status_snapshot_provider: -> { snapshot },
+      logger: @logger
+    )
+  end
+
+  def status_row(project: "alpha", slug: "red-task-260518-aaaa", stage: "6-review",
+                 marker: "review_error", attrs: {}, action: "recover_review",
+                 action_label: "Needs recovery", diagnostic: nil, display_name: "Red Task")
+    Hive::Bot::StatusWatcher::Row.new(
+      project: project,
+      slug: slug,
+      display_name: display_name,
+      stage: stage,
+      workflow: "coding",
+      marker: marker,
+      attrs: attrs,
+      folder: "/tmp/#{slug}",
+      action: action,
+      action_label: action_label,
+      diagnostic: diagnostic
     )
   end
 
@@ -561,21 +591,145 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_match(/Bot got confused/, result.text)
   end
 
-  def test_show_details_dispatches_cached_status_details_render
-    result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+  def test_show_details_replies_with_rendered_row_summary
+    handlers = handlers_with_snapshot([ status_row ])
 
-    assert_equal :dispatch_then_reply, result.action
-    assert_equal "alpha", result.project
-    assert_equal "red-task-260518-aaaa", result.slug
-    assert_nil result.stage
-    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_nil result.command_argv
+    assert_includes result.text, "Red Task — alpha/red-task-260518-aaaa (6-review)"
+    assert_includes result.text, "Action: Needs recovery"
+    refute_includes result.text, "No diagnostic available"
   end
 
-  def test_show_details_passes_stage_when_callback_carries_it
-    result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-stage:6-review"))
+  def test_show_details_resolves_stage_when_callback_carries_it
+    execute = status_row(slug: "red-task-260518-stage", stage: "4-execute", marker: "execute_stale",
+                         action: "recover_execute", action_label: "Needs recovery", display_name: "Execute Row")
+    review = status_row(slug: "red-task-260518-stage", stage: "6-review", marker: "review_error",
+                        action: "recover_review", action_label: "Needs recovery", display_name: "Review Row")
+    handlers = handlers_with_snapshot([ execute, review ])
 
-    assert_equal "6-review", result.stage
-    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-stage:6-review"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Review Row — alpha/red-task-260518-stage (6-review)"
+    refute_includes result.text, "Execute Row"
+  end
+
+  def test_show_details_replies_gracefully_for_stale_button
+    handlers = handlers_with_snapshot([])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:gone-task-260518-dead"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "no longer active"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_default_snapshot_provider_replies_gracefully
+    result = @handlers.handle(:callback_show_details, update("details:alpha:gone-task-260518-dead"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "no longer active"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_replies_soft_retry_when_snapshot_is_loading
+    handlers = handlers_with_snapshot(nil)
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status is still loading"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_replies_gracefully_for_ambiguous_legacy_button
+    handlers = handlers_with_snapshot([
+      status_row(slug: "same-task-260518-abcd", stage: "4-execute"),
+      status_row(slug: "same-task-260518-abcd", stage: "6-review")
+    ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:same-task-260518-abcd"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "ambiguous"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_replies_soft_retry_when_snapshot_provider_raises
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(_project) { },
+      conversation_store: nil,
+      result_class: Result,
+      status_snapshot_provider: -> { raise "boom" },
+      logger: @logger
+    )
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    refute_includes result.text, "No diagnostic available"
+    logged = @logger.events.find { |event| event[:name] == :details_lookup_failed }
+    refute_nil logged, "a swallowed snapshot-provider fault must be logged, not silently degraded"
+    assert_equal "alpha", logged[:payload][:project]
+    assert_equal "red-task-260518-aaaa", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_show_details_degrades_and_logs_when_render_raises
+    # details_reply renders OUTSIDE resolve_details_row's degrade rescue and the
+    # callback was already ack'd, so a render-time fault must degrade + log, not
+    # escape to the :fatal poll handler and leave the tap with no reply. The
+    # row resolves cleanly (project/slug match) but raises when rendered.
+    raising_row = Class.new do
+      def project = "alpha"
+      def slug = "boom-260518-aaaa"
+      def attrs = raise("render boom")
+    end.new
+    handlers = handlers_with_snapshot([ raising_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:boom-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault after the callback ack must be logged, not a silent dead end"
+    assert_equal "alpha", logged[:payload][:project]
+    assert_equal "boom-260518-aaaa", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_show_details_skips_non_conforming_snapshot_rows
+    # resolve_details_row's row.respond_to?(:project)/:slug guard must skip a
+    # snapshot entry that doesn't quack like a Row instead of crashing the
+    # match — then resolve the one conforming row normally.
+    handlers = handlers_with_snapshot([ Object.new, status_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Red Task — alpha/red-task-260518-aaaa (6-review)"
+  end
+
+  def test_show_details_appends_existing_row_diagnostic
+    handlers = handlers_with_snapshot([
+      status_row(
+        diagnostic: {
+          "summary" => "REVIEW_ERROR phase=fix pass=1",
+          "detail" => "fix attempt timed out"
+        }
+      )
+    ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "REVIEW_ERROR phase=fix pass=1"
+    assert_includes result.text, "fix attempt timed out"
   end
 
   def test_refresh_diagnose_dispatches_diagnose_write_for_fresh_agent_verdict

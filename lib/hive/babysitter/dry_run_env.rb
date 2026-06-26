@@ -1,4 +1,6 @@
 require "fileutils"
+require "rbconfig"
+require "shellwords"
 
 module Hive
   module Babysitter
@@ -14,6 +16,9 @@ module Hive
       # diagnostic record and callers/tests read it after `with_env` returns.
       OVERLAY_DIRNAME = ".hive-babysitter-dry-run-bin"
       SKIP_LOG_BASENAME = ".babysitter-dry-run-skipped.log"
+      RUBY_STARTUP_ENV = %w[
+        RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
+      ].freeze
 
       def with_env(worktree_path)
         # Resolve real git/gh *before* prepending the overlay onto PATH,
@@ -68,17 +73,28 @@ module Hive
         }.each do |name, (target, env)|
           link = File.join(overlay, name)
           FileUtils.rm_f(link)
-          env_setup = env.map do |env_name, value|
-            value.nil? ? "ENV.delete(#{env_name.dump})" : "ENV[#{env_name.dump}] = #{value.to_s.dump}"
-          end.join("\n")
-          File.write(link, <<~RUBY)
-            #!/usr/bin/env ruby
+          env_setup = env.map { |env_name, value| shell_env_assignment(env_name, value) }.join("\n")
+          # Start the overlay through /bin/sh, not Ruby: Ruby consumes RUBYOPT/RUBYLIB
+          # before script code runs, so a Ruby shim cannot scrub those variables in time.
+          # The shell wrapper clears Ruby/Bundler/Gem startup env, pins the handoff env, and
+          # then invokes the shared Ruby stub through the running Ruby's absolute path.
+          File.write(link, <<~SH)
+            #!/bin/sh
+            unset #{RUBY_STARTUP_ENV.join(' ')}
             #{env_setup}
-            exec(#{target.dump}, *ARGV)
-          RUBY
+            exec #{shell_word(RbConfig.ruby)} #{shell_word(target)} "$@"
+          SH
           FileUtils.chmod("+x", link)
         end
         overlay
+      end
+
+      def shell_env_assignment(name, value)
+        value.nil? ? "unset #{name}" : "export #{name}=#{shell_word(value)}"
+      end
+
+      def shell_word(value)
+        Shellwords.escape(value.to_s)
       end
 
       def gh_config_dir
@@ -97,7 +113,7 @@ module Hive
       def which(name)
         ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
           candidate = File.join(dir, name)
-          return candidate if File.file?(candidate) && File.executable?(candidate)
+          return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
         end
         nil
       end

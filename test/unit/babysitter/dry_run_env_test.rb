@@ -102,6 +102,164 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_canonicalizes_relative_path_real_binaries_before_agent_cwd_changes
+    with_tmp_dir do |dir|
+      parent = File.join(dir, "parent")
+      worktree = File.join(dir, "worktree")
+      parent_bin = File.join(parent, "bin")
+      worktree_bin = File.join(worktree, "bin")
+      FileUtils.mkdir_p([ parent_bin, worktree_bin ])
+      recording_binary(parent_bin, "git")
+      recording_binary(parent_bin, "gh")
+      pwn_git = File.join(worktree, "pwn-git-ran")
+      pwn_gh = File.join(worktree, "pwn-gh-ran")
+      executable_touch_binary(worktree_bin, "git", pwn_git)
+      executable_touch_binary(worktree_bin, "gh", pwn_gh)
+
+      Dir.chdir(parent) do
+        with_env("PATH" => [ "bin", ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+          Hive::Babysitter::DryRunEnv.with_env(worktree) do
+            Dir.chdir(worktree) do
+              _out, git_err, git_status = Open3.capture3("git", "status", "--short")
+              _out, gh_err, gh_status = Open3.capture3("gh", "repo", "view", "owner/repo")
+
+              assert git_status.success?, git_err
+              assert gh_status.success?, gh_err
+            end
+          end
+        end
+      end
+
+      real_invocations = File.read(File.join(parent_bin, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+      refute_path_exists pwn_git
+      refute_path_exists pwn_gh
+    end
+  end
+
+  # Companion to the real-binary canonicalization test above, but for the *interpreter*.
+  # The overlay shim and the stub it hands off to are both Ruby scripts; a
+  # `#!/usr/bin/env ruby` shebang resolves `ruby` from PATH at exec time. With a relative
+  # PATH component and the agent chdir'd into the worktree, a worktree-controlled
+  # `bin/ruby` would be picked as the interpreter and run arbitrary code — defeating the
+  # canonicalized HIVE_BABYSITTER_REAL_* pins entirely. Pinning the shim shebang and the
+  # stub handoff to the running Ruby's absolute path must keep that poison out.
+  def test_overlay_shims_pin_ruby_interpreter_against_worktree_cwd_ruby
+    with_tmp_dir do |dir|
+      parent = File.join(dir, "parent")
+      worktree = File.join(dir, "worktree")
+      parent_bin = File.join(parent, "bin")
+      worktree_bin = File.join(worktree, "bin")
+      FileUtils.mkdir_p([ parent_bin, worktree_bin ])
+      recording_binary(parent_bin, "git")
+      recording_binary(parent_bin, "gh")
+      pwn_ruby = File.join(worktree, "pwn-ruby-ran")
+      executable_touch_binary(worktree_bin, "ruby", pwn_ruby)
+
+      Dir.chdir(parent) do
+        with_env("PATH" => [ "bin", ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+          Hive::Babysitter::DryRunEnv.with_env(worktree) do
+            Dir.chdir(worktree) do
+              _out, git_err, git_status = Open3.capture3("git", "status", "--short")
+              _out, gh_err, gh_status = Open3.capture3("gh", "repo", "view", "owner/repo")
+
+              assert git_status.success?, git_err
+              assert gh_status.success?, gh_err
+            end
+          end
+        end
+      end
+
+      refute_path_exists pwn_ruby,
+                         "worktree-controlled bin/ruby interpreted a dry-run shim or its stub"
+      real_invocations = File.read(File.join(parent_bin, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+    end
+  end
+
+  def test_overlay_shims_scrub_ruby_startup_environment_before_stub_handoff
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "poison")
+      marker = File.join(dir, "rubyopt-loaded")
+      FileUtils.mkdir_p(poison_dir)
+      File.write(
+        File.join(poison_dir, "pwn.rb"),
+        "File.write(ENV.fetch(\"HIVE_RUBYOPT_MARKER\"), \"loaded\")\n"
+      )
+      recording_binary(dir, "git")
+      recording_binary(dir, "gh")
+
+      with_env("PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          injected = {
+            "RUBYOPT" => "-rpwn",
+            "RUBYLIB" => poison_dir,
+            "HIVE_RUBYOPT_MARKER" => marker
+          }
+
+          _out, git_err, git_status = Open3.capture3(injected, "git", "status", "--short")
+          _out, gh_err, gh_status = Open3.capture3(injected, "gh", "repo", "view", "owner/repo")
+
+          assert git_status.success?, git_err
+          assert gh_status.success?, gh_err
+        end
+      end
+
+      refute_path_exists marker, "RUBYOPT/RUBYLIB loaded code before the dry-run stub guarded the call"
+      real_invocations = File.read(File.join(dir, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+    end
+  end
+
+  def test_stubs_refuse_relative_real_binary_paths
+    with_tmp_dir do |dir|
+      bin_dir = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      pwn_git = File.join(dir, "pwn-git-ran")
+      pwn_gh = File.join(dir, "pwn-gh-ran")
+      executable_touch_binary(bin_dir, "git", pwn_git)
+      executable_touch_binary(bin_dir, "gh", pwn_gh)
+
+      [
+        [ "git", "HIVE_BABYSITTER_REAL_GIT", [ "status", "--short" ], pwn_git ],
+        [ "gh", "HIVE_BABYSITTER_REAL_GH", [ "repo", "view", "owner/repo" ], pwn_gh ]
+      ].each do |binary, env_name, args, pwn_path|
+        env = {
+          env_name => "bin/#{binary}",
+          "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "#{binary}-skipped.log")
+        }
+
+        _out, err, status = Open3.capture3(env, stub_path(binary), *args, chdir: dir)
+
+        assert_equal 127, status.exitstatus, err
+        assert_includes err, "#{env_name} must be an absolute path"
+        refute_path_exists pwn_path
+      end
+    end
+  end
+
+  def test_gh_stub_reports_missing_real_gh_without_backtrace
+    with_tmp_dir do |dir|
+      missing_gh = File.join(dir, "missing-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => missing_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "gh-skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+
+      assert_equal 127, status.exitstatus, err
+      assert_includes err, "hive-babysitter dry-run: cannot exec real gh at #{missing_gh.inspect}:"
+      refute_includes err, "hive-babysitter-stub-gh:"
+    end
+  end
+
   def test_with_env_isolates_gh_config_against_command_local_home
     with_tmp_dir do |dir|
       recording_binary(dir, "git")
@@ -264,6 +422,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
       skipped = File.binread(log_path)
       assert_includes skipped, expected
       refute_includes skipped, "bad\xFF\nline".b
+    end
+  end
+
+  def test_gh_stub_skips_invalid_utf8_argv_without_crashing
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
+      invalid_url = "https://evil.example.com/bad\xFF".b
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", invalid_url)
+
+      assert status.success?, err
+      expected = "gh api https://evil.example.com/bad\xFF skipped".b
+      assert_includes err.b, expected
+      refute_includes err.b, "ArgumentError"
+      skipped = File.binread(log_path)
+      assert_includes skipped, expected
     end
   end
 
@@ -873,7 +1048,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     with_tmp_git_repo do |dir|
       trace_path = File.join(dir, "trace.log")
       env = {
-        "HIVE_BABYSITTER_REAL_GIT" => "git",
+        "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
         "GIT_TRACE" => trace_path
       }
 
@@ -969,7 +1144,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       File.write(File.join(dir, "README.md"), "changed\n")
 
       base_env = {
-        "HIVE_BABYSITTER_REAL_GIT" => "git",
+        "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
       }
 
@@ -1309,9 +1484,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def real_git_env(dir)
     {
-      "HIVE_BABYSITTER_REAL_GIT" => "git",
+      "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
       "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
     }
+  end
+
+  def real_git_binary
+    Hive::Babysitter::DryRunEnv.which("git") || raise("git binary not found on PATH")
   end
 
   def with_tmp_signed_git_repo(log_show_signature: false)

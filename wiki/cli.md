@@ -40,6 +40,10 @@ unrecognized `--foo`, and quoted strings containing `--workflow` remain task
 text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
 decided from the last recognized JSON boolean flag in argv, so a trailing false
 form such as `--no-json` or `--json=false` overrides an earlier `--json`.
+Before any wrapper rewrite or Thor dispatch, every `ARGV` entry must have valid
+encoding. Invalid-byte arguments raise through the same usage-error path as
+malformed wrapper options, so JSON callers still receive the command-specific
+error envelope instead of a Ruby/Thor backtrace.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested

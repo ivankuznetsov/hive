@@ -395,9 +395,23 @@ module Hive
       end
     end
 
+    def brainstorm_action
+      case marker.name
+      when :complete
+        ACTIONS.fetch(:brainstorm_complete)
+      when :none
+        # Markerless (:none) = nothing ran at this stage yet, so it's runnable
+        # rather than an input gate; a genuine pause carries a real `:waiting`
+        # marker (U6 — stops the phantom needs-input surface).
+        ACTIONS.fetch(:generic_ready_to_run)
+      else
+        ACTIONS.fetch(:brainstorm_waiting)
+      end
+    end
+
     def execute_action
       case marker.name
-      when :execute_complete
+      when :execute_complete, :complete
         ACTIONS.fetch(:execute_complete)
       when :execute_stale
         ACTIONS.fetch(:execute_stale)
@@ -405,8 +419,19 @@ module Hive
         return ACTIONS.fetch(:execute_stale) if legacy_execute_findings?
 
         ACTIONS.fetch(:execute_waiting)
+      when :none
+        # Markerless (:none) = nothing ran at this stage yet → runnable, not an
+        # input gate; a real pause carries an `:execute_waiting` marker (U6).
+        ACTIONS.fetch(:generic_ready_to_run)
       else
-        ACTIONS.fetch(:execute_waiting)
+        # Any other marker at the execute stage is foreign/incoherent: the
+        # runner only ever stamps execute_waiting/execute_complete/execute_stale/
+        # :none here, and universal markers (agent_working/error/manual_steering)
+        # are intercepted earlier. Fail loud rather than auto-running `hive run`
+        # against a marker we don't recognize — for a foreign marker (terminal
+        # OR non-terminal alike) "no auto-run" is strictly safer for the daemon
+        # Policy than presuming the stage is runnable.
+        ACTIONS.fetch(:error)
       end
     end
 
@@ -420,6 +445,9 @@ module Hive
     def finalize_action
       return ACTIONS.fetch(:error) if finalize_missing_pr_md?
       return finalize_complete_action if marker.name == :complete
+      # Markerless (:none) = nothing ran at this stage yet → runnable, not an
+      # input gate; a real pause carries a `:waiting` marker (U6).
+      return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
 
       ACTIONS.fetch(:finalize_waiting)
     end

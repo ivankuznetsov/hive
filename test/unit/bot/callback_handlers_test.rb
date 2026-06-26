@@ -1,15 +1,17 @@
 require "test_helper"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
+require "hive/bot/status_watcher"
+require "hive/markers"
 
-# Pins the dispatch shape emitted by CallbackHandlers for callbacks that
-# fan out to `hive` subprocess invocations. The router exposes one Result
-# struct per callback; this test exercises the per-callback methods so
-# changes to argv shape (e.g., row 24 — show_details switching to
-# --diagnose) cannot regress silently.
+# Pins the descriptors emitted by CallbackHandlers for callbacks that
+# either reply in-process or fan out to `hive` subprocess invocations.
+# The router exposes one Result struct per callback; this test exercises
+# the per-callback methods so changes to reply/argv shape cannot regress
+# silently.
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                      :project, :slug, :question_n, :answer_text, :mode,
+                      :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
                       :attachment, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
@@ -17,6 +19,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       events << { name: name, payload: payload }
     end
   end
+  StatusRow = Hive::Bot::StatusWatcher::Row
 
   def setup
     @pending_ideas = {}
@@ -33,6 +36,67 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   def update(callback_data)
     Struct.new(:callback_data).new(callback_data)
+  end
+
+  def with_plan_row(marker_name)
+    Dir.mktmpdir("bot-plan-approve") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, marker_name)
+      row = StatusRow.new(
+        project: "hive",
+        slug: "plan-task-260624-abcd",
+        stage: "3-plan",
+        workflow: "coding",
+        marker: marker_name.to_s,
+        attrs: {},
+        state_file: state_file,
+        action: "needs_input",
+        action_label: "Needs input",
+        suggested_command: "hive plan plan-task-260624-abcd --from 3-plan --project hive"
+      )
+      yield row, state_file
+    end
+  end
+
+  def handlers_with_rows(rows)
+    Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil,
+      result_class: Result,
+      logger: @logger,
+      status_snapshot_provider: -> { rows }
+    )
+  end
+
+  def handlers_with_snapshot(snapshot)
+    Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil,
+      result_class: Result,
+      status_snapshot_provider: -> { snapshot },
+      logger: @logger
+    )
+  end
+
+  def status_row(project: "alpha", slug: "red-task-260518-aaaa", stage: "6-review",
+                 marker: "review_error", attrs: {}, action: "recover_review",
+                 action_label: "Needs recovery", diagnostic: nil, display_name: "Red Task")
+    Hive::Bot::StatusWatcher::Row.new(
+      project: project,
+      slug: slug,
+      display_name: display_name,
+      stage: stage,
+      workflow: "coding",
+      marker: marker,
+      attrs: attrs,
+      folder: "/tmp/#{slug}",
+      action: action,
+      action_label: action_label,
+      diagnostic: diagnostic
+    )
   end
 
   def test_simple_reply_callbacks_return_operator_facing_text
@@ -56,7 +120,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     %i[callback_path_a_yes callback_path_a_just_type].each do |intent|
       result = @handlers.handle(intent, update("anything:hive:slug:1"))
       assert_equal :reply, result.action
-      assert_match(/Codex draft flow was removed/, result.text)
+      assert_match(%r{Codex draft flow was removed.*/answer <id\|slug>}, result.text)
     end
   end
 
@@ -291,33 +355,381 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
-  def test_show_details_dispatches_status_diagnose_for_targeted_envelope
-    # The Show-details button previously ran a full `hive status --json`
-    # and replied with the entire snapshot. PR #84 review row 24 narrows
-    # it to `hive status --diagnose <slug> --project <project> --json`
-    # so the bot reply renders the bounded summary + detail instead of
-    # dumping the whole status payload.
-    result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+  def test_rerun_callback_dispatches_develop_against_current_execute_stage
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:develop"))
 
     assert_equal :dispatch_then_reply, result.action
-    assert_equal "alpha", result.project
-    assert_equal "red-task-260518-aaaa", result.slug
     assert_equal(
-      [ "hive", "status", "--diagnose", "red-task-260518-aaaa", "--project", "alpha", "--json" ],
-      result.command_argv,
-      "show_details must invoke `hive status --diagnose` so the reply renders the bounded envelope"
+      [ "hive", "develop", "slug-260624-abcd", "--from", "4-execute", "--project", "hive", "--json" ],
+      result.command_argv
     )
   end
 
-  def test_show_details_passes_stage_when_callback_carries_it
-    result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-stage:6-review"))
+  def test_rerun_callback_dispatches_finalize_against_current_finalize_stage
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:8-finalize:finalize"))
 
     assert_equal(
-      [ "hive", "status", "--diagnose", "red-task-260518-stage",
-        "--project", "alpha", "--stage", "6-review", "--json" ],
-      result.command_argv,
-      "show_details must pass --stage so duplicate slugs in the same project resolve"
+      [ "hive", "finalize", "slug-260624-abcd", "--from", "8-finalize", "--project", "hive", "--json" ],
+      result.command_argv
     )
+  end
+
+  def test_rerun_callback_dispatches_generic_run_with_stage_filter
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:1-intake:run"))
+
+    assert_equal(
+      [ "hive", "run", "slug-260624-abcd", "--stage", "1-intake", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_approve_plan_callback_flips_waiting_marker_and_dispatches_develop
+    with_plan_row(:waiting) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-abcd", "--from", "3-plan",
+          "--project", "hive", "--json" ],
+        result.command_argv
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_callback_dispatches_develop_for_already_advanced_row
+    # Realistic race: between rendering the plan-waiting Approve button and the
+    # operator tapping it, the plan advanced to :complete (daemon auto-approve
+    # or a manual advance). TaskAction then reclassifies the row as
+    # ready_to_develop, so its suggested_command is now `hive develop ...`.
+    # The stale Approve tap must dispatch that valid develop, not fall to
+    # handle's generic "Bot got confused" rescue. (The previous fixture used an
+    # impossible :complete row carrying a `hive plan` command.)
+    Dir.mktmpdir("bot-plan-approve-advanced") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :complete)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+        marker: "complete", attrs: {}, state_file: state_file,
+        action: "ready_to_develop", action_label: "Ready to develop",
+        suggested_command: "hive develop plan-task-260624-abcd --from 3-plan --project hive"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-abcd", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_keeps_waiting_marker_and_replies_corrupt_on_malformed_command
+    # validate-before-flip invariant: a row whose suggested_command is neither
+    # `hive plan` nor `hive develop` (corrupt state) is rejected by
+    # rewrite_to_develop BEFORE the marker flip, so the plan marker must stay
+    # :waiting for inspection and the operator gets an actionable corrupt-state
+    # reply — not the generic "Bot got confused".
+    Dir.mktmpdir("bot-plan-approve-corrupt") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input",
+        suggested_command: "hive review plan-task-260624-abcd --from 3-plan --project hive"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :reply, result.action
+      assert_match(/plan\.md may be corrupt/, result.text)
+      assert_equal :waiting, Hive::Markers.current(state_file).name,
+                   "command validation must happen before the marker flip"
+      assert(@logger.events.any? { |e| e[:name] == :callback_plan_state_corrupt },
+             "a corrupt-state approval must be logged for an audit trail")
+    end
+  end
+
+  def test_approve_plan_callback_refuses_non_approvable_marker_without_crashing
+    with_plan_row(:error) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :reply, result.action
+      assert_match(/no longer waiting/, result.text)
+      assert_equal :error, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_replies_when_row_not_in_snapshot
+    # The common stale-button tap: the snapshot has advanced (or the task was
+    # archived) so the row the callback names is gone. Must steer back to
+    # /queue rather than crash or dispatch a phantom develop. @handlers uses the
+    # default empty status_snapshot_provider, so this also exercises that path.
+    result = @handlers.handle(
+      :callback_approve_plan,
+      update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Task status changed - reopen \/queue\./, result.text)
+  end
+
+  def test_approve_plan_appends_project_flag_when_suggested_command_omits_it
+    Dir.mktmpdir("bot-plan-approve-noproj") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-noproj", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input",
+        suggested_command: "hive plan plan-task-260624-noproj --from 3-plan"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-noproj:3-plan")
+      )
+
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-noproj", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv,
+        "a suggested_command missing --project must get it appended via ensure_flag!"
+      )
+    end
+  end
+
+  def test_approve_plan_replies_when_state_file_unavailable
+    row = StatusRow.new(
+      project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, state_file: "",
+      action: "needs_input", action_label: "Needs input",
+      suggested_command: "hive plan plan-task-260624-abcd --from 3-plan --project hive"
+    )
+
+    result = handlers_with_rows([ row ]).handle(
+      :callback_approve_plan,
+      update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Plan state is unavailable - reopen \/queue\./, result.text)
+  end
+
+  def test_approve_plan_synthesizes_develop_command_when_suggested_command_blank
+    Dir.mktmpdir("bot-plan-approve-blank") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-wxyz", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input", suggested_command: nil
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-wxyz:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-wxyz", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv,
+        "a blank suggested_command must synthesize `hive plan <slug> --from <stage>`, rewritten to develop"
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_replies_when_marker_write_fails
+    # A read-only / full state dir makes the marker write (PlanApproval.prepare
+    # → Markers.set) raise a SystemCallError. Without the rescue it would escape
+    # to the poll loop's generic rescue and the operator would see the acked
+    # spinner clear then silence; instead reply with an actionable next step.
+    with_plan_row(:waiting) do |row, _state_file|
+      handlers = handlers_with_rows([ row ])
+      # Singleton-override prepare to raise a SystemCallError (minitest/mock
+      # isn't bundled); restore it afterwards.
+      original = Hive::Daemon::PlanApproval.method(:prepare)
+      Hive::Daemon::PlanApproval.define_singleton_method(:prepare) { |*| raise Errno::EACCES, "plan.md" }
+      result = begin
+        handlers.handle(:callback_approve_plan, update("approve_plan:hive:plan-task-260624-abcd:3-plan"))
+      ensure
+        Hive::Daemon::PlanApproval.singleton_class.send(:remove_method, :prepare)
+        Hive::Daemon::PlanApproval.define_singleton_method(:prepare, &original)
+      end
+
+      assert_equal :reply, result.action
+      assert_match(/Couldn't record the approval/, result.text)
+      assert(@logger.events.any? { |e| e[:name] == :callback_marker_write_failed },
+             "a failed marker write must be logged for an audit trail")
+    end
+  end
+
+  def test_unknown_rerun_verb_uses_confused_fallback
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:doctor"))
+
+    assert_equal :reply, result.action
+    assert_match(/Bot got confused/, result.text)
+  end
+
+  def test_show_details_replies_with_rendered_row_summary
+    handlers = handlers_with_snapshot([ status_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_nil result.command_argv
+    assert_includes result.text, "Red Task — alpha/red-task-260518-aaaa (6-review)"
+    assert_includes result.text, "Action: Needs recovery"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_resolves_stage_when_callback_carries_it
+    execute = status_row(slug: "red-task-260518-stage", stage: "4-execute", marker: "execute_stale",
+                         action: "recover_execute", action_label: "Needs recovery", display_name: "Execute Row")
+    review = status_row(slug: "red-task-260518-stage", stage: "6-review", marker: "review_error",
+                        action: "recover_review", action_label: "Needs recovery", display_name: "Review Row")
+    handlers = handlers_with_snapshot([ execute, review ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-stage:6-review"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Review Row — alpha/red-task-260518-stage (6-review)"
+    refute_includes result.text, "Execute Row"
+  end
+
+  def test_show_details_replies_gracefully_for_stale_button
+    handlers = handlers_with_snapshot([])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:gone-task-260518-dead"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "no longer active"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_default_snapshot_provider_replies_gracefully
+    result = @handlers.handle(:callback_show_details, update("details:alpha:gone-task-260518-dead"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "no longer active"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_replies_soft_retry_when_snapshot_is_loading
+    handlers = handlers_with_snapshot(nil)
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status is still loading"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_replies_gracefully_for_ambiguous_legacy_button
+    handlers = handlers_with_snapshot([
+      status_row(slug: "same-task-260518-abcd", stage: "4-execute"),
+      status_row(slug: "same-task-260518-abcd", stage: "6-review")
+    ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:same-task-260518-abcd"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "ambiguous"
+    refute_includes result.text, "No diagnostic available"
+  end
+
+  def test_show_details_replies_soft_retry_when_snapshot_provider_raises
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(_project) { },
+      conversation_store: nil,
+      result_class: Result,
+      status_snapshot_provider: -> { raise "boom" },
+      logger: @logger
+    )
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    refute_includes result.text, "No diagnostic available"
+    logged = @logger.events.find { |event| event[:name] == :details_lookup_failed }
+    refute_nil logged, "a swallowed snapshot-provider fault must be logged, not silently degraded"
+    assert_equal "alpha", logged[:payload][:project]
+    assert_equal "red-task-260518-aaaa", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_show_details_degrades_and_logs_when_render_raises
+    # details_reply renders OUTSIDE resolve_details_row's degrade rescue and the
+    # callback was already ack'd, so a render-time fault must degrade + log, not
+    # escape to the :fatal poll handler and leave the tap with no reply. The
+    # row resolves cleanly (project/slug match) but raises when rendered.
+    raising_row = Class.new do
+      def project = "alpha"
+      def slug = "boom-260518-aaaa"
+      def attrs = raise("render boom")
+    end.new
+    handlers = handlers_with_snapshot([ raising_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:boom-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault after the callback ack must be logged, not a silent dead end"
+    assert_equal "alpha", logged[:payload][:project]
+    assert_equal "boom-260518-aaaa", logged[:payload][:slug]
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_show_details_skips_non_conforming_snapshot_rows
+    # resolve_details_row's row.respond_to?(:project)/:slug guard must skip a
+    # snapshot entry that doesn't quack like a Row instead of crashing the
+    # match — then resolve the one conforming row normally.
+    handlers = handlers_with_snapshot([ Object.new, status_row ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "Red Task — alpha/red-task-260518-aaaa (6-review)"
+  end
+
+  def test_show_details_appends_existing_row_diagnostic
+    handlers = handlers_with_snapshot([
+      status_row(
+        diagnostic: {
+          "summary" => "REVIEW_ERROR phase=fix pass=1",
+          "detail" => "fix attempt timed out"
+        }
+      )
+    ])
+
+    result = handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-aaaa"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "REVIEW_ERROR phase=fix pass=1"
+    assert_includes result.text, "fix attempt timed out"
   end
 
   def test_refresh_diagnose_dispatches_diagnose_write_for_fresh_agent_verdict

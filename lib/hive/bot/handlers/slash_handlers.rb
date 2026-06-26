@@ -48,7 +48,8 @@ module Hive
         end
 
         def idea(update)
-          text = update.effective_text.to_s.sub(%r{\A/idea\b}, "").strip
+          text_source = update.respond_to?(:effective_text) ? update.effective_text : update.text
+          text = text_source.to_s.sub(%r{\A/idea\b}, "").strip
           if text.empty?
             return start_text_capture(update) if @idea_draft_store
 
@@ -267,8 +268,9 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea [text], /answer <id|slug>, " \
-                  "/approve <id|slug>, /autofix <id|slug>, /details <id|slug>, /done, /help"
+            text: "Send any message to capture an idea. Commands: /status [project], /queue, " \
+                  "/idea [text], /answer <id|slug>, /approve <id|slug>, /autofix <id|slug>, " \
+                  "/details <id|slug>, /done, /help"
           )
         end
 
@@ -280,7 +282,7 @@ module Hive
             action: :reply,
             text: "Connected. This bot drives your hive pipeline: it notifies you when " \
                   "tasks need answers or approvals, and you can reply right here.\n\n" \
-                  "Try /status to see your tasks, /idea to capture a new one, " \
+                  "Try /status to see your tasks, send any message to capture a new idea, " \
                   "or /help for every command."
           )
         end

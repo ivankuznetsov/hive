@@ -181,6 +181,42 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_overlay_shims_scrub_ruby_startup_environment_before_stub_handoff
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "poison")
+      marker = File.join(dir, "rubyopt-loaded")
+      FileUtils.mkdir_p(poison_dir)
+      File.write(
+        File.join(poison_dir, "pwn.rb"),
+        "File.write(ENV.fetch(\"HIVE_RUBYOPT_MARKER\"), \"loaded\")\n"
+      )
+      recording_binary(dir, "git")
+      recording_binary(dir, "gh")
+
+      with_env("PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          injected = {
+            "RUBYOPT" => "-rpwn",
+            "RUBYLIB" => poison_dir,
+            "HIVE_RUBYOPT_MARKER" => marker
+          }
+
+          _out, git_err, git_status = Open3.capture3(injected, "git", "status", "--short")
+          _out, gh_err, gh_status = Open3.capture3(injected, "gh", "repo", "view", "owner/repo")
+
+          assert git_status.success?, git_err
+          assert gh_status.success?, gh_err
+        end
+      end
+
+      refute_path_exists marker, "RUBYOPT/RUBYLIB loaded code before the dry-run stub guarded the call"
+      real_invocations = File.read(File.join(dir, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")

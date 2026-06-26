@@ -25,7 +25,13 @@ class TaskActionDispatchParityTest < Minitest::Test
         when "inbox"
           ACTIONS.fetch(:inbox)
         when "brainstorm"
-          marker.name == :complete ? ACTIONS.fetch(:brainstorm_complete) : ACTIONS.fetch(:brainstorm_waiting)
+          # NOTE: the brainstorm cell is tautological, like the command column
+          # noted below — this legacy arm calls the SAME production
+          # `brainstorm_action` the kind-dispatch path resolves, so the
+          # `:none -> generic_ready_to_run` (U6) reclassification is not
+          # independently cross-checked here. It is pinned directly in
+          # task_action_test.rb instead.
+          brainstorm_action
         when "plan"
           plan_action
         when "execute"

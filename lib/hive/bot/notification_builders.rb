@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "hive"
 require "hive/bot/format"
+require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
 require "hive/workflows"
@@ -176,38 +177,45 @@ module Hive
       end
 
       def needs_input(row)
-        case row.marker
-        when "waiting"
-          waiting_input(row)
-        when "review_waiting"
-          review_waiting(row)
+        resolution = Hive::Bot::RowActions.resolve(row)
+        return nil if resolution.suppress
+        return nil if resolution.actions.empty?
+
+        # Dispatch on the resolver's declared surface kind, not on the exact
+        # role array. The role-array match silently fell through to the
+        # neutral default whenever RowActions reordered or added an action;
+        # the kind tag makes the intended surface explicit.
+        case resolution.kind
+        when :brainstorm_waiting
+          brainstorm_waiting(row, actions: resolution.actions)
+        when :plan_waiting
+          plan_waiting(row, actions: resolution.actions)
+        when :review_waiting
+          review_waiting(row, actions: resolution.actions)
+        when :execute_waiting
+          execute_waiting(row, actions: resolution.actions)
+        when :finalize_waiting
+          finalize_waiting(row, actions: resolution.actions)
+        when :generic_needs_input
+          default_needs_input(row, actions: resolution.actions)
         else
-          default_needs_input(row)
+          # A catch-all `else default_needs_input` would silently re-route a new
+          # needs_input KIND to the generic copy — the exact misroute the kind
+          # tag exists to prevent. Fail loud instead: every needs_input surface
+          # must be wired explicitly here.
+          raise ArgumentError,
+                "needs_input received an unexpected resolution kind #{resolution.kind.inspect} " \
+                "(RowActions.resolve must map every needs_input row to a known surface)"
         end
       end
 
-      # A `waiting` marker is used by BOTH the coding 2-brainstorm stage
-      # (genuine operator questions) and the coding 3-plan stage (a
-      # plan-draft/approval pause); each gets its own label so a plan pause
-      # isn't mis-announced as "Brainstorm questions" (it isn't, and the daemon
-      # usually auto-approves it — see suppress_daemon_plan_pause?). Only the
-      # coding workflow has those two stages, so a `waiting` marker from any
-      # other workflow — or any other coding stage — falls through to the
-      # neutral default below.
-      def waiting_input(row)
-        return plan_waiting(row) if plan_pause?(row)
-        return brainstorm_waiting(row) if brainstorm_qna?(row)
-
-        default_needs_input(row)
-      end
-
-      # Coding-workflow `waiting`/`review_waiting` classifications shared by the
-      # push-notification builders (waiting_input/review_waiting) and the
-      # Show-details hint (details_hint), so tap-time copy mirrors build-time
-      # and the two trees can't drift after a future stage/marker change. Each
-      # predicate re-checks the marker itself (not just the stage implied by the
-      # caller); keep that marker check when editing so the two trees stay
-      # aligned across whatever rows a future caller routes through here.
+      # Coding-workflow `waiting`/`review_waiting` classifications used by the
+      # Show-details hint (details_hint), so tap-time copy mirrors the
+      # push-notification surfaces and the two trees can't drift after a future
+      # stage/marker change. Each predicate re-checks the marker itself (not
+      # just the stage implied by the caller); keep that marker check when
+      # editing so the two trees stay aligned across whatever rows a future
+      # caller routes through here.
       def plan_pause?(row)
         Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" && row.marker.to_s == "waiting" # coding-scoped: plan approval pause only exists in coding workflow
       end
@@ -221,23 +229,19 @@ module Hive
           row.attrs.to_h.transform_keys(&:to_s)["reason"].to_s == "fix_guardrail"
       end
 
-      def default_needs_input(row)
+      def default_needs_input(row, actions:)
         Notification.new(
           text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
-          keyboard: [
-            [ button("Show details", details_callback(row)) ]
-          ]
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
-      def brainstorm_waiting(row)
+      def brainstorm_waiting(row, actions:)
         Notification.new(
           text: header(row) + "\n" \
                 "Brainstorm questions are waiting. " \
                 "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
-          keyboard: [
-            [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ]
-          ]
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
@@ -245,36 +249,42 @@ module Hive
       # brainstorm Q&A round. When the daemon is enabled it auto-approves
       # this and the bot suppresses the push entirely
       # (`suppress_daemon_plan_pause?`); this notification is for the
-      # daemon-OFF case, where the operator reviews the draft and advances
-      # it from the CLI — so it points at the plan, not the `/answer` flow.
-      def plan_waiting(row)
+      # daemon-OFF case. The operator can now tap Approve in chat (the
+      # keyboard is Approve + Details, supplied by `RowActions`) or advance
+      # the draft from the CLI — either way it points at the plan, not the
+      # `/answer` flow.
+      def plan_waiting(row, actions:)
         Notification.new(
           text: header(row) + "\nPlan draft is ready for your review.",
-          keyboard: [
-            [ button("Show details", details_callback(row)) ]
-          ]
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
-      def review_waiting(row)
+      def review_waiting(row, actions:)
         if fix_guardrail_review?(row)
           return Notification.new(
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
-            keyboard: [
-              [ button("Show details", details_callback(row)) ]
-            ]
+            keyboard: keyboard_for_actions(actions)
           )
         end
 
         Notification.new(
           text: header(row) + "\nReview triage is waiting.",
-          keyboard: [
-            [
-              button("Accept all", "findings:accept_all:#{row.project}:#{row.slug}:#{row.stage}"),
-              button("Reject all", "findings:reject_all:#{row.project}:#{row.slug}:#{row.stage}")
-            ],
-            [ button("Show details", details_callback(row)) ]
-          ]
+          keyboard: keyboard_for_actions(actions)
+        )
+      end
+
+      def execute_waiting(row, actions:)
+        Notification.new(
+          text: header(row) + "\nExecute paused — needs your input.",
+          keyboard: keyboard_for_actions(actions)
+        )
+      end
+
+      def finalize_waiting(row, actions:)
+        Notification.new(
+          text: header(row) + "\nFinalize paused — ready to run.",
+          keyboard: keyboard_for_actions(actions)
         )
       end
 
@@ -583,6 +593,41 @@ module Hive
 
       def details_callback(row)
         callback_with_stage("details", row)
+      end
+
+      def keyboard_for_actions(actions)
+        actions = Array(actions)
+        buttons = actions.map { |action| button(label_for_action(action), action.callback) }
+        if actions.first(2).map(&:role) == [ :findings_accept, :findings_reject ]
+          # Review triage: Accept all / Reject all share the top row; any
+          # trailing action (Show details) stacks one-per-row beneath them.
+          return [ buttons.first(2), *buttons.drop(2).map { |btn| [ btn ] } ]
+        end
+
+        buttons.map { |btn| [ btn ] }
+      end
+
+      def label_for_action(action)
+        return rerun_label(action.verb) if action.role == :rerun
+
+        {
+          answer: "Answer in chat",
+          approve: "Approve",
+          approve_plan: "Approve",
+          findings_accept: "Accept all",
+          findings_reject: "Reject all",
+          autofix: "🔧 Autofix",
+          details: "Show details"
+        }.fetch(action.role)
+      end
+
+      # A paused-stage re-run button reuses the single `:rerun` role for every
+      # verb. The label is chosen purely lexically: the "develop" verb renders
+      # "Re-run", every other verb (finalize, generic run) renders "Run". The
+      # rule is lexical, not an execution-history claim — a "finalize" rerun is
+      # only produced for a finalize agent that already ran and paused.
+      def rerun_label(verb)
+        verb.to_s == "develop" ? "Re-run" : "Run"
       end
 
       def callback_with_stage(prefix, row)

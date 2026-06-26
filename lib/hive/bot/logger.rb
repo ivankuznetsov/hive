@@ -36,6 +36,10 @@ module Hive
         envelope_parse_failure
         send_failure
         callback_malformed
+        callback_marker_write_failed
+        callback_plan_state_corrupt
+        notification_build_failed
+        status_button_failed
         details_lookup_failed
         details_render_failed
         status_lookup_failed

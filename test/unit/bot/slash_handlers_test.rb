@@ -7,7 +7,7 @@ require "hive/bot/status_watcher"
 
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                      :project, :slug, :question_n, :answer_text, :mode,
+                      :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
                       :attachment, keyword_init: true)
   Update = Struct.new(:text, :chat_id, keyword_init: true) do

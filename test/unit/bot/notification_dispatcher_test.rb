@@ -106,6 +106,64 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
            "legacy-stage warning must dedupe while the project remains legacy-dirty")
   end
 
+  def test_one_unbuildable_row_does_not_abort_the_whole_tick
+    # A single malformed row (e.g. an unmapped action role raising at the
+    # RowActions boundary, or a KeyError in label_for_action) must drop only
+    # its own notification — not abort every push this tick. Singleton-override
+    # NotificationBuilders.build (minitest/mock isn't bundled) so the bad row
+    # raises while the good row builds normally.
+    d = dispatcher
+    good = row(slug: "good-task-260525-aaaa")
+    bad = row(slug: "bad-task-260525-bbbb")
+
+    original = Hive::Bot::NotificationBuilders.method(:build)
+    Hive::Bot::NotificationBuilders.define_singleton_method(:build) do |candidate, **|
+      raise KeyError, "unmapped role" if candidate.slug == "bad-task-260525-bbbb"
+
+      Hive::Bot::NotificationBuilders::Notification.new(text: "Build OK for #{candidate.slug}", keyboard: nil)
+    end
+    begin
+      d.process_rows([ bad, good ])
+    ensure
+      Hive::Bot::NotificationBuilders.singleton_class.send(:remove_method, :build)
+      Hive::Bot::NotificationBuilders.define_singleton_method(:build, &original)
+    end
+
+    assert_equal 1, telegram.messages.size,
+                 "the good row must still deliver even though the bad row failed to build"
+    assert_equal "Build OK for good-task-260525-aaaa", telegram.messages.first[:text]
+    assert(logger.events.any? { |name, attrs| name == :notification_build_failed && attrs[:slug] == "bad-task-260525-bbbb" },
+           "the unbuildable row must be logged as :notification_build_failed")
+  end
+
+  def test_a_fingerprint_failure_outside_build_does_not_abort_the_whole_tick
+    # The fingerprint/suppress predicates run OUTSIDE NotificationBuilders.build,
+    # so the per-row isolation has to wrap the whole body — not just the build —
+    # or a malformed-attrs row raising at fingerprint time aborts the tick.
+    # Force a non-Argument/Key error (RuntimeError) from fingerprint for one row.
+    d = dispatcher
+    good = row(slug: "good-task-260525-cccc")
+    bad = row(slug: "bad-task-260525-dddd")
+
+    original = Hive::Bot::NotificationBuilders.method(:fingerprint)
+    Hive::Bot::NotificationBuilders.define_singleton_method(:fingerprint) do |candidate|
+      raise "boom in fingerprint" if candidate.slug == "bad-task-260525-dddd"
+
+      original.call(candidate)
+    end
+    begin
+      d.process_rows([ bad, good ])
+    ensure
+      Hive::Bot::NotificationBuilders.singleton_class.send(:remove_method, :fingerprint)
+      Hive::Bot::NotificationBuilders.define_singleton_method(:fingerprint, &original)
+    end
+
+    assert_equal 1, telegram.messages.size,
+                 "the good row must still deliver even though the bad row raised at fingerprint time"
+    assert(logger.events.any? { |name, attrs| name == :notification_build_failed && attrs[:slug] == "bad-task-260525-dddd" },
+           "the row that raised outside build must still be logged and isolated")
+  end
+
   # AC-05 (#261): the bot's queue dispatch path deliberately does NOT reset
   # the alert at enqueue time — the daemon clears the marker later. The
   # supervisor test pins "reset_task not called"; this pins the property
@@ -364,6 +422,47 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(
         Hive::Bot::NotificationBuilders.fingerprint(named)
       )
+    end
+  end
+
+  def test_persistently_unbuildable_recovery_row_does_not_self_heal_falsely
+    # A previously-alerted recovery row that LATER deterministically fails to
+    # build is still broken — present, not gone. It must not earn a false
+    # "✅ Recovered": current_notifications records its fingerprint as present-
+    # this-tick so process_recoveries skips it even past the grace window.
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      stuck = recovery_row(slug: "stuck-task-260525-abcd")
+
+      # Tick 1: the row builds and alerts normally, seeding the stored entry.
+      d.process_rows([ stuck ])
+      assert_equal 1, telegram.messages.size
+
+      # The SAME row (identical fingerprint) now deterministically fails to
+      # build while still present in the status output.
+      original = Hive::Bot::NotificationBuilders.method(:build)
+      Hive::Bot::NotificationBuilders.define_singleton_method(:build) do |candidate, **|
+        raise KeyError, "malformed" if candidate.slug == "stuck-task-260525-abcd"
+
+        original.call(candidate)
+      end
+      begin
+        d.process_rows([ stuck ]) # present-but-unbuilt → absence must NOT start
+        @clock += 1_000           # well past recovery_grace_sec
+        d.process_rows([ stuck ]) # still present-but-unbuilt
+      ensure
+        Hive::Bot::NotificationBuilders.singleton_class.send(:remove_method, :build)
+        Hive::Bot::NotificationBuilders.define_singleton_method(:build, &original)
+      end
+
+      refute(telegram.messages.any? { |m| m[:text].to_s.include?("Recovered") },
+             "a still-broken row that fails to build must not get a false Recovered")
+      refute_nil Hive::Bot::AlertStore.new(path: path).entry(
+        Hive::Bot::NotificationBuilders.fingerprint(stuck)
+      ), "the alert entry must remain while the row is still present-but-unbuildable"
+      assert(logger.events.any? { |name, attrs| name == :notification_build_failed && attrs[:slug] == "stuck-task-260525-abcd" },
+             "the unbuildable row must still be logged each tick")
     end
   end
 

@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/idea_draft_store"
 require "hive/bot/status_watcher"
+require "hive/markers"
 
 # Pins the descriptors emitted by CallbackHandlers for callbacks that
 # either reply in-process or fan out to `hive` subprocess invocations.
@@ -10,7 +11,7 @@ require "hive/bot/status_watcher"
 # silently.
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                      :project, :slug, :question_n, :answer_text, :mode,
+                      :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
                       :attachment, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
@@ -18,6 +19,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       events << { name: name, payload: payload }
     end
   end
+  StatusRow = Hive::Bot::StatusWatcher::Row
 
   def setup
     @pending_ideas = {}
@@ -34,6 +36,38 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   def update(callback_data)
     Struct.new(:callback_data).new(callback_data)
+  end
+
+  def with_plan_row(marker_name)
+    Dir.mktmpdir("bot-plan-approve") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, marker_name)
+      row = StatusRow.new(
+        project: "hive",
+        slug: "plan-task-260624-abcd",
+        stage: "3-plan",
+        workflow: "coding",
+        marker: marker_name.to_s,
+        attrs: {},
+        state_file: state_file,
+        action: "needs_input",
+        action_label: "Needs input",
+        suggested_command: "hive plan plan-task-260624-abcd --from 3-plan --project hive"
+      )
+      yield row, state_file
+    end
+  end
+
+  def handlers_with_rows(rows)
+    Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(project) { @last_projects << project },
+      conversation_store: nil,
+      result_class: Result,
+      logger: @logger,
+      status_snapshot_provider: -> { rows }
+    )
   end
 
   def handlers_with_snapshot(snapshot)
@@ -319,6 +353,242 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       result.command_argv,
       "generic run button must use `hive run --stage`, never `hive run --from`"
     )
+  end
+
+  def test_rerun_callback_dispatches_develop_against_current_execute_stage
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:develop"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal(
+      [ "hive", "develop", "slug-260624-abcd", "--from", "4-execute", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_rerun_callback_dispatches_finalize_against_current_finalize_stage
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:8-finalize:finalize"))
+
+    assert_equal(
+      [ "hive", "finalize", "slug-260624-abcd", "--from", "8-finalize", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_rerun_callback_dispatches_generic_run_with_stage_filter
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:1-intake:run"))
+
+    assert_equal(
+      [ "hive", "run", "slug-260624-abcd", "--stage", "1-intake", "--project", "hive", "--json" ],
+      result.command_argv
+    )
+  end
+
+  def test_approve_plan_callback_flips_waiting_marker_and_dispatches_develop
+    with_plan_row(:waiting) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-abcd", "--from", "3-plan",
+          "--project", "hive", "--json" ],
+        result.command_argv
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_callback_dispatches_develop_for_already_advanced_row
+    # Realistic race: between rendering the plan-waiting Approve button and the
+    # operator tapping it, the plan advanced to :complete (daemon auto-approve
+    # or a manual advance). TaskAction then reclassifies the row as
+    # ready_to_develop, so its suggested_command is now `hive develop ...`.
+    # The stale Approve tap must dispatch that valid develop, not fall to
+    # handle's generic "Bot got confused" rescue. (The previous fixture used an
+    # impossible :complete row carrying a `hive plan` command.)
+    Dir.mktmpdir("bot-plan-approve-advanced") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :complete)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+        marker: "complete", attrs: {}, state_file: state_file,
+        action: "ready_to_develop", action_label: "Ready to develop",
+        suggested_command: "hive develop plan-task-260624-abcd --from 3-plan --project hive"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-abcd", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_keeps_waiting_marker_and_replies_corrupt_on_malformed_command
+    # validate-before-flip invariant: a row whose suggested_command is neither
+    # `hive plan` nor `hive develop` (corrupt state) is rejected by
+    # rewrite_to_develop BEFORE the marker flip, so the plan marker must stay
+    # :waiting for inspection and the operator gets an actionable corrupt-state
+    # reply — not the generic "Bot got confused".
+    Dir.mktmpdir("bot-plan-approve-corrupt") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input",
+        suggested_command: "hive review plan-task-260624-abcd --from 3-plan --project hive"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :reply, result.action
+      assert_match(/plan\.md may be corrupt/, result.text)
+      assert_equal :waiting, Hive::Markers.current(state_file).name,
+                   "command validation must happen before the marker flip"
+      assert(@logger.events.any? { |e| e[:name] == :callback_plan_state_corrupt },
+             "a corrupt-state approval must be logged for an audit trail")
+    end
+  end
+
+  def test_approve_plan_callback_refuses_non_approvable_marker_without_crashing
+    with_plan_row(:error) do |row, state_file|
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+      )
+
+      assert_equal :reply, result.action
+      assert_match(/no longer waiting/, result.text)
+      assert_equal :error, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_replies_when_row_not_in_snapshot
+    # The common stale-button tap: the snapshot has advanced (or the task was
+    # archived) so the row the callback names is gone. Must steer back to
+    # /queue rather than crash or dispatch a phantom develop. @handlers uses the
+    # default empty status_snapshot_provider, so this also exercises that path.
+    result = @handlers.handle(
+      :callback_approve_plan,
+      update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Task status changed - reopen \/queue\./, result.text)
+  end
+
+  def test_approve_plan_appends_project_flag_when_suggested_command_omits_it
+    Dir.mktmpdir("bot-plan-approve-noproj") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-noproj", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input",
+        suggested_command: "hive plan plan-task-260624-noproj --from 3-plan"
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-noproj:3-plan")
+      )
+
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-noproj", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv,
+        "a suggested_command missing --project must get it appended via ensure_flag!"
+      )
+    end
+  end
+
+  def test_approve_plan_replies_when_state_file_unavailable
+    row = StatusRow.new(
+      project: "hive", slug: "plan-task-260624-abcd", stage: "3-plan", workflow: "coding",
+      marker: "waiting", attrs: {}, state_file: "",
+      action: "needs_input", action_label: "Needs input",
+      suggested_command: "hive plan plan-task-260624-abcd --from 3-plan --project hive"
+    )
+
+    result = handlers_with_rows([ row ]).handle(
+      :callback_approve_plan,
+      update("approve_plan:hive:plan-task-260624-abcd:3-plan")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Plan state is unavailable - reopen \/queue\./, result.text)
+  end
+
+  def test_approve_plan_synthesizes_develop_command_when_suggested_command_blank
+    Dir.mktmpdir("bot-plan-approve-blank") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n")
+      Hive::Markers.set(state_file, :waiting)
+      row = StatusRow.new(
+        project: "hive", slug: "plan-task-260624-wxyz", stage: "3-plan", workflow: "coding",
+        marker: "waiting", attrs: {}, state_file: state_file,
+        action: "needs_input", action_label: "Needs input", suggested_command: nil
+      )
+
+      result = handlers_with_rows([ row ]).handle(
+        :callback_approve_plan,
+        update("approve_plan:hive:plan-task-260624-wxyz:3-plan")
+      )
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal(
+        [ "hive", "develop", "plan-task-260624-wxyz", "--from", "3-plan", "--project", "hive", "--json" ],
+        result.command_argv,
+        "a blank suggested_command must synthesize `hive plan <slug> --from <stage>`, rewritten to develop"
+      )
+      assert_equal :complete, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_approve_plan_replies_when_marker_write_fails
+    # A read-only / full state dir makes the marker write (PlanApproval.prepare
+    # → Markers.set) raise a SystemCallError. Without the rescue it would escape
+    # to the poll loop's generic rescue and the operator would see the acked
+    # spinner clear then silence; instead reply with an actionable next step.
+    with_plan_row(:waiting) do |row, _state_file|
+      handlers = handlers_with_rows([ row ])
+      # Singleton-override prepare to raise a SystemCallError (minitest/mock
+      # isn't bundled); restore it afterwards.
+      original = Hive::Daemon::PlanApproval.method(:prepare)
+      Hive::Daemon::PlanApproval.define_singleton_method(:prepare) { |*| raise Errno::EACCES, "plan.md" }
+      result = begin
+        handlers.handle(:callback_approve_plan, update("approve_plan:hive:plan-task-260624-abcd:3-plan"))
+      ensure
+        Hive::Daemon::PlanApproval.singleton_class.send(:remove_method, :prepare)
+        Hive::Daemon::PlanApproval.define_singleton_method(:prepare, &original)
+      end
+
+      assert_equal :reply, result.action
+      assert_match(/Couldn't record the approval/, result.text)
+      assert(@logger.events.any? { |e| e[:name] == :callback_marker_write_failed },
+             "a failed marker write must be logged for an audit trail")
+    end
+  end
+
+  def test_unknown_rerun_verb_uses_confused_fallback
+    result = @handlers.handle(:callback_rerun, update("rerun:hive:slug-260624-abcd:4-execute:doctor"))
+
+    assert_equal :reply, result.action
+    assert_match(/Bot got confused/, result.text)
   end
 
   def test_show_details_replies_with_rendered_row_summary

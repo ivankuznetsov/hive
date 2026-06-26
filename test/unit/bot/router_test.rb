@@ -450,6 +450,8 @@ class HiveBotRouterTest < Minitest::Test
   def test_classifies_all_callback_prefixes
     cases = {
       "reject:anything" => :callback_reject,
+      "approve_plan:hive:slug-260514-abcd:3-plan" => :callback_approve_plan,
+      "rerun:hive:slug-260514-abcd:4-execute:develop" => :callback_rerun,
       "autofix:hive:slug-260514-abcd:6-review:REVIEW_ERROR" => :callback_autofix,
       "open_laptop:hive:slug-260514-abcd" => :callback_open_laptop,
       "details:hive:slug-260514-abcd" => :callback_show_details,
@@ -474,6 +476,20 @@ class HiveBotRouterTest < Minitest::Test
     cases.each do |callback_data, intent|
       assert_equal intent, @router.classify(update(callback_data: callback_data)), callback_data
     end
+  end
+
+  def test_unresolved_compacted_callback_classifies_as_expired_button
+    # A `#`-prefixed compacted token whose registry entry is gone (bot
+    # restart, or TTL/size eviction) survives resolve_callback unchanged and
+    # must route to the actionable "button expired" reply rather than the
+    # generic "I did not understand that".
+    expired = "#approve_plan:deadbeefdeadbeef"
+    assert_equal :callback_expired, @router.classify(update(callback_data: expired))
+
+    result = @router.handle(update(callback_data: expired))
+    assert_equal :reply, result.action
+    assert_match(/button expired/i, result.text)
+    assert_match(%r{/queue}, result.text)
   end
 
   def test_slash_approve_dispatches_approve_command

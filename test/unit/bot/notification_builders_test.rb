@@ -236,7 +236,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "brainstorm-waiting keyboard is deterministic Q-by-Q only — no Codex draft, no laptop button"
   end
 
-  def test_generic_waiting_row_uses_neutral_details_notification
+  def test_generic_waiting_row_uses_neutral_run_notification
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "waiting", stage: "2-gather", workflow: "dispatch")
     )
@@ -244,19 +244,13 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_match(/Needs input: waiting/, notification.text)
     refute_match(/Brainstorm questions/, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Show details" ], labels
+    assert_equal [ "Run" ], labels
+    assert_equal "rerun:hive:slug-260514-abcd:2-gather:run",
+                 notification.keyboard.flatten.first[:callback_data]
   end
 
-  # Characterization (A7): a coding `waiting` marker only ever appears at
-  # 2-brainstorm / 3-plan in practice (supervisor.rb / notification_dispatcher),
-  # so the U6 routing migration is inert for coding. Pin that a coding `waiting`
-  # at ANY other stage (e.g. 5-open-pr, 8-finalize) falls through to the neutral
-  # "Needs input" / "Show details" default rather than the brainstorm "Answer in
-  # chat" affordance — preserving the byte-identical-coding mandate. Restoring
-  # the old unconditional brainstorm routing would be wrong: it would mislabel a
-  # generic row as "Brainstorm questions".
-  def test_coding_waiting_outside_brainstorm_and_plan_uses_neutral_default
-    %w[5-open-pr 8-finalize].each do |stage|
+  def test_coding_waiting_outside_brainstorm_and_plan_gets_working_button
+    %w[5-open-pr].each do |stage|
       notification = Hive::Bot::NotificationBuilders.build(
         row(action: "needs_input", marker: "waiting", stage: stage, workflow: "coding")
       )
@@ -267,19 +261,72 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       refute_match(/Answer in chat/, notification.text,
                    "coding waiting at #{stage} must not offer the brainstorm /answer affordance")
       labels = notification.keyboard.flatten.map { |button| button[:text] }
-      assert_equal [ "Show details" ], labels
+      assert_equal [ "Run" ], labels
     end
   end
 
-  def test_generic_needs_input_marker_builds_show_details_only_keyboard
+  def test_generic_needs_input_marker_builds_run_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" })
     )
 
     assert_match(/Needs input: agent_waiting reason=operator/, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Show details" ], labels,
-                 "the only useful action for an unknown waiting marker is Show details"
+    assert_equal [ "Run" ], labels
+    assert_equal "rerun:hive:slug-260514-abcd:2-brainstorm:run",
+                 notification.keyboard.flatten.first[:callback_data]
+  end
+
+  def test_plan_waiting_builds_approve_and_details_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "waiting", stage: "3-plan")
+    )
+
+    assert_match(/Plan draft is ready/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Approve", "Show details" ], labels
+    callbacks = notification.keyboard.flatten.map { |button| button[:callback_data] }
+    assert_equal [
+      "approve_plan:hive:slug-260514-abcd:3-plan",
+      "details:hive:slug-260514-abcd:3-plan"
+    ], callbacks
+  end
+
+  def test_execute_waiting_builds_rerun_and_details_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "execute_waiting", stage: "4-execute")
+    )
+
+    assert_match(/Execute paused — needs your input/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Re-run", "Show details" ], labels
+    callbacks = notification.keyboard.flatten.map { |button| button[:callback_data] }
+    assert_equal [
+      "rerun:hive:slug-260514-abcd:4-execute:develop",
+      "details:hive:slug-260514-abcd:4-execute"
+    ], callbacks
+  end
+
+  def test_finalize_waiting_builds_run_and_details_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "waiting", stage: "8-finalize")
+    )
+
+    assert_match(/Finalize paused — ready to run/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Run", "Show details" ], labels
+    callbacks = notification.keyboard.flatten.map { |button| button[:callback_data] }
+    assert_equal [
+      "rerun:hive:slug-260514-abcd:8-finalize:finalize",
+      "details:hive:slug-260514-abcd:8-finalize"
+    ], callbacks
+  end
+
+  def test_none_and_complete_needs_input_rows_are_suppressed
+    %w[none complete].each do |marker|
+      assert_nil Hive::Bot::NotificationBuilders.build(row(action: "needs_input", marker: marker)),
+                 "marker=#{marker} needs_input rows must not push a notification"
+    end
   end
 
   def test_details_reply_for_default_needs_input_has_summary_and_laptop_hint
@@ -698,6 +745,12 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes labels, "Accept all"
     assert_includes labels, "Reject all"
     assert_includes labels, "Show details"
+
+    # Pin the un-flattened row structure so a regression to one-per-row or
+    # all-on-one-row fails: Accept all / Reject all share the top row, Show
+    # details sits on its own row beneath them.
+    row_labels = notification.keyboard.map { |keyboard_row| keyboard_row.map { |button| button[:text] } }
+    assert_equal [ [ "Accept all", "Reject all" ], [ "Show details" ] ], row_labels
   end
 
   def test_recovery_match_attr_review_stale_uses_pass_reason

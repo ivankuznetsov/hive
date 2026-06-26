@@ -244,6 +244,22 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_reports_missing_real_gh_without_backtrace
+    with_tmp_dir do |dir|
+      missing_gh = File.join(dir, "missing-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => missing_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "gh-skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+
+      assert_equal 127, status.exitstatus, err
+      assert_includes err, "hive-babysitter dry-run: cannot exec real gh at #{missing_gh.inspect}:"
+      refute_includes err, "hive-babysitter-stub-gh:"
+    end
+  end
+
   def test_with_env_isolates_gh_config_against_command_local_home
     with_tmp_dir do |dir|
       recording_binary(dir, "git")

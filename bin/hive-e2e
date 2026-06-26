@@ -158,7 +158,8 @@ module Hive
             exit_code: BinaryExit::CONFIG
           )
         end
-        unless File.lstat(script).file? && File.executable?(script)
+        unless artifact_path_without_symlinks?(run_dir, scenario_root, scenario_dir, script) &&
+               File.lstat(script).file? && File.executable?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} repro.sh is not executable (#{script})",
             error_kind: "unusable_repro",
@@ -213,6 +214,12 @@ module Hive
 
       def tui_scenario?(scenario)
         scenario.steps.any? { |step| %w[tui_keys tui_expect wait_subprocess].include?(step.kind) }
+      end
+
+      def artifact_path_without_symlinks?(*paths)
+        paths.none? { |path| File.lstat(path).symlink? }
+      rescue Errno::ENOENT
+        false
       end
 
       def exit_with_error(error, error_kind:, exit_code:)

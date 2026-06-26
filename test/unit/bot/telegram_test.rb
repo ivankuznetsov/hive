@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "telegram/bot"
+require "hive/bot/poll_health"
 require "hive/bot/telegram"
 
 class HiveBotTelegramTest < Minitest::Test
@@ -65,8 +66,10 @@ class HiveBotTelegramTest < Minitest::Test
     @logger ||= StubLogger.new
   end
 
-  def telegram(api)
-    Hive::Bot::Telegram.new(token: "token", logger: logger, client: FakeClient.new(api))
+  def telegram(api, poll_health: nil)
+    kwargs = { token: "token", logger: logger, client: FakeClient.new(api) }
+    kwargs[:poll_health] = poll_health if poll_health
+    Hive::Bot::Telegram.new(**kwargs)
   end
 
   def telegram_with_http(api, http)
@@ -76,6 +79,14 @@ class HiveBotTelegramTest < Minitest::Test
 
   def fixture(name)
     JSON.parse(File.read(File.expand_path("../../fixtures/telegram_fixtures/#{name}", __dir__)))
+  end
+
+  def response_error
+    response = Struct.new(:body, :status).new(
+      JSON.generate(error_code: 429, description: "Too Many Requests"),
+      429
+    )
+    ::Telegram::Bot::Exceptions::ResponseError.new(response: response)
   end
 
   def test_poll_updates_parses_message_and_callback_records
@@ -102,6 +113,21 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal [], updates
     assert_equal :poll_failure, logger.events.first.first
     assert_match(/ConnectionFailed/, logger.events.first.last[:error_class])
+    assert_equal :debug, logger.events.first.last[:level]
+    assert_equal :noise, logger.events.first.last[:category]
+  end
+
+  def test_poll_updates_logs_net_read_timeout_as_debug_noise
+    api = FakeApi.new
+    api.raise_on_get_updates = Net::ReadTimeout.new("slow")
+
+    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal [], updates
+    assert_equal :poll_failure, logger.events.first.first
+    assert_match(/Net::ReadTimeout/, logger.events.first.last[:error_class])
+    assert_equal :debug, logger.events.first.last[:level]
+    assert_equal :noise, logger.events.first.last[:category]
   end
 
   def test_poll_updates_skips_malformed_update
@@ -180,6 +206,140 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal :poll_failure, logger.events.first.first
     assert_equal "RuntimeError", logger.events.first.last[:error_class]
     assert_equal "boom", logger.events.first.last[:message]
+    refute logger.events.first.last.key?(:level)
+    refute logger.events.first.last.key?(:category)
+  end
+
+  def test_poll_updates_logs_telegram_response_error_as_warning_default
+    api = FakeApi.new
+    api.raise_on_get_updates = response_error
+
+    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal [], updates
+    assert_equal :poll_failure, logger.events.first.first
+    assert_equal "Telegram::Bot::Exceptions::ResponseError", logger.events.first.last[:error_class]
+    assert_match(/error_code/, logger.events.first.last[:message])
+    refute logger.events.first.last.key?(:level), "real logger map supplies the warn level"
+    refute logger.events.first.last.key?(:category)
+  end
+
+  def test_poll_updates_emits_poll_unhealthy_after_sustained_failures
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+    bot = telegram(api, poll_health: health)
+
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 1, unhealthy_events.size
+    attrs = unhealthy_events.first.last
+    assert_equal :warn, attrs[:level]
+    assert_equal 2, attrs[:consecutive_failures]
+    # 0 because the injected clock is frozen across all three polls — this
+    # escalation is driven by the consecutive-failure threshold, not silence,
+    # so the elapsed-silence value is incidental here (the meaningful
+    # seconds_since_success == 11 assertion lives in the silence test below).
+    assert_equal 0, attrs[:seconds_since_success]
+    assert_equal "consecutive", attrs[:reason]
+  end
+
+  def test_poll_updates_emits_poll_unhealthy_after_sustained_generic_errors
+    # The generic `rescue StandardError` arm also drives escalation; a
+    # copy-paste regression dropping `emit_poll_unhealthy_if_needed` from
+    # only that arm would otherwise go unnoticed.
+    api = FakeApi.new
+    api.raise_on_get_updates = RuntimeError.new("boom")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+    bot = telegram(api, poll_health: health)
+
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 1, unhealthy_events.size
+    attrs = unhealthy_events.first.last
+    assert_equal :warn, attrs[:level]
+    assert_equal 2, attrs[:consecutive_failures]
+    assert_equal "consecutive", attrs[:reason]
+  end
+
+  def test_poll_updates_re_arms_escalation_after_a_successful_poll
+    # Cross-layer wiring for the re-arm seam: a successful get_updates calls
+    # @poll_health.record_success, which clears the unhealthy latch so a SECOND
+    # sustained outage escalates again. Without record_success in poll_updates,
+    # the first episode would latch poll_unhealthy off forever.
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+    bot = telegram(api, poll_health: health)
+
+    # First outage: second failure escalates.
+    2.times { bot.poll_updates(timeout: 25, since_update_id: nil) }
+
+    # A successful poll re-arms escalation.
+    api.raise_on_get_updates = nil
+    bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    # Second outage: must escalate again, not stay latched off.
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    2.times { bot.poll_updates(timeout: 25, since_update_id: nil) }
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 2, unhealthy_events.size,
+                 "a successful poll must re-arm escalation so a second outage escalates again"
+  end
+
+  def test_poll_updates_emits_poll_unhealthy_with_silence_reason
+    # Silence escalation (no successful poll for max_silence_sec) is the other
+    # PollHealth reason; pin its Telegram-layer emission with an injected clock.
+    api = FakeApi.new
+    api.raise_on_get_updates = Faraday::TimeoutError.new("slow")
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 99, max_silence_sec: 10)
+    bot = telegram(api, poll_health: health)
+
+    now += 11
+    assert_equal [], bot.poll_updates(timeout: 25, since_update_id: nil)
+
+    unhealthy_events = logger.events.select { |name, _attrs| name == :poll_unhealthy }
+    assert_equal 1, unhealthy_events.size
+    attrs = unhealthy_events.first.last
+    assert_equal "silence", attrs[:reason]
+    assert_equal 1, attrs[:consecutive_failures]
+    assert_equal 11, attrs[:seconds_since_success]
+  end
+
+  def test_build_update_parse_failures_never_escalate_poll_health
+    # A per-update parse failure happens AFTER a successful get_updates fetch,
+    # so it must NOT count toward poll-health (see the deliberate comment in
+    # Telegram#build_update's rescue). Inject a low threshold + frozen clock and
+    # feed several malformed updates in ONE poll: if a refactor ever routed the
+    # build_update rescue through emit_poll_unhealthy_if_needed, the 2nd failure
+    # would trip max_consecutive and page. Pin that it never does while
+    # poll_failure is still logged per malformed update.
+    exploding = Class.new do
+      def update_id
+        raise RuntimeError, "cannot decode"
+      end
+    end
+    api = FakeApi.new(updates: [ exploding.new, exploding.new, exploding.new ])
+    now = Time.utc(2026, 6, 24, 12, 0, 0)
+    health = Hive::Bot::PollHealth.new(now: -> { now }, max_consecutive: 2, max_silence_sec: 60)
+
+    assert_equal [], telegram(api, poll_health: health).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal %i[poll_failure poll_failure poll_failure], logger.events.map(&:first),
+                 "each malformed update must log poll_failure"
+    assert_empty logger.events.select { |name, _attrs| name == :poll_unhealthy },
+                 "build_update parse failures must never escalate poll-health, even past max_consecutive"
   end
 
   def test_poll_updates_accepts_object_shaped_updates

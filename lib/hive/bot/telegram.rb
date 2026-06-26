@@ -1,11 +1,18 @@
 require "json"
+require "net/http"
 require "telegram/bot"
 require "hive/bot/logger"
+require "hive/bot/poll_health"
 
 module Hive
   module Bot
     class Telegram
       MAX_MESSAGE_CHARS = 4096
+      BENIGN_POLL_ERRORS = [
+        Faraday::TimeoutError,
+        Faraday::ConnectionFailed,
+        Net::ReadTimeout
+      ].freeze
 
       Update = Data.define(:update_id, :chat_id, :from_id, :message_id, :text,
                            :callback_data, :callback_query_id, :entities, :reply_to_text,
@@ -54,13 +61,17 @@ module Hive
 
       attr_reader :client
 
+      # `now:` only seeds the clock of the default `poll_health:` collaborator;
+      # Telegram never stores or reads it directly. Inject a fully-built
+      # `poll_health:` to govern health tracking (and its clock) explicitly.
       def initialize(token:, logger:, client: nil, base_url: "https://api.telegram.org",
-                     http_client: nil)
+                     http_client: nil, now: -> { Time.now }, poll_health: PollHealth.new(now: now))
         @token = token
         @base_url = base_url.to_s.delete_suffix("/")
         @http_client = http_client
         @logger = logger
         @client = client || ::Telegram::Bot::Client.new(token)
+        @poll_health = poll_health
         @build_update_error_classes_seen = {}
       end
 
@@ -68,13 +79,16 @@ module Hive
         params = { timeout: timeout }
         params[:offset] = since_update_id if since_update_id
         raw_updates = client.api.get_updates(params)
+        @poll_health.record_success
         Array(raw_updates).filter_map { |raw| build_update(raw) }
-      rescue Faraday::TimeoutError, Faraday::ConnectionFailed,
-             ::Telegram::Bot::Exceptions::ResponseError => e
-        @logger.event(:poll_failure, error_class: e.class.name, message: e.message)
+      rescue *BENIGN_POLL_ERRORS => e
+        @logger.event(:poll_failure, level: :debug, category: Logger::CATEGORY_NOISE,
+                                     error_class: e.class.name, message: e.message)
+        emit_poll_unhealthy_if_needed
         []
       rescue StandardError => e
         @logger.event(:poll_failure, error_class: e.class.name, message: e.message)
+        emit_poll_unhealthy_if_needed
         []
       end
 
@@ -182,12 +196,26 @@ module Hive
           media_group_id: callback ? nil : value(message, :media_group_id)
         )
       rescue StandardError => e
+        # Intentionally does NOT call emit_poll_unhealthy_if_needed (unlike the
+        # two poll_updates rescues): a per-update parse failure occurs AFTER a
+        # successful get_updates fetch, so it must not count toward poll-health
+        # or trip the outage escalator.
         already_seen = @build_update_error_classes_seen.key?(e.class)
         @build_update_error_classes_seen[e.class] = true
         attrs = { error_class: e.class.name, message: e.message }
         attrs[:backtrace] = Array(e.backtrace).first(10).join("\n") unless already_seen
         @logger.event(:poll_failure, **attrs)
         nil
+      end
+
+      def emit_poll_unhealthy_if_needed
+        result = @poll_health.record_failure
+        return unless result.escalate?
+
+        @logger.event(:poll_unhealthy, level: :warn,
+                                       consecutive_failures: result.consecutive_failures,
+                                       seconds_since_success: result.seconds_since_success,
+                                       reason: result.reason.to_s)
       end
 
       def value(object, key)

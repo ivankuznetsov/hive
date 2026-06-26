@@ -24,6 +24,8 @@ module Hive
         slash_help
         slash_start
         callback_approve
+        callback_approve_plan
+        callback_rerun
         callback_reject
         callback_autofix
         callback_clear_and_retry
@@ -41,6 +43,7 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        callback_expired
         idea_voice
         idea_voice_during_draft
         idea_voice_edit_text
@@ -53,7 +56,7 @@ module Hive
       ].freeze
 
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                          :project, :slug, :question_n, :answer_text, :mode,
+                          :project, :slug, :stage, :question_n, :answer_text, :mode,
                           :intent, :alert_reset, :clear_keyboard, :format,
                           :attachment, keyword_init: true)
 
@@ -91,7 +94,8 @@ module Hive
           idea_attachment_policy: Hive::Bot::IdeaAttachmentPolicy,
           max_attachment_bytes: bot_config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024),
           max_attachment_count: bot_config.fetch("idea_attachment_max_count", 10),
-          status_snapshot_provider: status_snapshot_provider
+          status_snapshot_provider: status_snapshot_provider,
+          logger: @logger
         )
         @callback_handlers = Handlers::CallbackHandlers.new(
           pending_ideas: @pending_ideas,
@@ -100,8 +104,10 @@ module Hive
           result_class: Result,
           idea_draft_store: @idea_draft_store,
           projects_provider: @projects_provider,
+          status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
-          logger: @logger
+          logger: @logger,
+          status_snapshot_provider: status_snapshot_provider
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
           conversation_store: @conversation_store,
@@ -211,6 +217,8 @@ module Hive
       def callback_intent(data)
         case data
         when /\Aapprove:/ then :callback_approve
+        when /\Aapprove_plan:/ then :callback_approve_plan
+        when /\Arerun:/ then :callback_rerun
         when /\Areject:/ then :callback_reject
         when /\Aautofix:/ then :callback_autofix
         when /\Aclear_retry:/ then :callback_clear_and_retry
@@ -228,6 +236,13 @@ module Hive
         when /\Afindings:accept_all:/ then :callback_findings_accept_all
         when /\Afindings:reject_all:/ then :callback_findings_reject_all
         when /\Aidea_project_new:/ then :callback_idea_project_new
+        # A `#`-prefixed token that survived resolve_callback is a compacted
+        # callback whose registry entry is gone (bot restart, or TTL/size
+        # eviction) — the long approve_plan:/rerun: callbacks on this project's
+        # slugs routinely exceed Telegram's 64-byte cap and rely on that
+        # registry. Tell the operator the button expired instead of the
+        # generic "I did not understand that".
+        when /\A#/ then :callback_expired
         else :unknown
         end
       end
@@ -293,6 +308,8 @@ module Hive
         when :idea_media then @slash_handlers.media(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
+        when :callback_expired
+          Result.new(action: :reply, text: "That button expired — reopen /queue to get a fresh one.")
         when :unknown then Result.new(action: :reply, text: "I did not understand that. Send /help for commands.")
         else @callback_handlers.handle(intent, update)
         end
@@ -300,7 +317,7 @@ module Hive
 
       def answer_voice(update)
         context = answer_context(update)
-        return Result.new(action: :reply, text: "Send /answer <slug> before sending a voice answer.") unless context
+        return Result.new(action: :reply, text: "Send /answer <id|slug> before sending a voice answer.") unless context
 
         result = @slash_handlers.voice(update)
         return result unless result.action == :transcribe_voice

@@ -457,4 +457,10 @@ end
 config_home = Dir.mktmpdir("hive-babysitter-gh")
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
-exec(real, *argv)
+
+begin
+  exec real, *argv
+rescue SystemCallError => e
+  warn "hive-babysitter dry-run: cannot exec real gh at #{real.inspect}: #{e.message}"
+  exit 127
+end

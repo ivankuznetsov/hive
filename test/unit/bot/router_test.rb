@@ -373,6 +373,17 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil result.question_n
   end
 
+  def test_answer_voice_without_context_hints_id_or_slug
+    # The classifier only routes :answer_voice when answer_context is present,
+    # so the defensive no-context branch is unreachable via classify. Drive it
+    # directly to pin the operator hint copy: a silent revert to the old
+    # `<slug>`-only phrasing must fail here.
+    result = @router.send(:answer_voice, update(voice: { file_id: "voice", file_size: 1 }))
+
+    assert_equal :reply, result.action
+    assert_match(%r{/answer <id\|slug>}, result.text)
+  end
+
   def test_slash_answer_returns_start_answer_action_not_immediate_start
     result = @router.handle(update(text: "/answer slug-260514-abcd"))
 
@@ -493,7 +504,7 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_includes result.text, "/status"
-    assert_includes result.text, "/approve <slug>"
+    assert_includes result.text, "/approve <id|slug>"
   end
 
   def test_legacy_callback_update_without_with_still_dispatches

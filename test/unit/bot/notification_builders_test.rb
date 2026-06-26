@@ -46,6 +46,17 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
   end
 
+  def assert_live_agent_skip_logged(logger, marker:, action:, slug: "slug-260514-abcd", stage: "4-execute")
+    assert_equal 1, logger.events.size
+    event, attrs = logger.events.first
+    assert_equal :notification_skipped_live_agent, event
+    assert_equal "hive", attrs[:project]
+    assert_equal slug, attrs[:slug]
+    assert_equal stage, attrs[:stage]
+    assert_equal marker, attrs[:marker]
+    assert_equal action, attrs[:action]
+  end
+
   def test_legacy_stage_dirs_notification_renders_project_count_dirs_and_command
     notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs)
 
@@ -315,6 +326,73 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     end
   end
 
+  def test_agent_running_error_marker_is_suppressed_and_logged
+    logger = StubLogger.new
+    r = row(action: "agent_running", marker: "error", stage: "4-execute")
+
+    assert_nil Hive::Bot::NotificationBuilders.build(r, logger: logger)
+    assert_live_agent_skip_logged(logger, marker: "error", action: "agent_running")
+  end
+
+  def test_error_action_error_marker_still_builds_recovery_notification
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "error", marker: "error", stage: "4-execute")
+    )
+
+    refute_nil notification
+    assert_includes notification.text, "⚠ Execute stuck"
+    assert_includes notification.text, "Tap Show details to see what needs manual intervention."
+  end
+
+  def test_recover_actions_still_build_recovery_notifications
+    recover_execute = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_execute", marker: "execute_stale", stage: "4-execute")
+    )
+    recover_review = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error", stage: "6-review")
+    )
+
+    assert_includes recover_execute.text, "⚠ Execute stuck"
+    assert_includes recover_review.text, "⚠ Review stuck"
+  end
+
+  def test_agent_running_suppresses_all_stale_recovery_markers
+    logger = StubLogger.new
+    markers = %w[review_stale execute_stale review_error review_ci_stale]
+
+    markers.each do |marker|
+      assert_nil Hive::Bot::NotificationBuilders.build(
+        row(action: "agent_running", marker: marker, stage: "6-review"),
+        logger: logger
+      )
+    end
+
+    assert_equal markers, logger.events.map { |_name, attrs| attrs[:marker] }
+    assert(logger.events.all? { |name, attrs| name == :notification_skipped_live_agent && attrs[:action] == "agent_running" })
+  end
+
+  def test_archived_error_marker_is_suppressed
+    logger = StubLogger.new
+    assert_nil Hive::Bot::NotificationBuilders.build(
+      row(action: "archived", marker: "error", stage: "9-done"), logger: logger
+    )
+    # The archived contradiction must stay diagnosable: the skip log fires with
+    # the row's own action ("archived"), not a hardcoded "agent_running". A
+    # regression that narrowed the log gate to agent_running, or hardcoded the
+    # action, would drop this — line coverage alone (shared with the
+    # agent_running gate) would not catch it.
+    assert_live_agent_skip_logged(logger, marker: "error", action: "archived", stage: "9-done")
+  end
+
+  def test_bug_9281_agent_running_error_fixture_is_suppressed_and_logged_once
+    logger = StubLogger.new
+    slug = "bug-agentlimit-false-positives-on-260623-a4df"
+    r = row(action: "agent_running", marker: "error", slug: slug, stage: "4-execute")
+
+    assert_nil Hive::Bot::NotificationBuilders.build(r, logger: logger)
+    assert_live_agent_skip_logged(logger, marker: "error", action: "agent_running", slug: slug)
+  end
+
   def test_compacted_callback_round_trips
     long_slug = "slug-" + ("a" * 80)
     notification = Hive::Bot::NotificationBuilders.build(
@@ -541,5 +619,17 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     assert_equal Hive::Bot::NotificationBuilders.fingerprint(without_pr),
                  Hive::Bot::NotificationBuilders.fingerprint(with_pr)
+  end
+
+  class StubLogger
+    attr_reader :events
+
+    def initialize
+      @events = []
+    end
+
+    def event(name, **attrs)
+      @events << [ name, attrs ]
+    end
   end
 end

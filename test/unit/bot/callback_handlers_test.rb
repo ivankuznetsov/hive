@@ -90,7 +90,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     %i[callback_path_a_yes callback_path_a_just_type].each do |intent|
       result = @handlers.handle(intent, update("anything:hive:slug:1"))
       assert_equal :reply, result.action
-      assert_match(/Codex draft flow was removed/, result.text)
+      assert_match(%r{Codex draft flow was removed.*/answer <id\|slug>}, result.text)
     end
   end
 

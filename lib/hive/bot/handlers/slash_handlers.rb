@@ -230,15 +230,21 @@ module Hive
         public
 
         def answer(update, _conversation_store)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /answer <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /answer <id|slug>.") if target.empty?
+
+          slug, error = resolve_numeric_target_slug(target)
+          return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(action: :start_answer, slug: slug, mode: :path_b)
         end
 
         def approve(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /approve <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /approve <id|slug>.") if target.empty?
+
+          slug, error = resolve_numeric_target_slug(target)
+          return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "approve", slug, "--json" ],
@@ -259,8 +265,8 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea [text], /answer <slug>, " \
-                  "/approve <slug>, /autofix <slug>, /details <slug>, /done, /help"
+            text: "Commands: /status [project], /queue, /idea [text], /answer <id|slug>, " \
+                  "/approve <id|slug>, /autofix <id|slug>, /details <id|slug>, /done, /help"
           )
         end
 
@@ -278,10 +284,10 @@ module Hive
         end
 
         def autofix(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /autofix <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /autofix <id|slug>.") if target.empty?
 
-          row, error = resolve_status_row(slug)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
           # Gate on retryable_recovery? exactly as the inline 🔧 Autofix button
@@ -313,10 +319,10 @@ module Hive
         end
 
         def details(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /details <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /details <id|slug>.") if target.empty?
 
-          row, error = resolve_status_row(slug)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(
@@ -342,33 +348,60 @@ module Hive
           end
         end
 
-        # Resolves a slug against the latest status snapshot. Returns
+        def numeric_id(target)
+          match = /\A#?(\d+)\z/.match(target.to_s)
+          match ? Integer(match[1], 10) : nil
+        end
+
+        def resolve_numeric_target_slug(target)
+          id = numeric_id(target)
+          return [ target, nil ] unless id
+
+          row, error = resolve_status_row(target, id: id)
+          return [ nil, error ] if error
+
+          [ row.slug, nil ]
+        end
+
+        # Resolves an id or slug against the latest status snapshot. Returns
         # [row, nil] on a unique match, or [nil, error_text] otherwise:
         #   - snapshot nil        → status not loaded yet (bot just started);
         #                           we never sync-fetch here (see
         #                           Supervisor#latest_status_rows for why)
-        #   - zero matches        → slug not found / archived
-        #   - more than one match → ambiguous across projects. A slash
+        #   - id zero matches     → id not found / archived
+        #   - id multi-match      → ids are globally unique, so we take the
+        #                           head row with no ambiguity guard (unlike
+        #                           the slug arm below); a duplicate id would
+        #                           mean a corrupt snapshot, not a real choice
+        #   - slug zero matches   → slug not found / archived
+        #   - slug multi-match    → ambiguous across projects. A slash
         #                           command carries no project, so we refuse
         #                           rather than dispatch against a guessed
         #                           project (slugs are date+hex so this is
         #                           rare, but a silent wrong-project dispatch
         #                           would be worse than asking the operator).
-        def resolve_status_row(slug)
+        def resolve_status_row(target, id: numeric_id(target))
           snapshot = @status_snapshot_provider.call
           return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
 
-          matches = Array(snapshot).select { |row| row.respond_to?(:slug) && row.slug == slug }
+          if id
+            matches = Array(snapshot).select { |row| row.respond_to?(:id) && row.id == id }
+            return [ nil, "No active task ##{id} — was it archived?" ] if matches.empty?
+
+            return [ matches.first, nil ]
+          end
+
+          matches = Array(snapshot).select { |row| row.respond_to?(:slug) && row.slug == target }
           case matches.length
           when 0 then [ nil, "Slug not found, was it archived?" ]
           when 1 then [ matches.first, nil ]
-          else [ nil, "Multiple active tasks match #{slug}; open on a laptop to pick the right project." ]
+          else [ nil, "Multiple active tasks match #{target}; open on a laptop to pick the right project." ]
           end
         rescue StandardError
           # The production provider just reads a cached ivar and cannot raise,
           # but a future provider that does I/O must never crash the poll loop
-          # (an escape here would skip write_last_seen and let Telegram
-          # redeliver the update). Degrade to a soft retry hint instead.
+          # (an escape here would skip write_last_seen_update_id and let
+          # Telegram redeliver the update). Degrade to a soft retry hint instead.
           [ nil, "Status lookup failed — try again in a moment." ]
         end
       end

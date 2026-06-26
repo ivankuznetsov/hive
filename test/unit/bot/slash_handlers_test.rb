@@ -71,6 +71,10 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = @handlers.help(Update.new(text: "/help"))
 
     assert_includes result.text, "/status [project]"
+    assert_includes result.text, "/answer <id|slug>"
+    assert_includes result.text, "/approve <id|slug>"
+    assert_includes result.text, "/autofix <id|slug>"
+    assert_includes result.text, "/details <id|slug>"
   end
 
   def test_status_with_json_flag_sets_format_json
@@ -103,7 +107,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     def clear(chat_id:, slug:) = (@cleared << [ chat_id, slug ])
   end
 
-  Row = Struct.new(:project, :slug, :stage, :marker, :attrs, :diagnostic, keyword_init: true)
+  Row = Struct.new(:project, :slug, :id, :stage, :marker, :attrs, :diagnostic, keyword_init: true)
 
   def autofix_handlers(snapshot)
     Hive::Bot::Handlers::SlashHandlers.new(
@@ -118,6 +122,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
   REVIEW_ERROR_ROW = Row.new(
     project: "hive",
     slug: "stuck-260525-abcd",
+    id: 9281,
     stage: "6-review",
     marker: "review_error",
     attrs: { "phase" => "fix", "pass" => "2" },
@@ -127,11 +132,154 @@ class HiveBotSlashHandlersTest < Minitest::Test
   EXECUTE_STALE_ROW = Row.new(
     project: "hive",
     slug: "stale-260525-abcd",
+    id: 9282,
     stage: "4-execute",
     marker: "execute_stale",
     attrs: {},
     diagnostic: nil
   ).freeze
+
+  def test_approve_with_numeric_id_dispatches_resolved_slug
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "9281", "#9281" ].each do |target|
+      result = handlers.approve(Update.new(text: "/approve #{target}", chat_id: 1))
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal [ "hive", "approve", "stuck-260525-abcd", "--json" ], result.command_argv
+      assert_equal "stuck-260525-abcd", result.slug
+      assert_nil result.text, "a resolved numeric id dispatches silently — no operator reply text"
+    end
+  end
+
+  def test_numeric_id_filters_multi_row_snapshot_instead_of_taking_head
+    # The head row's id (9282) does NOT match the target (9281); only the
+    # second row does. Proves resolve_status_row's `select { row.id == id }`
+    # actually filters by id rather than blindly taking the snapshot head —
+    # guarding against a future refactor that swaps the predicate for `.first`.
+    handlers = autofix_handlers([ EXECUTE_STALE_ROW, REVIEW_ERROR_ROW ])
+
+    result = handlers.approve(Update.new(text: "/approve 9281", chat_id: 1))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal "stuck-260525-abcd", result.slug,
+                 "must resolve the row whose id matches, not the snapshot head"
+    assert_equal [ "hive", "approve", "stuck-260525-abcd", "--json" ], result.command_argv
+  end
+
+  def test_approve_with_slug_dispatches_verbatim_without_snapshot_lookup
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { raise "unexpected lookup" }
+    )
+
+    result = handlers.approve(Update.new(text: "/approve approve-me-260525-abcd", chat_id: 1))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "approve", "approve-me-260525-abcd", "--json" ], result.command_argv
+    assert_equal "approve-me-260525-abcd", result.slug
+  end
+
+  def test_approve_with_missing_numeric_id_replies_with_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "4242", "#4242" ].each do |target|
+      result = handlers.approve(Update.new(text: "/approve #{target}", chat_id: 1))
+
+      assert_equal :reply, result.action
+      assert_equal "No active task #4242 — was it archived?", result.text
+      assert_nil result.command_argv
+    end
+  end
+
+  def test_approve_with_missing_numeric_id_having_leading_zeroes_reports_normalized_id
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    result = handlers.approve(Update.new(text: "/approve 04242", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "No active task #4242 — was it archived?", result.text,
+                 "an id miss must echo the normalized id (leading zeroes stripped), not the raw 04242"
+    assert_nil result.command_argv
+  end
+
+  def test_approve_with_cold_snapshot_replies_still_loading_for_numeric_id
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { nil }
+    )
+
+    result = handlers.approve(Update.new(text: "/approve 9281", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/still loading/, result.text)
+    assert_nil result.command_argv
+  end
+
+  def test_approve_without_arg_replies_with_usage_hint
+    result = @handlers.approve(Update.new(text: "/approve", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "Use /approve <id|slug>.", result.text
+  end
+
+  def test_answer_with_numeric_id_starts_answer_for_resolved_slug
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "9281", "#9281" ].each do |target|
+      result = handlers.answer(Update.new(text: "/answer #{target}", chat_id: 1), nil)
+
+      assert_equal :start_answer, result.action
+      assert_equal "stuck-260525-abcd", result.slug
+      assert_equal :path_b, result.mode
+      assert_nil result.text, "a resolved numeric id starts the answer flow — no operator reply text"
+    end
+  end
+
+  def test_answer_with_slug_starts_answer_verbatim_without_snapshot_lookup
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { raise "unexpected lookup" }
+    )
+
+    result = handlers.answer(Update.new(text: "/answer answer-me-260525-abcd", chat_id: 1), nil)
+
+    assert_equal :start_answer, result.action
+    assert_equal "answer-me-260525-abcd", result.slug
+    assert_equal :path_b, result.mode
+  end
+
+  def test_answer_with_missing_numeric_id_replies_with_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "4242", "#4242" ].each do |target|
+      result = handlers.answer(Update.new(text: "/answer #{target}", chat_id: 1), nil)
+
+      assert_equal :reply, result.action
+      assert_equal "No active task #4242 — was it archived?", result.text
+      assert_nil result.slug
+    end
+  end
+
+  def test_answer_with_cold_snapshot_replies_still_loading_for_numeric_id
+    handlers = Hive::Bot::Handlers::SlashHandlers.new(
+      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
+      result_class: Result, status_snapshot_provider: -> { nil }
+    )
+
+    result = handlers.answer(Update.new(text: "/answer 9281", chat_id: 1), nil)
+
+    assert_equal :reply, result.action
+    assert_match(/still loading/, result.text)
+    assert_nil result.slug
+  end
+
+  def test_answer_without_arg_replies_with_usage_hint
+    result = @handlers.answer(Update.new(text: "/answer", chat_id: 1), nil)
+
+    assert_equal :reply, result.action
+    assert_equal "Use /answer <id|slug>.", result.text
+  end
 
   def test_autofix_with_default_snapshot_provider_replies_slug_not_found
     # SlashHandlers default-constructs status_snapshot_provider to -> { [] }
@@ -156,9 +304,172 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     result = handlers.autofix(Update.new(text: "/autofix stuck-260525-abcd", chat_id: 1))
 
+    assert_review_error_autofix_result(result)
+  end
+
+  def test_autofix_with_numeric_id_dispatches_expected_recover_sequence_argv
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "9281", "#9281" ].each do |target|
+      result = handlers.autofix(Update.new(text: "/autofix #{target}", chat_id: 1))
+
+      assert_review_error_autofix_result(result)
+    end
+  end
+
+  def test_autofix_manual_only_marker_resolved_by_id_replies_with_open_laptop_hint
+    handlers = autofix_handlers([ EXECUTE_STALE_ROW ])
+
+    result = handlers.autofix(Update.new(text: "/autofix 9282", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic recovery/, result.text)
+  end
+
+  def test_autofix_with_missing_numeric_id_replies_with_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    result = handlers.autofix(Update.new(text: "/autofix #4242", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "No active task #4242 — was it archived?", result.text
+    # `commands` is only non-nil on the dispatch path, so contrast it: the
+    # SAME handler resolving a matching id (#9281) populates the recovery
+    # sequence, while the miss path must leave it nil rather than dispatch
+    # against an unintended row. (Bare `assert_nil` here would pass for any
+    # :reply regardless of correctness.)
+    refute_nil handlers.autofix(Update.new(text: "/autofix #9281", chat_id: 1)).commands,
+               "control: a matching id populates the recovery commands"
+    assert_nil result.commands,
+               "a missing id must not populate the recovery commands the success path sets"
+  end
+
+  def test_autofix_numeric_target_does_not_match_nil_id_rows
+    nil_id_row = Row.new(project: "hive", slug: "nil-id-260525-abcd", id: nil,
+                         stage: "6-review", marker: "review_error", attrs: {},
+                         diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    handlers = autofix_handlers([ nil_id_row ])
+
+    result = handlers.autofix(Update.new(text: "/autofix 9281", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "No active task #9281 — was it archived?", result.text
+  end
+
+  def test_autofix_numeric_target_accepts_leading_zeroes
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    result = handlers.autofix(Update.new(text: "/autofix 09281", chat_id: 1))
+
+    assert_review_error_autofix_result(result)
+  end
+
+  def test_autofix_numeric_id_boundaries_fall_through_to_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    # id 0 (`0`/`#0`) and a Bignum id all parse as numeric ids that no
+    # snapshot row matches, so each takes the id-miss path and echoes the
+    # normalized id — benign, but pinned so a regex/normalization regression
+    # can't silently start dispatching against the snapshot head.
+    {
+      "0" => "#0",
+      "#0" => "#0",
+      "999999999999999999999" => "#999999999999999999999"
+    }.each do |target, expected|
+      result = handlers.autofix(Update.new(text: "/autofix #{target}", chat_id: 1))
+
+      assert_equal :reply, result.action, "boundary id #{target} must reply, not dispatch"
+      assert_equal "No active task #{expected} — was it archived?", result.text
+      assert_nil result.commands, "boundary id #{target} must not dispatch a recovery sequence"
+    end
+  end
+
+  def test_autofix_hash_without_digits_stays_on_slug_path
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    result = handlers.autofix(Update.new(text: "/autofix #", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/Slug not found/, result.text)
+  end
+
+  def test_autofix_with_slug_matching_numeric_id_uses_slug_path
+    numeric_slug_row = Row.new(project: "hive", slug: "9281-260525-abcd", id: 1111,
+                               stage: "6-review", marker: "review_error", attrs: {},
+                               diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    handlers = autofix_handlers([ numeric_slug_row ])
+
+    result = handlers.autofix(Update.new(text: "/autofix 9281-260525-abcd", chat_id: 1))
+
+    assert_equal :dispatch_commands, result.action
+    assert_equal "9281-260525-abcd", result.slug
+  end
+
+  def test_details_dispatches_status_diagnose_argv_for_numeric_id
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "9281", "#9281" ].each do |target|
+      result = handlers.details(Update.new(text: "/details #{target}", chat_id: 1))
+
+      assert_equal :dispatch_then_reply, result.action
+      assert_equal "hive", result.project
+      assert_equal "stuck-260525-abcd", result.slug
+      assert_equal [ "hive", "status", "--diagnose", "stuck-260525-abcd",
+                     "--project", "hive", "--stage", "6-review", "--json" ], result.command_argv
+      assert_nil result.text, "a resolved numeric id dispatches diagnose silently — no operator reply text"
+    end
+  end
+
+  def test_details_with_missing_numeric_id_replies_with_archive_hint
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    [ "4242", "#4242" ].each do |target|
+      result = handlers.details(Update.new(text: "/details #{target}", chat_id: 1))
+
+      assert_equal :reply, result.action
+      assert_equal "No active task #4242 — was it archived?", result.text
+      assert_nil result.command_argv
+    end
+  end
+
+  def test_details_numeric_target_does_not_match_nil_id_rows
+    nil_id_row = Row.new(project: "hive", slug: "nil-id-260525-abcd", id: nil,
+                         stage: "6-review", marker: "review_error", attrs: {},
+                         diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    handlers = autofix_handlers([ nil_id_row ])
+
+    result = handlers.details(Update.new(text: "/details 9281", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_equal "No active task #9281 — was it archived?", result.text
+  end
+
+  def test_details_still_resolves_nil_id_row_by_slug
+    nil_id_row = Row.new(project: "hive", slug: "nil-id-260525-abcd", id: nil,
+                         stage: "6-review", marker: "review_error", attrs: {},
+                         diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    handlers = autofix_handlers([ nil_id_row ])
+
+    result = handlers.details(Update.new(text: "/details nil-id-260525-abcd", chat_id: 1))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal "nil-id-260525-abcd", result.slug
+  end
+
+  def test_details_numeric_target_accepts_leading_zeroes
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+
+    result = handlers.details(Update.new(text: "/details 09281", chat_id: 1))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal "stuck-260525-abcd", result.slug
+  end
+
+  def assert_review_error_autofix_result(result)
     assert_equal :dispatch_commands, result.action
     assert_equal "hive", result.project
     assert_equal "stuck-260525-abcd", result.slug
+    assert_nil result.text, "a successful autofix dispatch carries no operator reply text"
     assert_equal [
       [ "hive", "markers", "clear", "stuck-260525-abcd", "--name", "REVIEW_ERROR",
         "--project", "hive", "--match-attr", "pass=2", "--json" ],
@@ -236,7 +547,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = handlers.autofix(Update.new(text: "/autofix", chat_id: 1))
 
     assert_equal :reply, result.action
-    assert_equal "Use /autofix <slug>.", result.text
+    assert_equal "Use /autofix <id|slug>.", result.text
   end
 
   def test_autofix_with_unknown_slug_replies_with_archive_hint
@@ -338,7 +649,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = handlers.details(Update.new(text: "/details", chat_id: 1))
 
     assert_equal :reply, result.action
-    assert_equal "Use /details <slug>.", result.text
+    assert_equal "Use /details <id|slug>.", result.text
   end
 
   def test_details_with_unknown_slug_replies_with_archive_hint

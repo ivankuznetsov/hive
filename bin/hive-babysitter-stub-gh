@@ -45,7 +45,7 @@ def escape_control_chars(arg)
   arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
 end
 
-argv = ARGV.dup
+argv = ARGV.map(&:b)
 
 # `gh --repo`/`-R` accept `[HOST/]OWNER/REPO`, a full URL, or an scp-style
 # `git@host:owner/repo`; only the bare `OWNER/REPO` slug (exactly one slash and

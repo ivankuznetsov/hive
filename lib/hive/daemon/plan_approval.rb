@@ -38,12 +38,13 @@ module Hive
       # workflow verb's `WrongStage` check as the failure boundary.
       #
       # @param suggested_command [String] the `hive plan ...` command
-      #   from the row's `suggested_command`
+      #   from the row's `suggested_command` (or an already-rewritten
+      #   `hive develop ...` command when the row has already advanced)
       # @param state_file [String] absolute path to the row's state
       #   file (e.g. `.../3-plan/<slug>/plan.md`)
       # @return [String] the rewritten `hive develop ...` command
       # @raise [ArgumentError] when `suggested_command` is not a
-      #   well-formed `hive plan ...` invocation
+      #   well-formed `hive plan ...` or `hive develop ...` invocation
       # @raise [NotApprovable] when the marker is neither `:waiting`
       #   nor `:complete`
       def prepare(suggested_command, state_file)
@@ -64,11 +65,20 @@ module Hive
         develop_command
       end
 
+      # Idempotent for an already-advanced row. The daemon path always passes
+      # the `plan_waiting` row's `hive plan ...` command. The bot's Approve
+      # button can instead fire on a row that already raced to `:complete`
+      # (daemon auto-approve or a manual advance), at which point TaskAction
+      # reclassifies it as `ready_to_develop` and its `suggested_command` is
+      # already `hive develop ...`. Accepting both shapes lets that stale tap
+      # dispatch the valid develop and makes the `:complete` no-op branch in
+      # `prepare` reachable, rather than raising on the develop verb.
       def rewrite_to_develop(suggested_command)
         argv = Shellwords.split(suggested_command.to_s)
-        unless argv.length >= 3 && argv[0] == "hive" && argv[1] == "plan"
+        unless argv.length >= 3 && argv[0] == "hive" && %w[plan develop].include?(argv[1])
           raise ArgumentError,
-                "plan-approval auto-dispatch expects `hive plan ...`, got #{suggested_command.inspect}"
+                "plan-approval auto-dispatch expects `hive plan ...` or `hive develop ...`, " \
+                "got #{suggested_command.inspect}"
         end
 
         argv[1] = "develop"

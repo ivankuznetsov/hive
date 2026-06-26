@@ -7,7 +7,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
-  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
+  Row = Struct.new(:project, :slug, :stage, :workflow, :action, :action_label, :marker, :attrs, :diagnostic,
                    :id, :display_name, :pr_url,
                    keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
@@ -59,7 +59,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        :stage, :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
                         :intent, :attachment,
                         keyword_init: true)
   end
@@ -238,10 +238,10 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
-  def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
+  def row(project: "hive", slug: "task", stage: "3-plan", workflow: "coding", action: "ready_to_develop",
           action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil,
           id: nil, display_name: nil, pr_url: nil)
-    Row.new(project: project, slug: slug, stage: stage, action: action,
+    Row.new(project: project, slug: slug, stage: stage, workflow: workflow, action: action,
             action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic,
             id: id, display_name: display_name, pr_url: pr_url)
   end
@@ -316,7 +316,8 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis is available for "Red task…". Tap Show details to dump it here.', text
+    assert_equal 'Refreshed diagnosis for "Red task…". ' \
+                 "Tap Show details for the summary (updates on the next status refresh).", text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"
@@ -1181,6 +1182,7 @@ class HiveBotSupervisorTest < Minitest::Test
   def test_trigger_for_result_maps_intents_for_telemetry
     %i[
       slash_done callback_autofix callback_clear_and_retry callback_approve
+      callback_approve_plan callback_rerun
       callback_findings_accept_all callback_findings_reject_all callback_show_details
     ].each do |intent|
       result = FakeRouter::Result.new(intent: intent)
@@ -1222,6 +1224,13 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal %w[idea status queue answer approve autofix details done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
+    # Pin the A5 discoverability copy: the typeable command menu must advertise
+    # the <id|slug> argument so operators learn they can paste a numeric id.
+    descriptions = commands.to_h { |cmd| [ cmd.fetch(:command), cmd.fetch(:description) ] }
+    assert_includes descriptions.fetch("answer"), "/answer <id|slug>"
+    assert_includes descriptions.fetch("approve"), "/approve <id|slug>"
+    assert_includes descriptions.fetch("autofix"), "/autofix <id|slug>"
+    assert_includes descriptions.fetch("details"), "/details <id|slug>"
   end
 
   def test_register_bot_commands_swallows_telegram_failure_and_logs_send_failure
@@ -1368,15 +1377,20 @@ class HiveBotSupervisorTest < Minitest::Test
                  "a verb that splits to no words must fall back to the literal 'Command' label"
   end
 
-  def test_inferred_success_slug_resolves_status_diagnose_target
+  def test_status_success_text_does_not_infer_a_diagnose_slug
+    # Plain `hive status --json` (Show details / /details) is rendered
+    # in-process by render_details and never reaches success-text inference;
+    # a `--diagnose` child short-circuits via diagnose_reply_for_child. The
+    # old `--diagnose` slug lookup was therefore dead and has been dropped —
+    # a status child carries no inferable slug, so only the project qualifies.
     text = @supervisor.send(
       :command_success_text,
       command_argv: [ "hive", "status", "--diagnose", "diag-slug", "--json" ],
       project: "hive", slug: ""
     )
 
-    assert_equal "Status check completed for hive/diag-slug.", text,
-                 "a blank slug on a status --diagnose run must be inferred from the argv that follows --diagnose"
+    assert_equal "Status check completed for hive.", text,
+                 "status runs no longer infer a slug from the removed --diagnose lookup"
   end
 
   def test_inferred_success_slug_resolves_markers_target_from_argv3
@@ -1520,6 +1534,16 @@ class HiveBotSupervisorTest < Minitest::Test
                      action: "needs_input", marker: "waiting")
     ready_to_x = row(slug: "ship-it-260526-bbbb", stage: "7-artifacts",
                      action: "ready_to_finalize", marker: "complete")
+    plan_waiting = row(slug: "plan-260624-abcd", stage: "3-plan",
+                       action: "needs_input", marker: "waiting")
+    execute_waiting = row(slug: "execute-260624-abcd", stage: "4-execute",
+                          action: "needs_input", marker: "execute_waiting")
+    finalize_waiting = row(slug: "finalize-260624-abcd", stage: "8-finalize",
+                           action: "needs_input", marker: "waiting")
+    generic_waiting = row(slug: "generic-260624-abcd", stage: "1-intake", workflow: "blank",
+                          action: "needs_input", marker: "waiting")
+    review_waiting = row(slug: "review-260624-abcd", stage: "6-review",
+                         action: "needs_input", marker: "review_waiting")
     retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
                              action: "recover_review", marker: "review_error",
                              attrs: { "phase" => "fix", "pass" => "2" },
@@ -1530,18 +1554,39 @@ class HiveBotSupervisorTest < Minitest::Test
     inert = row(slug: "agent-running-260526-eeee", action: "agent_running")
 
     keyboard = @supervisor.send(:status_keyboard,
-                                [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+                                [ brainstorm, ready_to_x, plan_waiting, execute_waiting,
+                                  finalize_waiting, generic_waiting, review_waiting,
+                                  retryable_recovery, manual_recovery, inert ])
     callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
 
     assert_includes callbacks, "answer:hive:ask-q-260526-aaaa",
                     "brainstorm-waiting rows get an answer button"
     assert_includes callbacks, "approve:finalize:hive:ship-it-260526-bbbb:7-artifacts",
                     "ready_to_X rows get an approve button with the workflow verb"
+    assert_includes callbacks, "approve_plan:hive:plan-260624-abcd:3-plan",
+                    "plan waiting rows get a plan-approve button"
+    assert_includes callbacks, "rerun:hive:execute-260624-abcd:4-execute:develop",
+                    "execute waiting rows get a develop rerun button"
+    assert_includes callbacks, "rerun:hive:finalize-260624-abcd:8-finalize:finalize",
+                    "finalize waiting rows get a finalize run button"
+    assert_includes callbacks, "rerun:hive:generic-260624-abcd:1-intake:run",
+                    "generic needs-input rows get a universal run button"
+    assert_includes callbacks, "findings:accept_all:hive:review-260624-abcd:6-review",
+                    "review waiting rows get an accept-all primary button"
     assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
                     "retryable recovery rows get an autofix button"
     assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
                     "manual-only recovery rows get a details button"
-    assert_equal 4, callbacks.length, "inert agent_running rows produce no button"
+    assert_equal 9, callbacks.length, "inert agent_running rows produce no button"
+  end
+
+  def test_status_keyboard_suppresses_none_and_complete_needs_input_rows
+    suppressed = [
+      row(slug: "none-260624-abcd", action: "needs_input", marker: "none"),
+      row(slug: "complete-260624-abcd", action: "needs_input", marker: "complete")
+    ]
+
+    assert_nil @supervisor.send(:status_keyboard, suppressed)
   end
 
   def test_status_keyboard_is_nil_when_no_row_is_actionable
@@ -1557,11 +1602,88 @@ class HiveBotSupervisorTest < Minitest::Test
 
     text = @supervisor.send(:render_details, rows, "hive", "task")
 
+    # The adjacent assert_includes lines below pin the rendered delegation;
+    # a self-comparison to details_reply(rows.first) would only restate the
+    # method render_details delegates to, proving nothing.
     assert_includes text, "hive/task (3-plan)"
     assert_includes text, "Action: ready_to_develop"
     assert_includes text, "Marker: none"
     assert_includes text, "Attrs: a=1 z=9"
+    refute_includes text, "No diagnostic available"
     assert_equal "No active row found for hive/missing.", @supervisor.send(:render_details, rows, "hive", "missing")
+  end
+
+  def test_render_details_degrades_and_logs_when_render_raises
+    # render_details renders details_reply from a live Row outside any rescue;
+    # the /status-intercept branch that calls it skips write_last_seen on a
+    # raise. A render-time fault must degrade to the soft hint and log, never
+    # escape to the :fatal poll handler. Inject a row whose attrs read raises.
+    raising_row = Class.new do
+      def project = "hive"
+      def slug = "boom-260525-abcd"
+      def attrs = raise("render boom")
+    end.new
+
+    text = @supervisor.send(:render_details, [ raising_row ], "hive", "boom-260525-abcd")
+
+    assert_includes text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault must be logged, not a silent dead end"
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_status_action_button_isolates_a_resolver_failure
+    # A row whose resolution raises (typo'd/unmapped role at the RowActions
+    # boundary, or an unmapped status_action_emoji key) must drop only its own
+    # /status button, not abort the whole keyboard's filter_map.
+    bad = row(slug: "boom-260624-abcd", action: "ready_to_develop", marker: "complete")
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_r| raise KeyError, "boom" }
+    button = begin
+      @supervisor.send(:status_action_button, bad)
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_nil button, "a row whose resolution raises drops only its own button"
+    assert(@logger.events.any? { |e| e[:name] == :status_button_failed },
+           "the dropped button must be logged for an audit trail")
+  end
+
+  def test_status_action_emoji_covers_every_row_action_role
+    # status_action_emoji renders the primary /status button; `.fetch` raises on
+    # an unmapped role and status_action_button's rescue swallows it (silently
+    # dropping the button). `:findings_reject` is structurally never the primary
+    # today, so button_coverage_test's primary-role sweep never reaches it —
+    # this parity sweep is what pins the table to the closed RowActions::ROLES
+    # vocabulary if a future refactor ever promotes it to primary.
+    Hive::Bot::RowActions::ROLES.each do |role|
+      emoji = @supervisor.send(:status_action_emoji, role)
+      assert_kind_of String, emoji, "status_action_emoji must map #{role.inspect}"
+      refute_empty emoji, "status_action_emoji must not be blank for #{role.inspect}"
+    end
+  end
+
+  def test_next_step_hint_maps_findings_reject_primary
+    # Mirror of the emoji parity above for next_step_hint: `:findings_reject` is
+    # never the primary today (review_waiting makes findings_accept primary), so
+    # only a stubbed promotion exercises the grouped arm. Pin it so the closed-
+    # vocabulary `else` raise can't surprise a future refactor.
+    reject = Hive::Bot::RowActions.action(
+      :findings_reject, "findings:reject_all:hive:tri-260624-abcd:6-review", primary: true
+    )
+    resolution = Hive::Bot::RowActions::Resolution.new(actions: [ reject ], kind: :review_waiting)
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_r| resolution }
+    hint = begin
+      @supervisor.send(:next_step_hint, row(stage: "6-review", action: "needs_input", marker: "review_waiting"))
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_equal "Next: tap Accept all or Reject all to triage findings.", hint
   end
 
   def test_execute_dispatch_renders_status_queue_without_spawning_child

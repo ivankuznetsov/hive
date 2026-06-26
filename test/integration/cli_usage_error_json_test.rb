@@ -152,4 +152,22 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
     end
   end
+
+  def test_invalid_byte_json_arg_uses_command_usage_envelope
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "run", "--json", "bad\xFF".b)
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      refute_match(%r{/thor/}, err)
+      payload = JSON.parse(out)
+      assert_equal "hive-run", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "invalid_task_path", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/invalid byte sequence/, payload["message"])
+    end
+  end
 end

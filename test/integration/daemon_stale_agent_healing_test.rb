@@ -293,8 +293,9 @@ class DaemonStaleAgentHealingTest < Minitest::Test
         post_clear_row = status_rows_via_consumer(dir).find { |candidate| candidate.slug == slug }
         assert post_clear_row, "status pipeline must include the cleared finalize task"
         assert_equal "none", post_clear_row.marker
-        assert_equal "needs_input", post_clear_row.action,
-                     "policy input must come from the real post-clear status row"
+        assert_equal "ready_to_run", post_clear_row.action,
+                     "a cleared finalize marker (:none) is now classified runnable, " \
+                     "not the stale needs_input that surfaced as the 'needs input: none' bug"
 
         decision = Hive::Daemon::Policy.decide(
           action: post_clear_row.action,

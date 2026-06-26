@@ -1,5 +1,8 @@
+require "hive/bot/notification_builders"
 require "hive/bot/idea_keyboards"
 require "hive/bot/handlers/recovery_sequence"
+require "hive/daemon/plan_approval"
+require "shellwords"
 
 module Hive
   module Bot
@@ -8,6 +11,7 @@ module Hive
         def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:,
                        idea_draft_store: nil,
                        projects_provider: -> { [] },
+                       status_snapshot_provider: -> { [] },
                        last_project: -> { nil },
                        logger: nil)
           @pending_ideas = pending_ideas
@@ -16,6 +20,7 @@ module Hive
           @result_class = result_class
           @idea_draft_store = idea_draft_store
           @projects_provider = projects_provider
+          @status_snapshot_provider = status_snapshot_provider
           @last_project = last_project
           @logger = logger
         end
@@ -24,6 +29,8 @@ module Hive
           data = update.callback_data.to_s
           case intent
           when :callback_approve then approve(data)
+          when :callback_approve_plan then approve_plan(data)
+          when :callback_rerun then rerun(data)
           when :callback_reject then @result_class.new(action: :reply, text: "Left unchanged.")
           when :callback_autofix then autofix(data)
           when :callback_clear_and_retry then clear_and_retry(data)
@@ -42,7 +49,7 @@ module Hive
           when :callback_path_a_yes,
                :callback_path_a_just_type
             @result_class.new(action: :reply,
-                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <slug>) " \
+                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <id|slug>) " \
                                     "and reply with your answer; the bot will send the next question automatically.")
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
@@ -58,15 +65,102 @@ module Hive
 
         def approve(data)
           _prefix, verb, project, slug, stage = split_callback(data, 5)
-          # `hive run` (the generic-stage agent, from a `ready_to_run` row)
-          # scopes the slug lookup with --stage and has no --from; every
-          # other advance/approve verb asserts the source stage with --from.
+          # `hive run` (the generic-stage agent, from a `ready_to_run` row) is
+          # the only verb here that scopes with --stage and has no --from;
+          # every other advance/approve verb asserts the source stage.
+          dispatch_stage_verb(verb: verb, project: project, slug: slug, stage: stage)
+        end
+
+        def rerun(data)
+          _prefix, project, slug, stage, verb = split_callback(data, 5)
+          raise ArgumentError, "unsupported rerun verb" unless %w[run develop finalize].include?(verb)
+
+          # Workflow verbs only expose --from in the CLI; at the target stage
+          # it acts as the same stage filter the plan called for and avoids
+          # the source-stage terminal-marker gate. The generic `run` verb
+          # scopes with --stage.
+          dispatch_stage_verb(verb: verb, project: project, slug: slug, stage: stage)
+        end
+
+        # Build the dispatch Result for a single `hive <verb> <slug>` against a
+        # stage. The generic `run` verb scopes with --stage (no --from); every
+        # workflow advance/retry verb asserts the source stage with --from.
+        # Shared by approve (ready-row Approve button) and rerun (paused-row
+        # Re-run/Run buttons) so the argv shape can't drift between them.
+        def dispatch_stage_verb(verb:, project:, slug:, stage:)
           stage_flag = verb == "run" ? "--stage" : "--from"
           @result_class.new(
             action: :dispatch_then_reply,
             project: project,
             slug: slug,
             command_argv: [ "hive", verb, slug, stage_flag, stage, "--project", project, "--json" ]
+          )
+        end
+
+        def approve_plan(data)
+          _prefix, project, slug, stage = split_callback(data, 4)
+          row = status_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: "Task status changed - reopen /queue.") unless row
+          unless row.respond_to?(:state_file) && !row.state_file.to_s.empty?
+            return @result_class.new(action: :reply, text: "Plan state is unavailable - reopen /queue.")
+          end
+
+          command = row.respond_to?(:suggested_command) ? row.suggested_command.to_s : ""
+          command = "hive plan #{Shellwords.escape(slug)} --from #{Shellwords.escape(stage)} --project #{Shellwords.escape(project)}" if command.empty?
+          # `PlanApproval.prepare` flips the plan marker `:waiting` → `:complete`
+          # on disk HERE, before the develop dispatch is durably enqueued (the
+          # supervisor enqueues the returned Result later). This is a deliberate
+          # advance-then-resurface window: if that enqueue fails, the supervisor
+          # surfaces a "couldn't queue" reply and the now-`:complete` 3-plan row
+          # reclassifies as ready_to_develop on the next status poll, so it
+          # resurfaces driveable rather than stranding. The command shape is
+          # validated BEFORE the flip (PlanApproval.rewrite_to_develop), so a
+          # malformed row leaves the marker at `:waiting` for inspection. A row
+          # that already raced to `:complete` carries a `hive develop ...`
+          # command, which prepare accepts idempotently and dispatches.
+          #
+          # The local rescues wrap ONLY prepare (not split_callback above), so a
+          # malformed callback still routes to handle's generic "Bot got
+          # confused" while corrupt plan state gets its own actionable reply.
+          begin
+            argv = Shellwords.split(Hive::Daemon::PlanApproval.prepare(command, row.state_file))
+          rescue Hive::Daemon::PlanApproval::NotApprovable
+            return @result_class.new(action: :reply, text: "Plan is no longer waiting for approval. Reopen /queue.")
+          rescue ArgumentError => e
+            # A corrupt plan.md (invalid UTF-8 bytes break Hive::Markers.current)
+            # or a malformed queued command (rewrite_to_develop rejects a verb
+            # that is neither plan nor develop) — both raise BEFORE the marker
+            # flip, so the plan marker is still `:waiting` and inspectable.
+            # Distinguish this corrupt-state from the handler-level malformed-
+            # callback generic so the operator gets an actionable next step.
+            @logger&.event(:callback_plan_state_corrupt, project: project, slug: slug, stage: stage,
+                                                         error_class: e.class.name, message: e.message)
+            return @result_class.new(
+              action: :reply,
+              text: "Couldn't read this plan's approval state — plan.md may be corrupt or its queued " \
+                    "command is malformed. Open it on a laptop."
+            )
+          rescue SystemCallError, IOError => e
+            # The marker write itself failed (read-only / full state dir). Without
+            # this, the error escapes to the poll loop's generic rescue, which
+            # logs :fatal and sends nothing — the operator sees the acked spinner
+            # clear, then silence. Reply with an actionable next step instead.
+            @logger&.event(:callback_marker_write_failed, project: project, slug: slug, stage: stage,
+                                                           error_class: e.class.name, message: e.message)
+            return @result_class.new(
+              action: :reply,
+              text: "Couldn't record the approval (#{e.class}) - the task's state dir may be read-only or full. " \
+                    "Open it on a laptop."
+            )
+          end
+
+          ensure_flag!(argv, "--project", project)
+          argv << "--json" unless argv.include?("--json")
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: project,
+            slug: slug,
+            command_argv: argv
           )
         end
 
@@ -105,19 +199,30 @@ module Hive
 
         def show_details(data)
           _prefix, project, slug, stage = split_callback(data, [ 3, 4 ])
-          stage_argv = stage ? [ "--stage", stage ] : []
-          # Replace the previous full-status dump with a targeted
-          # `hive status --diagnose <slug>` so the bot reply renders the
-          # bounded Diagnostic envelope (summary + detail) instead of
-          # the whole snapshot. `--stage` disambiguates duplicate slugs
-          # in the same project. See PR #84 review row 24.
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: project,
-            slug: slug,
-            command_argv: [ "hive", "status", "--diagnose", slug,
-                            "--project", project, *stage_argv, "--json" ]
-          )
+          row, error = resolve_details_row(project: project, slug: slug, stage: stage)
+          return @result_class.new(action: :reply, text: error) if error
+
+          @result_class.new(action: :reply, text: render_details_reply(project: project, slug: slug, stage: stage, row: row))
+        end
+
+        # details_reply renders from a live Row and never raises today, but it
+        # runs OUTSIDE resolve_details_row's degrade rescue. process_update
+        # already ack'd this callback and skips write_last_seen on a raise, so a
+        # render-time fault (e.g. a row whose attrs aren't a Hash) would escape
+        # past handle's ArgumentError-only rescue to the :fatal poll handler and
+        # leave the tap with no reply at all — the very dead end the Show-details
+        # flow exists to prevent. Degrade to the same soft retry hint the lookup
+        # path uses, and log (with a backtrace) so the fault stays diagnosable.
+        def render_details_reply(project:, slug:, stage:, row:)
+          Hive::Bot::NotificationBuilders.details_reply(row)
+        rescue StandardError => e
+          # Carry stage (already in scope from show_details, and what
+          # resolve_details_row matched on) so a render fault recurring for a
+          # single stage of a duplicated slug stays attributable in bot.log.
+          @logger&.event(:details_render_failed, project: project, slug: slug, stage: stage,
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
+          Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
         end
 
         def refresh_diagnose(data)
@@ -264,6 +369,46 @@ module Hive
           raise ArgumentError, "malformed callback" unless counts.include?(parts.length)
 
           parts
+        end
+
+        def status_row(project:, slug:, stage:)
+          Array(@status_snapshot_provider.call).find do |row|
+            row.respond_to?(:project) && row.respond_to?(:slug) && row.respond_to?(:stage) &&
+              row.project.to_s == project.to_s && row.slug.to_s == slug.to_s && row.stage.to_s == stage.to_s
+          end
+        end
+
+        def ensure_flag!(argv, flag, value)
+          return if argv.include?(flag)
+
+          argv.concat([ flag, value ])
+        end
+
+        def resolve_details_row(project:, slug:, stage:)
+          snapshot = @status_snapshot_provider.call
+          return [ nil, Hive::Bot::NotificationBuilders::STATUS_STILL_LOADING_REPLY ] if snapshot.nil?
+
+          matches = Array(snapshot).select do |row|
+            row.respond_to?(:project) && row.respond_to?(:slug) &&
+              row.project == project && row.slug == slug &&
+              (stage.nil? || row.stage.to_s == stage)
+          end
+          case matches.length
+          when 0 then [ nil, "That task is no longer active — send /status to see current tasks." ]
+          when 1 then [ matches.first, nil ]
+          else [ nil, "That task is ambiguous — send /status to pick the current task." ]
+          end
+        rescue StandardError => e
+          # Log before degrading: a recurring snapshot-provider fault (e.g. a
+          # future I/O-backed status_snapshot_provider) would otherwise be
+          # invisible in bot.log. Mirrors handle's :callback_malformed logging.
+          # The backtrace lets a deterministic programming error (e.g. a
+          # NoMethodError from the match block) be told apart from a transient
+          # I/O blip despite the shared "try again" degrade copy.
+          @logger&.event(:details_lookup_failed, project: project, slug: slug,
+                                                  error_class: e.class.name, message: e.message,
+                                                  backtrace: Array(e.backtrace).first(3))
+          [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
 
         # The recovery callbacks (autofix / clear_and_retry) carry up to two

@@ -1,5 +1,7 @@
 require "time"
+require "set"
 require "hive/config"
+require "hive/bot/logger"
 require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
 require "hive/bot/title_formatter"
@@ -33,10 +35,12 @@ module Hive
         # operator is already answering). nil = no suppression (older
         # wiring / tests that don't inject it).
         @conversation_store = conversation_store
+        @dedupe_logged = Set.new
+        @backoff_logged = Set.new
       end
 
       def process_rows(rows)
-        current = current_notifications(rows)
+        current, present_unbuilt = current_notifications(rows)
         if @alert_store.fresh_install?
           immediate, seedable = current.partition do |_fingerprint, payload|
             immediate_on_fresh_install?(payload.fetch(:row))
@@ -46,7 +50,10 @@ module Hive
           process_current(immediate)
           return
         end
-        process_recoveries(current)
+        # live_recovery_identities is consulted only by process_recoveries (to
+        # hold a stored recovery while its retry is in flight), so compute it at
+        # its single use — the fresh-install early return above skips the pass.
+        process_recoveries(current, live_recovery_identities(rows), present_unbuilt)
         process_current(current)
       end
 
@@ -57,18 +64,93 @@ module Hive
 
       private
 
+      # Returns [current, present_unbuilt]: `current` is the fingerprint=>payload
+      # map of buildable notifications process_current sends; `present_unbuilt`
+      # is the set of fingerprints for rows that WERE present this tick but
+      # failed to build (or raised mid-body). process_recoveries needs the
+      # latter so a still-broken row that deterministically fails to build isn't
+      # mistaken for "gone" and given a false "✅ Recovered".
       def current_notifications(rows)
-        Array(rows).each_with_object({}) do |row, out|
-          next if suppress_ready_action?(row)
-          next if suppress_daemon_plan_pause?(row)
-          next if suppress_active_conversation?(row)
-
-          notification = NotificationBuilders.build(row, logger: @logger)
-          next unless notification
-
-          fingerprint = NotificationBuilders.fingerprint(row)
-          out[fingerprint] ||= { row: row, notification: notification }
+        present_unbuilt = []
+        current = Array(rows).each_with_object({}) do |row, out|
+          # Capture attribution into locals BEFORE the begin so the rescue's log
+          # line can't re-raise (and re-abort the tick) on a row whose own
+          # top-level readers are malformed.
+          project = row.project
+          slug = row.slug
+          marker = row.marker
+          action = row.action
+          begin
+            add_notification(row, out, present_unbuilt)
+          rescue StandardError => e
+            # Isolate the WHOLE per-row body, not just the build: a suppress
+            # predicate or fingerprint call hitting a NoMethodError/TypeError on
+            # a malformed attrs/workflow value must drop only this row, not abort
+            # the tick via status_loop's :fatal rescue (which would silently drop
+            # every push this poll, recurring every tick). Record the fingerprint
+            # (when computable) as present so a row that raised here isn't read as
+            # "recovered" next tick. Log with row attribution.
+            record_present_fingerprint(row, present_unbuilt)
+            @logger.event(:notification_build_failed, project: project, slug: slug,
+                                                       marker: marker, action: action,
+                                                       error_class: e.class.name, message: e.message)
+          end
         end
+        [ current, present_unbuilt ]
+      end
+
+      def add_notification(row, out, present_unbuilt)
+        return if suppress_ready_action?(row)
+        return if suppress_daemon_plan_pause?(row)
+        return if suppress_active_conversation?(row)
+
+        # Fingerprint depends only on the row, not the notification, so compute
+        # it before the build — that way a build failure can still record this
+        # row as present-this-tick (see build_notification).
+        fingerprint = NotificationBuilders.fingerprint(row)
+        notification = build_notification(row, fingerprint: fingerprint, present_unbuilt: present_unbuilt)
+        return unless notification
+
+        out[fingerprint] ||= { row: row, notification: notification }
+      end
+
+      # Build one row's notification, isolating a malformed row so it can't
+      # abort the whole tick. A typo'd/unmapped action role surfaces as an
+      # ArgumentError at RowActions::Action construction (the closed ROLES
+      # boundary), a KeyError in label_for_action, or any other StandardError
+      # from the builder; either way we log and skip just this row rather than
+      # dropping every push this poll.
+      def build_notification(row, fingerprint:, present_unbuilt:)
+        # Capture attribution into locals BEFORE the begin so the rescue's log
+        # line can't re-raise on a malformed row.
+        project = row.project
+        slug = row.slug
+        marker = row.marker
+        action = row.action
+        begin
+          NotificationBuilders.build(row, logger: @logger)
+        rescue StandardError => e
+          # A row that DETERMINISTICALLY fails to build (a persistently malformed
+          # attrs/workflow value) would drop from `current`; process_recoveries
+          # would then read its stored fingerprint as gone and fire a false
+          # "✅ Recovered" for a still-broken task. Record it as present-this-tick
+          # so recovery is skipped — the row is still dropped from the push.
+          present_unbuilt << fingerprint
+          @logger.event(:notification_build_failed, project: project, slug: slug,
+                                                     marker: marker, action: action,
+                                                     error_class: e.class.name, message: e.message)
+          nil
+        end
+      end
+
+      # Record a present-but-unbuildable row's fingerprint. fingerprint(row) can
+      # itself raise on a sufficiently malformed row; when it does there is
+      # nothing to record (and no stored alert could match it anyway), so the
+      # row falls through to the normal absence path.
+      def record_present_fingerprint(row, present_unbuilt)
+        present_unbuilt << NotificationBuilders.fingerprint(row)
+      rescue StandardError
+        nil
       end
 
       # Suppress the proactive "X is waiting for your input" push for a
@@ -130,9 +212,13 @@ module Hive
         @logger.event(:fresh_install_seeded, fingerprint_count: current.size)
       end
 
-      def process_recoveries(current)
+      def process_recoveries(current, live_identities, present_unbuilt)
         @alert_store.each_fingerprint do |fingerprint|
           next if current.key?(fingerprint)
+          # A row that is still present this tick but failed to build is NOT
+          # gone — skip it so a deterministically-malformed row doesn't earn a
+          # false "✅ Recovered" while it is still broken.
+          next if present_unbuilt.include?(fingerprint)
 
           entry = @alert_store.entry(fingerprint)
           row = entry&.row
@@ -143,11 +229,37 @@ module Hive
               @alert_store.remove(fingerprint)
               next
             end
-            next if backoff_active?(entry)
-
-            unless absence_passed_grace?(entry, fingerprint)
+            # A live `agent_running` retry holds the stored recovery from
+            # firing a premature "Recovered": NotificationBuilders suppresses
+            # agent_running rows, so a retry in flight is absent from `current`
+            # even though the stage has NOT recovered. The hold is checked
+            # BEFORE grace and re-arms the settling window each held tick
+            # (clears absent_since) so the grace clock can only start ticking
+            # once the hold genuinely lifts.
+            #
+            # This ordering is load-bearing: the live identity can vanish from a
+            # SINGLE status snapshot without the retry finishing. A per-project
+            # status degrade (commands/status.rb keeps the top-level status
+            # `ok:true` while emptying a project whose dir check fails —
+            # missing_project_path / not_initialised; status_watcher's
+            # `extract_rows` skips a project with an `error`; the supervisor
+            # still calls `process_rows` because `result.ok`) drops the
+            # still-running agent_running row for one tick. Re-arming here means
+            # that one-tick drop re-arms again as soon as the row reappears,
+            # instead of looking like a completed retry and releasing the hold —
+            # so a transient blip can no longer fire a false "Recovered"
+            # mid-retry (A5). Recovered only fires once the lock is gone for a
+            # full grace window. Resolution straight to a live non-error state
+            # (`manual_steering`/`needs_input`/`ready_*`) is still truthful then,
+            # because the agent has stopped and the error has cleared.
+            if live_identities.include?(recovery_identity(row))
+              @alert_store.mark_present(fingerprint)
               next
             end
+
+            next if backoff_active?(entry)
+
+            next unless absence_passed_grace?(entry, fingerprint)
 
             if send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
@@ -175,6 +287,8 @@ module Hive
       end
 
       def process_current(current)
+        reconcile_skip_log_state(current)
+
         current.each do |fingerprint, payload|
           row = payload.fetch(:row)
           entry = @alert_store.entry(fingerprint)
@@ -192,9 +306,7 @@ module Hive
               @alert_store.record_send_failure(fingerprint, @now.call)
             end
           elsif backoff_active?(entry)
-            @logger.event(:notification_skipped_backoff, project: row.project, slug: row.slug,
-                                                          marker: row.marker,
-                                                          consecutive_failures: entry.consecutive_failures.to_i)
+            log_backoff_skip_once(fingerprint, row, entry)
           elsif (pending = pending_chat_ids(entry)).any?
             newly_delivered = send_notification(payload.fetch(:notification), to: pending)
             if newly_delivered.any?
@@ -212,11 +324,40 @@ module Hive
               @alert_store.record_send_failure(fingerprint, @now.call)
             end
           else
-            @logger.event(:notification_skipped_dedupe, project: row.project,
-                                                         slug: row.slug,
-                                                         marker: row.marker)
+            log_dedupe_skip_once(fingerprint, row)
           end
         end
+      end
+
+      # Throttle the debug/noise dedupe + backoff skip lines to state
+      # transitions. The two in-memory Sets hold the fingerprints already
+      # logged this episode; pruning them to `current` here re-arms a
+      # fingerprint only when it leaves the current set (entry / fingerprint
+      # change / leave-and-return). This is distinct from the AlertStore's
+      # persistent delivery dedup — these Sets govern log noise, not delivery.
+      def reconcile_skip_log_state(current)
+        @dedupe_logged.keep_if { |fingerprint| current.key?(fingerprint) }
+        @backoff_logged.keep_if { |fingerprint| current.key?(fingerprint) }
+      end
+
+      def log_backoff_skip_once(fingerprint, row, entry)
+        return if @backoff_logged.include?(fingerprint)
+
+        @backoff_logged.add(fingerprint)
+        @logger.event(:notification_skipped_backoff, level: :debug, category: Logger::CATEGORY_NOISE,
+                                                      project: row.project, slug: row.slug,
+                                                      marker: row.marker,
+                                                      consecutive_failures: entry.consecutive_failures.to_i)
+      end
+
+      def log_dedupe_skip_once(fingerprint, row)
+        return if @dedupe_logged.include?(fingerprint)
+
+        @dedupe_logged.add(fingerprint)
+        @logger.event(:notification_skipped_dedupe, level: :debug, category: Logger::CATEGORY_NOISE,
+                                                     project: row.project,
+                                                     slug: row.slug,
+                                                     marker: row.marker)
       end
 
       def backoff_active?(entry)
@@ -268,6 +409,12 @@ module Hive
 
       def recovery_identity(row)
         [ row.project.to_s, row.slug.to_s, row.stage.to_s ]
+      end
+
+      def live_recovery_identities(rows)
+        Array(rows).each_with_object(Set.new) do |row, identities|
+          identities.add(recovery_identity(row)) if row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
+        end
       end
 
       def reminder_due?(entry, row)

@@ -43,6 +43,14 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     assert_match(/expects `hive plan/, err.message)
   end
 
+  def test_rewrite_to_develop_accepts_already_develop_shaped_command
+    # Idempotent for the bot's stale-Approve race: a row that already advanced
+    # to :complete carries `hive develop ...` (ready_to_develop), and the tap
+    # must dispatch it rather than crash on the non-plan verb.
+    assert_equal "hive develop slug --from 3-plan",
+                 PA.rewrite_to_develop("hive develop slug --from 3-plan")
+  end
+
   def test_rewrite_to_develop_rejects_empty_command
     assert_raises(ArgumentError) { PA.rewrite_to_develop("") }
     assert_raises(ArgumentError) { PA.rewrite_to_develop(nil) }
@@ -71,6 +79,18 @@ class HiveDaemonPlanApprovalTest < Minitest::Test
     with_state_file("<!-- COMPLETE -->") do |path|
       cmd = PA.prepare("hive plan slug --from 3-plan", path)
       assert_equal "hive develop slug --from 3-plan", cmd
+      assert_equal :complete, Hive::Markers.current(path).name
+    end
+  end
+
+  def test_prepare_dispatches_develop_for_already_advanced_complete_row
+    # The bot's stale-Approve race made concrete: the row is already :complete
+    # and its suggested_command is already `hive develop ...`. prepare must
+    # return that develop command (no-op on the marker), making the :complete
+    # branch reachable instead of raising on the develop verb.
+    with_state_file("<!-- COMPLETE -->") do |path|
+      cmd = PA.prepare("hive develop slug --from 3-plan --project hive", path)
+      assert_equal "hive develop slug --from 3-plan --project hive", cmd
       assert_equal :complete, Hive::Markers.current(path).name
     end
   end

@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-23
+updated: 2026-06-25
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -289,14 +289,14 @@ and avoids requiring `sh` or Git Bash volume-path translation.
 `ghcr.io/<owner>/hivebox:<version>` and `ghcr.io/<owner>/hivebox:latest` after
 `release-finalize` succeeds. Image publishing is smoke-gated by
 `packaging/docker/smoke.sh`: the release job boots the amd64 image before
-pushing tags, and a post-publish `macos-15` job is intended to pull the arm64
-registry image under Colima to verify the Docker-on-Mac layer. Current
-`.github/workflows/ci.yml` does not run a push/PR Docker image smoke; it covers
-Rails web tests, the golden-path browser E2E, and the Windows installer harness.
-Commit `abb62aae` records that this macOS leg currently failed before Docker at
-`colima start --cpu 2 --memory 4` when the hosted runner's Lima VZ VM exited;
-the gap is verification-only, because the image publish does not depend on that
-job. The smoke is intentionally front-door only (`/health`,
+pushing tags, and the post-publish `hivebox-smoke-arm64` job pulls the arm64
+registry image on native `ubuntu-24.04-arm` Docker and runs the same smoke
+against the published manifest. This replaced the old hosted macOS/Colima
+attempt: hosted Apple Silicon runners do not expose nested virtualization, so
+Colima cannot boot a Linux VM there. Current `.github/workflows/ci.yml` does
+not run a push/PR Docker image smoke; it covers Rails web tests, the
+golden-path browser E2E, and the Windows installer harness. The smoke is
+intentionally front-door only (`/health`,
 claimable `/login`, owner-gated `/`). The Windows workflow cannot run Linux
 containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
 `packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the

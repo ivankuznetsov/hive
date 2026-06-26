@@ -21,6 +21,8 @@ module Hive
         @env_overrides = env
         @log_path = log_path
         @fake_claude_path = fake_claude_path
+        @pgid = nil
+        @reaped = false
       end
 
       def start
@@ -36,12 +38,14 @@ module Hive
         SandboxEnv.with(@sandbox_dir, @run_home, @fake_claude_path) do |env|
           @pid = Process.spawn(env.merge(SandboxEnv.stringify_env(@env_overrides)), *command, **spawn_opts)
         end
-        Process.detach(@pid) # reap if it exits on its own; #stop still signals it
+        @pgid = @pid
+        @reaped = false
         self
       end
 
       def alive?
         return false unless @pid
+        return false if child_reaped?
 
         Process.kill(0, @pid)
         true
@@ -51,24 +55,62 @@ module Hive
         false
       end
 
-      # TERM the whole process group, then KILL after a short grace (mirrors
-      # CliDriver#terminate). The grace is a kill-escalation delay, not a
-      # condition wait — scenarios wait on file/log conditions, never on sleep.
+      # TERM the whole process group, then KILL after a short grace if the
+      # original child has not exited. The grace is a kill-escalation delay,
+      # not a condition wait — scenarios wait on file/log conditions, never on
+      # sleep.
       #
       # `pgroup: true` at spawn makes the child its own group leader, so its
-      # pgid == @pid; signal -@pid directly rather than re-deriving the pgid
-      # (which could itself raise on a reaped/recycled pid). ESRCH (already
-      # gone) and EPERM (pid recycled to a foreign process) are both no-ops.
+      # pgid == @pid. Do not asynchronously detach/reap the child: while it is
+      # unreaped, the pid/pgid cannot be reused for an unrelated process group.
       def stop(grace: 0.5)
         return unless @pid
 
-        Process.kill("TERM", -@pid)
-        sleep grace
-        Process.kill("KILL", -@pid)
+        pgid = @pgid || @pid
+        unless child_reaped?
+          signal_group("TERM", pgid)
+          wait_until_reaped(grace)
+        end
+        unless child_reaped?
+          signal_group("KILL", pgid)
+          wait_until_reaped(0.2)
+        end
+      ensure
+        detach_unreaped_child
+        @pid = nil
+        @pgid = nil
+        @reaped = false
+      end
+
+      private
+
+      def child_reaped?
+        return true if @reaped
+        return true unless @pid
+
+        @reaped = !Process.waitpid(@pid, Process::WNOHANG).nil?
+      rescue Errno::ECHILD
+        @reaped = true
+      end
+
+      def wait_until_reaped(seconds)
+        deadline = Time.now + seconds
+        sleep 0.05 until child_reaped? || Time.now >= deadline
+        child_reaped?
+      end
+
+      def signal_group(signal, pgid)
+        Process.kill(signal, -pgid)
       rescue Errno::ESRCH, Errno::EPERM
         nil
-      ensure
-        @pid = nil
+      end
+
+      def detach_unreaped_child
+        return unless @pid && !@reaped
+
+        Process.detach(@pid)
+      rescue Errno::ECHILD
+        nil
       end
     end
   end

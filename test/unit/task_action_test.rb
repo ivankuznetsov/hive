@@ -101,6 +101,32 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive open-pr demo-260426-aaaa --from 4-execute", action.command
   end
 
+  def test_execute_stage_stray_terminal_marker_is_error
+    # A terminal marker that doesn't belong to the execute stage (e.g. a
+    # mis-stamped :review_complete) is structurally incoherent here: there's
+    # no runnable next step, so execute_action's else-branch must classify it
+    # as :error rather than collapsing back to a runnable :generic_ready_to_run
+    # against a structurally-wrong marker.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:review_complete))
+    assert_equal "error", action.key
+    assert_nil action.command, "an incoherent execute-stage terminal marker offers no runnable command"
+  end
+
+  def test_execute_stage_non_terminal_foreign_marker_is_error
+    # A NON-terminal foreign marker at the execute stage (e.g. a stray :waiting)
+    # is structurally incoherent: no execute verb stamps it (the runner emits
+    # only execute_waiting/execute_complete/execute_stale/:none, and universal
+    # markers are intercepted earlier). execute_action's else-branch now fails
+    # loud (:error) for ANY foreign marker rather than auto-running `hive run`
+    # against a marker it doesn't recognize — "no auto-run on a foreign marker"
+    # is the safer default for the daemon Policy.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:waiting))
+    assert_equal "error", action.key
+    assert_nil action.command, "an incoherent execute-stage non-terminal marker offers no runnable command"
+  end
+
   def test_open_pr_complete_is_ready_for_review
     task = fake_task(stage_name: "open-pr", stage_index: 5)
     action = Hive::TaskAction.for(task, marker(:complete))
@@ -1092,7 +1118,7 @@ class TaskActionTest < Minitest::Test
       terminal: "ready_to_brainstorm"
     },
     "brainstorm" => {
-      none: "needs_input",
+      none: "ready_to_run",
       waiting: "needs_input",
       terminal: "ready_to_plan"
     },
@@ -1102,7 +1128,7 @@ class TaskActionTest < Minitest::Test
       terminal: "ready_to_develop"
     },
     "execute" => {
-      none: "needs_input",
+      none: "ready_to_run",
       waiting: "needs_input",
       terminal: "ready_to_open_pr"
     },
@@ -1218,7 +1244,7 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive open-pr demo-260426-aaaa --from 5-open-pr", action.command
   end
 
-  def test_finalize_waiting_when_pr_md_exists
+  def test_markerless_finalize_when_pr_md_exists_is_ready_to_run
     Dir.mktmpdir("task-action-finalize-waiting") do |dir|
       folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
@@ -1230,9 +1256,33 @@ class TaskActionTest < Minitest::Test
 
       action = Hive::TaskAction.for(task, marker(:none))
 
-      assert_equal "needs_input", action.key
-      assert_equal "hive finalize demo-260426-aaaa --from 7-finalize", action.command
+      assert_equal "ready_to_run", action.key
+      assert_equal "hive run demo-260426-aaaa", action.command
     end
+  end
+
+  def test_execute_complete_marker_uses_execute_complete_semantics
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:complete))
+
+    assert_equal "ready_to_open_pr", action.key
+    assert_equal "hive open-pr demo-260426-aaaa --from 4-execute", action.command
+  end
+
+  def test_markerless_execute_is_ready_to_run_not_needs_input
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:none))
+
+    assert_equal "ready_to_run", action.key
+    assert_equal "hive run demo-260426-aaaa", action.command
+  end
+
+  def test_markerless_brainstorm_is_ready_to_run_not_needs_input
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:none))
+
+    assert_equal "ready_to_run", action.key
+    assert_equal "hive run demo-260426-aaaa", action.command
   end
 
   def test_dead_agent_without_recorded_pid_uses_generic_summary

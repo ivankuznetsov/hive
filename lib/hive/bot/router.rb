@@ -302,7 +302,7 @@ module Hive
 
       def answer_voice(update)
         context = answer_context(update)
-        return Result.new(action: :reply, text: "Send /answer <slug> before sending a voice answer.") unless context
+        return Result.new(action: :reply, text: "Send /answer <id|slug> before sending a voice answer.") unless context
 
         result = @slash_handlers.voice(update)
         return result unless result.action == :transcribe_voice

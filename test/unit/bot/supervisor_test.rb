@@ -1223,6 +1223,13 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal %w[idea status queue answer approve autofix details done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
+    # Pin the A5 discoverability copy: the typeable command menu must advertise
+    # the <id|slug> argument so operators learn they can paste a numeric id.
+    descriptions = commands.to_h { |cmd| [ cmd.fetch(:command), cmd.fetch(:description) ] }
+    assert_includes descriptions.fetch("answer"), "/answer <id|slug>"
+    assert_includes descriptions.fetch("approve"), "/approve <id|slug>"
+    assert_includes descriptions.fetch("autofix"), "/autofix <id|slug>"
+    assert_includes descriptions.fetch("details"), "/details <id|slug>"
   end
 
   def test_register_bot_commands_swallows_telegram_failure_and_logs_send_failure

@@ -45,7 +45,7 @@ module Hive
           when :callback_path_a_yes,
                :callback_path_a_just_type
             @result_class.new(action: :reply,
-                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <slug>) " \
+                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <id|slug>) " \
                                     "and reply with your answer; the bot will send the next question automatically.")
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")

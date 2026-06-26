@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-log.v2.json",
-  "title": "hive bot structured log line (v2)",
-  "description": "One JSON-line event emitted by Hive::Bot::Logger. v2 retires the Codex draft-assist feature: the codex_spawned, codex_succeeded, and codex_failed events are removed from the `event` enum (they no longer occur). v1 is kept as-is for historical log lines. Like v1, v2 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event) require a v3 schema file with $id and `schema_version` bumped.",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-log.v3.json",
+  "title": "hive bot structured log line (v3)",
+  "description": "One JSON-line event emitted by Hive::Bot::Logger. v3 adds a required `level` field to every log line plus an optional `category` tag (present only on events that carry one, e.g. noise; omitted otherwise), and adds `poll_unhealthy` for loud poll-health escalation. v2 is kept as-is for historical log lines. Like prior versions, v3 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event, or removing required fields) require a v4 schema file with $id and `schema_version` bumped.",
   "type": "object",
   "additionalProperties": true,
-  "required": ["ts", "schema", "schema_version", "event"],
+  "required": ["ts", "schema", "schema_version", "event", "level"],
   "properties": {
     "ts": {
       "type": "string",
@@ -15,13 +15,14 @@
       "const": "hive-bot-log"
     },
     "schema_version": {
-      "const": 2
+      "const": 3
     },
     "event": {
       "enum": [
         "bot_started",
         "bot_stopping",
         "poll_failure",
+        "poll_unhealthy",
         "poll_schema_skew",
         "update_received",
         "update_rejected_unauthorized",
@@ -56,6 +57,13 @@
         "transcription_failed",
         "fatal"
       ]
+    },
+    "level": {
+      "enum": ["debug", "info", "warn", "error"]
+    },
+    "category": {
+      "type": "string",
+      "description": "Optional open-set tag. The only convention-bearing value is \"noise\", marking high-frequency, low-signal lines (benign poll-transport failures, dedupe/backoff skips). Nothing in the producer gem filters on it — it is a downstream-only contract for a log viewer or forwarder to drop category=noise lines."
     }
   }
 }

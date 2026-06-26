@@ -1,4 +1,5 @@
 require "fileutils"
+require "rbconfig"
 
 module Hive
   module Babysitter
@@ -71,10 +72,19 @@ module Hive
           env_setup = env.map do |env_name, value|
             value.nil? ? "ENV.delete(#{env_name.dump})" : "ENV[#{env_name.dump}] = #{value.to_s.dump}"
           end.join("\n")
+          # Pin the interpreter to the running Ruby's absolute path, both for the
+          # shim's own shebang and for the stub it hands off to. A `#!/usr/bin/env ruby`
+          # shebang (the shim's, and the stub's when reached via the kernel) resolves
+          # `ruby` from PATH at exec time, so a relative PATH component plus an agent
+          # that `chdir`s into the worktree would let a worktree-controlled `bin/ruby`
+          # interpret the script and run arbitrary code before the canonicalized
+          # HIVE_BABYSITTER_REAL_* targets ever take effect. Running the stub through the
+          # pinned interpreter (rather than relying on its shebang) closes that handoff
+          # too. Mirrors the git/gh real-binary canonicalization in `which`.
           File.write(link, <<~RUBY)
-            #!/usr/bin/env ruby
+            #!#{RbConfig.ruby}
             #{env_setup}
-            exec(#{target.dump}, *ARGV)
+            exec #{RbConfig.ruby.dump}, #{target.dump}, *ARGV
           RUBY
           FileUtils.chmod("+x", link)
         end
@@ -97,7 +107,7 @@ module Hive
       def which(name)
         ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
           candidate = File.join(dir, name)
-          return candidate if File.file?(candidate) && File.executable?(candidate)
+          return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
         end
         nil
       end

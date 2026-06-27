@@ -17,6 +17,7 @@ def append_skip_log(path)
     stat = File.lstat(path)
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+    raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
   rescue Errno::ENOENT
     # Missing logs are created below; the fstat check still verifies the opened target.
   end
@@ -25,6 +26,7 @@ def append_skip_log(path)
     stat = file.stat
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+    raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
 
     yield file
   end

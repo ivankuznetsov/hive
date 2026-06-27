@@ -403,6 +403,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_stubs_refuse_hardlinked_skip_log
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target.log")
+      link = File.join(dir, "skipped.log")
+      File.write(target, "existing\n")
+      File.link(target, link)
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => link }
+
+      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "through-hardlink")
+      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+
+      assert git_status.success?, git_err
+      assert gh_status.success?, gh_err
+      assert_equal "existing\n", File.read(target)
+      assert_includes git_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
+      assert_includes gh_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
+    end
+  end
+
   def test_stubs_refuse_fifo_skip_log_without_blocking
     with_tmp_dir do |dir|
       fifo = File.join(dir, "skipped.fifo")

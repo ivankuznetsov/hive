@@ -807,6 +807,10 @@ module Hive
         # don't fall to the bottom (below "Error") as unknown labels would.
         "Ready to run",
         "Ready to advance",
+        # Per-stage "needs input" labels (the differentiated NEEDS_INPUT rows
+        # plus the shared generic "Needs your input"). Deliberately ordered
+        # between "Ready to advance" and "Ready to plan" so these actionable
+        # rows sort high alongside the other "ready"/"needs" rows.
         "Answer questions",
         "Review plan draft",
         "Needs your input",

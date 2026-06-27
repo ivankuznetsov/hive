@@ -37,7 +37,7 @@ class SetupBackendPromptTest < Minitest::Test
     assert_match(/3\) pi/, output.string)
   end
 
-  def test_interactive_accepts_numbers_and_persists_backend_order
+  def test_interactive_accepts_numbers_and_returns_backend_order
     prompt, = make_prompt("3,1\n")
 
     assert_equal %w[claude pi], prompt.collect
@@ -54,6 +54,30 @@ class SetupBackendPromptTest < Minitest::Test
 
     assert_equal %w[claude pi], prompt.collect
     assert_match(/unknown backend selection "ghost"/, output.string)
+  end
+
+  def test_token_stripping_to_empty_reprompts
+    # "," is non-blank (so it bypasses the blank-default path) but every
+    # token strips away, so resolve_selection returns nil and re-prompts.
+    prompt, output = make_prompt(",\nclaude\n")
+
+    assert_equal %w[claude], prompt.collect
+    assert_match(/unknown backend selection ","/, output.string)
+  end
+
+  def test_empty_registered_agents_raises
+    err = assert_raises(ArgumentError) { make_prompt("", registered_agents: []) }
+    assert_match(/at least one setup backend/, err.message)
+  end
+
+  def test_non_intersecting_registered_agents_raises
+    err = assert_raises(ArgumentError) { make_prompt("", registered_agents: %w[ghost]) }
+    assert_match(/at least one setup backend/, err.message)
+  end
+
+  def test_no_default_backend_registered_raises
+    err = assert_raises(ArgumentError) { make_prompt("", registered_agents: %w[pi]) }
+    assert_match(/at least one default backend/, err.message)
   end
 
   def test_eof_raises_aborted

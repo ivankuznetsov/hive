@@ -14,6 +14,9 @@ class TuiReactivityPerfTest < Minitest::Test
   # the correctness fallback path, while archive-size independence is
   # the primary regression signal this test enforces.
   ACTIVE_REPARSE_BUDGET_MS = 100.0
+  # Coverage instrumentation materially changes wall-clock parse cost, so keep
+  # the normal test-suite budget strict and use this only for `rake coverage`.
+  COVERAGE_ACTIVE_REPARSE_BUDGET_MS = 150.0
   IDLE_SCALING_TOLERANCE = 3.0
   IDLE_SCALING_ADD_MS = 1.0
   ACTIVE_SCALING_TOLERANCE = 2.0
@@ -25,8 +28,8 @@ class TuiReactivityPerfTest < Minitest::Test
 
     assert_operator large.fetch(:idle_tick_ms), :<, IDLE_TICK_BUDGET_MS,
                     "idle tick should stay below #{IDLE_TICK_BUDGET_MS}ms at 8x200"
-    assert_operator large.fetch(:active_parse_ms), :<, ACTIVE_REPARSE_BUDGET_MS,
-                    "active parse should stay below #{ACTIVE_REPARSE_BUDGET_MS}ms at 8x200"
+    assert_operator large.fetch(:active_parse_ms), :<, active_reparse_budget_ms,
+                    "active parse should stay below #{active_reparse_budget_ms}ms at 8x200"
     assert_scaled(
       small.fetch(:idle_tick_ms),
       large.fetch(:idle_tick_ms),
@@ -44,6 +47,10 @@ class TuiReactivityPerfTest < Minitest::Test
   end
 
   private
+
+  def active_reparse_budget_ms
+    ENV["HIVE_COVERAGE"] ? COVERAGE_ACTIVE_REPARSE_BUDGET_MS : ACTIVE_REPARSE_BUDGET_MS
+  end
 
   def measure_fixture(tasks_per_project:)
     with_tmp_global_config do |home|

@@ -559,6 +559,33 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_archive_refresher_failure_warns_without_raising
+    with_direct_project do |_project, _hive_state|
+      raise_archive_refresh = true
+      patch = Module.new do
+        define_method(:json_payload) do |projects, **kwargs|
+          if raise_archive_refresh && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+            raise StandardError, "synthetic archive refresh failure"
+          end
+
+          super(projects, **kwargs)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+
+      _out, err = capture_io do
+        source.send(:refresh_archived_cache, Hive::Config.registered_projects)
+      end
+
+      assert_match(/tui archive refresh failed/, err)
+      assert_match(/synthetic archive refresh failure/, err)
+    ensure
+      raise_archive_refresh = false
+      source&.stop
+    end
+  end
+
   def test_safe_mtime_returns_nil_when_mtime_raises_on_existing_path
     # state_source.rb 152: the file may vanish (or error) between the
     # File.exist? check and File.mtime. The rescue must degrade to nil

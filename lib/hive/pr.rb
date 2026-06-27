@@ -33,6 +33,19 @@ module Hive
       match ? "##{match[1]}" : nil
     end
 
+    def identifier_to_number(identifier)
+      value = identifier.to_s.strip
+
+      match = value.match(/\A#?(\d+)\z/)
+      return match[1].to_i if match
+
+      pr_number = number(value)
+      return pr_number.delete_prefix("#").to_i if pr_number
+
+      raise ArgumentError,
+            "invalid PR identifier #{identifier.inspect}; pass a PR number, #number, or GitHub pull request URL"
+    end
+
     # Injection-gating predicate shared by the OSC 8 (TUI) and HTML (bot)
     # link builders: true only for a parseable http(s) URL with a non-empty
     # host. This is the check that rejects `javascript:` and other non-http

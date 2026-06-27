@@ -15,6 +15,7 @@ module Hive
       class CollisionError < Hive::Error; end
 
       SOURCE = "ad-hoc".freeze
+      REVIEW_STAGE = Hive::Workflows.for_verb("review").fetch(:target).freeze
 
       def initialize(pr:, project: nil, json: false)
         @pr_identifier = pr
@@ -51,7 +52,7 @@ module Hive
       private
 
       def reuse(slug, hive_state_path)
-        { slug: slug, task_folder: File.join(hive_state_path, "stages", "6-review", slug), reused: true }
+        { slug: slug, task_folder: File.join(hive_state_path, "stages", REVIEW_STAGE, slug), reused: true }
       end
 
       def slug_for(pr_number)
@@ -59,7 +60,7 @@ module Hive
       end
 
       def reusable_folder?(hive_state_path, slug)
-        File.directory?(File.join(hive_state_path, "stages", "6-review", slug))
+        File.directory?(File.join(hive_state_path, "stages", REVIEW_STAGE, slug))
       end
 
       def refuse_if_owned!(hive_state_path, slug, pr_number)
@@ -73,7 +74,7 @@ module Hive
       def existing_slug_owner(hive_state_path, slug)
         Dir.glob(File.join(hive_state_path, "stages", "*", slug)).filter_map do |folder|
           stage = File.basename(File.dirname(folder))
-          next if stage == "6-review"
+          next if stage == REVIEW_STAGE
 
           { stage: stage, slug: slug, folder: folder }
         end.first
@@ -107,7 +108,7 @@ module Hive
       end
 
       def create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
-        task_folder = File.join(hive_state_path, "stages", "6-review", slug)
+        task_folder = File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
         materialized = materialize(project_root, slug, pr_number)
         verify_head!(pr_number, metadata, materialized)

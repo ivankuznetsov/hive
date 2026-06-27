@@ -48,6 +48,13 @@ module Hive
         Open3.capture3("git", "-C", @project.fetch("path"), "worktree", "prune")
         FileUtils.rm_rf(path)
       end
+
+      def run_git!(*args)
+        out, err, status = Open3.capture3("git", "-C", @project.fetch("path"), *args)
+        return out if status.success?
+
+        raise Hive::WorktreeError, "git #{args.join(' ')} failed: #{err.strip.empty? ? out : err}"
+      end
     end
   end
 end

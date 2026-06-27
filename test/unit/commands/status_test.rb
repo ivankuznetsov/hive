@@ -1275,12 +1275,8 @@ class CommandsStatusTest < Minitest::Test
 
     sorted = cmd.send(:action_labels, rows)
 
-    assert_operator sorted.index("Ready to run"), :<, sorted.index("Error"),
-                    "generic 'Ready to run' rows must sort above 'Error'"
-    assert_operator sorted.index("Ready to advance"), :<, sorted.index("Error"),
-                    "generic 'Ready to advance' rows must sort above 'Error'"
-    [ "Answer questions", "Review plan draft", "Needs your input",
-      "Needs review decision", "Confirm finalize" ].each do |label|
+    [ "Ready to run", "Ready to advance", "Answer questions", "Review plan draft",
+      "Needs your input", "Needs review decision", "Confirm finalize" ].each do |label|
       assert_operator sorted.index(label), :<, sorted.index("Error"),
                       "#{label.inspect} rows must sort above 'Error'"
     end

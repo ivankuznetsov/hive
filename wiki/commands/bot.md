@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-24
+updated: 2026-06-27
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -39,10 +39,11 @@ hive bot install [--force] [--json]
 
 | Slash command | Behavior |
 |--------------|----------|
-| `/start` | Telegram's automatic first-contact command. Replies with a short "Connected" welcome and concrete next steps (`/status`, `/idea`, `/help`) instead of falling through to the unknown-command hint. It does not dispatch workflow state. |
+| `/start` | Telegram's automatic first-contact command. Replies with a short "Connected" welcome and concrete next steps (`/status`, "send any message to capture a new idea", `/help`) instead of falling through to the unknown-command hint. It does not dispatch workflow state. |
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
+| `/waiting` | Renders the same global status queue filtered to rows waiting on human input: brainstorm questions, plan approval when the project daemon is off, review triage/fix guardrail, execute/finalize pauses, and generic `needs_input`. It reuses the `/status` renderer and inline button mapping. Empty snapshots reply `Nothing is waiting on you.` |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
-| `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
+| `/idea [text]` | Explicit alias for inbox idea capture. Bare non-slash text outside an active answer conversation now follows the same path, so the operator can just send the idea text; `/idea <text>` remains supported. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
 | `/answer <id\|slug>` | Starts deterministic brainstorm answering; numeric ids (`9281` or `#9281`) resolve through the current status snapshot to the task slug before the conversation starts. Each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. The historical Path A/B distinction is compatibility-only now, and both modes use the same answer writer. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
 | `/approve <id\|slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface after resolving numeric ids through the current status snapshot. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <id\|slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves an id or slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
@@ -50,10 +51,12 @@ hive bot install [--force] [--json]
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
 | `/help` | Lists the typeable workflow command set. |
 
-Free text outside an active answer conversation is rejected with a
-`/help` hint unless it is a reply-to reattach message whose quoted text
-contains a project/slug or legacy "Answer mode started" slug. Unauthorized
-chats receive no reply.
+Free text outside an active answer conversation starts a new idea draft by
+default, reusing the `/idea` project-picker flow. Active answer
+conversations and reply-to reattach messages still take priority and write
+the text as the brainstorm answer. Unknown slash commands stay on the
+unknown-command path and reply with the `/help` hint; a leading `/` is never
+captured as idea text. Unauthorized chats receive no reply.
 
 Media messages participate in the `/idea` flow. A photo or document with
 a caption starts an idea draft using the caption as the idea text and
@@ -115,6 +118,13 @@ The reply stays text-only when no row is actionable. The `/answer`,
 `/approve`, `/autofix`, `/details` slash commands remain typeable
 (and appear in the quick-actions menu as `<id|slug>`) for operators who
 prefer typing or scripting.
+
+`/waiting` is the filtered companion to `/status`: it uses
+`Hive::Bot::WaitingRows.select` to keep only `needs_input` human gates and
+then renders the same queue text/buttons. Because the source is
+`hive status --json`, which has one row per task, `/waiting` naturally shows
+one surfaced gate per task. It is global in this pass (no project argument)
+and uses the same 10-row display cap as `/status`.
 
 ### Dispatch acknowledgment on success
 

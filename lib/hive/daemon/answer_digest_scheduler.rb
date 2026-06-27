@@ -133,7 +133,11 @@ module Hive
 
       def parse_date(value)
         value && Date.iso8601(value.to_s)
-      rescue ArgumentError
+      rescue ArgumentError => e
+        # read_state only logs JSON/IO faults; a well-formed-JSON-but-malformed
+        # `last_fired_date` would otherwise self-heal to nil in the dark. Log
+        # it on the same event so a corrupt cursor is observable.
+        log_state_unreadable("malformed last_fired_date #{value.inspect}: #{e.message}")
         nil
       end
     end

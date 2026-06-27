@@ -171,6 +171,11 @@ module Hive
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answers_pending?`).
         @brainstorm_parse_errors = {}
+        # `op-label → last-logged error signature` for the global-digest
+        # scheduler tick/complete :fatal dedup, mirroring the brainstorm-gate
+        # pattern so a persistently-raising scheduler logs once per distinct
+        # fault (and re-logs after a clean run), not on every ~30s poll.
+        @digest_scheduler_fatal_signatures = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -215,25 +220,8 @@ module Hive
         # + catch-up-cap `write_state`), and an unguarded SystemCallError
         # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
         # trip the unit's restart-loop cap.
-        begin
-          @digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
-            dispatch_digest(digest_dispatch, now: now)
-          end
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "digest_scheduler.tick raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
-        begin
-          @answer_digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
-            dispatch_digest(digest_dispatch, now: now)
-          end
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "answer_digest_scheduler.tick raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
+        run_digest_scheduler_tick(@digest_scheduler, "digest_scheduler.tick", now: now)
+        run_digest_scheduler_tick(@answer_digest_scheduler, "answer_digest_scheduler.tick", now: now)
 
         # 2. Fetch status
         result = @status_consumer.fetch
@@ -619,29 +607,50 @@ module Hive
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
             @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
           end
-          if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
-            # `complete` advances the cursor via `write_state`; isolate its
-            # disk I/O so an ENOSPC/EROFS fault on the digest can't crash the
-            # reap (and with it the whole poll loop).
-            begin
-              @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
-            rescue StandardError => e
-              @logger.event(:fatal,
-                            message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
-                            keeping_previous: true)
-            end
-          end
-          if entry.stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
-            begin
-              @answer_digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
-            rescue StandardError => e
-              @logger.event(:fatal,
-                            message: "answer_digest_scheduler.complete raised: #{e.class}: #{e.message}",
-                            keeping_previous: true)
-            end
-          end
+          complete_digest_scheduler_for(entry, now: now)
         end
         entries.any?
+      end
+
+      # Advance the matching global-digest scheduler's cursor after one of its
+      # pseudo-children exits, isolating the scheduler's disk I/O (an
+      # ENOSPC/EROFS `write_state` fault) so it can't crash the reap and with
+      # it the whole poll loop. A no-op for non-digest stages (the resolver
+      # returns nil), so both reap paths can call it unconditionally; a third
+      # digest type needs no new copy-paste branch.
+      def complete_digest_scheduler_for(entry, now:)
+        scheduler = global_digest_scheduler(entry.stage)
+        return unless scheduler
+
+        label = "#{global_digest_action(entry.stage)}_scheduler.complete"
+        scheduler.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+        @digest_scheduler_fatal_signatures.delete(label)
+      rescue StandardError => e
+        log_digest_scheduler_fatal(label, e)
+      end
+
+      # Run one global-digest scheduler's tick and dispatch any returned
+      # pseudo-children, isolating a tick crash as a deduped :fatal so a
+      # persistently-raising scheduler can't crash the poll loop or spam the
+      # log every ~30s. A clean run clears the dedup so a later distinct fault
+      # re-logs.
+      def run_digest_scheduler_tick(scheduler, label, now:)
+        return unless scheduler
+
+        scheduler.tick(now: now)&.each { |digest_dispatch| dispatch_digest(digest_dispatch, now: now) }
+        @digest_scheduler_fatal_signatures.delete(label)
+      rescue StandardError => e
+        log_digest_scheduler_fatal(label, e)
+      end
+
+      # Log a global-digest scheduler tick/complete crash as :fatal, deduped
+      # per op-label on the error signature (mirrors `log_brainstorm_parse_error`).
+      def log_digest_scheduler_fatal(label, error)
+        signature = "#{error.class}: #{error.message}"
+        return if @digest_scheduler_fatal_signatures[label] == signature
+
+        @digest_scheduler_fatal_signatures[label] = signature
+        @logger.event(:fatal, message: "#{label} raised: #{signature}", keeping_previous: true)
       end
 
       # Snapshot each tracked state file's on-disk mtime so the next fast
@@ -754,26 +763,9 @@ module Hive
           # Mirror reap_completed's digest hook: a dry-run digest pseudo-child
           # must also clear the scheduler's `@pending` marker, or `tick`
           # returns [] forever (`@pending.any?`) and the dry-run daemon wedges
-          # after dispatching the digest exactly once. Isolate the disk I/O the
-          # same way the sibling branch does.
-          if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
-            begin
-              @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
-            rescue StandardError => e
-              @logger.event(:fatal,
-                            message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
-                            keeping_previous: true)
-            end
-          end
-          if entry.stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
-            begin
-              @answer_digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
-            rescue StandardError => e
-              @logger.event(:fatal,
-                            message: "answer_digest_scheduler.complete raised: #{e.class}: #{e.message}",
-                            keeping_previous: true)
-            end
-          end
+          # after dispatching the digest exactly once. Same isolation as the
+          # real reap path, via the shared helper.
+          complete_digest_scheduler_for(entry, now: now)
           @logger.event(:child_exited,
                         pid: entry.pid, exit_code: entry.exit_code,
                         project: entry.project, slug: entry.slug, stage: entry.stage,

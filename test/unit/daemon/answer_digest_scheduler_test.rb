@@ -242,13 +242,17 @@ class HiveDaemonAnswerDigestSchedulerTest < Minitest::Test
     end
   end
 
-  def test_unparseable_cursor_date_is_treated_as_unfired
+  def test_unparseable_cursor_date_is_treated_as_unfired_and_logged
     with_utc do
       with_tmp_dir do |dir|
         write_state(dir, "last_fired_date" => "not-a-date")
-        scheduler = scheduler(dir, enabled: true)
+        logger = StubLogger.new
+        scheduler = scheduler(dir, enabled: true, logger: logger)
 
         assert_equal "2026-06-14", scheduler.tick(now: AT_9).first.fetch(:slug)
+        event = logger.events.find { |name, _| name == :answer_digest_state_unreadable }
+        refute_nil event, "a corrupt last_fired_date must be logged, not self-heal in the dark"
+        assert_match(/malformed last_fired_date/, event.last.fetch(:error))
       end
     end
   end

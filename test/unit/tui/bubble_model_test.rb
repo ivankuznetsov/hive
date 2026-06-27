@@ -183,6 +183,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :archive, @model.hive_model.mode
   end
 
+  def test_open_archive_pane_requests_archive_refresh
+    calls = 0
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch,
+      archive_refresh: -> { calls += 1 }
+    )
+
+    @model.update(Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
+
+    assert_equal 1, calls
+    assert_equal :archive, @model.hive_model.mode
+  end
+
   # F2: full filter happy path through KeyMessage → KeyMap → Update.
   # Open filter, type chars, commit; assert filter committed and mode
   # back to :grid. Pins the regression we found in the /ce-code-review

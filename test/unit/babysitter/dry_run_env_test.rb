@@ -886,6 +886,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env_keys = %w[
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+        SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
       ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
@@ -902,7 +904,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GH_FORCE_TTY" => "80",
         "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
         "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
-        "HOME" => File.join(dir, "evil-home")
+        "HOME" => File.join(dir, "evil-home"),
+        "HTTP_PROXY" => "http://127.0.0.1:8080",
+        "HTTPS_PROXY" => "http://127.0.0.1:8443",
+        "ALL_PROXY" => "socks5://127.0.0.1:1080",
+        "NO_PROXY" => "",
+        "http_proxy" => "http://127.0.0.1:8081",
+        "https_proxy" => "http://127.0.0.1:8444",
+        "all_proxy" => "socks5://127.0.0.1:1081",
+        "no_proxy" => "",
+        "SSL_CERT_FILE" => File.join(dir, "agent-ca.pem"),
+        "SSL_CERT_DIR" => File.join(dir, "agent-ca-dir"),
+        "ssl_cert_file" => File.join(dir, "agent-ca-lower.pem"),
+        "ssl_cert_dir" => File.join(dir, "agent-ca-dir-lower")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")

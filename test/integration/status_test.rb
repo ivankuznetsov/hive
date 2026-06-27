@@ -36,7 +36,7 @@ class StatusTest < Minitest::Test
         out, _err = capture_io { Hive::Commands::Status.new.call }
         assert_includes out, project
         assert_includes out, "Ready to brainstorm"
-        assert_includes out, "Needs your input"
+        assert_includes out, "Answer questions"
         assert_includes out, "hive brainstorm"
         assert_includes out, "#1"
         assert_includes out, "#2"

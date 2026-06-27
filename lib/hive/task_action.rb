@@ -25,7 +25,7 @@ module Hive
       },
       brainstorm_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Answer questions",
         command: "brainstorm"
       },
       brainstorm_complete: {
@@ -35,7 +35,7 @@ module Hive
       },
       plan_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Review plan draft",
         command: "plan"
       },
       plan_complete: {
@@ -75,7 +75,7 @@ module Hive
       },
       review_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Needs review decision",
         command: "review"
       },
       review_ready: {
@@ -122,7 +122,7 @@ module Hive
       },
       finalize_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Confirm finalize",
         command: "finalize"
       },
       finalize_complete: {

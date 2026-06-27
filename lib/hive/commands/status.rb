@@ -807,7 +807,11 @@ module Hive
         # don't fall to the bottom (below "Error") as unknown labels would.
         "Ready to run",
         "Ready to advance",
+        "Answer questions",
+        "Review plan draft",
         "Needs your input",
+        "Needs review decision",
+        "Confirm finalize",
         "Ready to plan",
         "Ready to develop",
         "Needs recovery",

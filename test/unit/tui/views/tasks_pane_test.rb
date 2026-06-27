@@ -145,6 +145,24 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "1m",               "age column must render (90s → 1m)"
   end
 
+  def test_needs_review_decision_fits_status_column_without_truncation
+    label = "Needs review decision"
+    assert_operator Hive::Tui::Views::Format.display_width(label),
+                    :<=,
+                    Hive::Tui::Views::TasksPane::STATUS_WIDTH
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "review-row", stage: "6-review", action: "needs_input",
+                  action_label: label, marker: "review_waiting",
+                  suggested: "hive review review-row --from 6-review")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_includes out, label
+  end
+
   def test_renders_dash_pr_column_without_url
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [

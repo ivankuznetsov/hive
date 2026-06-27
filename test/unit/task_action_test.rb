@@ -51,14 +51,27 @@ class TaskActionTest < Minitest::Test
     assert_equal "Ready to plan", action.label
   end
 
-  def test_brainstorm_waiting_is_needs_input
+  def test_brainstorm_waiting_label_is_distinct
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
-    assert_equal "needs_input", Hive::TaskAction.for(task, marker(:waiting)).key
+    action = Hive::TaskAction.for(task, marker(:waiting))
+
+    assert_equal "needs_input", action.key
+    assert_equal "Answer questions", action.label
+    assert_equal "hive brainstorm demo-260426-aaaa --from 2-brainstorm", action.command
   end
 
   def test_plan_complete_is_ready_to_develop
     task = fake_task(stage_name: "plan", stage_index: 3)
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
+  end
+
+  def test_plan_waiting_label_is_distinct
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    action = Hive::TaskAction.for(task, marker(:waiting))
+
+    assert_equal "needs_input", action.key
+    assert_equal "Review plan draft", action.label
+    assert_equal "hive plan demo-260426-aaaa --from 3-plan", action.command
   end
 
   def test_plan_missing_or_empty_output_is_error_not_needs_input
@@ -173,11 +186,12 @@ class TaskActionTest < Minitest::Test
     assert_nil action.command
   end
 
-  def test_review_waiting_is_needs_input
+  def test_review_waiting_label_is_distinct
     task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:review_waiting, "pass" => "2"))
     assert_equal "needs_input", action.key
-    assert_equal "Needs your input", action.label
+    assert_equal "Needs review decision", action.label
+    assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
   end
 
   # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
@@ -199,6 +213,8 @@ class TaskActionTest < Minitest::Test
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(task, marker(:execute_waiting))
     assert_equal "needs_input", action.key
+    assert_equal "Needs your input", action.label
+    assert_equal "hive develop demo-260426-aaaa --from 4-execute", action.command
   end
 
   def test_legacy_execute_waiting_with_findings_surfaces_recovery_findings_cli
@@ -294,6 +310,29 @@ class TaskActionTest < Minitest::Test
       assert_equal "ready_to_finalize", open_pr_marker.key,
                    "open-pr's is_draft=true COMPLETE marker must not look archive-ready"
       assert_equal "hive finalize demo-260426-aaaa --from 8-finalize", open_pr_marker.command
+    end
+  end
+
+  def test_finalize_waiting_label_is_distinct
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 8,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+      File.write(task.state_file, "---\npr_url: https://example.com/pr/9\n---\n")
+
+      action = Hive::TaskAction.for(task, marker(:waiting))
+
+      assert_equal "needs_input", action.key
+      assert_equal "Confirm finalize", action.label
+      assert_equal "hive finalize demo-260426-aaaa --from 8-finalize", action.command
     end
   end
 

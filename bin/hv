@@ -40,9 +40,23 @@ probe_version() {
     "$1" --version </dev/null >"$output_file" 2>/dev/null &
     pid=$!
     (
-      sleep 5
+      # As soon as the probe finishes, the cleanup below TERMs this watchdog so
+      # a fast candidate is never made to wait out the full timeout. Run each
+      # delay as a background job we `wait` on, with a TERM trap that kills the
+      # sleeping grandchild and exits. The `wait` builtin is interruptible by a
+      # trapped signal, so teardown is immediate. A foreground `sleep` would
+      # not be: on bash 3.2 (stock macOS) the watchdog cannot be torn down
+      # until the sleep elapses, leaving the cleanup `wait` below to block for
+      # the entire five seconds on every fast probe.
+      nap=""
+      trap 'kill "$nap" 2>/dev/null || true; exit 0' TERM
+      sleep 5 &
+      nap=$!
+      wait "$nap" 2>/dev/null
       kill "$pid" 2>/dev/null || exit 0
-      sleep 1
+      sleep 1 &
+      nap=$!
+      wait "$nap" 2>/dev/null
       kill -KILL "$pid" 2>/dev/null || true
     ) &
     watchdog=$!

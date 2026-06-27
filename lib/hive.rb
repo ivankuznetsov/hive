@@ -47,6 +47,12 @@ module Hive
       # failures use stderr + exit code, and the Thor-usage error path
       # emits the shared error envelope (see JSON_USAGE_ERROR_CONTRACTS).
       "hive-digest" => 1,
+      # Daily digest of tasks waiting on human input (`hive answer-digest
+      # --json`). The success envelope reports the send outcome plus the full
+      # waiting set (count/tasks); the Thor-usage error path emits the shared
+      # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
+      # outage emit the in-command error envelope.
+      "hive-answer-digest" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,

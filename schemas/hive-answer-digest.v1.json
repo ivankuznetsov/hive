@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-answer-digest.v1.json",
+  "title": "hive answer-digest output (v1)",
+  "description": "Stable contract emitted by `hive answer-digest --json`. The success envelope reports whether a Telegram digest of human-blocking tasks was sent (sent/reason/dry_run/chat_id), the attached button count, and the full waiting set (count/tasks) so an agent can learn how many and which tasks wait even on a real send where message is null. Usage errors emit the ErrorPayload: a bad --date (Hive::ConfigError, error_kind=config) and a status outage (StatusUnavailableError, error_kind=status_unavailable) via the in-command envelope, and bad flags (Thor::Error, error_kind=usage) via JSON_USAGE_ERROR_CONTRACTS. A Telegram send error mid-delivery surfaces on stderr + a non-zero exit code without an envelope.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "date",
+        "sent",
+        "reason",
+        "dry_run",
+        "chat_id",
+        "button_count",
+        "count",
+        "tasks",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-answer-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "The local calendar date echoed from --date (or today's local date). Does not scope the (always-live) waiting set or dedup sends; scheduler idempotency lives in answer_digest_state.json."
+        },
+        "sent": {
+          "type": "boolean",
+          "description": "true only when a Telegram message was actually sent (reason is null). Derived from reason."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "enum": [null, "empty", "dry_run"],
+          "description": "null = a digest was sent; empty = nothing was waiting, so nothing was sent; dry_run = the digest was rendered but not sent (--dry-run)."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "true when invoked with --dry-run; nothing was sent to Telegram."
+        },
+        "chat_id": {
+          "type": ["integer", "string", "null"],
+          "description": "The Telegram chat the digest was sent to (the first bot.chat_id_allowlist entry). null when nothing was sent (empty/dry_run)."
+        },
+        "button_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The number of inline buttons attached to the sent message, capped at the 10-task display cap. Use `count` for the true total."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The true number of tasks waiting on human input (uncapped)."
+        },
+        "tasks": {
+          "type": "array",
+          "description": "One entry per waiting task, in delivery order. Present even on a real send (where message is null).",
+          "items": { "$ref": "#/$defs/Task" }
+        },
+        "message": {
+          "type": ["string", "null"],
+          "description": "The rendered digest text on a --dry-run (so a caller can preview it); null on a real send and on an empty waiting set."
+        }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "id", "title", "stage", "pr"],
+      "properties": {
+        "project": { "type": ["string", "null"], "description": "The owning project name." },
+        "slug": { "type": ["string", "null"], "description": "The task slug." },
+        "id": { "type": ["integer", "null"], "description": "The numeric task id, when assigned." },
+        "title": { "type": "string", "description": "The display title (`#<id> <name>`, name, or slug-derived fallback)." },
+        "stage": { "type": ["string", "null"], "description": "The current stage directory the task waits in." },
+        "pr": { "type": ["string", "null"], "description": "The `#<number>` pull-request label when a PR exists, else null." }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-answer-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the error class that was raised."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage",
+            "config",
+            "status_unavailable",
+            "internal"
+          ],
+          "description": "usage = malformed invocation caught before command dispatch (exit 64). config = bad --date / missing chat config (exit 78). status_unavailable = `hive status --json` came back unusable (exit 1, retryable). internal = uncategorised crash (exit 1/70)."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 64, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 78=CONFIG."
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

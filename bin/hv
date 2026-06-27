@@ -37,8 +37,20 @@ probe_version() {
     local output_file pid status watchdog
     output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return
 
+    # Launch the probe in its own process group so the watchdog can signal the
+    # whole probe tree, not just the direct child. GNU `timeout` group-kills on
+    # expiry; on this fallback path we must match it. A candidate that forks a
+    # child without `exec` — e.g. a wrapper that boots a JVM/helper and `wait`s
+    # on it — would otherwise survive: TERMing only the wrapper PID leaves the
+    # JVM orphaned, so repeated probes accrete stray processes. Monitor mode
+    # (`set -m`) places the next background job in a fresh process group whose
+    # PGID equals its PID, so `kill -TERM -"$pid"` reaches every descendant. We
+    # restore `set +m` immediately to suppress job-control chatter; the
+    # already-forked job keeps its process group regardless.
+    set -m
     "$1" --version </dev/null >"$output_file" 2>/dev/null &
     pid=$!
+    set +m
     (
       # As soon as the probe finishes, the cleanup below TERMs this watchdog so
       # a fast candidate is never made to wait out the full timeout. Run each
@@ -53,11 +65,14 @@ probe_version() {
       sleep 5 &
       nap=$!
       wait "$nap" 2>/dev/null
-      kill "$pid" 2>/dev/null || exit 0
+      # Signal the probe's whole process group (negative PID). Fall back to the
+      # bare PID if the group is gone; `exit 0` only when both miss, i.e. the
+      # probe already finished and there is nothing left to escalate against.
+      kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || exit 0
       sleep 1 &
       nap=$!
       wait "$nap" 2>/dev/null
-      kill -KILL "$pid" 2>/dev/null || true
+      kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
     ) &
     watchdog=$!
 

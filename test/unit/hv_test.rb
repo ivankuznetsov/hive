@@ -145,6 +145,75 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_timed_out_probe_tree_is_group_killed_when_timeout_binary_is_absent
+    with_tmp_dir do |dir|
+      pidfile = File.join(dir, "probe-child.pid")
+
+      # A wrapper candidate that forks a long-lived child WITHOUT `exec`,
+      # records its PID, then blocks. On the no-`timeout` fallback path the
+      # watchdog must group-kill the probe: TERMing only the wrapper PID would
+      # orphan this child (a stand-in for a JVM/helper), and repeated probes
+      # would accrete stray processes. The watchdog launches the probe under
+      # monitor mode so a negative-PID kill reaches the whole tree.
+      wrapper = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(wrapper))
+      File.write(wrapper, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          #{RbConfig.ruby} -e 'sleep 60' &
+          echo "$!" > "#{pidfile}"
+          wait
+          exit 0
+        fi
+        echo wrapper:$1
+      SH
+      FileUtils.chmod(0o755, wrapper)
+
+      bash_env = File.join(dir, "bash-env")
+      File.write(bash_env, <<~SH)
+        command() {
+          if [ "$1" = "-v" ] && [ "${2:-}" = "timeout" ]; then return 1; fi
+          builtin command "$@"
+        }
+
+        sleep() {
+          case "${1:-}" in
+            5|1) builtin command sleep 0.1 ;;
+            *) builtin command sleep "$@" ;;
+          esac
+        }
+      SH
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => wrapper,
+          "XDG_BIN_HOME" => xdg_bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "BASH_ENV" => bash_env
+        },
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out, "hv must fall through the hung wrapper to the good candidate"
+
+      child_pid = Integer(File.read(pidfile).strip)
+      refute probe_child_alive?(child_pid),
+             "the watchdog must group-kill the probe so a fork-without-exec child is not orphaned"
+    ensure
+      reap_probe_child(pidfile)
+    end
+  end
+
   def test_self_recursion_guard_resolves_symlinks_via_realpath_rung
     assert_recursion_guard_holds(disabled_resolvers: [])
   end
@@ -215,6 +284,30 @@ class HvTest < Minitest::Test
       assert_equal 127, status.exitstatus, err
       assert_includes err, "hive binary not found"
     end
+  end
+
+  # Poll briefly for the orphan to disappear: after the watchdog group-kills
+  # the probe, the child is reparented to the subreaper/init and reaped, so
+  # `kill(0)` flips to ESRCH. Polling absorbs that small teardown window
+  # without a fixed sleep.
+  def probe_child_alive?(pid)
+    20.times do
+      Process.kill(0, pid)
+      sleep 0.1
+    end
+    true
+  rescue Errno::ESRCH
+    false
+  rescue Errno::EPERM
+    # PID was recycled into a process we don't own — treat as gone.
+    false
+  end
+
+  def reap_probe_child(pidfile)
+    pid = Integer(File.read(pidfile).strip)
+    Process.kill("KILL", pid)
+  rescue StandardError
+    nil
   end
 
   def write_failing_resolvers(dir, names)

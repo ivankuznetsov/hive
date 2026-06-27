@@ -866,6 +866,34 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  # Risk #6 last-row edge: dropping a project's ONLY archived folder leaves an
+  # empty 9-done dir, so every later refresh returns tasks=[] with the prior
+  # rows still cached. The on-disk gate must let that empty result clear the
+  # cache — otherwise the dropped row becomes a permanent ghost in the archive
+  # pane (the retain-prior-on-empty guard would re-retain it forever).
+  def test_dropping_last_archived_folder_clears_ghost_on_next_refresh
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      only_done = write_state_task(hive_state, "9-done", "done-only-260626-abcd",
+                                   marker: "COMPLETE", id: 2)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      assert_includes source.current.rows.map(&:slug), "done-only-260626-abcd"
+
+      FileUtils.rm_r(only_done)
+      File.utime(Time.now + 5, Time.now + 5, File.join(hive_state, "stages", "9-done"))
+      source.send(:refresh_once)
+      wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
+      source.send(:refresh_once)
+
+      refute_includes source.current.rows.map(&:slug), "done-only-260626-abcd",
+                      "dropping a project's LAST archived folder must clear the ghost, not retain it forever"
+    ensure
+      source&.stop
+    end
+  end
+
   # Reverse of test_task_moving_into_done: a task moved OUT of 9-done while
   # its slug is still in the stale archived cache must render exactly once
   # (the active row wins; the merge's reverse-direction dedup drops the
@@ -935,22 +963,88 @@ class TuiStateSourceTest < Minitest::Test
 
   # A transient empty archive payload for a project (the generic-degradation
   # shape: tasks=[] with no "error") must NOT blank the project's archived
-  # rows — archived_cache_from_payload retains the prior cache entry.
+  # rows WHILE the on-disk 9-done dir still holds a task folder —
+  # archived_cache_from_payload retains the prior cache entry. (The drop
+  # direction — empty payload AND empty dir — is covered by the sibling test.)
   def test_archived_cache_retains_prior_rows_when_archive_payload_is_empty
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
-    good = source.send(:archived_cache_from_payload, {
-      "projects" => [
-        { "path" => "/p", "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
-      ]
-    })
-    assert_equal 1, good.fetch(:rows_by_path).fetch("/p").size
+    Dir.mktmpdir("state-source-retain") do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+      # On-disk evidence the empty payload is transient: the 9-done dir still
+      # holds a task folder.
+      FileUtils.mkdir_p(File.join(archive_dir, "done-260626-abcd"))
 
-    degraded = source.send(:archived_cache_from_payload,
-                           { "projects" => [ { "path" => "/p", "tasks" => [] } ] },
-                           previous: good)
+      good = source.send(:archived_cache_from_payload, {
+        "projects" => [
+          { "path" => dir, "hive_state_path" => hive_state,
+            "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
+        ]
+      })
+      assert_equal 1, good.fetch(:rows_by_path).fetch(dir).size
 
-    assert_equal [ "done-260626-abcd" ], degraded.fetch(:rows_by_path).fetch("/p").map { |t| t["slug"] },
-                 "an empty archive payload must retain the prior cached rows, not publish []"
+      degraded = source.send(
+        :archived_cache_from_payload,
+        { "projects" => [ { "path" => dir, "hive_state_path" => hive_state, "tasks" => [] } ] },
+        previous: good
+      )
+
+      assert_equal [ "done-260626-abcd" ], degraded.fetch(:rows_by_path).fetch(dir).map { |t| t["slug"] },
+                   "an empty payload must retain prior rows while the 9-done dir still holds task folders"
+    end
+  end
+
+  # The last-row edge (plan Risk #6): when the empty archive payload coincides
+  # with an empty/absent on-disk 9-done dir, dropping a project's LAST archived
+  # folder must publish [] rather than re-retain a permanent ghost. Without the
+  # on-disk gate the retain-prior guard could never clear the final row.
+  def test_archived_cache_clears_last_rows_when_archive_dir_is_empty
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    Dir.mktmpdir("state-source-drop") do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+      FileUtils.mkdir_p(File.join(archive_dir, "done-260626-abcd"))
+      good = source.send(:archived_cache_from_payload, {
+        "projects" => [
+          { "path" => dir, "hive_state_path" => hive_state,
+            "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
+        ]
+      })
+      assert_equal 1, good.fetch(:rows_by_path).fetch(dir).size
+
+      # Drop the LAST archived folder: the 9-done dir is now empty on disk, so
+      # the empty payload is a real removal — publish [], don't retain a ghost.
+      FileUtils.rm_r(File.join(archive_dir, "done-260626-abcd"))
+      cleared = source.send(
+        :archived_cache_from_payload,
+        { "projects" => [ { "path" => dir, "hive_state_path" => hive_state, "tasks" => [] } ] },
+        previous: good
+      )
+
+      assert_empty cleared.fetch(:rows_by_path).fetch(dir),
+                   "dropping the last archived folder must clear the cache, not retain a permanent ghost"
+    end
+  end
+
+  # A stat fault on the 9-done dir is uncertain, not proof of removal:
+  # archive_dir_has_tasks? must bias toward retaining prior rows (mirrors
+  # safe_mtime's re-check bias) so a transient EACCES/ESTALE can't blank a
+  # project's archived rows.
+  def test_archive_dir_has_tasks_treats_a_stat_fault_as_retain
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    Dir.mktmpdir("state-source-archive-stat") do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+      FileUtils.mkdir_p(archive_dir)
+      with_replaced_singleton_method(Dir, :children, lambda { |arg|
+        raise Errno::EACCES, arg if arg == archive_dir
+
+        Dir.entries(arg) - %w[. ..]
+      }) do
+        assert source.send(:archive_dir_has_tasks?, hive_state),
+               "an unreadable 9-done dir is uncertain — retain prior rows rather than blank them"
+      end
+    end
   end
 
   # Permanent-failure backoff: the first archive-refresh failure re-arms an
@@ -1053,6 +1147,208 @@ class TuiStateSourceTest < Minitest::Test
       assert surfaced,
              "a newly-added project's archived rows must surface after the background refresh"
     ensure
+      source&.stop
+    end
+  end
+
+  # A persistently-stuck stat error on a project's 9-done dir (exist? true,
+  # mtime raises — e.g. stale NFS) must NOT re-trigger the heavy archive rescan
+  # on every poll tick. safe_mtime returns a fresh, never-equal StatError, so a
+  # naive `!=` compare would read the dir as "changed" forever; the stable
+  # signature collapses StatError so a stuck dir arms the dirty flag once on the
+  # transition into the error, then stays quiet (the 30s backstop still covers
+  # changes hidden behind an unreadable mtime).
+  def test_persistent_archive_dir_stat_error_does_not_retrigger_refresh_every_tick
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+
+      archive_dir = File.join(hive_state, "stages", "9-done")
+      with_replaced_singleton_method(File, :mtime, lambda { |arg|
+        raise Errno::ESTALE, arg if arg == archive_dir
+
+        File.stat(arg).mtime
+      }) do
+        # First read establishes the StatError marker (the transition into the
+        # error legitimately arms one refresh).
+        source.instance_variable_set(:@archive_refresh_dirty, false)
+        source.send(:refresh_archive_signals, source.current.projects)
+        assert source.instance_variable_get(:@archive_refresh_dirty),
+               "the transition into a stat error arms exactly one refresh"
+
+        # Subsequent reads with the SAME stuck dir must not keep re-arming.
+        source.instance_variable_set(:@archive_refresh_dirty, false)
+        3.times { source.send(:refresh_archive_signals, source.current.projects) }
+        refute source.instance_variable_get(:@archive_refresh_dirty),
+               "a persistently stat-erroring 9-done dir must not hot-loop the heavy archive rescan"
+      end
+    ensure
+      source&.stop
+    end
+  end
+
+  # Dual error-channel separation, end-to-end: a failed archive refresh records
+  # on @archive_last_error (NOT @last_error), and a SUBSEQUENT successful active
+  # reparse — which sets @last_error = nil — must NOT swallow the still-unresolved
+  # archive error. A regression collapsing the two channels would let the active
+  # tick wipe the archive failure and pass every other test.
+  def test_archive_error_survives_a_subsequent_successful_active_refresh
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      keep_raising = true
+      patch = Module.new do
+        define_method(:json_payload) do |projects, **kwargs|
+          if keep_raising && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+            raise StandardError, "synthetic archive refresh failure"
+          end
+
+          super(projects, **kwargs)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+
+      capture_io { source.send(:refresh_archived_cache, Hive::Config.registered_projects) }
+      assert_nil source.instance_variable_get(:@last_error),
+                 "archive failures must not land on the active @last_error channel"
+      refute_nil source.instance_variable_get(:@archive_last_error)
+      assert_match(/synthetic archive refresh failure/, source.last_error.message)
+
+      # A successful active reparse clears @last_error but must leave the
+      # archive error visible. Pin the dirty flag off so this tick doesn't
+      # spawn a fresh (re-raising) refresher and make the assertion racy.
+      source.instance_variable_set(:@archive_refresh_dirty, false)
+      File.utime(Time.now + 5, Time.now + 5, source.current.rows.first.state_file)
+      source.send(:refresh_once)
+
+      assert_nil source.instance_variable_get(:@last_error),
+                 "a successful active reparse clears its own error channel"
+      refute_nil source.last_error,
+                 "the archive error must still surface after a successful active reparse"
+      assert_match(/synthetic archive refresh failure/, source.last_error.message)
+    ensure
+      keep_raising = false
+      source&.stop
+    end
+  end
+
+  # Watch-set regression (project_watch_paths): a BRAND-NEW task folder created
+  # in a non-last custom-workflow project's active stage must surface via the
+  # ~1s mtime gate, not the 3s liveness fallback. The on-disk stage-dir glob
+  # keeps the custom `2-work` dir in the fingerprint even though load! leaves
+  # the default project's overlay registered last; reverting to the
+  # all_stage_dirs union would drop it and delay detection to the fallback.
+  def test_new_folder_in_non_last_custom_project_surfaces_via_mtime_gate
+    with_tmp_global_config do |home|
+      custom_state = write_custom_workflow_project(home, name: "custom", workflow: "my-flow")
+      seed = File.join(custom_state, "stages", "2-work", "seed-task-260626-abcd")
+      FileUtils.mkdir_p(seed)
+      Hive::TaskMeta.write(seed, id: 1, slug: "seed-task-260626-abcd",
+                           display_name: nil, workflow: "my-flow")
+      File.write(File.join(seed, "work.md"), "<!-- COMPLETE -->\n")
+
+      # Register a DEFAULT-workflow project AFTER the custom one so load! leaves
+      # the default overlay registered last — the exact condition under which a
+      # union-derived watch set would omit the custom project's 2-work dir.
+      _coding, coding_state = add_direct_project(home, name: "coding")
+      write_state_task(coding_state, "4-execute", "exec-task-260626-efgh",
+                       marker: "EXECUTE_COMPLETE", id: 2)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      refute_includes source.current.rows.map(&:slug), "new-task-260626-ijkl"
+
+      new_task = File.join(custom_state, "stages", "2-work", "new-task-260626-ijkl")
+      FileUtils.mkdir_p(new_task)
+      Hive::TaskMeta.write(new_task, id: 3, slug: "new-task-260626-ijkl",
+                           display_name: nil, workflow: "my-flow")
+      File.write(File.join(new_task, "work.md"), "<!-- COMPLETE -->\n")
+      # A child folder bumps the 2-work dir mtime; push it past 1s FS
+      # granularity so the assertion pins watch-set membership, not FS timing.
+      File.utime(Time.now + 5, Time.now + 5, File.join(custom_state, "stages", "2-work"))
+      # Pin the 3s liveness fallback OFF so a pass can only come from the mtime
+      # gate, never the time-based reparse.
+      source.instance_variable_set(:@last_full_parse_at, Time.now)
+      source.send(:refresh_once)
+
+      assert_includes source.current.rows.map(&:slug), "new-task-260626-ijkl",
+                      "a new task in a non-last custom project's active stage must surface via the mtime gate"
+    ensure
+      source&.stop
+      Hive::Workflows::Project.reset! if defined?(Hive::Workflows::Project)
+    end
+  end
+
+  # Observability: a refresher thread that never returns (e.g. blocking I/O on a
+  # stale-NFS 9-done dir) blocks every future spawn while #stalled? stays false.
+  # note_archive_refresher_liveness must leave exactly one breadcrumb once the
+  # thread outlives the hang threshold, and reset its streak once it finishes.
+  def test_hung_archive_refresher_breadcrumbs_once_after_threshold_ticks
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    release = Queue.new
+    hung = Thread.new { release.pop }
+    source.instance_variable_set(:@archive_refresh_thread, hung)
+    threshold = Hive::Tui::StateSource::ARCHIVE_REFRESHER_HANG_TICKS
+
+    breadcrumbs = []
+    with_replaced_singleton_method(Hive::Tui::Debug, :log, lambda { |_tag, message = nil| breadcrumbs << message }) do
+      (threshold + 2).times { source.send(:note_archive_refresher_liveness) }
+    end
+
+    assert_equal 1, breadcrumbs.size,
+                 "a hung refresher must emit exactly one breadcrumb when it crosses the threshold"
+    assert_match(/archive refresher alive/, breadcrumbs.first)
+
+    release << :go
+    hung.join(1)
+    source.send(:note_archive_refresher_liveness)
+    assert_equal 0, source.instance_variable_get(:@archive_refresh_alive_ticks),
+                 "a finished refresher resets the alive-tick streak"
+  ensure
+    release&.close
+    hung&.join(1)
+    source&.stop
+  end
+
+  # The off-thread refresher invokes Status#json_payload, whose degrade paths
+  # `warn` to $stderr. Running off the poll thread it is a SECOND concurrent
+  # emitter, so the call is wrapped in a capture-IO guard: a degrade-path warn
+  # must NOT reach the alt-screen $stderr (it would corrupt the frame).
+  def test_archive_refresher_suppresses_status_degrade_warns_from_the_alt_screen
+    with_direct_project do |_project, _hive_state|
+      # MRI has no `unprepend`, so gate the synthetic warn behind a flag
+      # flipped off in `ensure` — otherwise the leaked module would make every
+      # later test's archive json_payload return an empty payload (see sibling
+      # tests' note).
+      keep_warning = true
+      patch = Module.new do
+        define_method(:json_payload) do |projects, **kwargs|
+          if keep_warning && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+            warn "hive: status: synthetic degrade-path warn"
+            { "projects" => [] }
+          else
+            super(projects, **kwargs)
+          end
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+
+      _out, err = capture_io do
+        source.send(:refresh_archived_cache, Hive::Config.registered_projects)
+      end
+
+      refute_match(/synthetic degrade-path warn/, err,
+                   "an off-thread Status degrade-path warn must not reach the alt-screen $stderr")
+      assert_nil source.instance_variable_get(:@archive_last_error),
+                 "a successful (if noisy) refresh leaves no archive error"
+    ensure
+      keep_warning = false
       source&.stop
     end
   end

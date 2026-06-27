@@ -1,7 +1,9 @@
+require "stringio"
 require "hive"
 require "hive/archive_filter"
 require "hive/commands/status"
 require "hive/config"
+require "hive/stages"
 require "hive/tui/debug"
 require "hive/tui/snapshot"
 
@@ -42,6 +44,12 @@ module Hive
     # is a lock-free, single-writer-once-booted-plus-backstop discipline —
     # the OPPOSITE of `BubbleModel`'s `@healed_folders`, which is a
     # mutex-guarded multi-writer field.
+    # `@archive_refresh_thread` is also touched across threads: the poll
+    # thread spawns it and reads `&.alive?` (here, in `#archive_refresh_due?`
+    # and `#start_archive_refresh_if_needed`), while `#stop` (any thread)
+    # nils it. Each access is a single atomic-reference read/write under MRI's
+    # GVL; the only real interleaving is the teardown race documented in
+    # `#stop`'s comment.
     class StateSource
       attr_reader :current_seen_at
 
@@ -106,6 +114,12 @@ module Hive
         @archive_last_refresh_at = nil
         @archive_refresh_dirty = false
         @archive_refresh_thread = nil
+        # Consecutive poll ticks the archive refresher has stayed alive. A
+        # healthy refresh completes well within one tick, so a climbing count
+        # means the thread is blocked (e.g. uninterruptible I/O on a stale-NFS
+        # `9-done` dir), which silently freezes the cache; #note_archive_refresher_liveness
+        # leaves a once-fired breadcrumb when it crosses the hang threshold.
+        @archive_refresh_alive_ticks = 0
         @stop = false
         @thread = nil
       end
@@ -191,6 +205,7 @@ module Hive
       end
 
       def refresh_once
+        note_archive_refresher_liveness
         refresh_archive_signals(@current.projects) if @current
         request_archive_refresh if archive_refresh_due?
         start_archive_refresh_if_needed
@@ -382,14 +397,19 @@ module Hive
 
       # Builds the frozen archived-row cache keyed by project path. `previous`
       # is the prior cache (if any): when a project's archive-stage payload
-      # comes back EMPTY, retain that project's prior rows instead of
-      # publishing []. A transient per-project parse failure degrades to an
-      # empty task list with no "error" marker
-      # (Status#project_payload_or_degraded), and the off-thread refresher
-      # would otherwise treat that as success and drop the project's
-      # archived rows from the archive pane until a later refresh. Genuine
-      # removals shrink a project to a smaller non-empty set (still
-      # published verbatim); only the empty-result edge is held over.
+      # comes back EMPTY, retain that project's prior rows ONLY when the
+      # on-disk `9-done` dir still holds task folders. A transient per-project
+      # parse failure degrades to an empty task list with no "error" marker
+      # (Status#project_payload_or_degraded), which is structurally
+      # indistinguishable from a legitimate "final `9-done` folder dropped" —
+      # both yield `tasks=[]`. The on-disk check (`archive_dir_has_tasks?`)
+      # supplies the missing discriminator: a still-populated dir means the
+      # empty payload is a degradation (retain), an empty/absent dir means a
+      # real removal (publish []). Without it, dropping a project's LAST
+      # archived task would re-retain the stale rows on every subsequent empty
+      # refresh, leaving a permanent ghost in the archive pane (plan Risk #6).
+      # Genuine removals that shrink a project to a smaller non-empty set are
+      # still published verbatim.
       def archived_cache_from_payload(payload, previous: nil)
         previous_rows = previous && previous.fetch(:rows_by_path, nil)
         rows_by_path = {}
@@ -400,7 +420,7 @@ module Hive
           archived_rows = Array(project["tasks"]).select { |task| archived_stage?(task["stage"]) }
           if archived_rows.empty?
             prior = previous_rows && previous_rows[path]
-            if prior && !prior.empty?
+            if prior && !prior.empty? && archive_dir_has_tasks?(project["hive_state_path"])
               rows_by_path[path] = prior
               next
             end
@@ -412,6 +432,28 @@ module Hive
           rows_by_path[path] = archived_rows.map { |task| task.dup.freeze }.freeze
         end
         { rows_by_path: rows_by_path.freeze }.freeze
+      end
+
+      # Positive on-disk evidence that a project's `9-done` dir still holds at
+      # least one task folder — the discriminator that lets
+      # `archived_cache_from_payload` tell a transient empty payload (retain)
+      # apart from a real last-row drop (publish []). Uses the same
+      # `task_slug?` predicate as `Status#detect_legacy_stage_dirs` so stray
+      # `logs/` / `.gitkeep` siblings don't read as tasks. A stat fault on the
+      # dir is treated as "uncertain → retain" (mirrors `safe_mtime`'s
+      # re-check bias) so a transient EACCES/ESTALE can't blank a project's
+      # archived rows.
+      def archive_dir_has_tasks?(hive_state_path)
+        return false unless hive_state_path
+
+        archive_dir = File.join(hive_state_path.to_s, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
+        return false unless File.directory?(archive_dir)
+
+        Dir.children(archive_dir).any? do |child|
+          Hive::Stages.task_slug?(child) && File.directory?(File.join(archive_dir, child))
+        end
+      rescue StandardError
+        true
       end
 
       def dependency_identity_for(task)
@@ -440,8 +482,28 @@ module Hive
 
       def refresh_archive_signals(projects)
         mtimes = archive_dir_mtimes_for(projects)
-        request_archive_refresh if @archive_dir_mtimes != mtimes
+        # Compare on a STABLE signature that collapses every per-path
+        # `StatError` marker to one sentinel. `safe_mtime` returns a fresh,
+        # never-equal `StatError` on a stat fault so the mtime *gate* (the
+        # cheap active reparse) biases toward a re-check — but that same
+        # never-equal marker, fed straight into this archive *trigger*, reads
+        # as "changed" on EVERY tick for a persistently-stuck `9-done` dir
+        # (e.g. stale NFS where `File.exist?` is true but `File.mtime`
+        # raises). That hot-loops the heavyweight `json_payload(stages:
+        # [9-done])` rescan with no backoff: the 30s `#archive_refresh_due?`
+        # throttle gates only the time-based re-arm, and the failure backoff
+        # only engages when `json_payload` itself raises (here it succeeds).
+        # Collapsing `StatError` to one value makes a stuck dir trigger
+        # exactly once on the transition into the error (the correct
+        # "uncertain → re-check once" bias) and once on recovery, while the
+        # 30s backstop still forces periodic refreshes if the dir keeps
+        # mutating behind an unreadable mtime.
+        request_archive_refresh if archive_mtime_signature(@archive_dir_mtimes) != archive_mtime_signature(mtimes)
         @archive_dir_mtimes = mtimes
+      end
+
+      def archive_mtime_signature(mtimes)
+        mtimes.transform_values { |value| value.is_a?(StatError) ? :stat_error : value }
       end
 
       def archive_dir_mtimes_for(projects)
@@ -496,10 +558,20 @@ module Hive
       end
 
       def refresh_archived_cache(projects)
-        payload = Hive::Commands::Status.new.json_payload(
-          projects,
-          stages: [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
-        )
+        # `Status#json_payload`'s per-project degrade paths
+        # (`project_payload_or_degraded`, `dependency_gate_stage_for`) `warn`
+        # to the real `$stderr`. This refresher runs OFF the poll thread, so
+        # an unguarded call makes it a SECOND concurrent emitter that could
+        # tear the alt-screen frame mid-render. Capture stdout/stderr around
+        # the in-process call so those degrade-path warns — which never reach
+        # the operator under the alt-screen anyway — can't corrupt the frame
+        # (`capture_status_io`, mirroring `BubbleModel#capture_command_io`).
+        payload = capture_status_io do
+          Hive::Commands::Status.new.json_payload(
+            projects,
+            stages: [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+          )
+        end
         @archived_cache = archived_cache_from_payload(payload, previous: @archived_cache)
         @archive_last_refresh_at = Time.now
         @archive_refresh_failures = 0
@@ -531,6 +603,56 @@ module Hive
           # avoid.
           @archive_last_refresh_at = Time.now
         end
+      end
+
+      # Poll ticks an archive refresher may stay alive before it is treated as
+      # hung and a breadcrumb is dropped. A normal refresh completes well
+      # within one tick, so this is far above any healthy run.
+      ARCHIVE_REFRESHER_HANG_TICKS = 10
+
+      # Breadcrumb for a refresher thread that never returns. Both
+      # `#archive_refresh_due?` and `#start_archive_refresh_if_needed`
+      # early-return on `@archive_refresh_thread&.alive?`, so an
+      # uninterruptible I/O hang scoped to a `9-done` dir (e.g. stale NFS)
+      # freezes the cache forever with NO `@archive_last_error` and NO
+      # Debug.log (a blocked thread raises nothing) while `#stalled?` — which
+      # only tracks the active poll — stays false. Count the consecutive poll
+      # ticks the refresher stays alive and leave one breadcrumb once it
+      # crosses the threshold so the otherwise-silent freeze is diagnosable
+      # under HIVE_TUI_DEBUG. Poll-thread-local: only `#refresh_once` calls
+      # this, and it reads `@archive_refresh_thread` with the same atomic
+      # reference discipline as the other readers.
+      def note_archive_refresher_liveness
+        unless @archive_refresh_thread&.alive?
+          @archive_refresh_alive_ticks = 0
+          return
+        end
+
+        @archive_refresh_alive_ticks += 1
+        return unless @archive_refresh_alive_ticks == ARCHIVE_REFRESHER_HANG_TICKS
+
+        Hive::Tui::Debug.log(
+          "state_source",
+          "archive refresher alive for #{@archive_refresh_alive_ticks} consecutive poll ticks; " \
+          "archived cache refresh may be stuck (e.g. blocking I/O on a 9-done dir)"
+        )
+      end
+
+      # Redirect `$stdout`/`$stderr` to throwaway buffers for the duration of
+      # the block so an off-thread `Status#json_payload` call can't `warn`
+      # straight onto the alt-screen frame. Mirrors
+      # `BubbleModel#capture_command_io`; `capture_io` from minitest is not
+      # available in production. StateSource itself never `warn`s, so this only
+      # contains Status's degrade-path output.
+      def capture_status_io
+        orig_out = $stdout
+        orig_err = $stderr
+        $stdout = StringIO.new
+        $stderr = StringIO.new
+        yield
+      ensure
+        $stdout = orig_out
+        $stderr = orig_err
       end
 
       # Sleep in 0.05s slices so #stop joins quickly. Reading @stop

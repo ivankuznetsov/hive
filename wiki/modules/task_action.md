@@ -48,6 +48,7 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 | `plan_complete` | `READY_TO_DEVELOP` | "Ready to develop" | develop |
 | `execute_waiting` | `NEEDS_INPUT` | "Needs your input" | develop |
 | `execute_complete` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
+| `open_pr_ready` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
 | `open_pr_complete` | `READY_FOR_REVIEW` | "Ready for review" | review |
 | `execute_stale` | `RECOVER_EXECUTE` | "Needs recovery" | findings |
 | `review_ready` | `READY_FOR_REVIEW` | "Ready for review" | review |
@@ -61,6 +62,7 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
 | `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
 | `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
+| `manual_steering` | `MANUAL_STEERING` | "Manually steered" | nil |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |

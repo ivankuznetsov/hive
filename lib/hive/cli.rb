@@ -537,11 +537,32 @@ module Hive
     map "open-pr" => :open_pr
     map "pr" => :open_pr
 
-    desc "review TARGET", "Move a completed open-pr task into review, or run an existing review task"
+    desc "review [TARGET]", "Move a completed open-pr task into review, run an existing review task, or --pr PR"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def review(target)
+    option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
+    def review(target = nil)
+      if options[:pr]
+        raise Hive::InvalidTaskPath, "hive review: pass either TARGET or --pr, not both" if target
+
+        require "hive/commands/adhoc_review"
+        require "hive/commands/stage_action"
+        slug = Hive::Commands::AdhocReview.new(
+          pr: options[:pr],
+          project: options[:project],
+          json: options[:json]
+        ).call
+        return Hive::Commands::StageAction.new(
+          "review",
+          slug,
+          project: options[:project],
+          json: options[:json]
+        ).call
+      end
+
+      raise Hive::InvalidTaskPath, "hive review: missing TARGET (or pass --pr PR)" unless target
+
       run_stage_action("review", target)
     end
 

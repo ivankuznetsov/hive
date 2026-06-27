@@ -15,6 +15,7 @@ require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
+require "hive/commands/adhoc_review"
 require "hive/commands/status"
 require "hive/commands/approve"
 require "hive/commands/findings"
@@ -271,6 +272,58 @@ class HiveCliTest < Minitest::Test
       actual = calls.grep(Hash).map { |call| [ call.fetch(:args), call.fetch(:kwargs) ] }
       assert_equal expected.values.map { |verb| [ [ verb, "slug" ], { project: "proj", from: "inbox", json: true } ] }, actual
     end
+  end
+
+  def test_review_pr_dispatches_adhoc_enqueue_then_stage_action
+    with_command_new_stub(Hive::Commands::AdhocReview, return_value: "adhoc-review-pr-197") do |adhoc_calls|
+      with_command_new_stub(Hive::Commands::StageAction) do |stage_calls|
+        Hive::CLI.start([ "review", "--pr", "#197", "--project", "proj", "--json" ])
+
+        adhoc_ctor = adhoc_calls.grep(Hash).first
+        assert_equal [], adhoc_ctor.fetch(:args)
+        assert_equal({ pr: "#197", project: "proj", json: true }, adhoc_ctor.fetch(:kwargs))
+        assert_equal :call, adhoc_calls.last
+
+        stage_ctor = stage_calls.grep(Hash).first
+        assert_equal [ "review", "adhoc-review-pr-197" ], stage_ctor.fetch(:args)
+        assert_equal({ project: "proj", json: true }, stage_ctor.fetch(:kwargs))
+        assert_equal :call, stage_calls.last
+      end
+    end
+  end
+
+  def test_review_bare_number_still_dispatches_as_task_target
+    with_command_new_stub(Hive::Commands::StageAction) do |calls|
+      Hive::CLI.start([ "review", "197", "--project", "proj", "--json" ])
+
+      ctor = calls.grep(Hash).first
+      assert_equal [ "review", "197" ], ctor.fetch(:args)
+      assert_equal({ project: "proj", from: nil, json: true }, ctor.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_review_pr_rejects_positional_target
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "197", "--pr", "198" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/pass either TARGET or --pr/, err)
+  end
+
+  def test_review_requires_target_or_pr
+    _out, err, status = with_captured_exit { Hive::CLI.start([ "review" ]) }
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/missing TARGET/, err)
+  end
+
+  def test_review_help_mentions_pr_option
+    out, _err = capture_io { Hive::CLI.start([ "help", "review" ]) }
+
+    assert_match(/--pr/, out)
+    assert_match(/ad-hoc review/, out)
   end
 
   def test_archive_without_target_lists_archived_tasks_via_status

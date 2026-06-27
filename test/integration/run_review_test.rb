@@ -94,6 +94,18 @@ class RunReviewTest < Minitest::Test
     base
   end
 
+  def mark_task_adhoc(folder)
+    slug = File.basename(folder)
+    File.write(File.join(folder, "task.md"), <<~MD)
+      ---
+      slug: #{slug}
+      source: ad-hoc
+      ---
+
+      # #{slug}
+    MD
+  end
+
   def suppression_reviewer_cfg
     {
       "review" => {
@@ -1240,6 +1252,82 @@ class RunReviewTest < Minitest::Test
           Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run!)
           Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run!)
         end
+      end
+    end
+  end
+
+  def test_adhoc_review_waits_instead_of_running_fix_by_default
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => {
+            "reviewers" => [
+              {
+                "name" => "stub-reviewer",
+                "kind" => "agent",
+                "agent" => "claude",
+                "skill" => "ce-code-review",
+                "output_basename" => "stub-reviewer",
+                "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+                "timeout_sec" => 5
+              }
+            ]
+          }
+        })
+        mark_task_adhoc(folder)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **_kwargs|
+          path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
+          FileUtils.mkdir_p(File.dirname(path))
+          File.write(path, "## High\n- [x] fix the thing\n")
+          :ok
+        }) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+            esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+            File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
+            Hive::Stages::Review::Triage::Result.new(
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            )
+          }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+              flunk "ad-hoc review should not run fix by default with accepted=#{accepted.inspect}"
+            }) do
+              capture_io { Hive::Commands::Run.new(folder).call }
+            end
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        assert_equal "adhoc_fix_disabled", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["accepted"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_adhoc_review_fix_opt_in_runs_fix_phase
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => {
+            "adhoc" => { "fix" => true }
+          }
+        })
+        mark_task_adhoc(folder)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          { status: :ok }
+        }) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
       end
     end
   end

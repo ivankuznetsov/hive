@@ -20,6 +20,8 @@ class ConfigTest < Minitest::Test
       assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
+      assert_nil cfg.dig("review", "adhoc", "reviewers")
+      assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_equal dir, cfg["project_root"]
     end
   end
@@ -1261,6 +1263,30 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_review_adhoc_reviewers_accepts_reviewer_entries
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            fix: true
+            reviewers:
+              - name: adhoc-one
+                kind: agent
+                agent: claude
+                skill: ce-code-review
+                output_basename: adhoc-one
+                prompt_template: reviewer_claude_ce_code_review.md.erb
+                permissions: yolo
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("review", "adhoc", "fix")
+      assert_equal [ "adhoc-one" ], cfg.dig("review", "adhoc", "reviewers").map { |entry| entry.fetch("name") }
+    end
+  end
+
   # --- Validation --------------------------------------------------------
 
   def test_load_raises_when_reviewers_is_not_an_array
@@ -1288,6 +1314,70 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/review\.reviewers\[0\].*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_is_not_a_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc/, err.message)
+      assert_match(/must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_reviewers_is_not_array_or_nil
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            reviewers:
+              name: not-array
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.reviewers/, err.message)
+      assert_match(/must be an Array/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_fix_is_not_boolean
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            fix: yes-please
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.fix/, err.message)
+      assert_match(/must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_rejects_review_adhoc_permissions_block
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            permissions: yolo
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.permissions/, err.message)
+      assert_match(/review\.adhoc\.reviewers/, err.message)
     end
   end
 

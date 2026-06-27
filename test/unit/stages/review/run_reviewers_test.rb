@@ -217,6 +217,54 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_reviewer_specs_for_adhoc_task_uses_adhoc_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => {
+          "reviewers" => [ { "name" => "adhoc-reviewer" } ]
+        }
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "adhoc-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_adhoc_task_falls_back_to_standard_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => nil }
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: AD-HOC\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
   # cfg with distinct normal vs patrol reviewer sets, reused by the
   # task_frontmatter / patrol_task? edge-case tests below.
   def scoped_reviewer_cfg
@@ -316,6 +364,39 @@ class RunReviewersTest < Minitest::Test
 
     assert_raises(RuntimeError) do
       Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+    end
+  end
+
+  def test_adhoc_task_io_error_falls_back_to_normal_with_warn
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir)
+
+      specs = nil
+      _out, err = capture_io do
+        specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+      end
+
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+      assert_match(/adhoc_task\? could not read/, err)
+      assert_match(/routing as a normal/, err)
+    end
+  end
+
+  def test_adhoc_fix_enabled_predicate
+    cfg = { "review" => { "adhoc" => { "fix" => false } } }
+    enabled_cfg = { "review" => { "adhoc" => { "fix" => true } } }
+
+    with_tmp_dir do |dir|
+      adhoc_file = File.join(dir, "adhoc.md")
+      normal_file = File.join(dir, "normal.md")
+      File.write(adhoc_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc\n")
+      File.write(normal_file, "---\nsource: telegram\n---\n\n# Normal\n")
+      adhoc_task = Task.new(dir, adhoc_file)
+      normal_task = Task.new(dir, normal_file)
+
+      refute Hive::Stages::Review.adhoc_fix_enabled?(cfg, adhoc_task)
+      assert Hive::Stages::Review.adhoc_fix_enabled?(enabled_cfg, adhoc_task)
+      assert Hive::Stages::Review.adhoc_fix_enabled?(cfg, normal_task)
     end
   end
 

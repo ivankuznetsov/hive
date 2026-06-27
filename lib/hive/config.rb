@@ -141,6 +141,10 @@ module Hive
           "prompt_template" => "ci_fix_prompt.md.erb"
         },
         "reviewers" => [],
+        "adhoc" => {
+          "reviewers" => nil,
+          "fix" => false
+        },
         "triage" => {
           "enabled" => true,
           "agent" => "claude",
@@ -1539,6 +1543,7 @@ module Hive
       validate_hash_shaped_keys!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
+      validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
@@ -1748,6 +1753,27 @@ module Hive
       end
 
       validate_reviewer_entries!(reviewers, "review.reviewers", source_path)
+    end
+
+    def validate_review_adhoc!(cfg, source_path)
+      adhoc = cfg.dig("review", "adhoc")
+      unless adhoc.is_a?(Hash)
+        raise ConfigError,
+              "review.adhoc in #{describe_source(source_path)} must be a Hash; got #{adhoc.inspect} (#{adhoc.class})"
+      end
+
+      reviewers = adhoc["reviewers"]
+      unless reviewers.nil? || reviewers.is_a?(Array)
+        raise ConfigError,
+              "review.adhoc.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries or nil; got #{reviewers.class}"
+      end
+      validate_reviewer_entries!(reviewers, "review.adhoc.reviewers", source_path) if reviewers
+
+      fix = adhoc["fix"]
+      return if fix == true || fix == false
+
+      raise ConfigError,
+            "review.adhoc.fix in #{describe_source(source_path)} must be a boolean; got #{fix.inspect} (#{fix.class})"
     end
 
     def validate_reviewer_entries!(reviewers, label, source_path)
@@ -1996,6 +2022,12 @@ module Hive
         Array(review["reviewers"]).each_with_index do |entry, idx|
           collect.call("review.reviewers[#{idx}]", entry)
         end
+        adhoc = review["adhoc"]
+        if adhoc.is_a?(Hash)
+          Array(adhoc["reviewers"]).each_with_index do |entry, idx|
+            collect.call("review.adhoc.reviewers[#{idx}]", entry)
+          end
+        end
       end
 
       patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
@@ -2022,6 +2054,11 @@ module Hive
       reject_unsupported_permissions_at!(
         cfg["review"], "review.permissions", source_path,
         "set permissions per role under review.{ci,triage,fix,browser_test} or per reviewer entry"
+      )
+      review_adhoc = cfg["review"].is_a?(Hash) ? cfg["review"]["adhoc"] : nil
+      reject_unsupported_permissions_at!(
+        review_adhoc, "review.adhoc.permissions", source_path,
+        "set permissions per reviewer entry under review.adhoc.reviewers"
       )
       patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
       reject_unsupported_permissions_at!(

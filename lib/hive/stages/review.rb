@@ -493,6 +493,15 @@ module Hive
                      status: :review_waiting }
           end
 
+          unless adhoc_fix_enabled?(cfg, task)
+            Hive::Markers.set(task.state_file, :review_waiting,
+                              reason: "adhoc_fix_disabled",
+                              accepted: accepted_findings.count,
+                              pass: pass)
+            return { commit: "review_waiting_adhoc_fix_disabled_pass_#{format('%02d', pass)}",
+                     status: :review_waiting }
+          end
+
           # --- Phase 4: fix ---
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
@@ -1280,7 +1289,16 @@ module Hive
       def reviewer_specs_for(cfg, task)
         return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
 
+        if adhoc_task?(task)
+          reviewers = cfg.dig("review", "adhoc", "reviewers")
+          return Array(reviewers) unless reviewers.nil?
+        end
+
         Array(cfg.dig("review", "reviewers"))
+      end
+
+      def adhoc_fix_enabled?(cfg, task)
+        !adhoc_task?(task) || cfg.dig("review", "adhoc", "fix") == true
       end
 
       # Group reviewers that share an effective permission scope so they can
@@ -1328,6 +1346,15 @@ module Hive
         # unknown stage) propagate instead of being swallowed.
         warn "[hive.review] patrol_task? could not read #{task.state_file.inspect}: " \
              "#{e.class}: #{e.message} — routing as a normal (non-patrol) task"
+        false
+      end
+
+      def adhoc_task?(task)
+        frontmatter = task_frontmatter(task.state_file)
+        frontmatter["source"].to_s.strip.casecmp?("ad-hoc") || false
+      rescue SystemCallError => e
+        warn "[hive.review] adhoc_task? could not read #{task.state_file.inspect}: " \
+             "#{e.class}: #{e.message} — routing as a normal (non-ad-hoc) task"
         false
       end
 

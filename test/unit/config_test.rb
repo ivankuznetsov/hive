@@ -985,6 +985,101 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_project_for_path_resolves_registered_repo_from_cwd
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        FileUtils.mkdir_p(File.join(repo, ".hive-state"))
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.project_for_path(repo)
+
+        assert_equal "repo", project["name"]
+        assert_equal File.expand_path(repo), project["path"]
+      end
+    end
+  end
+
+  def test_project_for_path_resolves_nested_subdirectory
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        nested = File.join(repo, "lib", "hive")
+        FileUtils.mkdir_p([ File.join(repo, ".hive-state"), nested ])
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.project_for_path(nested)
+
+        assert_equal "repo", project["name"]
+      end
+    end
+  end
+
+  def test_project_for_path_uses_most_specific_registered_prefix
+    with_tmp_global_config do
+      with_tmp_dir do |parent|
+        child = File.join(parent, "child")
+        FileUtils.mkdir_p([ File.join(parent, ".hive-state"), File.join(child, ".hive-state") ])
+        Hive::Config.register_project(name: "parent", path: parent)
+        Hive::Config.register_project(name: "child", path: child)
+
+        project = Hive::Config.project_for_path(File.join(child, "subdir"))
+
+        assert_equal "child", project["name"]
+      end
+    end
+  end
+
+  def test_registered_project_resolves_by_project_name_override
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        FileUtils.mkdir_p(File.join(repo, ".hive-state"))
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.registered_project!(name: "repo", cwd: "/tmp/not-inside")
+
+        assert_equal "repo", project["name"]
+      end
+    end
+  end
+
+  def test_registered_project_rejects_unknown_project_name
+    with_tmp_global_config do
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.registered_project!(name: "missing", cwd: "/tmp/not-inside")
+      end
+
+      assert_includes err.message, "not a hive-invited repo"
+      assert_includes err.message, "hive init"
+    end
+  end
+
+  def test_registered_project_rejects_cwd_outside_registered_repos
+    with_tmp_global_config do
+      with_tmp_dir do |outside|
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.registered_project!(cwd: outside)
+        end
+
+        assert_includes err.message, "not a hive-invited repo"
+        assert_includes err.message, "--project NAME"
+      end
+    end
+  end
+
+  def test_registered_project_rejects_missing_hive_state_directory
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.registered_project!(cwd: repo)
+        end
+
+        assert_includes err.message, "not a hive-invited repo"
+        assert_includes err.message, "hive init"
+      end
+    end
+  end
+
   def test_register_project_replaces_existing_by_name
     with_tmp_global_config do
       Hive::Config.register_project(name: "foo", path: "/tmp/old")

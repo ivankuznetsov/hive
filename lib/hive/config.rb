@@ -1,6 +1,7 @@
 require "yaml"
 require "fileutils"
 require "securerandom"
+require "pathname"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
@@ -1077,6 +1078,45 @@ module Hive
 
     def find_project(name)
       registered_projects.find { |p| p["name"] == name }
+    end
+
+    def project_for_path(dir)
+      expanded_dir = File.expand_path(dir)
+      registered_projects
+        .select { |entry| path_prefix?(expanded_dir, entry["path"]) }
+        .max_by { |entry| File.expand_path(entry["path"]).length }
+    end
+
+    def registered_project!(name: nil, cwd:)
+      project = if name && !name.to_s.strip.empty?
+        find_project(name.to_s)
+      else
+        project_for_path(cwd)
+      end
+
+      unless project
+        raise ConfigError,
+              "not a hive-invited repo — run `hive init` here first, or pass --project NAME"
+      end
+
+      hive_state_path = project_hive_state_path(project)
+      return project if File.directory?(hive_state_path)
+
+      raise ConfigError,
+            "not a hive-invited repo — run `hive init` here first, or pass --project NAME"
+    end
+
+    def path_prefix?(path, prefix)
+      expanded_prefix = File.expand_path(prefix)
+      path == expanded_prefix || path.start_with?("#{expanded_prefix}#{File::SEPARATOR}")
+    end
+
+    def project_hive_state_path(project)
+      configured = project["hive_state_path"]
+      return File.join(project.fetch("path"), ".hive-state") if configured.nil? || configured.to_s.empty?
+      return File.expand_path(configured) if Pathname.new(configured).absolute?
+
+      File.expand_path(configured, project.fetch("path"))
     end
 
     # Load and validate the global `daemon` block from

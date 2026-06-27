@@ -21,6 +21,7 @@ require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
 require "hive/commands/digest"
+require "hive/commands/answer_digest"
 require "hive/commands/markers"
 require "hive/commands/daemon"
 require "hive/commands/bot"
@@ -342,6 +343,12 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "digest", "--date", "2026-06-13", "--dry-run", "--json" ])
       assert_equal [], calls.first.fetch(:args)
       assert_equal({ date: "2026-06-13", json: true, dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|
+      Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
+      assert_equal [], calls.first.fetch(:args)
+      assert_equal({ date: "2026-06-27", json: true, dry_run: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Markers) do |calls|

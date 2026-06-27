@@ -696,6 +696,28 @@ module Hive
       ).call
     end
 
+    desc "answer-digest", "Send a daily digest of tasks waiting on human input"
+    long_desc <<~DESC, wrap: false
+      Fetches the global hive status snapshot, filters it to tasks waiting on
+      human input, and sends one Telegram message with inline buttons for each
+      listed task. Empty snapshots are silent and still exit successfully.
+
+      Examples:
+        hive answer-digest
+        hive answer-digest --date 2026-06-27 --json
+        hive answer-digest --dry-run
+    DESC
+    option :date, type: :string, desc: "local calendar date for scheduler idempotency (YYYY-MM-DD)"
+    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
+    def answer_digest
+      require "hive/commands/answer_digest"
+      Hive::Commands::AnswerDigest.new(
+        date: options[:date],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered

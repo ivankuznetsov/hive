@@ -131,12 +131,15 @@ module Hive
 
         private
 
-        # Mirrors Router#effective_text exactly; FreeTextHandler#effective_text
-        # coerces the same read with `.to_s` (returns "", not nil), so the
-        # three are not interchangeable — consolidate with care. A media
-        # message carries its text in the caption (update.text is nil), so
-        # prefer #effective_text. The respond_to? guard is load-bearing for
-        # the LegacyMessageUpdate path, which exposes only #text.
+        # Byte-identical to Router#effective_text — those two ARE interchangeable
+        # and share its nil-able contract (returns nil when neither read is set).
+        # Only FreeTextHandler#effective_text differs, coercing the read with
+        # `.to_s` (returns "", never nil), so that one variant is not. A media
+        # message carries its text in the caption (update.text is nil), so prefer
+        # #effective_text. The respond_to? guard supports lean unit-test fixtures
+        # that expose only #text (e.g. router_test's LegacyMessageUpdate);
+        # production Telegram::Update always responds to #effective_text
+        # (telegram.rb), so the `: update.text` fallback never runs in production.
         def effective_text(update)
           update.respond_to?(:effective_text) ? update.effective_text : update.text
         end

@@ -292,6 +292,10 @@ module Hive
         }
       end
 
+      # Nil-able: returns nil when neither read is set (SlashHandlers#effective_text
+      # is byte-identical; FreeTextHandler's variant coerces to "" instead). The
+      # respond_to? guard supports lean test fixtures that expose only #text;
+      # production Telegram::Update always responds to #effective_text (telegram.rb).
       def effective_text(update)
         update.respond_to?(:effective_text) ? update.effective_text : update.text
       end

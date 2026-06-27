@@ -145,11 +145,11 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_content_less_update_opens_idea_text_capture
-    # Plan Risk-4 (accepted): a non-text / non-media / non-voice update
-    # (sticker, location, contact, video) carries no effective_text, so it
-    # falls through to :idea_bare_text and opens an awaiting_text draft asking
-    # for the idea text — rather than the old "I did not understand that" reply.
-    # Contrast a rejected attachment, which leaves no draft behind.
+    # A non-text / non-media / non-voice update (sticker, location, contact,
+    # video) carries no effective_text, so it falls through to :idea_bare_text
+    # and opens an awaiting_text draft asking for the idea text — rather than the
+    # old "I did not understand that" reply. Contrast a rejected attachment,
+    # which leaves no draft behind.
     assert_equal :idea_bare_text, @router.classify(update)
 
     result = @router.handle(update)
@@ -163,10 +163,10 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_bare_text_during_active_draft_clobbers_prior_draft
-    # Plan Risk-1 (accepted, most-aggressive default): bare text arriving while
-    # a draft is mid-flight starts a fresh idea, discarding the in-progress
-    # draft and any staged attachments with no "previous idea discarded"
-    # notice. Stage a real attachment first so the clobber actually exercises
+    # Most-aggressive accepted default: bare text arriving while a draft is
+    # mid-flight starts a fresh idea, discarding the in-progress draft and any
+    # staged attachments with no "previous idea discarded" notice. Stage a real
+    # attachment first so the clobber actually exercises
     # IdeaDraftStore#start -> clear -> cleanup_draft (otherwise the
     # staging-cleanup path is never run), then pin the chosen behavior so a
     # future protect/notify change is a deliberate, test-visible decision.

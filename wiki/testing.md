@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-25
+updated: 2026-06-26
 tags: [test, minitest, fixtures]
 ---
 
@@ -158,6 +158,12 @@ malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
 replay path safety, missing, non-executable, and symlinked replay artifact
 validation, cleanup retention validation, and the single-dispatch invariant for
 successful JSON commands.
+
+`test/e2e/lib/background_process_test.rb` pins the attached background-child
+harness used by daemon/bot e2e helpers: the child inherits the sandbox
+`HIVE_HOME`, `stop` terminates the spawned process group, and the reaped-child
+guard skips TERM/KILL once `waitpid(WNOHANG)` has already consumed the original
+child so cleanup does not signal a reused process group.
 
 The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
 runs `packaging/verify-release.sh --version=v0.1.0` against the published

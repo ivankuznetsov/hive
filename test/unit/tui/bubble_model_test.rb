@@ -197,6 +197,28 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :archive, @model.hive_model.mode
   end
 
+  # U4 end-to-end wiring (App#run_charm injects
+  # state_source.method(:request_archive_refresh) as the archive_refresh
+  # hook). BubbleModel calling its hook and StateSource#request_archive_refresh
+  # are each unit-tested in isolation; this pins the actual bound-method
+  # handoff so the binding can't be dropped/mis-wired with both halves green.
+  def test_open_archive_pane_marks_state_source_cache_dirty_through_bound_method
+    require "hive/tui/state_source"
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch,
+      archive_refresh: source.method(:request_archive_refresh)
+    )
+    refute source.instance_variable_get(:@archive_refresh_dirty),
+           "a fresh StateSource starts with a clean archive cache"
+
+    model.update(Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
+
+    assert source.instance_variable_get(:@archive_refresh_dirty),
+           "opening the archive pane must flip StateSource's dirty flag via the bound hook"
+  end
+
   # F2: full filter happy path through KeyMessage → KeyMap → Update.
   # Open filter, type chars, commit; assert filter committed and mode
   # back to :grid. Pins the regression we found in the /ce-code-review

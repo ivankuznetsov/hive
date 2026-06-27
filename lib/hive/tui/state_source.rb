@@ -21,6 +21,19 @@ module Hive
     # and the failure is recorded in `@last_error` (overwritten each
     # retry; not a ring buffer, so the renderer only ever displays the
     # most recent error). The polling loop never crashes its own thread.
+    #
+    # Cross-thread state beyond `@current`. A short-lived archive
+    # refresher thread (spawned by `#start_archive_refresh_if_needed`) is
+    # the SOLE writer of `@archived_cache` and `@archive_last_refresh_at`;
+    # the poll/render threads only read them, so the same atomic-
+    # reference-read discipline as `@current` applies. `@archive_refresh_dirty`
+    # is the one field written by more than one thread: ANY thread may SET
+    # it (`#request_archive_refresh` is called from the Bubbletea update
+    # thread as well as the poll thread, and the refresher re-arms it on
+    # failure), but only the poll thread CLEARS it (at refresher spawn). A
+    # set dropped under that race is recovered by the
+    # `ARCHIVE_REFRESH_FALLBACK_SECONDS` backstop. Mirrors the
+    # single-writer note on `BubbleModel`'s `@healed_folders`.
     class StateSource
       attr_reader :last_error, :current_seen_at
 
@@ -33,7 +46,20 @@ module Hive
       # keeps the indicator self-healing while still skipping most
       # idle-path parses.
       LIVENESS_REPARSE_FALLBACK_SECONDS = 3.0
+      # Backstop for the archive-set dirty signal, independent of the
+      # liveness fallback above. Even with no `9-done` dir-mtime change
+      # and no archive-pane open, force a background archived-cache
+      # refresh at least this often so a dropped dirty set (any thread may
+      # SET it, only the poll thread CLEARS it) or an mtime-granularity
+      # miss still self-heals.
       ARCHIVE_REFRESH_FALLBACK_SECONDS = 30.0
+
+      # Fresh-per-call marker distinguishing "stat errored" from nil
+      # ("absent"). Two instances are never `==`, so a repeatedly-erroring
+      # path reads as changed on every tick and the change detectors bias
+      # toward a re-check rather than masking a real mutation behind a
+      # transient stat failure (see `#safe_mtime`).
+      class StatError; end
 
       def initialize(poll_interval_seconds: 1.0)
         @poll_interval_seconds = poll_interval_seconds
@@ -42,9 +68,13 @@ module Hive
         @last_error = nil
         @mtime_fingerprint = nil
         @last_full_parse_at = nil
-        @last_active_payload = nil
         @archived_cache = empty_archived_cache
         @snapshot_archived_cache = @archived_cache
+        # Poll-thread-local memo of the identities derived from a given
+        # archived cache, so the hot active-reparse path doesn't rebuild
+        # them every tick (see #archived_identities_from_cache).
+        @archived_identities = nil
+        @archived_identities_source = nil
         @archive_dir_mtimes = {}
         @archive_last_refresh_at = nil
         @archive_refresh_dirty = false
@@ -66,6 +96,13 @@ module Hive
         current
       end
 
+      # Marks the archived-row cache dirty so the next poll tick spawns a
+      # background refresher. Cross-thread entry point: besides the poll
+      # thread, the Bubbletea update thread calls this (App wires it as
+      # BubbleModel's `archive_refresh` hook, fired on archive-pane open).
+      # Invariant: any thread may SET the dirty flag here; only the poll
+      # thread CLEARS it (at refresher spawn). A set lost to that race is
+      # recovered by the `ARCHIVE_REFRESH_FALLBACK_SECONDS` backstop.
       def request_archive_refresh
         @archive_refresh_dirty = true
         nil
@@ -81,10 +118,12 @@ module Hive
         @thread = Thread.new { poll_loop }
       end
 
-      # Sets the stop sentinel and joins the thread with a 0.5s
-      # deadline. The loop checks the sentinel between 0.05s sleep
-      # slices so this returns fast enough for test teardown to assert
-      # the thread is no longer in `Thread.list`.
+      # Sets the stop sentinel and joins the poll thread, then the archive
+      # refresher thread, each with its own 0.5s deadline (worst-case
+      # ~1.0s teardown). The poll loop checks the sentinel between 0.05s
+      # sleep slices, and `#start_archive_refresh_if_needed` refuses to
+      # spawn once `@stop` is set, so neither thread outlives this call and
+      # test teardown can assert both are gone from `Thread.list`.
       def stop
         @stop = true
         thread = @thread
@@ -128,23 +167,28 @@ module Hive
 
         projects = Hive::Config.registered_projects
         if @current.nil?
+          # Cold full parse: every task lands in exactly one stage, so the
+          # payload IS already the merged active+archived view — publish it
+          # directly instead of stripping archived rows and re-merging them
+          # from a cache derived from this same payload.
           payload = Hive::Commands::Status.new.json_payload(projects)
           @archived_cache = archived_cache_from_payload(payload)
           @archive_last_refresh_at = Time.now
-          @last_active_payload = payload_without_archived_rows(payload)
-          publish_snapshot(merge_archived_payload(@last_active_payload, @archived_cache),
-                           archived_cache: @archived_cache)
+          publish_snapshot(payload, archived_cache: @archived_cache)
           @archive_dir_mtimes = archive_dir_mtimes_for(@current.projects)
         else
+          # Steady state: re-parse active stages only and merge the frozen
+          # archived cache back in. `exclude_archived: true` makes Status
+          # subtract the terminal dir from EACH project's own loaded
+          # workflow overlay (computed after `load!`), so a custom-workflow
+          # project's active stages aren't dropped the way a single
+          # pre-computed union would drop them.
           active_payload = Hive::Commands::Status.new.json_payload(
             projects,
-            stages: active_stages,
+            exclude_archived: true,
             extra_dependency_tasks: archived_identities_from_cache(cache)
           )
-          @last_active_payload = active_payload
           publish_snapshot(merge_archived_payload(active_payload, cache), archived_cache: cache)
-          refresh_archive_signals(@current.projects)
-          start_archive_refresh_if_needed
         end
       rescue StandardError => e
         @last_error = e
@@ -197,10 +241,20 @@ module Hive
         [ stages_dir, *active_stages.map { |stage| File.join(stages_dir, stage) } ]
       end
 
+      # nil means the path is genuinely absent (or nil); a stat ERROR
+      # returns a fresh, never-equal `StatError` marker instead. The
+      # change detectors compare consecutive readings, so an errored read
+      # then reads as "changed/uncertain" and biases toward a re-check — a
+      # transient EACCES/ESTALE on an archive dir (or a vanish between
+      # `exist?` and `mtime`) can't masquerade as "unchanged" and drop a
+      # real mutation until the 30s backstop. A stably-absent path stays
+      # `nil == nil` and is correctly seen as unchanged.
       def safe_mtime(path)
-        File.mtime(path) if path && File.exist?(path)
+        return nil unless path && File.exist?(path)
+
+        File.mtime(path)
       rescue StandardError
-        nil
+        StatError.new
       end
 
       def publish_snapshot(payload, archived_cache:)
@@ -221,20 +275,6 @@ module Hive
         Hive::ArchiveFilter.archived?(stage)
       end
 
-      def payload_without_archived_rows(payload)
-        payload_with_filtered_tasks(payload) { |task| !archived_stage?(task["stage"]) }
-      end
-
-      def payload_with_filtered_tasks(payload)
-        copy = payload.dup
-        copy["projects"] = Array(payload["projects"]).map do |project|
-          project_copy = project.dup
-          project_copy["tasks"] = Array(project["tasks"]).select { |task| yield task }
-          project_copy
-        end
-        copy
-      end
-
       def merge_archived_payload(active_payload, archived_cache)
         cached_rows_by_path = archived_cache.fetch(:projects)
         copy = active_payload.dup
@@ -251,22 +291,19 @@ module Hive
       end
 
       def empty_archived_cache
-        { projects: {}.freeze, identities: {}.freeze }.freeze
+        { projects: {}.freeze }.freeze
       end
 
       def archived_cache_from_payload(payload)
         projects = {}
-        identities = {}
         Array(payload["projects"]).each do |project|
           path = project["path"]
           next unless path
 
           archived_rows = Array(project["tasks"]).select { |task| archived_stage?(task["stage"]) }
-          frozen_rows = archived_rows.map { |task| task.dup.freeze }.freeze
-          projects[path] = frozen_rows
-          identities[path] = frozen_rows.map { |task| dependency_identity_for(task).freeze }.freeze
+          projects[path] = archived_rows.map { |task| task.dup.freeze }.freeze
         end
-        { projects: projects.freeze, identities: identities.freeze }.freeze
+        { projects: projects.freeze }.freeze
       end
 
       def dependency_identity_for(task)
@@ -277,8 +314,20 @@ module Hive
         }
       end
 
+      # Derived from the `:projects` rows rather than stored as a second
+      # parallel map, so the dependency identities can never drift out of
+      # sync with the cached archived rows they describe. Memoized per
+      # cache object (frozen + replaced wholesale on each archive refresh)
+      # so the steady-state active reparse — the hot reactivity path —
+      # doesn't rebuild every archived identity on every tick. The memo is
+      # poll-thread-local; only the cache it derives from is shared.
       def archived_identities_from_cache(cache)
-        cache.fetch(:identities)
+        return @archived_identities if cache.equal?(@archived_identities_source)
+
+        @archived_identities_source = cache
+        @archived_identities = cache.fetch(:projects).transform_values do |rows|
+          rows.map { |task| dependency_identity_for(task) }
+        end
       end
 
       def refresh_archive_signals(projects)
@@ -305,12 +354,17 @@ module Hive
         (now - @archive_last_refresh_at) >= ARCHIVE_REFRESH_FALLBACK_SECONDS
       end
 
-      def start_archive_refresh_if_needed(projects = nil)
+      def start_archive_refresh_if_needed
+        # `@stop` guard: if the poll thread overshoots stop's join deadline
+        # mid-parse, it must not spawn a fresh refresher after `#stop`
+        # already captured/nilled the reference — that would leave a
+        # detached thread alive past teardown.
+        return if @stop
         return unless @archive_refresh_dirty
-        return if @current.nil? && projects.nil?
+        return if @current.nil?
         return if @archive_refresh_thread&.alive?
 
-        project_entries = projects || projects_from_snapshot(@current)
+        project_entries = projects_from_snapshot(@current)
         @archive_refresh_dirty = false
         @archive_refresh_thread = Thread.new(project_entries) do |entries|
           refresh_archived_cache(entries)
@@ -335,12 +389,21 @@ module Hive
         @archived_cache = archived_cache_from_payload(payload)
         @archive_last_refresh_at = Time.now
       rescue StandardError => e
-        warn "hive: tui archive refresh failed (#{e.class}: #{e.message})"
+        # Re-arm the dirty flag so the next poll tick retries instead of
+        # stranding a stale cache until the 30s backstop: the spawn cleared
+        # the flag and `refresh_archive_signals` already advanced
+        # `@archive_dir_mtimes`, so without this re-arm nothing left would
+        # re-trigger a refresh. Surface the failure on `@last_error` (the
+        # renderer's error channel) rather than `warn`, which would corrupt
+        # the alt-screen frame and never reach the operator.
+        @archive_refresh_dirty = true
+        @last_error = e
       end
 
       # Sleep in 0.05s slices so #stop joins quickly. Reading @stop
       # between slices is the same unsynchronised-reference-read pattern
-      # the render thread uses on @current — safe under MRI's GVL.
+      # the render thread uses on @current (and the poll thread uses on
+      # @archived_cache / @archive_refresh_dirty) — safe under MRI's GVL.
       def sleep_in_slices(total_seconds)
         slice = 0.05
         elapsed = 0.0

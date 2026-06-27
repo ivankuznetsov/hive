@@ -140,9 +140,9 @@ registry (`Hive::Config.global_config_path`), active stage directories,
 and each active row's state file and `.lock`; it deliberately excludes
 archived task files. Separately, one cheap stat per project watches the
 `9-done` directory mtime as an archive-set dirty signal. Archive cache
-refreshes run on a short-lived background thread on cold cache changes,
-`9-done` mtime changes, archive-pane opens, and a long backstop; the 1
-Hz poll thread never walks every archived task during steady state.
+refreshes run on a short-lived background thread on `9-done` mtime
+changes, archive-pane opens, and a long backstop; the 1 Hz poll thread
+never walks every archived task during steady state.
 
 A time-bounded fallback (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s)
 still forces an active-only re-parse even when the active fingerprint is

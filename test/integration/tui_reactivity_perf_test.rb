@@ -26,6 +26,12 @@ class TuiReactivityPerfTest < Minitest::Test
     small = measure_fixture(tasks_per_project: SMALL_TASKS_PER_PROJECT)
     large = measure_fixture(tasks_per_project: LARGE_TASKS_PER_PROJECT)
 
+    # Gate the parseability invariant in CI (previously only asserted behind
+    # HIVE_TUI_PROFILE=1): every fixture task must materialize into a row, so
+    # a regression that silently drops rows fails here, not just under the
+    # opt-in profile.
+    assert_equal PROJECTS * LARGE_TASKS_PER_PROJECT, large.fetch(:rows),
+                 "all #{PROJECTS}x#{LARGE_TASKS_PER_PROJECT} tasks must parse into rows"
     assert_operator large.fetch(:idle_tick_ms), :<, IDLE_TICK_BUDGET_MS,
                     "idle tick should stay below #{IDLE_TICK_BUDGET_MS}ms at 8x200"
     assert_operator large.fetch(:active_parse_ms), :<, active_reparse_budget_ms,
@@ -63,6 +69,7 @@ class TuiReactivityPerfTest < Minitest::Test
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
       source.send(:refresh_once)
       {
+        rows: source.current.rows.size,
         idle_tick_ms: min_ms { source.send(:refresh_once) },
         active_parse_ms: min_ms { force_active_reparse(source) }
       }

@@ -4,6 +4,7 @@ require "hive/commands/new"
 require "hive/commands/status"
 require "hive/task_meta"
 require "hive/tui/state_source"
+require "hive/workflows/project"
 
 # StateSource is the only TUI component that touches threads, so these
 # tests pin two contracts hard: (1) the polling thread really does land
@@ -62,6 +63,38 @@ class TuiStateSourceTest < Minitest::Test
     current["registered_projects"] = Array(current["registered_projects"]) + [ project ]
     File.write(File.join(global_home, "config.yml"), current.to_yaml)
     [ project, hive_state ]
+  end
+
+  # Registers a project whose tasks use a custom (non-built-in) workflow
+  # whose active stage dir (`2-<stage_name>`) is absent from the default
+  # registry union. Returns the project's hive_state path.
+  def write_custom_workflow_project(global_home, name:, workflow:, stage_name: "work")
+    project_root = File.join(global_home, name)
+    hive_state = File.join(project_root, ".hive-state")
+    instruction_dir = File.join(hive_state, "workflows", workflow)
+    FileUtils.mkdir_p(instruction_dir)
+    File.write(File.join(instruction_dir, "#{stage_name}.md"), "Do #{stage_name}.\n")
+    File.write(File.join(hive_state, "workflows", "#{workflow}.yml"), <<~YAML)
+      id: #{workflow}
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: #{stage_name}
+          kind: agent
+          state_file: #{stage_name}.md
+          instruction: ./#{workflow}/#{stage_name}.md
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+    FileUtils.mkdir_p(File.join(hive_state, "stages", "2-#{stage_name}"))
+    File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.to_yaml)
+    project = { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
+    current = YAML.safe_load(File.read(File.join(global_home, "config.yml"))) || {}
+    current["registered_projects"] = Array(current["registered_projects"]) + [ project ]
+    File.write(File.join(global_home, "config.yml"), current.to_yaml)
+    hive_state
   end
 
   def write_state_task(hive_state, stage, slug, marker:, id: nil, depends_on: nil)
@@ -480,13 +513,29 @@ class TuiStateSourceTest < Minitest::Test
       source.send(:refresh_once)
       assert_equal "agent_running", source.current.rows.first.action_key
 
-      now = source.instance_variable_get(:@last_full_parse_at) + 4
-      with_replaced_singleton_method(Time, :now, -> { now }) do
-        with_replaced_singleton_method(Process, :kill, lambda { |_signal, pid|
-          raise Errno::ESRCH if pid == Process.pid
+      fallback = Hive::Tui::StateSource::LIVENESS_REPARSE_FALLBACK_SECONDS
+      parsed_at = source.instance_variable_get(:@last_full_parse_at)
+      dead_holder = lambda do |_signal, pid|
+        raise Errno::ESRCH if pid == Process.pid
 
-          true
-        }) do
+        true
+      end
+
+      # Lower edge: just under the fallback window the mtime gate still
+      # reuses the cached snapshot, so the now-dead holder keeps its stale
+      # "agent_running" indicator — proving the boundary actually gates.
+      with_replaced_singleton_method(Time, :now, -> { parsed_at + fallback - 0.5 }) do
+        with_replaced_singleton_method(Process, :kill, dead_holder) do
+          source.send(:refresh_once)
+        end
+      end
+      assert_equal "agent_running", source.current.rows.first.action_key,
+                   "no reparse before the liveness fallback window elapses"
+
+      # At the boundary the forced reparse re-checks liveness and the dead
+      # holder's indicator clears.
+      with_replaced_singleton_method(Time, :now, -> { parsed_at + fallback }) do
+        with_replaced_singleton_method(Process, :kill, dead_holder) do
           source.send(:refresh_once)
         end
       end
@@ -559,7 +608,135 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  def test_archive_refresher_failure_warns_without_raising
+  # Directly pins the 30s archive backstop: with no `9-done` dir-mtime
+  # change, archive_refresh_due? must flip from false to true once
+  # @archive_last_refresh_at + ARCHIVE_REFRESH_FALLBACK_SECONDS elapses.
+  # An inverted comparison or a bad constant would otherwise slip through.
+  def test_archive_backstop_requests_refresh_after_fallback_window
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+
+      fallback = Hive::Tui::StateSource::ARCHIVE_REFRESH_FALLBACK_SECONDS
+      last_refresh = source.instance_variable_get(:@archive_last_refresh_at)
+
+      refute source.send(:archive_refresh_due?, now: last_refresh + fallback - 1.0),
+             "no backstop refresh before the fallback window elapses"
+      assert source.send(:archive_refresh_due?, now: last_refresh + fallback),
+             "backstop must request a refresh once the fallback window elapses"
+    ensure
+      source&.stop
+    end
+  end
+
+  # Overlap guard (state_source.rb): start_archive_refresh_if_needed must
+  # NOT spawn a second refresher while one is still alive, and must leave
+  # the dropped request armed so the next tick retries — otherwise a burst
+  # of triggers under load could leak refresher threads.
+  def test_start_archive_refresh_skips_when_a_refresher_is_already_alive
+    with_direct_project do |_project, _hive_state|
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+
+      release = Queue.new
+      running = Thread.new { release.pop }
+      source.instance_variable_set(:@archive_refresh_thread, running)
+      source.request_archive_refresh
+
+      source.send(:start_archive_refresh_if_needed)
+
+      assert_same running, source.instance_variable_get(:@archive_refresh_thread),
+                  "overlap guard must not replace a live refresher thread"
+      assert source.instance_variable_get(:@archive_refresh_dirty),
+             "the dropped refresh stays armed so the next tick retries"
+    ensure
+      release << :go if release
+      running&.join(1)
+      source&.stop
+    end
+  end
+
+  # Shutdown hardening (state_source.rb): once @stop is set,
+  # start_archive_refresh_if_needed must refuse to spawn a refresher even
+  # with the dirty flag armed, so a poll thread overshooting stop's join
+  # deadline can't leave a detached refresher alive past teardown.
+  def test_start_archive_refresh_refuses_to_spawn_after_stop
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "9-done", "archived-task-260626-abcd",
+                       marker: "COMPLETE", id: 1)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      source.stop # sets @stop = true and clears the thread reference
+      source.request_archive_refresh
+
+      source.send(:start_archive_refresh_if_needed)
+
+      assert_nil source.instance_variable_get(:@archive_refresh_thread),
+                 "no refresher may be spawned after stop"
+    end
+  end
+
+  # Identities derive from the cache's :projects rows (no parallel map to
+  # drift) and are memoized per cache object so the hot active reparse
+  # doesn't rebuild them every tick.
+  def test_archived_identities_are_memoized_per_cache_object
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    cache = {
+      projects: {
+        "/p" => [ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
+      }.freeze
+    }.freeze
+
+    first = source.send(:archived_identities_from_cache, cache)
+    second = source.send(:archived_identities_from_cache, cache)
+
+    assert_same first, second, "identities are memoized while the cache object is unchanged"
+    assert_equal([ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done" } ], first.fetch("/p"))
+  end
+
+  # Codex regression: the steady-state active reparse must compute the
+  # active-stage set per project AFTER each project's workflow overlay
+  # loads, not from a single union snapshot taken before json_payload.
+  # With a custom-workflow project registered ahead of a default one, the
+  # registry union no longer reflects the custom project's overlay when a
+  # pre-computed active filter is built, so its custom active stage
+  # (`2-work`) would be dropped from every incremental tick.
+  def test_incremental_reparse_keeps_custom_workflow_active_stage_rows
+    with_tmp_global_config do |home|
+      custom_state = write_custom_workflow_project(home, name: "custom", workflow: "my-flow")
+      custom_task = File.join(custom_state, "stages", "2-work", "work-task-260626-abcd")
+      FileUtils.mkdir_p(custom_task)
+      Hive::TaskMeta.write(custom_task, id: 1, slug: "work-task-260626-abcd",
+                           display_name: nil, workflow: "my-flow")
+      File.write(File.join(custom_task, "work.md"), "<!-- COMPLETE -->\n")
+
+      _coding, coding_state = add_direct_project(home, name: "coding")
+      write_state_task(coding_state, "4-execute", "exec-task-260626-efgh",
+                       marker: "EXECUTE_COMPLETE", id: 2)
+
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      assert_includes source.current.rows.map(&:slug), "work-task-260626-abcd",
+                      "cold full parse must include the custom-workflow task"
+
+      # Force a steady-state active-only reparse via an mtime bump.
+      File.utime(Time.now + 5, Time.now + 5, File.join(custom_task, "work.md"))
+      source.send(:refresh_once)
+
+      slugs = source.current.rows.map(&:slug)
+      assert_includes slugs, "work-task-260626-abcd",
+                      "incremental reparse must not drop the custom-workflow active stage"
+      assert_includes slugs, "exec-task-260626-efgh",
+                      "the default project's active rows must still be present"
+    ensure
+      source&.stop
+      Hive::Workflows::Project.reset! if defined?(Hive::Workflows::Project)
+    end
+  end
+
+  def test_archive_refresher_failure_rearms_and_records_error_without_raising
     with_direct_project do |_project, _hive_state|
       raise_archive_refresh = true
       patch = Module.new do
@@ -574,23 +751,34 @@ class TuiStateSourceTest < Minitest::Test
       Hive::Commands::Status.prepend(patch)
       source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
 
+      # The worker must not raise, must not `warn` (it would corrupt the
+      # alt-screen frame), must surface the failure on the renderer's error
+      # channel, and must leave a retry armed for the next poll tick.
       _out, err = capture_io do
         source.send(:refresh_archived_cache, Hive::Config.registered_projects)
       end
 
-      assert_match(/tui archive refresh failed/, err)
-      assert_match(/synthetic archive refresh failure/, err)
+      assert_empty err, "a failed archive refresh must not warn under the alt-screen TUI"
+      refute_nil source.last_error, "the failure must surface on @last_error"
+      assert_match(/synthetic archive refresh failure/, source.last_error.message)
+      assert source.instance_variable_get(:@archive_refresh_dirty),
+             "a failed refresh must re-arm the dirty flag so the next tick retries"
     ensure
       raise_archive_refresh = false
       source&.stop
     end
   end
 
-  def test_safe_mtime_returns_nil_when_mtime_raises_on_existing_path
-    # state_source.rb 152: the file may vanish (or error) between the
-    # File.exist? check and File.mtime. The rescue must degrade to nil
-    # rather than propagate out of the fingerprint computation.
+  def test_safe_mtime_distinguishes_stat_error_from_absent
+    # state_source.rb: the file may vanish (or error) between the
+    # File.exist? check and File.mtime. A stat error must degrade to a
+    # fresh, never-equal StatError marker (NOT nil) so the change
+    # detectors bias toward a re-check; nil is reserved for a genuinely
+    # absent path so a stable absence still compares equal across ticks.
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+
+    assert_nil source.send(:safe_mtime, File.join(Dir.tmpdir, "definitely-absent-260626-abcd.md")),
+               "an absent path must read as nil"
 
     Dir.mktmpdir("state-source-safe-mtime") do |dir|
       path = File.join(dir, "vanishing.md")
@@ -600,8 +788,12 @@ class TuiStateSourceTest < Minitest::Test
 
         File.stat(arg).mtime
       }) do
-        assert_nil source.send(:safe_mtime, path),
-                   "safe_mtime must return nil when File.mtime raises after File.exist? passed"
+        first = source.send(:safe_mtime, path)
+        second = source.send(:safe_mtime, path)
+
+        refute_nil first, "a stat error must NOT collapse into the absent (nil) reading"
+        refute_equal first, second,
+                     "two errored reads must compare unequal so the change detector re-checks"
       end
     end
   end

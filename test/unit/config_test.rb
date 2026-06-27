@@ -2598,10 +2598,11 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      # The digest verb ships a non-zero default cap so a wedged digest child
-      # can't pin the single global digest slot forever; every other verb
-      # stays at the (disabled) child_timeout_sec default.
-      assert_equal({ "digest" => 3600 }, cfg.dig("daemon", "child_verb_timeouts"))
+      # The digest and answer-digest verbs ship a non-zero default cap so a
+      # wedged child can't pin the single global digest slot forever; every
+      # other verb stays at the (disabled) child_timeout_sec default.
+      assert_equal({ "digest" => 3600, "answer-digest" => 3600 },
+                   cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
 

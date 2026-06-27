@@ -326,20 +326,23 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # The `digest` verb ships a non-zero DEFAULT cap (every other verb
-        # stays at `child_timeout_sec`=0/disabled) because the digest holds
-        # the single global digest slot (can_dispatch_digest?): a child that
-        # wedges on an unbounded leg — a hung `ship_times` `git log`, or a
-        # black-holed Telegram socket — would otherwise pin that slot forever
-        # and silently disable ALL future digests until a daemon restart. A
-        # reaped child exits non-zero, so DigestScheduler retries the date on
-        # backoff. 3600s sits well above the categorizer's own agent cap
-        # (timeout_sec.digest, default 1800) so it never kills a healthy run;
-        # raise it alongside a raised timeout_sec.digest, or set it to 0 to
-        # disable.
+        # The `digest` and `answer-digest` verbs ship a non-zero DEFAULT cap
+        # (every other verb stays at `child_timeout_sec`=0/disabled) because
+        # each holds the single global digest slot (can_dispatch_digest?): a
+        # child that wedges on an unbounded leg — a hung `ship_times` `git
+        # log`, or a black-holed Telegram socket — would otherwise pin that
+        # slot forever, leave the scheduler's in-memory `@pending` marker set,
+        # and silently disable ALL future digests/answer-digests until a
+        # daemon restart. A reaped child exits non-zero, so the scheduler
+        # retries the date on backoff. 3600s sits well above the categorizer's
+        # own agent cap (timeout_sec.digest, default 1800) so it never kills a
+        # healthy run; raise it alongside a raised timeout_sec.digest, or set
+        # it to 0 to disable. `answer-digest` shares the same cap: it spawns
+        # no categorizer agent (it only fetches status + sends Telegram), so
+        # 3600s is a generous ceiling that still bounds a wedged socket.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "digest" => 3600 },
+        "child_verb_timeouts" => { "digest" => 3600, "answer-digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },

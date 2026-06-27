@@ -176,6 +176,37 @@ class WorktreeTest < Minitest::Test
          "+refs/heads/master:refs/remotes/origin/master")
   end
 
+  def push_synthetic_pull_head(origin_dir, pr_number, filename:, content:)
+    scratch = Dir.mktmpdir("pull-head-pusher")
+    run!("git", "clone", origin_dir, scratch)
+    run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+    run!("git", "-C", scratch, "config", "user.name", "Test")
+    File.write(File.join(scratch, filename), content)
+    run!("git", "-C", scratch, "add", ".")
+    run!("git", "-C", scratch, "commit", "-m", "pr #{pr_number} head", "--quiet")
+    sha = run!("git", "-C", scratch, "rev-parse", "HEAD").strip
+    run!("git", "-C", scratch, "push", "origin", "+HEAD:refs/pull/#{pr_number}/head")
+    sha
+  ensure
+    FileUtils.rm_rf(scratch) if scratch
+  end
+
+  def with_synthetic_pull_origin(pr_number)
+    with_tmp_git_repo do |dir|
+      origin_dir = "#{dir}.origin.git"
+      worktree_root = File.join(File.dirname(dir), "synthetic-pr-worktrees")
+      begin
+        run!("git", "clone", "--bare", dir, origin_dir)
+        run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+        sha = push_synthetic_pull_head(origin_dir, pr_number, filename: "pr.txt", content: "first\n")
+        yield(dir, worktree_root, origin_dir, sha)
+      ensure
+        FileUtils.rm_rf(worktree_root)
+        FileUtils.rm_rf(origin_dir)
+      end
+    end
+  end
+
   def test_create_branches_from_origin_default_when_origin_ahead_of_local
     # Regression for the agent-plugins-was-7-commits-behind incident:
     # creating a worktree must branch from origin/<default>'s current
@@ -320,6 +351,90 @@ class WorktreeTest < Minitest::Test
       refute File.exist?(File.join(wt.path, "tagged-decoy.txt")),
              "the tagged decoy commit must not become the stacked base"
     end
+  end
+
+  def test_materialize_pr_fetches_pull_head_and_adds_branch_worktree
+    with_synthetic_pull_origin(42) do |dir, root, _origin_dir, sha|
+      path = File.join(root, "adhoc-review-pr-42")
+      result = Hive::Worktree.materialize_pr(
+        repo_root: dir,
+        pr_number: 42,
+        path: path,
+        branch: "hive/review/pr-42"
+      )
+
+      assert_equal path, result.fetch(:path)
+      assert_equal "hive/review/pr-42", result.fetch(:branch)
+      assert_equal sha, result.fetch(:head_sha)
+      assert_equal "hive/review/pr-42", run!("git", "-C", path, "branch", "--show-current").strip
+      assert_equal sha, run!("git", "-C", path, "rev-parse", "HEAD").strip
+      assert File.exist?(File.join(path, "pr.txt")),
+             "materialized worktree must contain the synthetic pull head"
+    end
+  end
+
+  def test_materialize_pr_rerun_resets_existing_branch_when_worktree_was_removed
+    with_synthetic_pull_origin(43) do |dir, root, origin_dir, _sha|
+      path = File.join(root, "adhoc-review-pr-43")
+      Hive::Worktree.materialize_pr(
+        repo_root: dir,
+        pr_number: 43,
+        path: path,
+        branch: "hive/review/pr-43"
+      )
+      run!("git", "-C", dir, "worktree", "remove", path)
+      new_sha = push_synthetic_pull_head(origin_dir, 43, filename: "pr.txt", content: "second\n")
+
+      result = Hive::Worktree.materialize_pr(
+        repo_root: dir,
+        pr_number: 43,
+        path: path,
+        branch: "hive/review/pr-43"
+      )
+
+      assert_equal new_sha, result.fetch(:head_sha)
+      assert_equal new_sha, run!("git", "-C", path, "rev-parse", "HEAD").strip
+      assert_equal "second\n", File.read(File.join(path, "pr.txt"))
+    end
+  end
+
+  def test_materialize_pr_raises_when_fetch_fails
+    with_tmp_git_repo do |dir|
+      err = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.materialize_pr(
+          repo_root: dir,
+          pr_number: 999,
+          path: File.join(dir, "missing-pr-worktree"),
+          branch: "hive/review/pr-999"
+        )
+      end
+
+      assert_match(/git fetch origin \+pull\/999\/head:refs\/hive\/review\/pr-999 failed/, err.message)
+    end
+  end
+
+  def test_materialize_pr_raises_when_head_cannot_be_resolved
+    ok = Class.new { def success? = true }.new
+    failed = Class.new { def success? = false }.new
+    calls = []
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*cmd|
+      calls << cmd
+      cmd.include?("rev-parse") ? [ "", "bad head", failed ] : [ "", "", ok ]
+    }) do
+      err = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.materialize_pr(
+          repo_root: "/tmp/repo",
+          pr_number: 44,
+          path: "/tmp/worktrees/adhoc-review-pr-44",
+          branch: "hive/review/pr-44"
+        )
+      end
+
+      assert_match(/git rev-parse HEAD failed: bad head/, err.message)
+    end
+
+    assert calls.any? { |cmd| cmd.include?("+pull/44/head:refs/hive/review/pr-44") }
   end
 
   # Regression for the origin-ahead-of-local placeholder miss: a prior run

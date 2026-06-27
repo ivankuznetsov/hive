@@ -282,6 +282,22 @@ module Hive
       status.success?
     end
 
+    def self.materialize_pr(repo_root:, pr_number:, path:, branch:)
+      repo_root = File.expand_path(repo_root)
+      path = File.expand_path(path)
+      pr_number = pr_number.to_i
+      local_ref = "refs/#{branch}"
+
+      FileUtils.mkdir_p(File.dirname(path))
+      run_materialize_git!(repo_root, "fetch", "origin", "+pull/#{pr_number}/head:#{local_ref}")
+      run_materialize_git!(repo_root, "worktree", "add", "-B", branch, path, local_ref)
+      {
+        path: path,
+        branch: branch,
+        head_sha: materialize_git_stdout!(path, "rev-parse", "HEAD").strip
+      }
+    end
+
     # Resolve symlinks before the prefix check — File.expand_path normalises
     # `..` and `~` lexically but does not follow symlinks. An agent that
     # writes a symlink at the worktree path could otherwise escape the root.
@@ -301,6 +317,20 @@ module Hive
     rescue Errno::ENOENT
       # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
       File.expand_path(path)
+    end
+
+    def self.run_materialize_git!(repo_root, *args)
+      out, err, status = Open3.capture3("git", "-C", repo_root, *args)
+      return if status.success?
+
+      raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"
+    end
+
+    def self.materialize_git_stdout!(repo_root, *args)
+      out, err, status = Open3.capture3("git", "-C", repo_root, *args)
+      return out if status.success?
+
+      raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"
     end
 
     private

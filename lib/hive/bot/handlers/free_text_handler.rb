@@ -21,8 +21,11 @@ module Hive
             # answer_context is truthy, and answer_context re-derives the same
             # conversation-state / reattach facts, so a routed update always has
             # either a conversation state or a reattach target by the time it
-            # lands here. Kept (and pinned by an isolated unit test) as a
-            # defensive fallback for any direct/future caller.
+            # lands here. That guarantee holds only while #reattach_from_reply
+            # stays a logic-identical duplicate of Router#reattach_target — if
+            # either reply-parse regex drifts, this branch becomes reachable, so
+            # keep the two in sync. Kept (and pinned by an isolated unit test)
+            # as a defensive fallback for any direct/future caller.
             return @result_class.new(action: :reply, text: "Send /help for commands.") unless reattached
             return blank_answer_refusal if blank?(answer_text)
 

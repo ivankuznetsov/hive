@@ -49,7 +49,7 @@ module Hive
         idea_voice_edit_text
         answer_voice
         idea_media
-        idea_text
+        idea_bare_text
         idea_text_capture
         free_text_answer
         unauthorized
@@ -168,7 +168,7 @@ module Hive
           # instead of being swallowed as idea text.
           return :unknown if text.start_with?("/")
 
-          :idea_text
+          :idea_bare_text
         end
       end
 
@@ -314,7 +314,7 @@ module Hive
         when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
-        when :idea_text then @slash_handlers.idea(update)
+        when :idea_bare_text then @slash_handlers.idea(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
         when :callback_expired

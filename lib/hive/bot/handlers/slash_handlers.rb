@@ -131,9 +131,11 @@ module Hive
 
         private
 
-        # Mirrors Router#effective_text / FreeTextHandler#effective_text: a
-        # media message carries its text in the caption (update.text is nil),
-        # so prefer #effective_text. The respond_to? guard is load-bearing for
+        # Mirrors Router#effective_text exactly; FreeTextHandler#effective_text
+        # coerces the same read with `.to_s` (returns "", not nil), so the
+        # three are not interchangeable — consolidate with care. A media
+        # message carries its text in the caption (update.text is nil), so
+        # prefer #effective_text. The respond_to? guard is load-bearing for
         # the LegacyMessageUpdate path, which exposes only #text.
         def effective_text(update)
           update.respond_to?(:effective_text) ? update.effective_text : update.text

@@ -979,7 +979,8 @@ module Hive
             )
           else
             if result.respond_to?(:mode) && result.mode == :waiting
-              rows = Hive::Bot::WaitingRows.select(rows, daemon_enabled: waiting_daemon_enabled_resolver)
+              rows = Hive::Bot::WaitingRows.select(rows, daemon_enabled: waiting_daemon_enabled_resolver,
+                                                         logger: @logger)
               if rows.empty?
                 safe_send_message(chat_id: update.chat_id, text: "Nothing is waiting on you.")
                 return nil
@@ -1468,46 +1469,19 @@ module Hive
 
       # One primary action button for a row, or nil when the canonical
       # row-action resolver says the row is suppressed or has no Telegram-side
-      # action. Labels carry the task title so the operator can tell rows apart.
+      # action. Delegates to the shared `WaitingRows.button_for` so /status,
+      # /waiting, and the answer-digest render the same conceptual button
+      # through one builder; the per-row rescue (drop just this row's button on
+      # a malformed row, logging :status_button_failed) lives there now.
       def status_action_button(row)
-        nb = Hive::Bot::NotificationBuilders
-        # Capture attribution into locals before the begin so the rescue's log
-        # line can't re-raise (and re-abort the keyboard's filter_map) on a row
-        # whose own top-level readers are malformed.
-        project = row.project
-        slug = row.slug
-        marker = row.marker
-        row_action = row.action
-        begin
-          resolution = Hive::Bot::RowActions.resolve(row)
-          return nil if resolution.suppress || resolution.actions.empty?
-
-          action = resolution.primary
-          title = nb.display_title(row)
-          nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
-        rescue StandardError => e
-          # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
-          # boundary, an unmapped status_action_emoji key, or any NoMethodError/
-          # TypeError on a bad attrs/workflow value) so it drops just its own
-          # /status button instead of aborting the whole keyboard's filter_map.
-          @logger&.event(:status_button_failed, project: project, slug: slug,
-                                                 marker: marker, action: row_action,
-                                                 error_class: e.class.name, message: e.message)
-          nil
-        end
+        Hive::Bot::WaitingRows.button_for(row, logger: @logger)
       end
 
+      # Single-sourced from WaitingRows::ROLE_EMOJI (validated against the
+      # closed RowActions::ROLES at load). Kept as a one-line delegator because
+      # the parity sweep in supervisor_test pins it directly.
       def status_action_emoji(role)
-        {
-          answer: "✏️",
-          approve: "✅",
-          approve_plan: "✅",
-          findings_accept: "✅",
-          findings_reject: "🚫",
-          autofix: "🔧",
-          details: "🔍",
-          rerun: "▶️"
-        }.fetch(role)
+        Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(role)
       end
 
       def waiting_daemon_enabled_resolver

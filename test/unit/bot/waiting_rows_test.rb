@@ -32,8 +32,14 @@ class HiveBotWaitingRowsTest < Minitest::Test
     )
   end
 
-  def waiting(rows, daemon_enabled: ->(_row) { false })
-    Hive::Bot::WaitingRows.select(rows, daemon_enabled: daemon_enabled)
+  CapturingLogger = Struct.new(:events, keyword_init: true) do
+    def event(name, **payload)
+      events << { name: name, payload: payload }
+    end
+  end
+
+  def waiting(rows, daemon_enabled: ->(_row) { false }, logger: nil)
+    Hive::Bot::WaitingRows.select(rows, daemon_enabled: daemon_enabled, logger: logger)
   end
 
   def test_select_keeps_only_needs_input_resolution_kinds
@@ -102,6 +108,7 @@ class HiveBotWaitingRowsTest < Minitest::Test
   def test_bad_row_resolution_is_dropped_without_aborting_the_rest
     bad = row(slug: "bad-260625-abcd")
     good = row(slug: "good-260625-abcd")
+    logger = CapturingLogger.new(events: [])
     original = Hive::Bot::RowActions.method(:resolve)
     Hive::Bot::RowActions.define_singleton_method(:resolve) do |candidate|
       raise KeyError, "boom" if candidate.slug == "bad-260625-abcd"
@@ -109,10 +116,25 @@ class HiveBotWaitingRowsTest < Minitest::Test
       original.call(candidate)
     end
 
-    assert_equal [ good ], waiting([ bad, good ])
+    assert_equal [ good ], waiting([ bad, good ], logger: logger)
+    dropped = logger.events.find { |e| e[:name] == :poll_failure }
+    refute_nil dropped, "a needs-input row that raises must be logged, not silently dropped"
+    assert_equal "waiting_row_resolve", dropped[:payload][:source]
   ensure
     Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
     Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+  end
+
+  def test_daemon_plan_pause_check_failure_fails_open_and_logs
+    plan = row(slug: "plan-260625-abcd", stage: "3-plan", marker: "waiting")
+    logger = CapturingLogger.new(events: [])
+
+    selected = waiting([ plan ], daemon_enabled: ->(_row) { raise "boom" }, logger: logger)
+
+    assert_equal [ plan ], selected, "a failed daemon-pause check must fail open (keep the row)"
+    failure = logger.events.find { |e| e[:name] == :poll_failure }
+    refute_nil failure, "a failed daemon-pause check must be logged"
+    assert_equal "waiting_daemon_pause", failure[:payload][:source]
   end
 
   def test_review_rows_sort_before_generic_rows

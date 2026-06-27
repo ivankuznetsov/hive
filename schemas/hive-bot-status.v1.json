@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-status.v1.json",
   "title": "hive bot status output (v1)",
-  "description": "Stable contract emitted by `hive bot status --json`. The SuccessPayload reports whether the Telegram bot process is running, its PID, and uptime (exit 0 when running, 1 when not). The ErrorPayload arm carries usage errors for the whole `hive bot` command surface — every `hive bot ... --json` usage error (missing/unknown subcommand, or a flag passed to a subcommand that does not accept it) rides this schema (exit 64).",
+  "description": "Stable contract emitted by `hive bot status --json`. The SuccessPayload reports whether the Telegram bot process is running, its PID, and uptime (exit 0 when running, 1 when not). The ErrorPayload arm carries usage errors for the whole `hive bot` command surface — every `hive bot ... --json` usage error (missing/unknown subcommand, a flag passed to a subcommand that does not accept it, or an extra positional argument after the subcommand) rides this schema (exit 64).",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -87,9 +87,10 @@
           "enum": [
             "missing_subcommand",
             "unknown_subcommand",
-            "wrong_subcommand_flag"
+            "wrong_subcommand_flag",
+            "extra_arguments"
           ],
-          "description": "missing_subcommand = `hive bot` with no SUBCOMMAND. unknown_subcommand = SUBCOMMAND outside the start/stop/status/reload/tail/install set. wrong_subcommand_flag = a flag was passed to a subcommand that does not accept it (e.g., --force on `bot status`, or --foreground combined with --detach on `bot start`)."
+          "description": "missing_subcommand = `hive bot` with no SUBCOMMAND. unknown_subcommand = SUBCOMMAND outside the start/stop/status/reload/tail/install set. wrong_subcommand_flag = a flag was passed to a subcommand that does not accept it (e.g., --force on `bot status`, or --foreground combined with --detach on `bot start`). extra_arguments = an extra positional argument was passed after the subcommand (e.g., `hive bot status extra`), rejected by the argv parser before the command runs."
         },
         "exit_code": {
           "type": "integer",

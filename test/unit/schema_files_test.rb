@@ -1604,15 +1604,17 @@ class SchemaFilesTest < Minitest::Test
 
   # ── hive-bot-status ────────────────────────────────────────────────────
 
-  # The three usage-error kinds the `hive bot` surface emits through
+  # The usage-error kinds the `hive bot` surface emits through
   # Hive::Commands::Bot.json_usage_error_payload. missing_subcommand /
-  # unknown_subcommand are raised in Hive::Commands::Bot#call; the bin/hive
+  # unknown_subcommand are raised in Hive::Commands::Bot#call; the cli.rb
   # `bot` dispatcher raises wrong_subcommand_flag before the command runs
-  # (e.g. `bot status --force`). All ride the hive-bot-status schema because
-  # there is no separate bot-usage-error schema — JSON_USAGE_ERROR_SCHEMA
-  # points here.
+  # (e.g. `bot status --force`); and extra_arguments rides the bin/hive
+  # JSON_USAGE_ERROR_CONTRACTS `bot` entry when Thor rejects an extra
+  # positional (e.g. `bot status extra`) before dispatch. All ride the
+  # hive-bot-status schema because there is no separate bot-usage-error
+  # schema — JSON_USAGE_ERROR_SCHEMA points here.
   BOT_USAGE_ERROR_KINDS = %w[
-    missing_subcommand unknown_subcommand wrong_subcommand_flag
+    missing_subcommand unknown_subcommand wrong_subcommand_flag extra_arguments
   ].freeze
 
   def test_hive_bot_status_schema_file_exists_and_is_valid_json

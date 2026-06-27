@@ -207,6 +207,51 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  # `hive bot SUBCOMMAND` takes a single positional and (unlike `daemon`) has no
+  # `*targets` splat, so an extra positional such as `hive bot status extra` is
+  # rejected by Thor *before* `Hive::Commands::Bot#call` runs — bypassing the
+  # command-level usage-error emitters. With --json it must still ride the
+  # hive-bot-status envelope via the bin/hive "bot" usage-error contract
+  # (error_kind "extra_arguments", error_class "InvalidTaskPath", exit 64), not
+  # bare Thor arity prose on stderr. This is the sole reason the "bot" entry
+  # exists in JSON_USAGE_ERROR_CONTRACTS.
+  def test_bot_extra_positional_json_usage_error_rides_bot_status_envelope
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    with_tmp_global_config do |home|
+      [ %w[bot status extra --json], %w[bot install extra --json] ].each do |argv|
+        out, err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal "hive-bot-status", payload["schema"]
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"), payload["schema_version"]
+        assert_equal false, payload["ok"]
+        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "extra_arguments", payload["error_kind"]
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        assert_match(/was called with arguments/, payload["message"])
+        assert_match(/^hive: ERROR: /, err.lines.first)
+        assert_empty schemer.validate(payload).map { |e| e["error"] },
+                     "#{argv.join(' ')} envelope must validate against hive-bot-status schema"
+      end
+    end
+  end
+
+  # Human-mode (non-`--json`) sibling: without --json the raw Thor arity prose
+  # must surface on stderr with empty stdout (exit 64), guarding bin/hive's
+  # stderr-prefix branch against a silent regression.
+  def test_bot_extra_positional_human_usage_error_emits_thor_arity_prose
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "bot", "status", "extra")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_empty out
+      assert_match(/was called with arguments \["status", "extra"\]/, err)
+    end
+  end
+
   def test_invalid_byte_json_arg_uses_command_usage_envelope
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "run", "--json", "bad\xFF".b)

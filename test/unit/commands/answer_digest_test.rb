@@ -28,6 +28,12 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     end
   end
 
+  CapturingLogger = Struct.new(:events, keyword_init: true) do
+    def event(name, **payload)
+      events << { name: name, payload: payload }
+    end
+  end
+
   def row(slug:, action: "needs_input", marker: "waiting", stage: "2-brainstorm", attrs: {},
           workflow: "coding", id: nil, display_name: nil, project_path: "/tmp/hive", pr_url: nil)
     Row.new(
@@ -280,5 +286,158 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
 
     assert_kind_of Hive::Bot::StatusWatcher, cmd.send(:status_watcher)
     assert_kind_of Hive::Bot::Telegram, cmd.send(:build_telegram, token: "token", logger: nil)
+  end
+
+  def test_real_send_json_envelope_reports_sent_chat_and_task_list
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    waiting = row(
+      slug: "answer-me-260625-abcd",
+      id: 9281,
+      display_name: "Answer Me",
+      pr_url: "https://github.com/example/repo/pull/17"
+    )
+    cmd, = command(rows: [ waiting ], output: output, json: true, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") do
+      result = cmd.call
+
+      assert_equal true, result.sent
+    end
+
+    assert_equal 1, telegram.messages.length
+    payload = JSON.parse(output.string)
+    assert_equal "hive-answer-digest", payload.fetch("schema")
+    assert_equal 1, payload.fetch("schema_version")
+    assert_equal true, payload.fetch("ok")
+    assert_equal true, payload.fetch("sent")
+    assert_nil payload.fetch("reason")
+    assert_equal 4242, payload.fetch("chat_id")
+    assert_equal 1, payload.fetch("button_count")
+    assert_equal 1, payload.fetch("count")
+    assert_nil payload.fetch("message"), "message is null on a real send, not the rendered text"
+    tasks = payload.fetch("tasks")
+    assert_equal 1, tasks.length
+    task = tasks.first
+    assert_equal "hive", task.fetch("project")
+    assert_equal "answer-me-260625-abcd", task.fetch("slug")
+    assert_equal 9281, task.fetch("id")
+    assert_equal "2-brainstorm", task.fetch("stage")
+    assert_equal "#17", task.fetch("pr")
+  end
+
+  def test_daemon_enabled_resolver_caches_config_load_per_project_path
+    cmd, = command(rows: [])
+    resolver = cmd.send(:daemon_enabled_resolver)
+    row_a = row(slug: "plan-a-260625-abcd", project_path: "/tmp/shared", stage: "3-plan")
+    row_b = row(slug: "plan-b-260625-abcd", project_path: "/tmp/shared", stage: "3-plan")
+    loads = 0
+
+    with_replaced_singleton_method(Hive::Config, :load, lambda { |_path|
+      loads += 1
+      { "daemon" => { "enabled" => true } }
+    }) do
+      assert_equal true, resolver.call(row_a)
+      assert_equal true, resolver.call(row_b)
+    end
+
+    assert_equal 1, loads,
+                 "two rows sharing a project_path must dedupe to one Hive::Config.load"
+  end
+
+  def test_daemon_enabled_resolver_logs_project_config_error_when_logger_present
+    logger = CapturingLogger.new(events: [])
+    cmd = Hive::Commands::AnswerDigest.new(
+      dry_run: true, cfg: cfg, config_loader: -> { cfg },
+      status_watcher: StubStatusWatcher.new(result: FetchResult.new(ok: true, rows: [])),
+      env_loader: StubEnvLoader.new(calls: []), logger: logger
+    )
+    resolver = cmd.send(:daemon_enabled_resolver)
+    broken = row(slug: "plan-260625-abcd", project_path: "/tmp/broken", stage: "3-plan")
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_equal false, resolver.call(broken)
+    end
+
+    event = logger.events.find { |e| e[:name] == :poll_failure }
+    refute_nil event, "a broken project config must be logged from the digest path, not invisible"
+    assert_equal "answer_digest_daemon_check", event[:payload][:source]
+    assert_equal "hive", event[:payload][:project]
+  end
+
+  def test_resolver_falls_back_to_registered_project_path_when_row_lacks_one
+    cmd, = command(rows: [])
+    resolver = cmd.send(:daemon_enabled_resolver)
+    blank = row(slug: "plan-260625-abcd", project_path: "", stage: "3-plan")
+    loaded = []
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/registered" } }) do
+      with_replaced_singleton_method(Hive::Config, :load, lambda { |path|
+        loaded << path
+        { "daemon" => { "enabled" => true } }
+      }) do
+        assert_equal true, resolver.call(blank)
+      end
+    end
+
+    assert_equal [ "/tmp/registered" ], loaded,
+                 "a project_path-less row must resolve the path via Config.find_project"
+  end
+
+  def test_status_failure_json_envelope_uses_status_unavailable_error_kind
+    output = StringIO.new
+    watcher = StubStatusWatcher.new(result: FetchResult.new(ok: false, rows: [], error: "boom"))
+    cmd = Hive::Commands::AnswerDigest.new(
+      date: "2026-06-27", json: true, output: output, cfg: cfg,
+      status_watcher: watcher, env_loader: StubEnvLoader.new(calls: []),
+      telegram_factory: ->(token:, logger:) { StubTelegram.new(messages: []) }
+    )
+
+    assert_raises(Hive::Error) { cmd.call }
+
+    payload = JSON.parse(output.string)
+    assert_equal "hive-answer-digest", payload.fetch("schema")
+    assert_equal false, payload.fetch("ok")
+    assert_equal "status_unavailable", payload.fetch("error_kind")
+    assert_equal "StatusUnavailableError", payload.fetch("error_class")
+    assert_equal Hive::ExitCodes::GENERIC, payload.fetch("exit_code")
+  end
+
+  def test_non_hive_error_json_envelope_uses_internal_error_kind_and_reraises
+    output = StringIO.new
+    watcher = Object.new
+    def watcher.fetch = raise("kaboom")
+    cmd = Hive::Commands::AnswerDigest.new(
+      date: "2026-06-27", json: true, output: output, cfg: cfg,
+      status_watcher: watcher, env_loader: StubEnvLoader.new(calls: []),
+      telegram_factory: ->(token:, logger:) { StubTelegram.new(messages: []) }
+    )
+
+    assert_raises(RuntimeError) { cmd.call }
+
+    payload = JSON.parse(output.string)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "internal", payload.fetch("error_kind")
+  end
+
+  def test_result_validates_reason_chat_id_and_derives_sent
+    base = {
+      date: Date.new(2026, 6, 27), message: "", button_count: 0,
+      reason: "empty", dry_run: false, count: 0, tasks: []
+    }
+    klass = Hive::Commands::AnswerDigest::Result
+
+    empty = klass.new(**base, chat_id: nil)
+    assert_equal false, empty.sent
+    sent = klass.new(date: Date.new(2026, 6, 27), message: "x", button_count: 1,
+                     chat_id: 42, reason: nil, dry_run: false, count: 1, tasks: [])
+    assert_equal true, sent.sent
+
+    assert_raises(ArgumentError) { klass.new(**base, chat_id: nil, reason: "bogus") }
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "x", button_count: 1,
+                chat_id: nil, reason: nil, dry_run: false, count: 1, tasks: [])
+    end
+    assert_raises(ArgumentError) { klass.new(**base, chat_id: 42) }
   end
 end

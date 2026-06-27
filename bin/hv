@@ -26,18 +26,40 @@ xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 # A misbehaving candidate must not hang `hv`: one that blocks reading
 # stdin, or a slow/JVM-based Apache Hive that takes seconds to boot,
 # would otherwise stall the probe indefinitely with no fallback. We
-# always close the probe's stdin (</dev/null) and, when `timeout` is
-# available, cap each probe so a slow candidate falls through to the
-# next instead of hanging. `timeout` is absent on stock macOS, so the
-# cap is best-effort — stdin redirection covers the common blocking case
-# even without it.
+# always close the probe's stdin (</dev/null) and cap each probe so a
+# slow candidate falls through to the next instead of hanging.
 timeout_bin="$(command -v timeout 2>/dev/null || true)"
 
 probe_version() {
   if [[ -n "$timeout_bin" ]]; then
     "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null
   else
-    "$1" --version </dev/null 2>/dev/null
+    local output_file pid status watchdog
+    output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return
+
+    "$1" --version </dev/null >"$output_file" 2>/dev/null &
+    pid=$!
+    (
+      sleep 5
+      kill "$pid" 2>/dev/null || exit 0
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null || true
+    ) &
+    watchdog=$!
+
+    if wait "$pid"; then
+      status=0
+    else
+      status=$?
+    fi
+
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+    if [[ "$status" -eq 0 ]]; then
+      cat "$output_file" || status=$?
+    fi
+    rm -f "$output_file"
+    return "$status"
   fi
 }
 

@@ -45,6 +45,33 @@ class StatusTest < Minitest::Test
     end
   end
 
+  # Headline acceptance for this task (plan-R10 / brainstorm-A8): a 6-review
+  # REVIEW_WAITING row must render in text-mode `hive status` under its own
+  # "Needs review decision" group, NOT collapse into the generic
+  # "Needs your input" label. Mirrors the brainstorm assertion above so the
+  # rendered-text contract is covered for the review case too.
+  def test_text_mode_groups_review_waiting_under_needs_review_decision
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "review-decision-260426-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "task.md"), "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, project
+        assert_includes out, "Needs review decision",
+                         "6-review REVIEW_WAITING must render under the 'Needs review decision' group"
+        assert_includes out, "hive review"
+        refute_includes out, "Needs your input",
+                         "review-stage needs-input must not collapse into the generic 'Needs your input' label"
+      end
+    end
+  end
+
   def test_status_json_includes_slug_id_and_display_name
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

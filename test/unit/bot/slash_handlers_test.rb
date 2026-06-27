@@ -686,7 +686,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
       marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
       state_file: "/tmp/plan-task-260525-abcd/plan.md",
-      action: "needs_input", action_label: "Needs your input", diagnostic: nil
+      action: "needs_input", action_label: "Review plan draft", diagnostic: nil
     )
     handlers = autofix_handlers([ plan_row ])
 
@@ -707,7 +707,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
       marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
       state_file: "/tmp/plan-task-260525-abcd/plan.md",
-      action: "needs_input", action_label: "Needs your input",
+      action: "needs_input", action_label: "Review plan draft",
       diagnostic: { "summary" => "PLAN_DIAG summary", "detail" => "plan diagnostic detail" }
     )
     handlers = autofix_handlers([ plan_row ])

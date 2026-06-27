@@ -72,6 +72,58 @@ class StatusTest < Minitest::Test
     end
   end
 
+  # R10 symmetry: a 3-plan WAITING row must render in text-mode `hive status`
+  # under its own "Review plan draft" group, NOT collapse into the generic
+  # "Needs your input" label. Mirrors the brainstorm/review assertions so the
+  # rendered-text contract is covered for the plan case too.
+  def test_text_mode_groups_plan_waiting_under_review_plan_draft
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "plan-decision-260426-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "plan.md"), "## Plan\n<!-- WAITING -->\n")
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, project
+        assert_includes out, "Review plan draft",
+                         "3-plan WAITING must render under the 'Review plan draft' group"
+        assert_includes out, "hive plan"
+        refute_includes out, "Needs your input",
+                         "plan-stage needs-input must not collapse into the generic 'Needs your input' label"
+      end
+    end
+  end
+
+  # R10 symmetry: an 8-finalize WAITING row must render in text-mode
+  # `hive status` under its own "Confirm finalize" group, NOT collapse into the
+  # generic "Needs your input" label. Mirrors the brainstorm/review assertions
+  # so the rendered-text contract is covered for the finalize case too.
+  def test_text_mode_groups_finalize_waiting_under_confirm_finalize
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "finalize-decision-260426-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "pr.md"), "## PR\n<!-- WAITING -->\n")
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, project
+        assert_includes out, "Confirm finalize",
+                         "8-finalize WAITING must render under the 'Confirm finalize' group"
+        assert_includes out, "hive finalize"
+        refute_includes out, "Needs your input",
+                         "finalize-stage needs-input must not collapse into the generic 'Needs your input' label"
+      end
+    end
+  end
+
   def test_status_json_includes_slug_id_and_display_name
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -155,7 +207,7 @@ class StatusTest < Minitest::Test
       claude_pid_alive: nil,
       live_task_lock: false,
       action_key: "needs_input",
-      action_label: "Needs your input",
+      action_label: "Answer questions",
       suggested_command: "hive brainstorm answered-260614-abcd --from 2-brainstorm",
       next_action: nil,
       diagnostic: nil

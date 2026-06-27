@@ -107,8 +107,7 @@ module Hive
           projects_provider: @projects_provider,
           status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
-          logger: @logger,
-          status_snapshot_provider: status_snapshot_provider
+          logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
           conversation_store: @conversation_store,
@@ -161,9 +160,12 @@ module Hive
           return :idea_media if update.respond_to?(:media?) && update.media?
           return :idea_text_capture if draft&.phase == :awaiting_text
 
-          # Bare non-slash text now defaults to idea capture. Unknown slash
-          # commands must keep the unknown-command reply instead of being
-          # swallowed as idea text.
+          # Bare non-slash text now defaults to idea capture. Text-less updates
+          # with no media/voice (stickers, locations, contacts, video) reach
+          # here too with an empty `text` and likewise open idea capture
+          # (`idea` -> awaiting_text draft) rather than the unknown-command
+          # reply. Unknown slash commands must keep the unknown-command reply
+          # instead of being swallowed as idea text.
           return :unknown if text.start_with?("/")
 
           :idea_text

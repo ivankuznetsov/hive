@@ -17,6 +17,12 @@ module Hive
           state = @conversation_store.get(chat_id: update.chat_id)
           unless state
             reattached = reattach_from_reply(update)
+            # Router-unreachable: classify only routes :free_text_answer when
+            # answer_context is truthy, and answer_context re-derives the same
+            # conversation-state / reattach facts, so a routed update always has
+            # either a conversation state or a reattach target by the time it
+            # lands here. Kept (and pinned by an isolated unit test) as a
+            # defensive fallback for any direct/future caller.
             return @result_class.new(action: :reply, text: "Send /help for commands.") unless reattached
             return blank_answer_refusal if blank?(answer_text)
 

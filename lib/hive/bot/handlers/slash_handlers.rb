@@ -48,8 +48,7 @@ module Hive
         end
 
         def idea(update)
-          text_source = update.respond_to?(:effective_text) ? update.effective_text : update.text
-          text = text_source.to_s.sub(%r{\A/idea\b}, "").strip
+          text = effective_text(update).to_s.sub(%r{\A/idea\b}, "").strip
           if text.empty?
             return start_text_capture(update) if @idea_draft_store
 
@@ -110,7 +109,7 @@ module Hive
         def media(update)
           draft = @idea_draft_store.get(chat_id: update.chat_id)
           started_here = draft.nil?
-          caption = update.effective_text.to_s.strip
+          caption = effective_text(update).to_s.strip
           if draft.nil?
             text = caption.empty? || caption.start_with?("/") ? nil : caption
             draft = @idea_draft_store.start(
@@ -131,6 +130,14 @@ module Hive
         end
 
         private
+
+        # Mirrors Router#effective_text / FreeTextHandler#effective_text: a
+        # media message carries its text in the caption (update.text is nil),
+        # so prefer #effective_text. The respond_to? guard is load-bearing for
+        # the LegacyMessageUpdate path, which exposes only #text.
+        def effective_text(update)
+          update.respond_to?(:effective_text) ? update.effective_text : update.text
+        end
 
         def start_text_capture(update)
           draft = @idea_draft_store.start(chat_id: update.chat_id, phase: :awaiting_text,

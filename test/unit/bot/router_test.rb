@@ -144,6 +144,43 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil draft.text
   end
 
+  def test_content_less_update_opens_idea_text_capture
+    # Plan Risk-4 (accepted): a non-text / non-media / non-voice update
+    # (sticker, location, contact, video) carries no effective_text, so it
+    # falls through to :idea_text and opens an awaiting_text draft asking for
+    # the idea text — rather than the old "I did not understand that" reply.
+    # Contrast a rejected attachment, which leaves no draft behind.
+    assert_equal :idea_text, @router.classify(update)
+
+    result = @router.handle(update)
+
+    assert_equal :reply, result.action
+    assert_match(/Send the idea text/, result.text)
+    refute_match(/did not understand/i, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal :awaiting_text, draft.phase
+    assert_nil draft.text
+  end
+
+  def test_bare_text_during_active_draft_clobbers_prior_draft
+    # Plan Risk-1 (accepted, most-aggressive default): bare text arriving while
+    # a draft is mid-flight starts a fresh idea, discarding the in-progress
+    # draft and any staged attachments with no "previous idea discarded"
+    # notice. Pin the chosen behavior so a future protect/notify change is a
+    # deliberate, test-visible decision.
+    @draft_store.start(chat_id: 12345, phase: :collecting_files, text: "old idea", token: "tok")
+
+    result = @router.handle(update(text: "new idea"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal "new idea", draft.text
+    assert_equal :awaiting_project, draft.phase
+    refute_equal "tok", draft.token,
+                 "the prior draft is clobbered into a fresh one, not continued"
+  end
+
   def test_unknown_slash_command_stays_unknown
     assert_equal :unknown, @router.classify(update(text: "/foobar"))
 
@@ -314,8 +351,13 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil @draft_store.get(chat_id: 12345),
                "A rejected bare media file must not leave a phantom draft that hijacks the next message"
 
-    # The phantom-draft regression: the next ordinary text must start a fresh
-    # idea, not continue a leaked :awaiting_text draft from the rejected media.
+    # The assert_nil above is the authoritative phantom-draft guard — do not
+    # delete it. The follow-up below is only a smoke check that a fresh idea
+    # still works after a rejected attachment: under the bare-text-idea default
+    # a leaked :awaiting_text draft and a fresh idea produce identical
+    # observable output (both reply "Pick a project" with draft.text ==
+    # "just chatting"), so the follow-up can no longer catch the regression on
+    # its own.
     followup = @router.handle(update(text: "just chatting"))
     assert_equal :reply, followup.action
     assert_match(/Pick a project/, followup.text)
@@ -510,13 +552,16 @@ class HiveBotRouterTest < Minitest::Test
       router = Hive::Bot::Router.new(
         bot_config: { "chat_id_allowlist" => [ 12345 ] },
         logger: @logger,
-        conversation_store: @store
+        conversation_store: @store,
+        idea_draft_store: @draft_store
       )
 
       result = router.handle(update(text: "fix broken cron"))
 
       assert_equal :reply, result.action
       assert_match(/No Hive projects are registered yet/, result.text)
+      assert_nil @draft_store.get(chat_id: 12345),
+                 "the empty-registry refusal must not leave a draft behind (start_idea checks the registry before opening a draft)"
     end
   end
 

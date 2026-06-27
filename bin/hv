@@ -84,6 +84,13 @@ probe_version() {
 
     kill "$watchdog" 2>/dev/null || true
     wait "$watchdog" 2>/dev/null || true
+    # The watchdog's KILL escalation only fires if it survives to run it. A
+    # wrapper that exits on TERM releases the `wait "$pid"` above, so we tear the
+    # watchdog down before it reaches that escalation — leaving a TERM-ignoring or
+    # TERM-delaying helper in the probe's process group orphaned. Sweep the group
+    # ourselves. On the fast path the probe (and its group) is already gone, so
+    # this KILL matches nothing and is a no-op.
+    kill -KILL "-$pid" 2>/dev/null || true
     if [[ "$status" -eq 0 ]]; then
       cat "$output_file" || status=$?
     fi

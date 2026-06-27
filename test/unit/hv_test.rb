@@ -214,6 +214,81 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_term_ignoring_probe_helper_is_swept_when_wrapper_exits_on_term
+    with_tmp_dir do |dir|
+      pidfile = File.join(dir, "probe-child.pid")
+
+      # The sibling of the group-kill case: a wrapper that exits on TERM while
+      # leaving a TERM-ignoring helper alive. When the watchdog TERMs the group,
+      # the wrapper exits and releases the `wait "$pid"` in `probe_version`,
+      # which tears the watchdog down BEFORE it reaches its KILL escalation. The
+      # helper would survive as an orphan unless `probe_version` sweeps the
+      # probe's process group itself after teardown.
+      wrapper = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(wrapper))
+      File.write(wrapper, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          trap 'exit 0' TERM
+          ( trap '' TERM; exec #{RbConfig.ruby} -e 'sleep 60' ) &
+          echo "$!" > "#{pidfile}"
+          wait
+          exit 0
+        fi
+        echo wrapper:$1
+      SH
+      FileUtils.chmod(0o755, wrapper)
+
+      # Stub only the watchdog's 5s arming delay so the test is fast. The 1s KILL
+      # escalation stays real: that guarantees the wrapper's TERM-exit reliably
+      # tears the watchdog down before it can escalate, reproducing exactly the
+      # path the post-teardown sweep must cover (a stubbed `sleep 1` would race
+      # the watchdog's own KILL against ours and mask a regression).
+      bash_env = File.join(dir, "bash-env")
+      File.write(bash_env, <<~SH)
+        command() {
+          if [ "$1" = "-v" ] && [ "${2:-}" = "timeout" ]; then return 1; fi
+          builtin command "$@"
+        }
+
+        sleep() {
+          case "${1:-}" in
+            5) builtin command sleep 0.1 ;;
+            *) builtin command sleep "$@" ;;
+          esac
+        }
+      SH
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => wrapper,
+          "XDG_BIN_HOME" => xdg_bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "BASH_ENV" => bash_env
+        },
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out, "hv must fall through the hung wrapper to the good candidate"
+
+      child_pid = Integer(File.read(pidfile).strip)
+      refute probe_child_alive?(child_pid),
+             "probe_version must sweep the probe's process group so a TERM-ignoring helper is not orphaned"
+    ensure
+      reap_probe_child(pidfile)
+    end
+  end
+
   def test_self_recursion_guard_resolves_symlinks_via_realpath_rung
     assert_recursion_guard_holds(disabled_resolvers: [])
   end

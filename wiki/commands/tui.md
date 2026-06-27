@@ -130,24 +130,28 @@ poll can starve Ruby background threads during startup; relying on the first
 background poll alone produced multi-second loading screens even when
 `hive status` itself was fast. After boot, the source calls
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)`
-in-process whenever the cached mtime
-fingerprint changes; otherwise it reuses the previous `Snapshot` and
-only refreshes `current_seen_at`. The fingerprint watches the global
-project registry (`Hive::Config.global_config_path`), each visible
-row's state file and `.lock`, plus the project's `.hive-state/stages`
-directory and stage children, so ordinary marker edits, newly-created
-task folders, runner lock acquisition/release, and `hive init`/`forget`
-registry changes all invalidate the cache without reparsing unchanged
-status data. A time-bounded fallback
-(`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s) forces a full re-parse even
-when the fingerprint is unchanged, so liveness-derived fields
-(`live_task_lock`, `claude_pid_alive`) that flip without touching any
-file cannot stay stale indefinitely. This makes the "near-zero idle
-CPU" AC a partial win: even with unchanged mtimes the fallback re-incurs
-a full `json_payload` + `Dir.glob` fingerprint rebuild ~20×/min (every
-3s). It is an accepted correctness tradeoff — those liveness fields flip
-without any file write and must self-heal — and it never causes a redraw
-because `App.start_snapshot_poller` dedups identical snapshots (below).
+in-process on boot, then keeps the 1 Hz poll path active-scaled. The
+boot refresh still pays one full status parse so the first frame has the
+same complete snapshot shape as every other consumer; after that,
+`StateSource` asks Status for active stages only (everything except
+`9-done`) and merges those fresh rows with a frozen in-memory cache of
+archived rows. The active mtime fingerprint watches the global project
+registry (`Hive::Config.global_config_path`), active stage directories,
+and each active row's state file and `.lock`; it deliberately excludes
+archived task files. Separately, one cheap stat per project watches the
+`9-done` directory mtime as an archive-set dirty signal. Archive cache
+refreshes run on a short-lived background thread on cold cache changes,
+`9-done` mtime changes, archive-pane opens, and a long backstop; the 1
+Hz poll thread never walks every archived task during steady state.
+
+A time-bounded fallback (`LIVENESS_REPARSE_FALLBACK_SECONDS`, 3s)
+still forces an active-only re-parse even when the active fingerprint is
+unchanged, so liveness-derived fields (`live_task_lock`,
+`claude_pid_alive`) that flip without touching any file cannot stay
+stale indefinitely. Archived tasks are terminal and stay served from
+cache. The merged snapshot dedups archived cache rows whose slug is
+currently active, so a task moved out of `9-done` does not render twice.
+The render layer still consumes the same `Snapshot` shape as before.
 Because status is the sole task-row producer, stage-move races are
 normalised upstream: `Status#collect_rows` skips task folders that vanish
 mid-read, re-raises `ENOENT` when the folder still exists, and prunes

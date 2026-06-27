@@ -14,6 +14,7 @@ module Hive
     class Router
       INTENTS = %i[
         slash_status
+        slash_waiting
         slash_queue
         slash_idea
         slash_answer
@@ -105,7 +106,6 @@ module Hive
           result_class: Result,
           idea_draft_store: @idea_draft_store,
           projects_provider: @projects_provider,
-          status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
           logger: @logger
         )
@@ -129,6 +129,7 @@ module Hive
         text = effective_text(update).to_s.strip
         case text
         when %r{\A/status\b} then :slash_status
+        when %r{\A/waiting\b} then :slash_waiting
         when %r{\A/queue\b} then :slash_queue
         when %r{\A/idea\b} then :slash_idea
         when %r{\A/answer\b} then :slash_answer
@@ -304,6 +305,7 @@ module Hive
         case intent
         when :unauthorized then Result.new(action: :noop)
         when :slash_status then @slash_handlers.status(update)
+        when :slash_waiting then @slash_handlers.waiting(update)
         when :slash_queue then @slash_handlers.queue(update)
         when :slash_idea then @slash_handlers.idea(update)
         when :slash_answer then @slash_handlers.answer(update, @conversation_store)

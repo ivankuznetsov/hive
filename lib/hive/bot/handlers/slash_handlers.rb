@@ -42,6 +42,12 @@ module Hive
                             format: json ? :json : nil)
         end
 
+        def waiting(_update)
+          @result_class.new(action: :dispatch_then_reply,
+                            command_argv: [ "hive", "status", "--json" ],
+                            mode: :waiting)
+        end
+
         def queue(_update)
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "status", "--json" ])
@@ -280,8 +286,8 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Send any message to capture an idea. Commands: /status [project], /queue, " \
-                  "/idea [text], /answer <id|slug>, /approve <id|slug>, /autofix <id|slug>, " \
+            text: "Send any message to capture an idea. Commands: /status [project], /waiting, " \
+                  "/queue, /idea [text], /answer <id|slug>, /approve <id|slug>, /autofix <id|slug>, " \
                   "/details <id|slug>, /done, /help"
           )
         end

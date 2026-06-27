@@ -22,6 +22,7 @@ require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
 require "hive/bot/row_actions"
+require "hive/bot/waiting_rows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/paths"
@@ -39,6 +40,7 @@ module Hive
       BOT_COMMANDS = [
         { command: "idea",    description: "Capture an idea, or just send any message" },
         { command: "status",  description: "Show active tasks" },
+        { command: "waiting", description: "Show tasks waiting on your answer" },
         { command: "queue",   description: "Show queued and waiting tasks" },
         { command: "answer",  description: "Answer brainstorm questions: /answer <id|slug>" },
         { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
@@ -976,6 +978,14 @@ module Hive
               text: render_details(rows, result.project, result.slug, stage: result.stage)
             )
           else
+            if result.respond_to?(:mode) && result.mode == :waiting
+              rows = Hive::Bot::WaitingRows.select(rows, daemon_enabled: waiting_daemon_enabled_resolver)
+              if rows.empty?
+                safe_send_message(chat_id: update.chat_id, text: "Nothing is waiting on you.")
+                return nil
+              end
+              legacy_stage_dirs = []
+            end
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
                               parse_mode: :html,
@@ -1498,6 +1508,32 @@ module Hive
           details: "🔍",
           rerun: "▶️"
         }.fetch(role)
+      end
+
+      def waiting_daemon_enabled_resolver
+        cache = {}
+        lambda do |row|
+          path = waiting_row_project_path(row)
+          next false if path.to_s.empty?
+
+          cache.fetch(path) do
+            cache[path] = Hive::Config.load(path).dig("daemon", "enabled") == true
+          end
+        rescue Hive::ConfigError => e
+          @logger&.event(:poll_failure, source: "waiting_daemon_check",
+                                          project: row.respond_to?(:project) ? row.project : nil,
+                                          error_class: e.class.name, message: e.message)
+          false
+        end
+      end
+
+      def waiting_row_project_path(row)
+        path = row.project_path if row.respond_to?(:project_path)
+        path = path.to_s
+        return path unless path.empty?
+
+        entry = Hive::Config.find_project(row.project) if row.respond_to?(:project)
+        entry && entry["path"]
       end
 
       def render_details(rows, project, slug, stage: nil)

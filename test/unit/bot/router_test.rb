@@ -41,6 +41,7 @@ class HiveBotRouterTest < Minitest::Test
 
   def test_classifies_slash_commands
     assert_equal :slash_status, @router.classify(update(text: "/status"))
+    assert_equal :slash_waiting, @router.classify(update(text: "/waiting"))
     assert_equal :slash_queue, @router.classify(update(text: "/queue"))
     assert_equal :slash_idea, @router.classify(update(text: "/idea fix cron"))
     assert_equal :slash_answer, @router.classify(update(text: "/answer slug"))
@@ -87,6 +88,14 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal [ "hive", "status", "--json" ], result.command_argv
+  end
+
+  def test_waiting_returns_dispatch_descriptor
+    result = @router.handle(update(text: "/waiting"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :waiting, result.mode
   end
 
   def test_idea_returns_project_picker_keyboard
@@ -673,6 +682,7 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_includes result.text, "/status"
+    assert_includes result.text, "/waiting"
     assert_includes result.text, "/approve <id|slug>"
   end
 

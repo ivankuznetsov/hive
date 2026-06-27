@@ -58,6 +58,14 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "hive", result.project
   end
 
+  def test_waiting_dispatches_status_in_waiting_mode
+    result = @handlers.waiting(Update.new(text: "/waiting"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :waiting, result.mode
+  end
+
   def test_status_preserves_multi_word_project_names
     result = @handlers.status(Update.new(text: "/status my project"))
 
@@ -80,6 +88,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     assert_includes result.text, "Send any message to capture an idea."
     assert_includes result.text, "/status [project]"
+    assert_includes result.text, "/waiting"
     assert_includes result.text, "/answer <id|slug>"
     assert_includes result.text, "/approve <id|slug>"
     assert_includes result.text, "/autofix <id|slug>"

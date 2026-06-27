@@ -24,7 +24,7 @@ Options:
 
 | Option | Behavior |
 |--------|----------|
-| `--date YYYY-MM-DD` | Local calendar date used for scheduler idempotency and JSON output. |
+| `--date YYYY-MM-DD` | Echoed into the JSON `date` field; does not scope the (always-live) waiting set or dedup sends. Scheduler idempotency lives in the daemon's `answer_digest_state.json`, not this command — `tick`/`complete` never consume the command's `--date`. |
 | omitted `--date` | Uses today's local calendar date. |
 | `--dry-run` | Avoids `.env`, token/chat lookup, and Telegram send; prints the would-send text plus button count. |
 | `--json` | Emits a small JSON result. Empty snapshots report `sent:false, reason:"empty"`. |
@@ -47,6 +47,19 @@ Options:
    Buttons are built by `WaitingRows.button_for`, which reuses
    `RowActions.resolve(row).primary`, so callbacks match the original
    push-notification buttons byte-for-byte.
+
+   **Caveat (long-callback buttons).** `hive answer-digest` runs as a separate
+   subprocess from the long-running bot. Callbacks over Telegram's 64-byte
+   limit are compacted to a `#prefix:` token stored only in *that subprocess's*
+   in-memory `NotificationBuilders` registry, which exits when the command
+   returns; the bot that handles the tap looks the token up in *its own*
+   registry, misses, and replies "button expired" (see the cross-process
+   registry note at `router.rb`). For project `hive`'s ~40-char slugs the
+   `approve_plan:`, `findings:accept_all:`, and `rerun:…` callbacks all exceed
+   64 bytes, so only the short `answer:` button is reliably tap-actionable from
+   the digest today. The short task lines still tell the operator what is
+   waiting; open a laptop / use `/waiting` in the bot chat to act on the
+   long-callback rows.
 
 The command is intentionally separate from `hive digest`: it does not collect
 completed work, spawn a categorizer agent, or write the shipped-digest state

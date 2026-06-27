@@ -91,9 +91,14 @@ non-project-scoped child after local midnight when `digest.enabled: true`. See
 
 `hive answer-digest` is the CLI bridge to the bot waiting-row selector: it
 builds one Telegram message for tasks currently blocked on human input, with
-inline buttons matching the original push notifications. Empty snapshots send
-nothing and still exit successfully. The daemon can schedule it once per local
-calendar day at/after `answer_digest.hour` when `answer_digest.enabled: true`.
+inline buttons whose callbacks are byte-identical to the original push
+notifications. Because it runs as a separate subprocess, buttons whose callback
+exceeds Telegram's 64-byte limit (compacted in the subprocess's own in-memory
+registry) reply "button expired" when tapped — only short callbacks like
+`answer:` are reliably tap-actionable from the digest; see the caveat in
+[[commands/answer-digest]]. Empty snapshots send nothing and still exit
+successfully. The daemon can schedule it once per local calendar day at/after
+`answer_digest.hour` when `answer_digest.enabled: true`.
 See [[commands/answer-digest]].
 
 `hive connect screenote` and `hive disconnect screenote` manage the operator's

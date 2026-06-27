@@ -21,8 +21,8 @@ Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descr
 - [[architecture]] — `wiki/architecture.md`
 - [[cli]] — `wiki/cli.md`
 - [[commands]] — `wiki/commands.md`
-- [[commands/approve]] — `wiki/commands/approve.md`
 - [[commands/answer-digest]] — `wiki/commands/answer-digest.md`
+- [[commands/approve]] — `wiki/commands/approve.md`
 - [[commands/babysit]] — `wiki/commands/babysit.md`
 - [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
 - [[commands/bot]] — `wiki/commands/bot.md`

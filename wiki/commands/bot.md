@@ -119,6 +119,14 @@ The reply stays text-only when no row is actionable. The `/answer`,
 (and appear in the quick-actions menu as `<id|slug>`) for operators who
 prefer typing or scripting.
 
+Callbacks longer than Telegram's 64-byte limit are compacted to a short
+`#prefix:` token stored in `NotificationBuilders`' in-process registry
+(3600s TTL). Because the push, `/status`, and `/waiting` are all built and
+tapped inside the same long-running bot process, those buttons resolve
+correctly — but a button can later reply "expired" if it is tapped after the
+registry entry's TTL lapses or the bot process restarts (the registry is
+in-memory, not persisted).
+
 `/waiting` is the filtered companion to `/status`: it uses
 `Hive::Bot::WaitingRows.select` to keep only `needs_input` human gates and
 then renders the same queue text/buttons. Because the source is

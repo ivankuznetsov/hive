@@ -25,6 +25,14 @@ The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch c
 
 `bundle exec rake coverage` is the CI coverage-report path. It fails when an executable source file was never loaded, when a subprocess result file cannot be read, or when line coverage drops below the default 100% threshold. Set `HIVE_COVERAGE_MIN_LINE` to a different numeric percentage only when intentionally loosening or tightening that gate. Visual-artifact and Screenote code paths are part of that 100% gate, including error/default branches such as invalid Screenote JSON, default Net::HTTP transport, manifest upload exceptions, missing media directories, screenote config type errors, and dry-run digest completion failures.
 
+A green Minitest summary does not mean the CI job passed: `rake coverage` runs
+the suite, then fails after the summary if the merged coverage gate is below
+100%. When a GitHub job shows `0 failures, 0 errors` followed by exit 1, read
+the `Coverage gate failed` section and add focused tests for the listed lines.
+Also check that intended `test_*` methods sit above any `private` marker; private
+test methods are not discovered, so they can silently leave defensive lines
+uncovered.
+
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
 
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Coverage also reloads `lib/hive.rb`, so self-derived enum constants must exclude `:ALL` to stay reload-safe.

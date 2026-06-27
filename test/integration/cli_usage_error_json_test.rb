@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "json_schemer"
 require "open3"
 require "rbconfig"
 
@@ -154,6 +155,11 @@ class CliUsageErrorJsonTest < Minitest::Test
   end
 
   def test_bot_json_usage_errors_emit_bot_envelopes
+    # Every bot --json usage error rides the hive-bot-status schema with
+    # ok:false; validate each emitted payload against the published schema so
+    # a schema-conforming agent client would actually accept it (the
+    # ErrorPayload arm regression that produced an unvalidatable envelope).
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "bot", "status", "--force", "--json")
 
@@ -167,6 +173,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/--force only applies/, payload["message"])
       assert_match(/^hive: hive bot status: --force only applies/, err.lines.last)
+      assert_empty schemer.validate(payload).map { |e| e["error"] },
+                   "bot status --force --json envelope must validate against hive-bot-status schema"
 
       out, err, status = run_hive(home, "bot", "--json")
 
@@ -180,6 +188,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/missing SUBCOMMAND/, payload["message"])
       assert_match(/^hive: hive bot: missing SUBCOMMAND/, err.lines.last)
+      assert_empty schemer.validate(payload).map { |e| e["error"] },
+                   "bot --json envelope must validate against hive-bot-status schema"
 
       out, err, status = run_hive(home, "bot", "unknown", "--json")
 
@@ -192,6 +202,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/unknown subcommand "unknown"/, payload["message"])
       assert_match(/^hive: hive bot: unknown subcommand "unknown"/, err.lines.last)
+      assert_empty schemer.validate(payload).map { |e| e["error"] },
+                   "bot unknown --json envelope must validate against hive-bot-status schema"
     end
   end
 

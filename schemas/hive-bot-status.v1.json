@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-status.v1.json",
   "title": "hive bot status output (v1)",
-  "description": "Stable contract emitted by `hive bot status --json`. Reports whether the Telegram bot process is running, its PID, and uptime. Exit code is 0 when running, 1 when not.",
+  "description": "Stable contract emitted by `hive bot status --json`. The SuccessPayload reports whether the Telegram bot process is running, its PID, and uptime (exit 0 when running, 1 when not). The ErrorPayload arm carries usage errors for the whole `hive bot` command surface — every `hive bot ... --json` usage error (missing/unknown subcommand, or a flag passed to a subcommand that does not accept it) rides this schema (exit 64).",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" }
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
     "SuccessPayload": {
@@ -59,6 +60,43 @@
           "type": ["string", "null"],
           "description": "Absolute path of the autostart unit file; null on unsupported platforms or if the probe could not run."
         }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-bot-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Always \"InvalidTaskPath\" for the current usage-error paths. Matches every other hive-* error envelope."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "missing_subcommand",
+            "unknown_subcommand",
+            "wrong_subcommand_flag"
+          ],
+          "description": "missing_subcommand = `hive bot` with no SUBCOMMAND. unknown_subcommand = SUBCOMMAND outside the start/stop/status/reload/tail/install set. wrong_subcommand_flag = a flag was passed to a subcommand that does not accept it (e.g., --force on `bot status`, or --foreground combined with --detach on `bot start`)."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [64],
+          "description": "Hive::ExitCodes. 64=USAGE — every bot usage error rides InvalidTaskPath (exit 64)."
+        },
+        "message": { "type": "string" }
       }
     }
   }

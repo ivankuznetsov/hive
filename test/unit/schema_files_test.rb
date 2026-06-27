@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "hive/commands/approve"
+require "hive/commands/bot"
 require "hive/commands/daemon"
 require "hive/commands/drop"
 require "hive/commands/forget"
@@ -1599,6 +1600,87 @@ class SchemaFilesTest < Minitest::Test
     # Reasons emitted by the four refusal branches in compute_reload_outcome.
     producer_reasons = %w[not_running pid_dead pid_reused unverified].sort
     assert_equal producer_reasons, schema_reasons
+  end
+
+  # ── hive-bot-status ────────────────────────────────────────────────────
+
+  # The three usage-error kinds the `hive bot` surface emits through
+  # Hive::Commands::Bot.json_usage_error_payload. missing_subcommand /
+  # unknown_subcommand are raised in Hive::Commands::Bot#call; the bin/hive
+  # `bot` dispatcher raises wrong_subcommand_flag before the command runs
+  # (e.g. `bot status --force`). All ride the hive-bot-status schema because
+  # there is no separate bot-usage-error schema — JSON_USAGE_ERROR_SCHEMA
+  # points here.
+  BOT_USAGE_ERROR_KINDS = %w[
+    missing_subcommand unknown_subcommand wrong_subcommand_flag
+  ].freeze
+
+  def test_hive_bot_status_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-bot-status")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-bot-status",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  # The usage-error arm (ErrorPayload) must exist in the oneOf alongside the
+  # SuccessPayload — without it, every `hive bot ... --json` usage error
+  # (which carries ok:false) is rejected by schema-validating agent clients.
+  def test_hive_bot_status_oneof_carries_success_and_error_arms
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status")))
+    refs = doc.fetch("oneOf").map { |arm| arm["$ref"] }
+    assert_includes refs, "#/$defs/SuccessPayload"
+    assert_includes refs, "#/$defs/ErrorPayload",
+                    "hive-bot-status must carry an ErrorPayload arm for usage errors"
+    assert_equal "hive-bot-status",
+                 doc.dig("$defs", "ErrorPayload", "properties", "schema", "const")
+    assert_equal false,
+                 doc.dig("$defs", "ErrorPayload", "properties", "ok", "const"),
+                 "ErrorPayload.ok must pin false so it never collides with SuccessPayload (ok:true)"
+  end
+
+  def test_hive_bot_status_error_kinds_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal BOT_USAGE_ERROR_KINDS.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror the bot usage-error kinds"
+  end
+
+  # Round-trip: every bot usage-error kind, built through the real producer
+  # (Hive::Commands::Bot.json_usage_error_payload), must validate against the
+  # published schema. This is the direct guard for the bug — before the
+  # ErrorPayload arm existed, `bot status --force --json` / `bot --json`
+  # emitted an ok:false envelope claiming schema "hive-bot-status" that the
+  # schema rejected.
+  def test_hive_bot_status_usage_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    error = Hive::InvalidTaskPath.new("hive bot: usage error")
+    BOT_USAGE_ERROR_KINDS.each do |kind|
+      payload = Hive::Commands::Bot.json_usage_error_payload(error: error, error_kind: kind)
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert schemer.valid?(payload),
+             "hive-bot-status ErrorPayload arm must accept error_kind=#{kind.inspect} " \
+             "(validation errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_hive_bot_status_error_payload_rejects_unknown_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    payload = {
+      "schema" => "hive-bot-status",
+      "schema_version" => 1,
+      "ok" => false,
+      "error_class" => "InvalidTaskPath",
+      "error_kind" => "made_up_kind",
+      "exit_code" => 64,
+      "message" => "nope"
+    }
+    refute schemer.valid?(payload),
+           "schema must reject error_kind values outside the bot usage-error set"
   end
 
   # ── hive-daemon-enroll ─────────────────────────────────────────────────

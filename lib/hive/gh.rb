@@ -29,6 +29,9 @@ module Hive
       end
     end
 
+    PrMetadata = Struct.new(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state,
+                            keyword_init: true)
+
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
     # returned `[]` on any error would reduce a security-critical
@@ -109,6 +112,29 @@ module Hive
     # silently flow into draft-finalization commands.
     def lookup_existing_pr(worktree_path, branch, cfg: nil)
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
+    end
+
+    def pr_metadata(number, cfg: nil)
+      ensure_authenticated!(cfg)
+      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state"
+      out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{number}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      PrMetadata.new(
+        number: doc["number"].to_i,
+        url: doc["url"].to_s,
+        base_ref_name: doc["baseRefName"].to_s,
+        head_ref_oid: doc["headRefOid"].to_s,
+        is_cross_repository: doc["isCrossRepository"] == true,
+        state: doc["state"].to_s
+      )
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
     def pr_state(pr_url, cfg: nil)

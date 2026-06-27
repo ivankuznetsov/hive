@@ -216,6 +216,102 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_pr_metadata_returns_pr_fields
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    responses = [
+      [ "", "", status ],
+      [
+        {
+          "number" => 197,
+          "url" => "https://github.com/o/r/pull/197",
+          "baseRefName" => "main",
+          "headRefOid" => "abc123",
+          "isCrossRepository" => false,
+          "state" => "OPEN"
+        }.to_json,
+        "",
+        status
+      ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
+      metadata = Hive::Gh.pr_metadata(197)
+
+      assert_equal 197, metadata.number
+      assert_equal "https://github.com/o/r/pull/197", metadata.url
+      assert_equal "main", metadata.base_ref_name
+      assert_equal "abc123", metadata.head_ref_oid
+      assert_equal false, metadata.is_cross_repository
+      assert_equal "OPEN", metadata.state
+    end
+  end
+
+  def test_pr_metadata_preserves_cross_repository_flag
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    responses = [
+      [ "", "", status ],
+      [
+        {
+          "number" => 198,
+          "url" => "https://github.com/o/r/pull/198",
+          "baseRefName" => "main",
+          "headRefOid" => "def456",
+          "isCrossRepository" => true,
+          "state" => "OPEN"
+        }.to_json,
+        "",
+        status
+      ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
+      metadata = Hive::Gh.pr_metadata(198)
+
+      assert_equal true, metadata.is_cross_repository
+      assert_equal "def456", metadata.head_ref_oid
+    end
+  end
+
+  def test_pr_metadata_raises_on_gh_pr_view_failure
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    responses = [
+      [ "", "", ok ],
+      [ "", "not found", failed ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
+      err = assert_raises(Hive::GhError) { Hive::Gh.pr_metadata(404) }
+
+      assert_match(/gh pr view 404.*failed/, err.message)
+      assert_match(/not found/, err.message)
+    end
+  end
+
+  def test_pr_metadata_raises_with_login_hint_when_unauthenticated
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "", "not logged in", failed ] }) do
+      err = assert_raises(Hive::GhError) { Hive::Gh.pr_metadata(197) }
+
+      assert_match(/gh auth login/, err.message)
+      assert_match(/not logged in/, err.message)
+    end
+  end
+
+  def test_pr_metadata_raises_on_unparseable_json
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    responses = [
+      [ "", "", ok ],
+      [ "not-json", "", ok ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
+      err = assert_raises(Hive::GhError) { Hive::Gh.pr_metadata(197) }
+
+      assert_match(/unparseable JSON/, err.message)
+    end
+  end
+
   def test_pr_state_raises_on_gh_pr_view_failure
     status = Hive::Gh::CommandStatus.new(exitstatus: 1)
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "", "auth required", status ] }) do

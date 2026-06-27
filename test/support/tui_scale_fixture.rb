@@ -15,7 +15,12 @@ module HiveTuiScaleFixture
   module_function
 
   def build(root:, projects: 8, tasks_per_project: 200, active_count: DEFAULT_ACTIVE_COUNT)
+    max_tasks = projects * tasks_per_project
+    raise ArgumentError, "active_count cannot exceed total task count" if active_count > max_tasks
+
     project_entries = []
+    active_counts = active_counts_by_project(projects, active_count)
+    active_index = 0
     id = 1
     projects.times do |project_index|
       project_root = File.join(root, "project-#{project_index + 1}")
@@ -29,14 +34,15 @@ module HiveTuiScaleFixture
         "hive_state_path" => hive_state
       }
 
-      active_count.times do |task_index|
-        stage = ACTIVE_STAGES[task_index % ACTIVE_STAGES.length]
+      active_counts.fetch(project_index).times do |task_index|
+        stage = ACTIVE_STAGES[active_index % ACTIVE_STAGES.length]
         slug = slug_for(project_index, task_index, "active")
-        write_task(hive_state, stage, slug, id: id, marker: marker_for(stage), active_index: task_index)
+        write_task(hive_state, stage, slug, id: id, marker: marker_for(stage), active_index: active_index)
         id += 1
+        active_index += 1
       end
 
-      archived_total = tasks_per_project - active_count
+      archived_total = tasks_per_project - active_counts.fetch(project_index)
       archived_total.times do |task_index|
         slug = slug_for(project_index, task_index, "archived")
         write_task(hive_state, Hive::ArchiveFilter::ARCHIVE_STAGE_DIR, slug, id: id, marker: "COMPLETE")
@@ -45,6 +51,13 @@ module HiveTuiScaleFixture
     end
     write_registry(project_entries)
     project_entries
+  end
+
+  def active_counts_by_project(projects, active_count)
+    Array.new(projects) do |index|
+      base = active_count / projects
+      index < (active_count % projects) ? base + 1 : base
+    end
   end
 
   def write_registry(projects)

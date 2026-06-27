@@ -31,7 +31,7 @@ class TuiReactivityProfileTest < Minitest::Test
       active_parse_seconds = active_parse_supported? ? median_seconds { active_payload(projects) } : nil
 
       puts format(
-        "tui profile fixture=%<projects>dx%<tasks>d active_per_project=%<active>d " \
+        "tui profile fixture=%<projects>dx%<tasks>d active_total=%<active>d " \
         "fingerprint_ms=%<fingerprint>.2f full_parse_ms=%<full>.2f active_parse_ms=%<active_ms>s",
         projects: PROJECTS,
         tasks: TASKS_PER_PROJECT,

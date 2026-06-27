@@ -134,13 +134,20 @@ module Hive
       # non-breaking; removing or renaming keys must bump a documented
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
-      def json_payload(projects)
+      def json_payload(projects, stages: nil, extra_dependency_tasks: nil)
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
           "generated_at" => Time.now.utc.iso8601,
-          "projects" => projects.map { |p| project_payload_or_degraded(p, project_count: projects.size) }
+          "projects" => projects.map do |p|
+            project_payload_or_degraded(
+              p,
+              project_count: projects.size,
+              stages: stages,
+              extra_dependency_tasks: dependency_tasks_for(extra_dependency_tasks, p)
+            )
+          end
         }
       end
 
@@ -152,8 +159,13 @@ module Hive
       # project to an empty task list (with a stderr breadcrumb in
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
-      def project_payload_or_degraded(project, project_count:)
-        project_payload(project, project_count: project_count)
+      def project_payload_or_degraded(project, project_count:, stages: nil, extra_dependency_tasks: nil)
+        project_payload(
+          project,
+          project_count: project_count,
+          stages: stages,
+          extra_dependency_tasks: extra_dependency_tasks
+        )
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
              "(#{e.class}: #{e.message}); reporting it with no tasks so other projects still advance"
@@ -167,7 +179,7 @@ module Hive
         }
       end
 
-      def project_payload(project, project_count:)
+      def project_payload(project, project_count:, stages: nil, extra_dependency_tasks: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -191,8 +203,8 @@ module Hive
             # JSON path: pay the diagnostic-extraction cost because
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
-            rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
-            rows = annotate_dependencies(rows, project)
+            rows = annotate_actions(collect_rows(hive_state, stages: stages), project, project_count, with_diagnostic: true)
+            rows = annotate_dependencies(rows, project, extra_dependency_tasks: extra_dependency_tasks)
             rows = archive_rows(rows) if @archive
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
             # Always emit `legacy_stage_dirs` (default empty array) so
@@ -540,9 +552,9 @@ module Hive
         puts "    run `hive migrate` to move them into the current layout"
       end
 
-      def collect_rows(hive_state)
+      def collect_rows(hive_state, stages: Hive::Workflows.all_stage_dirs)
         rows = []
-        Hive::Workflows.all_stage_dirs.each do |stage|
+        Array(stages || Hive::Workflows.all_stage_dirs).each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
@@ -655,7 +667,7 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
-      def annotate_dependencies(rows, project)
+      def annotate_dependencies(rows, project, extra_dependency_tasks: nil)
         threshold_stage = dependency_gate_stage_for(project)
         # filter_map + next: a future row source lacking :task must not
         # KeyError on this never-fail surface (production rows always carry
@@ -671,9 +683,16 @@ module Hive
             stage_index: task.stage_index
           }
         end
+        snapshot.concat(Array(extra_dependency_tasks))
 
         rows.each { |row| apply_dependency_result(row, snapshot, threshold_stage) }
         rows
+      end
+
+      def dependency_tasks_for(extra_dependency_tasks, project)
+        return nil unless extra_dependency_tasks
+
+        extra_dependency_tasks.fetch(project.fetch("path"), nil)
       end
 
       # Threshold stage for the dependency gate. Config.load validates the

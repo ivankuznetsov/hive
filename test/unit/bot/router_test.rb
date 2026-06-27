@@ -101,7 +101,7 @@ class HiveBotRouterTest < Minitest::Test
   def test_bare_text_defaults_to_idea_project_picker
     text = "add retry to webhook"
 
-    assert_equal :idea_text, @router.classify(update(text: text))
+    assert_equal :idea_bare_text, @router.classify(update(text: text))
 
     result = @router.handle(update(text: text))
 
@@ -122,7 +122,7 @@ class HiveBotRouterTest < Minitest::Test
   def test_forwarded_style_bare_text_defaults_to_idea_project_picker
     forwarded_text = "Forwarded: retry the webhook on timeout"
 
-    assert_equal :idea_text, @router.classify(update(text: forwarded_text))
+    assert_equal :idea_bare_text, @router.classify(update(text: forwarded_text))
 
     result = @router.handle(update(text: forwarded_text))
 
@@ -132,7 +132,7 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_blank_bare_text_starts_idea_text_capture
-    assert_equal :idea_text, @router.classify(update(text: "   "))
+    assert_equal :idea_bare_text, @router.classify(update(text: "   "))
 
     result = @router.handle(update(text: "   "))
 
@@ -147,10 +147,10 @@ class HiveBotRouterTest < Minitest::Test
   def test_content_less_update_opens_idea_text_capture
     # Plan Risk-4 (accepted): a non-text / non-media / non-voice update
     # (sticker, location, contact, video) carries no effective_text, so it
-    # falls through to :idea_text and opens an awaiting_text draft asking for
-    # the idea text — rather than the old "I did not understand that" reply.
+    # falls through to :idea_bare_text and opens an awaiting_text draft asking
+    # for the idea text — rather than the old "I did not understand that" reply.
     # Contrast a rejected attachment, which leaves no draft behind.
-    assert_equal :idea_text, @router.classify(update)
+    assert_equal :idea_bare_text, @router.classify(update)
 
     result = @router.handle(update)
 
@@ -166,9 +166,14 @@ class HiveBotRouterTest < Minitest::Test
     # Plan Risk-1 (accepted, most-aggressive default): bare text arriving while
     # a draft is mid-flight starts a fresh idea, discarding the in-progress
     # draft and any staged attachments with no "previous idea discarded"
-    # notice. Pin the chosen behavior so a future protect/notify change is a
-    # deliberate, test-visible decision.
+    # notice. Stage a real attachment first so the clobber actually exercises
+    # IdeaDraftStore#start -> clear -> cleanup_draft (otherwise the
+    # staging-cleanup path is never run), then pin the chosen behavior so a
+    # future protect/notify change is a deliberate, test-visible decision.
     @draft_store.start(chat_id: 12345, phase: :collecting_files, text: "old idea", token: "tok")
+    staging_dir = @draft_store.ensure_staging_dir(chat_id: 12345)
+    File.write(File.join(staging_dir, "image-1.png"), "staged bytes")
+    assert File.directory?(staging_dir), "precondition: the prior draft has a staging dir on disk"
 
     result = @router.handle(update(text: "new idea"))
 
@@ -179,6 +184,8 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :awaiting_project, draft.phase
     refute_equal "tok", draft.token,
                  "the prior draft is clobbered into a fresh one, not continued"
+    refute File.exist?(staging_dir),
+           "clobbering the prior draft must clean up its staged attachments on disk"
   end
 
   def test_unknown_slash_command_stays_unknown
@@ -189,6 +196,24 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :reply, result.action
     assert_match(/did not understand/, result.text)
     assert_nil @draft_store.get(chat_id: 12345)
+  end
+
+  def test_unknown_slash_during_awaiting_text_draft_is_captured_as_literal_idea_text
+    # With an open awaiting_text draft the awaiting_text branch wins before the
+    # unknown-slash guard, so even "/foobar" is recorded as the idea's literal
+    # text rather than refused as an unknown command. Pin this so a future
+    # reorder of the classifier's awaiting_text vs unknown-slash checks stays a
+    # deliberate, test-visible decision (contrast
+    # test_unknown_slash_command_stays_unknown, where no draft is open).
+    @draft_store.start(chat_id: 12345, phase: :awaiting_text, token: "tok")
+
+    assert_equal :idea_text_capture, @router.classify(update(text: "/foobar"))
+
+    result = @router.handle(update(text: "/foobar"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal "/foobar", @draft_store.get(chat_id: 12345).text
   end
 
   def test_idea_project_callback_enters_file_collection
@@ -562,6 +587,32 @@ class HiveBotRouterTest < Minitest::Test
       assert_match(/No Hive projects are registered yet/, result.text)
       assert_nil @draft_store.get(chat_id: 12345),
                  "the empty-registry refusal must not leave a draft behind (start_idea checks the registry before opening a draft)"
+    end
+  end
+
+  def test_blank_bare_text_without_registered_projects_still_opens_text_capture
+    # Divergence from the content-bearing case above: a content-less / blank
+    # update routes to :idea_bare_text -> SlashHandlers#idea -> start_text_capture,
+    # which opens an awaiting_text draft WITHOUT consulting the registry. So
+    # even with no projects registered it replies "Send the idea text" and
+    # leaves a draft, rather than refusing with "No Hive projects are
+    # registered yet" and leaving nothing behind.
+    with_tmp_global_config do
+      router = Hive::Bot::Router.new(
+        bot_config: { "chat_id_allowlist" => [ 12345 ] },
+        logger: @logger,
+        conversation_store: @store,
+        idea_draft_store: @draft_store
+      )
+
+      result = router.handle(update(text: "   "))
+
+      assert_equal :reply, result.action
+      assert_match(/Send the idea text/, result.text)
+      refute_match(/No Hive projects are registered/, result.text)
+      draft = @draft_store.get(chat_id: 12345)
+      assert_equal :awaiting_text, draft.phase
+      assert_nil draft.text
     end
   end
 

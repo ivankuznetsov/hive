@@ -684,7 +684,7 @@ class TuiStateSourceTest < Minitest::Test
   def test_archived_identities_are_memoized_per_cache_object
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
     cache = {
-      projects: {
+      rows_by_path: {
         "/p" => [ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
       }.freeze
     }.freeze
@@ -830,6 +830,230 @@ class TuiStateSourceTest < Minitest::Test
       ensure
         source.stop
       end
+    end
+  end
+
+  # Risk #6 removal direction: dropping ONE of several archived folders must
+  # update the cache on the next background refresh (the retain-prior guard
+  # only holds over an EMPTY archive result, so a shrink to a smaller
+  # non-empty set is published verbatim).
+  def test_dropping_one_archived_folder_updates_cache_on_next_refresh
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      first_done = write_state_task(hive_state, "9-done", "done-one-260626-abcd",
+                                    marker: "COMPLETE", id: 2)
+      write_state_task(hive_state, "9-done", "done-two-260626-abcd",
+                       marker: "COMPLETE", id: 3)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      assert_includes source.current.rows.map(&:slug), "done-one-260626-abcd"
+      assert_includes source.current.rows.map(&:slug), "done-two-260626-abcd"
+
+      FileUtils.rm_r(first_done)
+      File.utime(Time.now + 5, Time.now + 5, File.join(hive_state, "stages", "9-done"))
+      source.send(:refresh_once)
+      wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
+      source.send(:refresh_once)
+
+      slugs = source.current.rows.map(&:slug)
+      refute_includes slugs, "done-one-260626-abcd",
+                      "dropping an archived folder must update the cache on the next refresh"
+      assert_includes slugs, "done-two-260626-abcd",
+                      "the remaining archived row must survive the refresh"
+    ensure
+      source&.stop
+    end
+  end
+
+  # Reverse of test_task_moving_into_done: a task moved OUT of 9-done while
+  # its slug is still in the stale archived cache must render exactly once
+  # (the active row wins; the merge's reverse-direction dedup drops the
+  # cached archived twin).
+  def test_task_moving_out_of_done_renders_once_despite_stale_archive_cache
+    with_direct_project do |_project, hive_state|
+      done_folder = write_state_task(hive_state, "9-done", "resurrecting-task-260626-abcd",
+                                     marker: "COMPLETE", id: 1)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      assert_equal "9-done",
+                   source.current.rows.find { |r| r.slug == "resurrecting-task-260626-abcd" }.stage
+
+      active_folder = File.join(hive_state, "stages", "4-execute", File.basename(done_folder))
+      FileUtils.mv(done_folder, active_folder)
+      File.write(File.join(active_folder, state_file_name("4-execute")), "<!-- EXECUTE_COMPLETE -->\n")
+      source.send(:refresh_once)
+
+      rows = source.current.rows.select { |r| r.slug == "resurrecting-task-260626-abcd" }
+      assert_equal 1, rows.size,
+                   "a task moved out of 9-done must not duplicate via the stale archived cache"
+      assert_equal "4-execute", rows.first.stage,
+                   "the live active row wins over the stale archived cache entry"
+    ensure
+      source&.stop
+    end
+  end
+
+  # The merge guard drops a project's cached archived rows only when the
+  # active parse flagged it with an explicit "error" (missing_project_path /
+  # not_initialised).
+  def test_merge_drops_cached_archived_rows_for_errored_active_project
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    archived_cache = {
+      rows_by_path: {
+        "/p" => [ { "slug" => "done-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
+      }.freeze
+    }.freeze
+    active_payload = {
+      "projects" => [ { "path" => "/p", "error" => "missing_project_path", "tasks" => [] } ]
+    }
+
+    merged = source.send(:merge_archived_payload, active_payload, archived_cache)
+
+    assert_empty merged["projects"].first["tasks"],
+                 "an error-flagged active project must drop its stale cached archived rows"
+  end
+
+  # A healthy project with no active tasks (all-tasks-done, OR a generic
+  # silent degradation that is structurally identical) intentionally KEEPS
+  # its cached archived rows rather than blanking a legitimately-complete
+  # project — aligned with the retain-prior-on-empty discipline.
+  def test_merge_keeps_cached_archived_rows_for_healthy_empty_active_project
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    archived_cache = {
+      rows_by_path: {
+        "/p" => [ { "slug" => "done-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
+      }.freeze
+    }.freeze
+    active_payload = { "projects" => [ { "path" => "/p", "tasks" => [] } ] }
+
+    merged = source.send(:merge_archived_payload, active_payload, archived_cache)
+
+    assert_equal [ "done-260626-abcd" ], merged["projects"].first["tasks"].map { |t| t["slug"] },
+                 "an all-tasks-done project (empty active, no error) keeps its cached archived rows"
+  end
+
+  # A transient empty archive payload for a project (the generic-degradation
+  # shape: tasks=[] with no "error") must NOT blank the project's archived
+  # rows — archived_cache_from_payload retains the prior cache entry.
+  def test_archived_cache_retains_prior_rows_when_archive_payload_is_empty
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    good = source.send(:archived_cache_from_payload, {
+      "projects" => [
+        { "path" => "/p", "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
+      ]
+    })
+    assert_equal 1, good.fetch(:rows_by_path).fetch("/p").size
+
+    degraded = source.send(:archived_cache_from_payload,
+                           { "projects" => [ { "path" => "/p", "tasks" => [] } ] },
+                           previous: good)
+
+    assert_equal [ "done-260626-abcd" ], degraded.fetch(:rows_by_path).fetch("/p").map { |t| t["slug"] },
+                 "an empty archive payload must retain the prior cached rows, not publish []"
+  end
+
+  # Permanent-failure backoff: the first archive-refresh failure re-arms an
+  # immediate retry, but a repeated failure backs off to the 30s backstop
+  # (stamps @archive_last_refresh_at, does NOT re-arm) so a permanent
+  # json_payload raise can't hot-loop a full 9-done rescan every poll tick.
+  def test_archive_refresher_backs_off_after_repeated_failures
+    with_direct_project do |_project, _hive_state|
+      # MRI has no `unprepend`, so gate the raise behind a flag flipped off
+      # in `ensure` — otherwise the leaked module would break every later
+      # test's archive refresher (see sibling tests' note).
+      keep_raising = true
+      patch = Module.new do
+        define_method(:json_payload) do |projects, **kwargs|
+          if keep_raising && kwargs[:stages] == [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+            raise StandardError, "synthetic archive refresh failure"
+          end
+
+          super(projects, **kwargs)
+        end
+      end
+      Hive::Commands::Status.prepend(patch)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      projects = Hive::Config.registered_projects
+
+      capture_io { source.send(:refresh_archived_cache, projects) }
+      assert source.instance_variable_get(:@archive_refresh_dirty),
+             "the first failure re-arms an immediate retry"
+      refute_nil source.last_error, "the failure surfaces on the renderer's error channel"
+
+      source.instance_variable_set(:@archive_refresh_dirty, false)
+      before = Time.now
+      capture_io { source.send(:refresh_archived_cache, projects) }
+
+      refute source.instance_variable_get(:@archive_refresh_dirty),
+             "a repeated failure must back off rather than re-arm a per-tick retry"
+      assert_operator source.instance_variable_get(:@archive_last_refresh_at), :>=, before,
+                      "a repeated failure stamps the refresh time so the 30s backstop retries"
+    ensure
+      keep_raising = false
+      source&.stop
+    end
+  end
+
+  # A persistently-stuck stat error (vs. a one-off vanish) accumulates a
+  # per-path streak and emits a single breadcrumb once it crosses the
+  # threshold, so a stuck EACCES/ESTALE that would otherwise force a silent
+  # per-tick re-check is diagnosable.
+  def test_persistent_stat_error_streak_accumulates_and_surfaces_breadcrumb
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+    threshold = Hive::Tui::StateSource::STAT_ERROR_BREADCRUMB_THRESHOLD
+    Dir.mktmpdir("state-source-stat-streak") do |dir|
+      path = File.join(dir, "stuck.md")
+      File.write(path, "x\n")
+      with_replaced_singleton_method(File, :mtime, lambda { |arg|
+        raise Errno::EACCES, arg if arg == path
+
+        File.stat(arg).mtime
+      }) do
+        threshold.times { source.send(:safe_mtime, path) }
+      end
+
+      assert_equal threshold, source.instance_variable_get(:@stat_error_streaks)[path],
+                   "consecutive stat errors on a path accumulate a streak"
+
+      # A subsequent clean read clears the streak so a recovered path stops
+      # being treated as stuck.
+      source.send(:safe_mtime, path)
+      assert_nil source.instance_variable_get(:@stat_error_streaks)[path],
+                 "a clean read clears the per-path stat-error streak"
+    end
+  end
+
+  # Gate iv (archived direction): a newly-registered project's ARCHIVED rows
+  # surface after the follow-up background refresh, not only its active rows.
+  def test_newly_added_project_archived_rows_surface_after_background_refresh
+    with_tmp_global_config do |home|
+      _alpha, state_a = add_direct_project(home, name: "alpha")
+      write_state_task(state_a, "4-execute", "alpha-active-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 1)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      assert_equal [ "alpha" ], source.current.projects.map(&:name)
+
+      _beta, state_b = add_direct_project(home, name: "beta")
+      write_state_task(state_b, "4-execute", "beta-active-260626-abcd",
+                       marker: "EXECUTE_COMPLETE", id: 2)
+      write_state_task(state_b, "9-done", "beta-done-260626-abcd", marker: "COMPLETE", id: 3)
+
+      source.send(:refresh_once)
+      assert_equal [ "alpha", "beta" ], source.current.projects.map(&:name)
+      refute_includes source.current.rows.map(&:slug), "beta-done-260626-abcd",
+                      "beta's archived rows are not yet in the background cache"
+
+      surfaced = wait_for do
+        source.send(:refresh_once)
+        source.current.rows.map(&:slug).include?("beta-done-260626-abcd")
+      end
+      assert surfaced,
+             "a newly-added project's archived rows must surface after the background refresh"
+    ensure
+      source&.stop
     end
   end
 end

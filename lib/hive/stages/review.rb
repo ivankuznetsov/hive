@@ -1298,7 +1298,11 @@ module Hive
       end
 
       def adhoc_fix_enabled?(cfg, task)
-        !adhoc_task?(task) || cfg.dig("review", "adhoc", "fix") == true
+        # Safety gate: a state-file read error must fail CLOSED. If we cannot
+        # confirm the source, treat the task as ad-hoc so a genuine
+        # ad-hoc/fix-off task never has the fix agent run + auto-commit on it.
+        # (Reviewer SELECTION fails open — see adhoc_task?'s on_read_error.)
+        !adhoc_task?(task, on_read_error: true) || cfg.dig("review", "adhoc", "fix") == true
       end
 
       # Group reviewers that share an effective permission scope so they can
@@ -1349,13 +1353,21 @@ module Hive
         false
       end
 
-      def adhoc_task?(task)
+      # Near-clone of patrol_task? — see its comment for the strip + casecmp?
+      # (producer/consumer drift) and SystemCallError-only rescue + warn (don't
+      # swallow programmer errors) rationale. `on_read_error:` picks the safe
+      # direction per caller: reviewer SELECTION passes false (fall back to the
+      # broader normal reviewer set), while the fix-gate SAFETY check
+      # (adhoc_fix_enabled?) passes true (treat unknown as ad-hoc so auto-fix
+      # stays disabled).
+      def adhoc_task?(task, on_read_error: false)
         frontmatter = task_frontmatter(task.state_file)
         frontmatter["source"].to_s.strip.casecmp?("ad-hoc") || false
       rescue SystemCallError => e
+        consequence = on_read_error ? "treating as ad-hoc (auto-fix disabled)" : "routing as a normal (non-ad-hoc) task"
         warn "[hive.review] adhoc_task? could not read #{task.state_file.inspect}: " \
-             "#{e.class}: #{e.message} — routing as a normal (non-ad-hoc) task"
-        false
+             "#{e.class}: #{e.message} — #{consequence}"
+        on_read_error
       end
 
       def task_frontmatter(path)

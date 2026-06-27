@@ -114,10 +114,13 @@ module Hive
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
     end
 
-    def pr_metadata(number, cfg: nil)
+    # `chdir` scopes `gh pr view` to a specific repo checkout. Ad-hoc review
+    # passes the resolved project root so `hive review --pr N --project NAME`
+    # run from another repo queries the right PR instead of cwd's repo.
+    def pr_metadata(number, cfg: nil, chdir: nil)
       ensure_authenticated!(cfg)
       fields = "number,url,baseRefName,headRefOid,isCrossRepository,state"
-      out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg)
+      out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg, chdir: chdir)
       unless status.success?
         raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
       end

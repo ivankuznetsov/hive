@@ -1,11 +1,13 @@
 require "uri"
 
 module Hive
-  # PR-URL helpers shared by every surface that displays a pull-request
-  # link: the `hive status` command, the TUI tasks pane, and the Telegram
-  # bot. Keeping `number`/`valid_http_url?` here is what stops those
-  # surfaces from drifting apart on how a PR number is parsed or which
-  # hrefs are considered safe.
+  # PR helpers shared across surfaces. Two roles live here:
+  #   * Display helpers (`number`, `valid_http_url?`, `NUMBER_WIDTH`) shared by
+  #     every surface that renders a pull-request link — the `hive status`
+  #     command, the TUI tasks pane, and the Telegram bot — so those surfaces
+  #     can't drift on how a PR number is parsed or which hrefs are safe.
+  #   * The command-input parser `identifier_to_number`, which normalises a
+  #     user-supplied PR argument (number, #number, or URL) for ad-hoc review.
   module Pr
     module_function
 
@@ -33,6 +35,12 @@ module Hive
       match ? "##{match[1]}" : nil
     end
 
+    # Parse a user-supplied PR argument — a bare number, `#number`, or a
+    # GitHub pull-request URL — into an Integer PR number. Unlike `number`
+    # (which returns nil for unparseable input, since it scans display URLs),
+    # this is a strict command-input parser: it RAISES ArgumentError on junk
+    # so `hive review --pr <garbage>` fails loudly as a usage error rather
+    # than silently materialising the wrong PR.
     def identifier_to_number(identifier)
       value = identifier.to_s.strip
 

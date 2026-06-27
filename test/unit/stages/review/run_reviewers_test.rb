@@ -400,6 +400,27 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_adhoc_fix_gate_fails_closed_on_state_file_read_error
+    # The fix gate is a SAFETY check: when the source can't be read it must
+    # fail CLOSED (treat as ad-hoc → auto-fix disabled by default), the
+    # opposite of reviewer selection's fail-open. Point state_file at a
+    # directory so File.read raises Errno::EISDIR.
+    cfg = { "review" => { "adhoc" => { "fix" => false } } }
+
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir) # state_file is a directory → File.read raises
+
+      enabled = nil
+      _out, err = capture_io do
+        enabled = Hive::Stages::Review.adhoc_fix_enabled?(cfg, task)
+      end
+
+      refute enabled, "unreadable source must disable auto-fix (fail closed)"
+      assert_match(/adhoc_task\? could not read/, err)
+      assert_match(/treating as ad-hoc \(auto-fix disabled\)/, err)
+    end
+  end
+
   def test_empty_patrol_reviewers_warns_so_patrol_pr_is_not_silently_unreviewed
     cfg = {
       "review" => { "reviewers" => [ { "name" => "normal-reviewer" } ] },

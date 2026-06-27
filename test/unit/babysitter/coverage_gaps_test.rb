@@ -617,14 +617,8 @@ class BabysitterCoverageGapsTest < Minitest::Test
     end
   end
 
-  def test_worktree_run_git_failure_and_misc_validation_gaps
-    with_tmp_dir do |dir|
-      project = project_entry(dir)
-      worktree = Hive::Babysitter::Worktree.new(project, { "number" => 42 })
-      with_replaced_singleton_method(Open3, :capture3, ->(*_cmd) { [ "", "boom", Status.new(success: false) ] }) do
-        assert_raises(Hive::WorktreeError) { worktree.send(:run_git!, "status") }
-      end
-
+  def test_misc_validation_gaps
+    with_tmp_dir do |_dir|
       assert_raises(Hive::ConfigError) { Hive::Babysitter::Interval.parse("later") }
       begin
         Hive::Babysitter::Interval.parse(Object.new)

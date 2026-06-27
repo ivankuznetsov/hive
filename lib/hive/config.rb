@@ -141,6 +141,12 @@ module Hive
           "prompt_template" => "ci_fix_prompt.md.erb"
         },
         "reviewers" => [],
+        # Ad-hoc PR reviews (`hive review --pr N`). `reviewers` is a load-bearing
+        # tri-state: nil (the default) INHERITS `review.reviewers`, while an
+        # explicit `[]` runs ZERO reviewers. An operator who sets `[]` expecting
+        # "inherit" gets a silently unreviewed PR — use nil/omit to inherit.
+        # `fix` gates whether the fix agent runs + auto-commits on ad-hoc tasks
+        # (default false: review-only).
         "adhoc" => {
           "reviewers" => nil,
           "fix" => false

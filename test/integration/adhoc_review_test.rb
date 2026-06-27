@@ -43,7 +43,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
 
   def with_adhoc_review_stubs(head: "head-197", runs: [])
     materialized = []
-    with_replaced_singleton_method(Hive::Gh, :pr_metadata, lambda { |number|
+    with_replaced_singleton_method(Hive::Gh, :pr_metadata, lambda { |number, **_kwargs|
       Hive::Gh::PrMetadata.new(
         number: number,
         url: "https://github.com/o/r/pull/#{number}",
@@ -145,6 +145,52 @@ class AdhocReviewIntegrationTest < Minitest::Test
           refute Dir.exist?(File.join(repo, ".hive-state"))
         end
       end
+    end
+  end
+
+  def test_review_pr_outside_invited_repo_json_emits_stage_action_error_envelope
+    with_tmp_global_config do
+      with_tmp_git_repo do |repo|
+        Dir.chdir(repo) do
+          out, _err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197", "--json" ]) }
+
+          assert_equal Hive::ExitCodes::CONFIG, status
+          payload = JSON.parse(out)
+          assert_equal "hive-stage-action", payload.fetch("schema")
+          assert_equal "review", payload.fetch("verb")
+          assert_equal false, payload.fetch("ok")
+          assert_equal "error", payload.fetch("error_kind")
+          assert_equal Hive::ExitCodes::CONFIG, payload.fetch("exit_code")
+        end
+      end
+    end
+  end
+
+  def test_review_pr_invalid_identifier_json_emits_usage_error_envelope
+    with_registered_project do |_repo, _hive_state, _worktree_root|
+      out, _err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "not-a-pr", "--json" ]) }
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      payload = JSON.parse(out)
+      assert_equal "hive-stage-action", payload.fetch("schema")
+      assert_equal "review", payload.fetch("verb")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "invalid_task_path", payload.fetch("error_kind")
+      assert_match(/invalid PR identifier/, payload.fetch("message"))
+    end
+  end
+
+  def test_review_missing_target_json_emits_usage_error_envelope
+    with_registered_project do |_repo, _hive_state, _worktree_root|
+      out, _err, status = with_captured_exit { Hive::CLI.start([ "review", "--json" ]) }
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      payload = JSON.parse(out)
+      assert_equal "hive-stage-action", payload.fetch("schema")
+      assert_equal "review", payload.fetch("verb")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "invalid_task_path", payload.fetch("error_kind")
+      assert_match(/missing TARGET/, payload.fetch("message"))
     end
   end
 end

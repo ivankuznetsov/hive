@@ -326,8 +326,10 @@ module Hive
       raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"
     end
 
-    def self.materialize_git_stdout!(repo_root, *args)
-      out, err, status = Open3.capture3("git", "-C", repo_root, *args)
+    # `dir` is the directory to run git in (`git -C <dir>`); the sole caller
+    # passes the worktree `path`, not the repo root, for `rev-parse HEAD`.
+    def self.materialize_git_stdout!(dir, *args)
+      out, err, status = Open3.capture3("git", "-C", dir, *args)
       return out if status.success?
 
       raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"

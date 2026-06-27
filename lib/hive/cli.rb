@@ -544,24 +544,29 @@ module Hive
     option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
     def review(target = nil)
       if options[:pr]
-        raise Hive::InvalidTaskPath, "hive review: pass either TARGET or --pr, not both" if target
+        emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
 
         require "hive/commands/adhoc_review"
         require "hive/commands/stage_action"
-        slug = Hive::Commands::AdhocReview.new(
+        # AdhocReview emits its own --json error envelope on create-phase
+        # failures and re-raises. On success it returns the resolved project
+        # name; forward it (not the raw, possibly-nil options[:project]) so
+        # StageAction resolves the slug against the same project AdhocReview
+        # used, never a same-named slug in another registered repo.
+        result = Hive::Commands::AdhocReview.new(
           pr: options[:pr],
           project: options[:project],
           json: options[:json]
-        ).call
+        ).enqueue
         return Hive::Commands::StageAction.new(
           "review",
-          slug,
-          project: options[:project],
+          result.fetch(:slug),
+          project: result.fetch(:project),
           json: options[:json]
         ).call
       end
 
-      raise Hive::InvalidTaskPath, "hive review: missing TARGET (or pass --pr PR)" unless target
+      emit_review_usage_error("hive review: missing TARGET (or pass --pr PR)") unless target
 
       run_stage_action("review", target)
     end
@@ -1176,6 +1181,35 @@ module Hive
           end
         else
           warn message
+        end
+        raise error
+      end
+
+      # `hive review` raises usage errors from inside the method body: the
+      # optional TARGET (so `--pr` can stand alone) and the
+      # both/neither-given checks surface as Hive::Error, not the Thor::Error
+      # that bin/hive's JSON usage envelope keys on. Emit the same
+      # hive-stage-action envelope StageAction emits for `hive review <slug>
+      # --json` so every `hive review --json` failure stays symmetric, then
+      # raise so bin/hive maps the exit code (and prints the stderr line).
+      # AdhocReview and StageAction own their own envelopes, so neither is
+      # wrapped by this helper — no double emit.
+      def emit_review_usage_error(message)
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-stage-action",
+            error: error,
+            error_kind: "invalid_task_path",
+            extras: { "verb" => "review" }
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE, JSON::GeneratorError
+            # caller went away or payload not serialisable — fall through to
+            # the bare-text rescue in bin/hive.
+          end
         end
         raise error
       end

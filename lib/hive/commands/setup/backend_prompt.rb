@@ -26,7 +26,7 @@ module Hive
           @input = input
           @output = output
           @summary_io = summary_io
-          registered = (registered_agents || Hive::AgentProfiles.registered_names.map(&:to_s))
+          registered = (registered_agents || Hive::Config.registered_agent_names)
           @backends = BACKEND_ORDER.select { |name| registered.include?(name) }
 
           raise ArgumentError, "registered_agents must include at least one setup backend" if @backends.empty?
@@ -74,7 +74,12 @@ module Hive
         private
 
         def default_backends
-          DEFAULT_BACKENDS.select { |name| @backends.include?(name) }
+          # Frozen to match the Config layer's "frozen array of frozen
+          # strings on every path" contract — both collaborators produce
+          # "a backend selection" and must agree on mutability. This is the
+          # array #collect hands back on the non-interactive and blank-Enter
+          # paths, so freezing here covers both return sites.
+          DEFAULT_BACKENDS.select { |name| @backends.include?(name) }.freeze
         end
 
         def non_interactive_defaults
@@ -92,7 +97,9 @@ module Hive
             selected << name
           end
 
-          selected = BACKEND_ORDER.select { |name| selected.include?(name) }
+          # Frozen to match the Config layer's frozen-array contract (see
+          # #default_backends); this is #collect's third return site.
+          selected = BACKEND_ORDER.select { |name| selected.include?(name) }.freeze
           selected.empty? ? nil : selected
         end
 

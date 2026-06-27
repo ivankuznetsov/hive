@@ -575,14 +575,35 @@ module Hive
       File.join(hive_home, "config.yml")
     end
 
+    # Single source of the registry's string representation. The agent
+    # registry keys on symbols, but every backend-selection path (the
+    # defaults, normalize, the setup prompt) compares against backend-name
+    # *strings*, so the symbol→string projection lives here — the
+    # registry-representation coupling is then a one-line edit rather than
+    # several drifting copies.
+    def registered_agent_names
+      AgentProfiles.registered_names.map(&:to_s)
+    end
+
     # The default selection filtered down to the backends actually
     # registered on this machine, in canonical order. Returns a frozen
-    # array of frozen strings — the same return contract as
-    # `normalize_global_agents`, so a consumer never sees a mutable result
-    # on one path and a frozen one on the other (a latent FrozenError trap).
+    # array of frozen strings with at least one entry — the same return
+    # contract as `normalize_global_agents` on BOTH mutability and
+    # cardinality, so a consumer never sees a mutable result on one path and
+    # a frozen one on the other (a latent FrozenError trap), nor an empty
+    # selection the prompt boundary can never produce. Raises ConfigError
+    # when no default backend is registered — unreachable while claude/codex
+    # auto-register on `require "hive/config"`, but the guarantee is enforced
+    # here rather than merely asserted in this comment.
     def default_global_agents
-      registered = AgentProfiles.registered_names.map(&:to_s)
-      DEFAULT_GLOBAL_AGENTS.select { |name| registered.include?(name) }.freeze
+      registered = registered_agent_names
+      selected = DEFAULT_GLOBAL_AGENTS.select { |name| registered.include?(name) }
+      if selected.empty?
+        raise ConfigError,
+              "no default agent backend is registered (expected one of #{DEFAULT_GLOBAL_AGENTS.inspect})"
+      end
+
+      selected.freeze
     end
 
     def hive_state_dir(project_root, hive_state_name = ".hive-state")
@@ -795,10 +816,16 @@ module Hive
     end
 
     # The operator's persisted backend selection from the global config,
-    # or `default_global_agents` when nothing is stored yet. An absent
-    # `agents:` block or absent `agents.selected` key both fall through to
-    # the defaults; a present-but-malformed block (non-Hash `agents:`,
-    # non-Array `selected`) is a hand-edit error and raises ConfigError.
+    # or `default_global_agents` when nothing is stored yet. Three "unset"
+    # shapes all fall through to the defaults: an absent `agents:` block, an
+    # absent `agents.selected` key, and a present-but-null `selected:` (a
+    # bare `selected:` with no value). A present-but-malformed block
+    # (non-Hash `agents:`, non-Array `selected`) is a hand-edit error and
+    # raises ConfigError. Note the deliberate asymmetry against an empty
+    # `selected: []`: a null `selected:` is treated as "unset" and yields
+    # the defaults, whereas an explicit empty list raises via
+    # `normalize_global_agents` — an empty array is a hand-edit mistake the
+    # prompt can never produce, a null value is just "nothing stored yet".
     def load_global_agents
       Hive::Paths.ensure_migrated!
       validate_hive_home!
@@ -816,7 +843,7 @@ module Hive
       selected = agents["selected"]
       return default_global_agents if selected.nil?
 
-      normalize_global_agents(selected, source_path: path)
+      normalize_global_agents(selected, source: describe_source(path))
     end
 
     # Persist a backend selection, writing the normalized (validated,
@@ -826,7 +853,7 @@ module Hive
     # only `selected` is rewritten. A pre-existing non-Hash `agents:` value
     # is a hand-edit error and raises rather than being clobbered.
     def write_global_agents!(agents)
-      normalized = normalize_global_agents(agents, source_path: global_config_path)
+      normalized = normalize_global_agents(agents, source: "the write_global_agents! argument")
       update_global_config! do |data|
         existing = data["agents"]
         unless existing.nil? || existing.is_a?(Hash)
@@ -847,38 +874,39 @@ module Hive
     # prompt can never produce. Each name must be a non-empty String that
     # resolves to a registered backend; anything else is a hand-edit error
     # and raises ConfigError.
-    def normalize_global_agents(agents, source_path:)
+    def normalize_global_agents(agents, source:)
       unless agents.is_a?(Array)
         raise ConfigError,
-              "agents.selected in #{describe_source(source_path)} must be an Array of agent names; got #{agents.class}"
+              "agents.selected in #{source} must be an Array of agent names; got #{agents.class}"
       end
 
       if agents.empty?
         raise ConfigError,
-              "agents.selected in #{describe_source(source_path)} must list at least one backend"
+              "agents.selected in #{source} must list at least one backend"
       end
 
-      registered = AgentProfiles.registered_names.map(&:to_s)
+      registered = registered_agent_names
       allowed = GLOBAL_AGENT_BACKENDS.select { |name| registered.include?(name) }
       selected = []
       agents.each do |agent|
         unless agent.is_a?(String) && !agent.strip.empty?
           raise ConfigError,
-                "agents.selected in #{describe_source(source_path)} must contain non-empty strings"
+                "agents.selected in #{source} must contain non-empty strings"
         end
 
         name = agent.strip
         unless allowed.include?(name)
           raise ConfigError,
-                "agents.selected in #{describe_source(source_path)} contains unknown backend #{name.inspect}; " \
+                "agents.selected in #{source} contains unknown backend #{name.inspect}; " \
                 "expected one of #{allowed.inspect}"
         end
 
         selected << name
       end
 
-      # Reorder to canonical order and dedupe in one pass (iterating the
-      # unique constant means a repeated name collapses to a single entry).
+      # Reorder to canonical order and dedupe in a single `select` over the
+      # canonical constant (iterating the unique constant means a repeated
+      # name collapses to a single entry).
       GLOBAL_AGENT_BACKENDS.select { |name| selected.include?(name) }.freeze
     end
 

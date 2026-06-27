@@ -8,6 +8,8 @@ class GemspecTest < Minitest::Test
 
     assert_includes spec.files, "bin/hive-babysitter-stub-gh"
     assert_includes spec.files, "bin/hive-babysitter-stub-git"
+    assert_includes spec.files, "lib/hive/babysitter/stubs/gh.rb"
+    assert_includes spec.files, "lib/hive/babysitter/stubs/git.rb"
   end
 
   def test_gem_executables_exclude_bash_hv_launcher

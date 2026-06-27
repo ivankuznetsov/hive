@@ -56,14 +56,14 @@ module Hive
         root = File.expand_path("../../..", __dir__)
         {
           "git" => [
-            File.join(root, "bin", "hive-babysitter-stub-git"),
+            File.join(root, "lib", "hive", "babysitter", "stubs", "git.rb"),
             {
               "HIVE_BABYSITTER_REAL_GIT" => real_git,
               "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log
             }
           ],
           "gh" => [
-            File.join(root, "bin", "hive-babysitter-stub-gh"),
+            File.join(root, "lib", "hive", "babysitter", "stubs", "gh.rb"),
             {
               "HIVE_BABYSITTER_REAL_GH" => real_gh,
               "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log,
@@ -77,7 +77,7 @@ module Hive
           # Start the overlay through /bin/sh, not Ruby: Ruby consumes RUBYOPT/RUBYLIB
           # before script code runs, so a Ruby shim cannot scrub those variables in time.
           # The shell wrapper clears Ruby/Bundler/Gem startup env, pins the handoff env, and
-          # then invokes the shared Ruby stub through the running Ruby's absolute path.
+          # then invokes the private Ruby implementation through the running Ruby's absolute path.
           File.write(link, <<~SH)
             #!/bin/sh
             unset #{RUBY_STARTUP_ENV.join(' ')}

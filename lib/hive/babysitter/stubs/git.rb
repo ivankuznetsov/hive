@@ -1,0 +1,381 @@
+# frozen_string_literal: true
+
+def log_skip(argv)
+  path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
+  message = "[dry-run] git #{escaped_argv(argv)} skipped"
+  append_skip_log(path) { |file| file.puts(message) }
+rescue SystemCallError, IOError => e
+  # The command is still skipped (stderr below preserves the human-visible signal), but the
+  # persistent audit log just developed an invisible gap; surface the cause instead of
+  # silently dropping the record. Catch IOError too (e.g. a closed stream on flush) so a
+  # write/flush failure cannot escape, crash the stub, and drop the audit record. Name the
+  # target path so the operator knows which log location (the override or the default) failed.
+  warn "[dry-run] failed to write skip log #{path}: #{e.message}"
+end
+
+def append_skip_log(path)
+  raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
+  raise IOError, "File::NONBLOCK unavailable" unless File.const_defined?(:NONBLOCK)
+
+  begin
+    stat = File.lstat(path)
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+  rescue Errno::ENOENT
+    # Missing logs are created below; the fstat check still verifies the opened target.
+  end
+
+  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW | File::NONBLOCK, 0o600) do |file|
+    stat = file.stat
+    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+
+    yield file
+  end
+end
+
+def escaped_argv(argv)
+  argv.map { |arg| escape_control_chars(arg) }.join(" ")
+end
+
+def escape_control_chars(arg)
+  # Scan bytes, not characters: argv can carry non-UTF-8 bytes (git paths, agent-supplied
+  # messages), and a UTF-8 `gsub` would raise ArgumentError on an invalid sequence — crashing
+  # log_skip before its `rescue` and dropping the skip-log record. Binary-encode first so the
+  # regex matches control bytes byte-by-byte; high bytes pass through unescaped, as before.
+  arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
+end
+
+argv = ARGV.map(&:b)
+
+# Walk only the leading global-option region (everything before the subcommand) and
+# report whether any unsafe global option appears there. Scoping to the leading region
+# matters: a read-only subcommand flag like `-p` (`git log -p`) must not be misread as the
+# global `--paginate`. Returns [unsafe?, rest] where rest is the subcommand and its args.
+def split_global_options(argv)
+  rest = argv.dup
+  unsafe = false
+  loop do
+    case rest.first
+    # Any global config override (`-c`/`--config-env`, glued or separate) can wire up
+    # executable-affecting keys — diff.<driver>.textconv/command, filter.<driver>.*,
+    # gpg.<format>.program, pagers, hooks, aliases, and whatever git adds next. The
+    # babysitter never needs to inject config into read-only git, so reject the whole
+    # config-override category instead of enumerating dangerous keys.
+    when "-c", "--config-env"
+      unsafe = true
+      rest.shift(2)
+    when /\A-c./, /\A--config-env=/
+      unsafe = true
+      rest.shift
+    # `-p`/`--paginate` can launch an attacker-influenced pager, and `--exec-path[=<dir>]`
+    # redirects git to an arbitrary directory of git-* helper binaries — both are exec seams
+    # that a read-only babysitter never needs.
+    when "-p", "--paginate", "--exec-path", /\A--exec-path=/
+      unsafe = true
+      rest.shift
+    when "-C", "--git-dir", "--work-tree"
+      rest.shift(2)
+    when /\A--git-dir=/, /\A--work-tree=/
+      rest.shift
+    when /\A-/
+      # Unrecognized leading global option. Today's git routes all other globals through the
+      # branches above, but a future one taking a separate-word value would leave that value
+      # as the apparent subcommand and could fail open. Treat any unknown global as unsafe:
+      # over-blocking a read is the safe failure for a default-deny gate.
+      unsafe = true
+      rest.shift
+    else
+      break
+    end
+  end
+  [ unsafe, rest ]
+end
+
+def unsafe_command_options?(rest)
+  subcommand = rest.first
+  # Only tokens before the `--` pathspec separator are options; everything after it is a
+  # literal pathspec, so `git log -- -o` targets a file named `-o`, not the output flag.
+  options = (rest[1..] || []).take_while { |arg| arg != "--" }
+  options.each_with_index.any? { |arg, index| unsafe_read_option?(subcommand, arg, options[index + 1]) }
+end
+
+# `git grep` short options that consume the remainder of a cluster as their value. Once one
+# appears, the characters after it are an operand (a pattern, file, or count) — not packed
+# flags — so cluster scanning must stop there; e.g. `-eTODO` is the pattern `TODO`, not a
+# hidden `-O` pager flag.
+GREP_VALUE_TAKING_SHORT = "efmABC".chars.freeze
+SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
+SHOW_SIGNATURE_SUBCOMMANDS = %w[log show].freeze
+
+def grep_short_cluster_has_pager?(arg)
+  arg[1..].each_char do |ch|
+    return true if ch == "O"                          # `-O[<cmd>]` opens an arbitrary pager
+    break if GREP_VALUE_TAKING_SHORT.include?(ch)     # rest of cluster is this option's value
+  end
+  false
+end
+
+def unsafe_read_option?(subcommand, arg, next_arg = nil)
+  # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
+  return true if arg == "--ext-diff"
+  # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts any
+  # unambiguous prefix of a long option, so `--text`, `--textc`, `--textco`, ... all reach
+  # `--textconv` (e.g. `git cat-file --text`, `git grep --textc`). Default-deny every prefix
+  # form down to `--t`, not just the spelled-out flag. `--no-textconv` is safe and is not a
+  # prefix of `--textconv`, so it stays allowed.
+  return true if textconv_abbreviation?(arg)
+  # `git cat-file --filters` applies smudge filters, running the repo-local
+  # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
+  # hardening never sees, since cat-file stays a plain allowlisted passthrough.
+  return true if arg == "--filters"
+  # Signature display and `%G*` pretty placeholders verify commit signatures, which executes
+  # the configured gpg.program / gpg.<format>.program helper from repo config.
+  return true if signature_verification_option?(subcommand, arg, next_arg)
+
+  # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
+  # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the
+  # precise RCE seam this guard exists to close. On `diff` / `log` / `show`,
+  # `-O<orderfile>` is `--output-ordering`, which only reads an orderfile, so the pager
+  # block must be scoped to grep or it over-skips reads. `git grep -o` / `--only-matching`
+  # is a read-only match filter (grep has no `--output`).
+  if subcommand == "grep"
+    # git resolves any unambiguous long-option prefix, so `--open`, `--open-files`, down to
+    # the shortest unique `--op`, all reach `--open-files-in-pager` and must be blocked (with
+    # or without a glued `=<cmd>`). `--op` is the shortest prefix that is not shared with
+    # another grep long option (`--only-matching`, `--or`), so require length >= 4.
+    name = arg.split("=", 2).first
+    return true if name.length >= 4 && "--open-files-in-pager".start_with?(name)
+
+    # Short-option clusters: walk char by char so a value-taking option consumes the rest of
+    # the cluster as its operand. Without this, a read-only attached pattern like `-eTODO`
+    # would be misread as carrying the `-O` pager flag merely because its value contains `O`.
+    return grep_short_cluster_has_pager?(arg) if arg.start_with?("-") && !arg.start_with?("--")
+
+    return false
+  end
+
+  # `git ls-files -o` / `--others` lists untracked files — a read, not a write. ls-files has
+  # no file-writing `--output`, so only the genuine write forms below should ever fire here.
+  return false if subcommand == "ls-files" && (arg == "-o" || arg == "--others")
+
+  # The file-writing `--output` / `-o` (separate or glued `-o<path>`) defeats the no-mutation
+  # boundary on an allowed read (`diff` / `log` / `show` write the requested file).
+  arg == "--output" || arg.start_with?("--output=", "-o")
+end
+
+def signature_verification_option?(subcommand, arg, next_arg)
+  return false unless SIGNATURE_FORMAT_SUBCOMMANDS.include?(subcommand.to_s)
+  return true if SHOW_SIGNATURE_SUBCOMMANDS.include?(subcommand.to_s) &&
+                 (arg == "--show-signature" || arg.start_with?("--show-signature="))
+
+  signature_format_placeholder?(arg) ||
+    ([ "--format", "--pretty" ].include?(arg) && next_arg.to_s.include?("%G"))
+end
+
+def signature_format_placeholder?(arg)
+  option, value = arg.split("=", 2)
+  [ "--format", "--pretty" ].include?(option) && value.to_s.include?("%G")
+end
+
+def textconv_abbreviation?(arg)
+  # `--t`, `--te`, `--tex`, `--text`, `--textc`, ... `--textconv` are all prefixes git accepts
+  # as the `--textconv` long option. start_with?("--t") pins this to the textconv branch (min
+  # length `--t`); start_with?(arg) confirms arg is itself a prefix of `--textconv`.
+  arg.start_with?("--t") && "--textconv".start_with?(arg)
+end
+
+def unsafe_env?
+  # The argv guards above are fully bypassable through git's environment-variable config
+  # path, so the env path mirrors the same fail-closed posture. Each guarded var is a known
+  # exec-capable seam (this is a denylist of the known offenders, not an exhaustive bar):
+  #   * GIT_EXEC_PATH redirects git to an arbitrary directory of git-* helper binaries.
+  #   * GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND / GIT_SSH / GIT_PROXY_COMMAND each name a command
+  #     git execs directly (the older GIT_SSH / GIT_PROXY_COMMAND siblings are as dangerous as
+  #     the newer GIT_SSH_COMMAND). GIT_ASKPASS / SSH_ASKPASS name credential-prompt helpers
+  #     that git or ssh can exec during authenticated remote reads.
+  #   * GIT_CONFIG_PARAMETERS is git's one-shot config channel — it carries the same
+  #     exec-capable keys (diff.external, core.fsmonitor, aliases, …) as a leading `-c`.
+  #   * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n inject those keys as well.
+  #   * GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM repoint config at an attacker-written file that
+  #     can carry the same keys.
+  # Pager config/env is scrubbed or neutralized at passthrough time. It is not a reason to
+  # skip an otherwise read-only command.
+  return true if env_set?("GIT_EXEC_PATH")
+  return true if env_set?("GIT_EXTERNAL_DIFF")
+  return true if env_set?("GIT_SSH_COMMAND") || env_set?("GIT_SSH")
+  return true if env_set?("GIT_ASKPASS") || env_set?("SSH_ASKPASS")
+  return true if env_set?("GIT_PROXY_COMMAND")
+  return true if env_set?("GIT_CONFIG_PARAMETERS")
+  return true if env_set?("GIT_CONFIG_GLOBAL") || env_set?("GIT_CONFIG_SYSTEM")
+  return true if unsafe_config_count?
+
+  false
+end
+
+def unsafe_config_count?
+  raw = ENV.fetch("GIT_CONFIG_COUNT", "")
+  return false if raw.empty?
+
+  # Default-deny: a set GIT_CONFIG_COUNT is unsafe unless it cleanly parses to 0. A positive
+  # count carries attacker-controlled GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n; a non-numeric value
+  # (which `.to_i` would silently read as 0/allowed) is rejected rather than trusted to git.
+  Integer(raw, exception: false) != 0
+end
+
+def env_set?(name)
+  !ENV.fetch(name, "").empty?
+end
+
+def read_only_remote?(rest)
+  args = rest[1..] || []
+  args.shift while [ "-v", "--verbose" ].include?(args.first)
+  return true if args.empty?
+
+  case args.first
+  when "show"
+    args.shift
+    return false unless args.first == "-n"
+
+    args.shift
+    !args.empty? && args.all? { |arg| !arg.start_with?("-") }
+  when "get-url"
+    args.shift
+    args.shift while [ "--push", "--all" ].include?(args.first)
+    args.length == 1 && !args.first.start_with?("-")
+  else
+    false
+  end
+end
+
+def read_only_branch?(rest)
+  args = rest[1..] || []
+  return true if args.empty?
+  return true if args == [ "--show-current" ]
+  return true if args == [ "--contains" ]
+  return true if args.length == 2 && args.first == "--contains" && !args.last.start_with?("-")
+  return true if args.length == 1 && args.first.start_with?("--contains=") && args.first.length > "--contains=".length
+
+  false
+end
+
+def read_only_config?(rest)
+  args = rest[1..] || []
+  # Skip leading type/format modifiers that precede a read verb, e.g.
+  # `git config --bool --get commit.gpgsign` (auto_commit.rb runs exactly
+  # this). These never assign a value, so they keep the command read-only.
+  args = args.dup
+  args.shift while args.first =~ /\A(--bool|--int|--path|--null|-z|--type=.*)\z/
+
+  case args.first
+  when "--get", "--get-all"
+    args.length == 2 && !args.last.start_with?("-")
+  when "--list"
+    args.length == 1
+  else
+    false
+  end
+end
+
+def read_only?(rest)
+  case rest.first.to_s
+  when "branch"
+    read_only_branch?(rest)
+  when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
+       "rev-list", "rev-parse", "show", "status"
+    true
+  when "remote"
+    read_only_remote?(rest)
+  when "config"
+    read_only_config?(rest)
+  else
+    false
+  end
+end
+
+def hardened_passthrough_argv(argv, rest)
+  passthrough = argv.dup
+  insert_at = argv.length - rest.length + 1
+
+  # These commands can load exec-capable local diff drivers from .git/config. Keep the
+  # read passthrough, but force git's internal diff path and disable textconv.
+  if %w[diff log show].include?(rest.first.to_s)
+    passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
+  end
+
+  [
+    "-c", "core.fsmonitor=false",
+    "-c", "core.askPass=",
+    "-c", "log.showSignature=false",
+    # `log.showSignature=false` only suppresses the implicit `--show-signature`; it does NOT
+    # stop `%G*` pretty placeholders from verifying signatures. A `%G` format can reach git
+    # without ever appearing in argv: a worktree-local `pretty.<name>=format:%G?` alias selected
+    # by `format.pretty=<name>` resolves to `%G?` even for a bare `git log`, and the argv scan
+    # cannot see config-resolved formats. Every `%G*` verification execs the repo's gpg.program /
+    # gpg.<format>.program helper, so pin all of them to the no-op `false` — these `-c` overrides
+    # outrank the worktree config, so no attacker-configured helper runs no matter how the
+    # placeholder is reached.
+    "-c", "gpg.program=false",
+    "-c", "gpg.openpgp.program=false",
+    "-c", "gpg.x509.program=false",
+    "-c", "gpg.ssh.program=false",
+    # A read can otherwise auto-spawn a repo/caller-controlled `core.pager` on a TTY; force
+    # `--no-pager` so a dry-run read cannot launch a pager (PAGER/GIT_PAGER are also scrubbed below).
+    "--no-pager",
+    *passthrough
+  ]
+end
+
+unsafe_global, rest = split_global_options(argv)
+
+if unsafe_global || unsafe_command_options?(rest) || unsafe_env? || !read_only?(rest)
+  log_skip(argv)
+  warn "[dry-run] git #{escaped_argv(argv)} skipped"
+  exit 0
+end
+
+real = ENV["HIVE_BABYSITTER_REAL_GIT"].to_s
+if real.empty?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
+  exit 127
+end
+unless File.absolute_path?(real)
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT must be an absolute path; refusing to exec #{real.inspect}"
+  exit 127
+end
+
+# Even an allowlisted read-only subcommand can execute arbitrary commands or
+# write files if these env vars or config files reach real git, and argv
+# screening structurally cannot see them. Scrub the whole side-effect-capable
+# family before handing off, then install only our hermetic config controls.
+%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
+ENV["HOME"] = File::NULL
+ENV["XDG_CONFIG_HOME"] = File::NULL
+ENV["GIT_CONFIG_NOSYSTEM"] = "1"
+ENV["GIT_CONFIG_GLOBAL"] = File::NULL
+ENV["GIT_CONFIG_SYSTEM"] = File::NULL
+# Allowlisted reads must stay side-effect-free: `git status` (and other reads) otherwise take
+# the optional index/refs locks and rewrite `.git/index` to refresh stat data. Disable optional
+# locks so a dry-run read cannot mutate the repo on disk.
+ENV["GIT_OPTIONAL_LOCKS"] = "0"
+# The `-c gpg.program=false` (and gpg.<format>.program=false) no-ops above pin signature
+# verification to `false`, but git resolves that bare name through PATH — and the inherited
+# PATH is agent-controlled. Without this, an agent could prepend a directory holding its own
+# `false` and turn the supposed no-op back into an exec seam (likewise any other helper git
+# resolves via PATH). Pin PATH to root-owned system dirs so every PATH lookup git makes
+# resolves from a location an unprivileged agent cannot write. `/usr/local/bin` is omitted on
+# purpose: it is user-writable under Homebrew, which would reopen the same poisoning vector.
+#
+ENV["PATH"] = "/usr/bin:/bin"
+
+begin
+  # Array-form exec (no shell) hands argv straight to the real git binary.
+  exec real, *hardened_passthrough_argv(argv, rest)
+rescue SystemCallError => e
+  # A set-but-invalid path (missing, not executable, …) would otherwise leak a raw Ruby
+  # backtrace and exit 1; mirror the unset-case friendly exit-127 handling above.
+  warn "hive-babysitter dry-run: cannot exec real git at #{real.inspect}: #{e.message}"
+  exit 127
+end

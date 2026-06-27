@@ -195,7 +195,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
       }
 
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+      _out, err, status = capture_stub(env, "gh", "pr", "comment", "42", "--body", "hi")
 
       assert status.success?, err
       assert_includes err, "[dry-run] gh pr comment 42 --body hi skipped"
@@ -204,7 +204,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       real_gh = recording_binary(dir, "real-gh")
       _out, err, status = Open3.capture3(
         env.merge("HIVE_BABYSITTER_REAL_GH" => real_gh),
-        stub_path("gh"),
+        *stub_command("gh"),
         "repo",
         "view",
         "owner/repo"
@@ -252,6 +252,38 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_direct_stub_entrypoints_refuse_without_running_ruby_startup_hooks
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "poison")
+      FileUtils.mkdir_p(poison_dir)
+      File.write(
+        File.join(poison_dir, "pwn.rb"),
+        "File.write(ENV.fetch(\"HIVE_RUBYOPT_MARKER\"), \"loaded\")\n"
+      )
+
+      [
+        [ "git", [ "status", "--short" ] ],
+        [ "git", [ "push", "origin", "feature" ] ],
+        [ "gh", [ "repo", "view", "owner/repo" ] ],
+        [ "gh", [ "pr", "comment", "42", "--body", "hi" ] ]
+      ].each do |binary, args|
+        marker = File.join(dir, "#{binary}-#{args.first}-rubyopt-loaded")
+        env = {
+          "RUBYOPT" => "-rpwn",
+          "RUBYLIB" => poison_dir,
+          "HIVE_RUBYOPT_MARKER" => marker,
+          "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "#{binary}-direct.log")
+        }
+
+        _out, err, status = Open3.capture3(env, entrypoint_path(binary), *args)
+
+        assert_equal 127, status.exitstatus, err
+        assert_includes err, "direct #{binary} stub invocation is unsupported"
+        refute_path_exists marker, "#{entrypoint_path(binary)} honored RUBYOPT before refusing"
+      end
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")
@@ -270,7 +302,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
           "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "#{binary}-skipped.log")
         }
 
-        _out, err, status = Open3.capture3(env, stub_path(binary), *args, chdir: dir)
+        _out, err, status = capture_stub(env, binary, *args, chdir: dir)
 
         assert_equal 127, status.exitstatus, err
         assert_includes err, "#{env_name} must be an absolute path"
@@ -287,11 +319,11 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "gh-skipped.log")
       }
 
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+      _out, err, status = capture_stub(env, "gh", "repo", "view", "owner/repo")
 
       assert_equal 127, status.exitstatus, err
       assert_includes err, "hive-babysitter dry-run: cannot exec real gh at #{missing_gh.inspect}:"
-      refute_includes err, "hive-babysitter-stub-gh:"
+      refute_includes err, "stubs/gh.rb:"
     end
   end
 
@@ -392,8 +424,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       File.symlink(target, link)
       env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => link }
 
-      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "through-link")
-      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+      _out, git_err, git_status = capture_stub(env, "git", "commit", "-m", "through-link")
+      _out, gh_err, gh_status = capture_stub(env, "gh", "pr", "comment", "42", "--body", "hi")
 
       assert git_status.success?, git_err
       assert gh_status.success?, gh_err
@@ -427,8 +459,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       log_path = File.join(dir, "skipped.log")
       env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
 
-      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "line\nbreak")
-      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "line\nbreak")
+      _out, git_err, git_status = capture_stub(env, "git", "commit", "-m", "line\nbreak")
+      _out, gh_err, gh_status = capture_stub(env, "gh", "pr", "comment", "42", "--body", "line\nbreak")
 
       assert git_status.success?, git_err
       assert gh_status.success?, gh_err
@@ -449,7 +481,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
       invalid_arg = "bad\xFF\nline".b
 
-      _out, err, status = Open3.capture3(env, stub_path("git"), invalid_arg)
+      _out, err, status = capture_stub(env, "git", invalid_arg)
 
       assert status.success?, err
       expected = "git bad\xFF\\x0Aline skipped".b
@@ -466,7 +498,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
       invalid_url = "https://evil.example.com/bad\xFF".b
 
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", invalid_url)
+      _out, err, status = capture_stub(env, "gh", "api", invalid_url)
 
       assert status.success?, err
       expected = "gh api https://evil.example.com/bad\xFF skipped".b
@@ -905,7 +937,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "HOME" => File.join(dir, "evil-home")
       }
 
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+      _out, err, status = capture_stub(env, "gh", "repo", "view", "owner/repo")
 
       assert status.success?, err
       recorded = File.read(File.join(dir, "env.log")).lines.map(&:chomp).to_h do |line|
@@ -949,7 +981,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GITHUB_ENTERPRISE_TOKEN" => "github-enterprise-secret"
       }
 
-      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", "rate_limit")
+      _out, err, status = capture_stub(env, "gh", "api", "rate_limit")
 
       assert status.success?, err
       assert_equal env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n", File.read(File.join(dir, "env.log"))
@@ -1062,9 +1094,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       ].each do |cache_args|
         FileUtils.rm_rf(cache_home)
 
-        _out, err, status = Open3.capture3(
+        _out, err, status = capture_stub(
           env,
-          stub_path("gh"),
+          "gh",
           "api",
           "--method",
           "GET",
@@ -1087,7 +1119,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GIT_TRACE" => trace_path
       }
 
-      out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
+      out, err, status = capture_stub(env, "git", "-C", dir, "status", "--short")
 
       assert status.success?, err
       assert_empty out
@@ -1109,7 +1141,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "PAGER" => "touch pager-pwned"
       }
 
-      _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
+      _out, err, status = capture_stub(env, "git", "-C", dir, "status", "--short")
 
       assert status.success?, err
       assert_equal "GIT_OPTIONAL_LOCKS=0\nGIT_PAGER=<unset>\nPAGER=<unset>\n", File.read(File.join(dir, "env.log"))
@@ -1149,7 +1181,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       run!("git", "-C", dir, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
 
       env = real_git_env(dir).merge("GIT_EXEC_PATH" => helper_dir)
-      _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "remote", "show", "origin")
+      _out, err, status = capture_stub(env, "git", "-C", dir, "remote", "show", "origin")
 
       assert status.success?, err
       assert_includes err, "[dry-run] git -C #{dir} remote show origin skipped"
@@ -1187,12 +1219,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
         [ "HOME", base_env.merge("HOME" => home, "XDG_CONFIG_HOME" => empty_xdg), home_extdiff, home_pwn ],
         [ "XDG_CONFIG_HOME", base_env.merge("HOME" => File.join(dir, "empty-home"), "XDG_CONFIG_HOME" => xdg), xdg_extdiff, xdg_pwn ]
       ].each do |source, env, configured_extdiff, pwn_path|
-        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "config", "--list")
+        out, err, status = capture_stub(env, "git", "-C", dir, "config", "--list")
 
         assert status.success?, err
         refute_includes out, configured_extdiff, "#{source} git config reached real git"
 
-        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "diff")
+        out, err, status = capture_stub(env, "git", "-C", dir, "diff")
 
         assert status.success?, err
         assert_includes out, "README.md"
@@ -1208,7 +1240,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       run!("git", "-C", dir, "config", "diff.external", extdiff)
       File.write(File.join(dir, "README.md"), "changed\n")
 
-      out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
+      out, err, status = capture_stub(real_git_env(dir), "git", "-C", dir, "diff")
 
       assert status.success?, err
       assert_includes out, "README.md"
@@ -1229,7 +1261,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       run!("git", "-C", dir, "commit", "-m", "attrs", "--quiet")
       File.write(File.join(dir, "README.md"), "changed\n")
 
-      out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
+      out, err, status = capture_stub(real_git_env(dir), "git", "-C", dir, "diff")
 
       assert status.success?, err
       assert_includes out, "README.md"
@@ -1241,7 +1273,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       fsmonitor = executable_touch_binary(dir, "fsmonitor", pwn_path)
       run!("git", "-C", dir, "config", "core.fsmonitor", fsmonitor)
 
-      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "status", "--short")
+      _out, err, status = capture_stub(real_git_env(dir), "git", "-C", dir, "status", "--short")
 
       assert status.success?, err
       refute_path_exists pwn_path
@@ -1263,7 +1295,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       cases.each do |args|
         FileUtils.rm_f(marker_path)
 
-        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+        _out, err, status = capture_stub(env, "git", "-C", dir, *args)
 
         assert status.success?, err
         assert_includes err, "[dry-run] git -C #{dir} #{args.join(' ')} skipped"
@@ -1274,9 +1306,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def test_git_stub_disables_configured_signature_verification_before_passthrough
     with_tmp_signed_git_repo(log_show_signature: true) do |dir, marker_path|
-      out, err, status = Open3.capture3(
+      out, err, status = capture_stub(
         real_git_env(dir),
-        stub_path("git"),
+        "git",
         "-C",
         dir,
         "log",
@@ -1307,7 +1339,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       ].each do |args|
         FileUtils.rm_f(marker_path)
 
-        _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, *args)
+        _out, err, status = capture_stub(real_git_env(dir), "git", "-C", dir, *args)
 
         assert status.success?, err
         refute_path_exists marker_path,
@@ -1343,7 +1375,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       ].each do |args|
         FileUtils.rm_f(poison_marker)
 
-        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+        _out, err, status = capture_stub(env, "git", "-C", dir, *args)
 
         assert status.success?, err
         refute_path_exists poison_marker,
@@ -1359,7 +1391,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       run!("git", "-C", dir, "config", "protocol.ext.allow", "always")
       run!("git", "-C", dir, "config", "remote.origin.url", "ext::#{helper}")
 
-      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "remote", "show", "origin")
+      _out, err, status = capture_stub(real_git_env(dir), "git", "-C", dir, "remote", "show", "origin")
 
       assert status.success?, err
       assert_includes err, "[dry-run] git -C #{dir} remote show origin skipped"
@@ -1372,7 +1404,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   STUB_HANG_TIMEOUT_SEC = 10
 
   def capture_stub_with_timeout(env, binary, *args)
-    Open3.popen3(env, stub_path(binary), *args) do |stdin, stdout, stderr, wait_thread|
+    Open3.popen3(env, *stub_command(binary), *args) do |stdin, stdout, stderr, wait_thread|
       stdin.close
       out_reader = Thread.new { stdout.read }
       err_reader = Thread.new { stderr.read }
@@ -1388,7 +1420,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def assert_stubbed(env, binary, *args)
-    _out, err, status = Open3.capture3(env, stub_path(binary), *args)
+    _out, err, status = capture_stub(env, binary, *args)
     assert status.success?, err
     assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
     # Load-bearing: prove the command did not also fall through to the real binary. A
@@ -1402,7 +1434,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def assert_passes(env, binary, *args)
-    _out, err, status = Open3.capture3(env, stub_path(binary), *args)
+    _out, err, status = capture_stub(env, binary, *args)
     assert status.success?, err
     # Load-bearing, mirroring assert_stubbed's refute: exit 0 alone does not prove passthrough
     # — a "skipped-but-exit-0" regression would also exit 0. Confirm the invocation actually
@@ -1463,7 +1495,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     output = +""
     status = nil
 
-    PTY.spawn(env, stub_path(binary), *args) do |reader, writer, pid|
+    PTY.spawn(env, *stub_command(binary), *args) do |reader, writer, pid|
       writer.close
       output = Timeout.timeout(STUB_HANG_TIMEOUT_SEC) do
         buffer = +""
@@ -1497,7 +1529,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path
   end
 
+  def capture_stub(env, binary, *args, **opts)
+    Open3.capture3(env, *stub_command(binary), *args, **opts)
+  end
+
+  def stub_command(binary)
+    [ RbConfig.ruby, stub_path(binary) ]
+  end
+
   def stub_path(binary)
+    File.expand_path("../../../lib/hive/babysitter/stubs/#{binary}.rb", __dir__)
+  end
+
+  def entrypoint_path(binary)
     File.expand_path("../../../bin/hive-babysitter-stub-#{binary}", __dir__)
   end
 

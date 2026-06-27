@@ -548,14 +548,21 @@ module Hive
     # The agent backends `hive setup` can persist globally, in canonical
     # listing/storage order. Every method that filters or reorders a
     # selection iterates this list so the on-disk order is stable
-    # regardless of the order the operator typed. Strings are frozen
-    # (this file has no `frozen_string_literal` magic comment) so callers
-    # that receive these names back from `normalize_global_agents` cannot
+    # regardless of the order the operator typed. The names are frozen so
+    # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
     GLOBAL_AGENT_BACKENDS = %w[claude codex pi].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
+    # Boot-time parity guard, the analogue of Init::Prompts' CHOICES/MODES
+    # check (init/prompts.rb): a recommended default that isn't also a
+    # known backend would let `default_global_agents` emit a value that
+    # `normalize_global_agents`/`write_global_agents!` then reject. Enforce
+    # the subset here rather than letting it surface only as a runtime
+    # ConfigError. Single-line modifier (like the sibling guard) so the
+    # never-taken raise stays on the evaluated line for the coverage gate.
+    raise "DEFAULT_GLOBAL_AGENTS must be a subset of GLOBAL_AGENT_BACKENDS: #{(DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).inspect} not in #{GLOBAL_AGENT_BACKENDS.inspect}" unless (DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).empty?
     # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
     # Kept as an explicit policy literal rather than derived via
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
@@ -597,7 +604,12 @@ module Hive
     # here rather than merely asserted in this comment.
     def default_global_agents
       registered = registered_agent_names
-      selected = DEFAULT_GLOBAL_AGENTS.select { |name| registered.include?(name) }
+      # Derive order from the canonical GLOBAL_AGENT_BACKENDS rather than
+      # iterating the DEFAULT_* literal, so reordering the default literal
+      # can't make this producer disagree with `normalize_global_agents`,
+      # and the result is guaranteed ⊆ GLOBAL_AGENT_BACKENDS (a value
+      # normalize/write would accept). Left-ordered `&` dedups too.
+      selected = GLOBAL_AGENT_BACKENDS & DEFAULT_GLOBAL_AGENTS & registered
       if selected.empty?
         raise ConfigError,
               "no default agent backend is registered (expected one of #{DEFAULT_GLOBAL_AGENTS.inspect})"
@@ -882,11 +894,13 @@ module Hive
 
       if agents.empty?
         raise ConfigError,
-              "agents.selected in #{source} must list at least one backend"
+              "agents.selected in #{source} must list at least one backend " \
+              "(omit or null out the `selected:` key to fall back to the " \
+              "defaults #{DEFAULT_GLOBAL_AGENTS.inspect})"
       end
 
       registered = registered_agent_names
-      allowed = GLOBAL_AGENT_BACKENDS.select { |name| registered.include?(name) }
+      allowed = GLOBAL_AGENT_BACKENDS & registered
       selected = []
       agents.each do |agent|
         unless agent.is_a?(String) && !agent.strip.empty?
@@ -894,20 +908,35 @@ module Hive
                 "agents.selected in #{source} must contain non-empty strings"
         end
 
-        name = agent.strip
+        # Downcase before the allowed-list check so a hand-edited
+        # `selected: [Claude]` — the exact capitalization the setup prompt
+        # displays — loads, matching the prompt's case-insensitive name
+        # resolution (BackendPrompt#resolve_token).
+        name = agent.strip.downcase
         unless allowed.include?(name)
+          if GLOBAL_AGENT_BACKENDS.include?(name)
+            # Valid backend name, just not installed/registered on THIS
+            # machine — the synced-dotfiles case. Distinct from a typo so
+            # the operator knows to install it / re-run `hive setup`, not
+            # to hunt for a misspelling.
+            raise ConfigError,
+                  "agents.selected in #{source} names backend #{name.inspect}, which is valid but " \
+                  "not installed or registered on this machine; install it or re-run `hive setup` " \
+                  "(registered here: #{allowed.inspect})"
+          end
+
           raise ConfigError,
                 "agents.selected in #{source} contains unknown backend #{name.inspect}; " \
-                "expected one of #{allowed.inspect}"
+                "expected one of #{GLOBAL_AGENT_BACKENDS.inspect}"
         end
 
         selected << name
       end
 
-      # Reorder to canonical order and dedupe in a single `select` over the
-      # canonical constant (iterating the unique constant means a repeated
-      # name collapses to a single entry).
-      GLOBAL_AGENT_BACKENDS.select { |name| selected.include?(name) }.freeze
+      # Reorder to canonical order and dedupe in a single intersection over
+      # the canonical constant (iterating the unique constant means a
+      # repeated name collapses to a single entry).
+      (GLOBAL_AGENT_BACKENDS & selected).freeze
     end
 
     # Shape gate shared by the loader and `prune`'s predicate so the
@@ -937,7 +966,11 @@ module Hive
       YAML.safe_load(File.read(path)) || {}
     rescue Psych::Exception => e
       raise ConfigError, "global config at #{path} is not valid YAML: #{e.message}"
-    rescue Errno::EACCES, Errno::EISDIR => e
+    rescue Errno::EACCES, Errno::EISDIR, Errno::ENOENT => e
+      # ENOENT closes the narrow TOCTOU on every `File.exist?(path) ?
+      # load_global_config(path) : {}` reader: a config deleted between the
+      # existence check and the read here surfaces as exit-78 ConfigError
+      # instead of an exit-70 InternalError.
       raise ConfigError, "global config at #{path} is not readable: #{e.message}"
     end
 

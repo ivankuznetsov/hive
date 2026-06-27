@@ -1,0 +1,95 @@
+require "hive/agent_profiles"
+require "hive/config"
+
+module Hive
+  module Commands
+    class Setup
+      class BackendPrompt
+        class Aborted < StandardError; end
+
+        BACKEND_ORDER = Hive::Config::GLOBAL_AGENT_BACKENDS
+        DEFAULT_BACKENDS = Hive::Config::DEFAULT_GLOBAL_AGENTS
+
+        def initialize(input: $stdin, output: $stderr, summary_io: $stdout, registered_agents: nil)
+          @input = input
+          @output = output
+          @summary_io = summary_io
+          registered = (registered_agents || Hive::AgentProfiles.registered_names.map(&:to_s))
+          @backends = BACKEND_ORDER.select { |name| registered.include?(name) }
+
+          raise ArgumentError, "registered_agents must include at least one setup backend" if @backends.empty?
+        end
+
+        def collect
+          return non_interactive_defaults unless interactive?
+
+          @output.puts "Select the agent backends Hive should set up globally."
+          @output.puts "(Press Enter for Claude + Codex. Add Pi only if you use it.)"
+          @output.puts ""
+          @backends.each_with_index do |name, index|
+            marker = default_backends.include?(name) ? " [default]" : ""
+            @output.puts "  #{index + 1}) #{name}#{marker}"
+          end
+
+          loop do
+            @output.print "Backends [#{default_backends.join(', ')}]: "
+            @output.flush
+            answer = read_line
+            selection = answer.empty? ? default_backends : resolve_selection(answer)
+            return selection if selection
+
+            @output.puts "  unknown backend selection #{answer.inspect}; use names or numbers from the list"
+          end
+        end
+
+        def interactive?
+          @input.respond_to?(:tty?) && @input.tty?
+        end
+
+        private
+
+        def default_backends
+          DEFAULT_BACKENDS.select { |name| @backends.include?(name) }
+        end
+
+        def non_interactive_defaults
+          selected = default_backends
+          @summary_io.puts "hive setup: using default backends — #{selected.join(', ')}"
+          selected
+        end
+
+        def resolve_selection(answer)
+          selected = []
+          answer.split(",").map(&:strip).reject(&:empty?).each do |token|
+            name = resolve_token(token)
+            return nil unless name
+
+            selected << name
+          end
+
+          selected = BACKEND_ORDER.select { |name| selected.include?(name) }
+          selected.empty? ? nil : selected
+        end
+
+        def resolve_token(token)
+          match = @backends.find { |name| name.casecmp(token).zero? }
+          return match if match
+
+          if token.match?(/\A\d+\z/)
+            index = token.to_i
+            return @backends[index - 1] if index >= 1 && index <= @backends.size
+          end
+
+          nil
+        end
+
+        def read_line
+          line = @input.gets
+          raise Aborted, "input stream closed (EOF)" if line.nil?
+
+          line.chomp.strip
+        end
+      end
+    end
+  end
+end

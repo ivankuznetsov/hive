@@ -1,0 +1,74 @@
+require "test_helper"
+require "hive/commands/setup/backend_prompt"
+
+class SetupBackendPromptTest < Minitest::Test
+  BACKENDS = %w[claude codex pi].freeze
+
+  def make_prompt(input_text, tty: true, registered_agents: BACKENDS)
+    input = StringIO.new(input_text)
+    input.define_singleton_method(:tty?) { true } if tty
+    output = StringIO.new
+    summary_io = StringIO.new
+    prompt = Hive::Commands::Setup::BackendPrompt.new(
+      input: input,
+      output: output,
+      summary_io: summary_io,
+      registered_agents: registered_agents
+    )
+    [ prompt, output, summary_io ]
+  end
+
+  def test_non_tty_uses_claude_codex_defaults
+    prompt, output, summary_io = make_prompt("", tty: false)
+
+    assert_equal %w[claude codex], prompt.collect
+    assert_equal "", output.string
+    assert_match(/using default backends/, summary_io.string)
+    assert_match(/claude, codex/, summary_io.string)
+    refute_match(/pi/, summary_io.string)
+  end
+
+  def test_interactive_blank_uses_default_selection
+    prompt, output = make_prompt("\n")
+
+    assert_equal %w[claude codex], prompt.collect
+    assert_match(/1\) claude \[default\]/, output.string)
+    assert_match(/2\) codex \[default\]/, output.string)
+    assert_match(/3\) pi/, output.string)
+  end
+
+  def test_interactive_accepts_numbers_and_persists_backend_order
+    prompt, = make_prompt("3,1\n")
+
+    assert_equal %w[claude pi], prompt.collect
+  end
+
+  def test_interactive_accepts_names_case_insensitively_and_dedupes
+    prompt, = make_prompt("PI,claude,pi\n")
+
+    assert_equal %w[claude pi], prompt.collect
+  end
+
+  def test_unknown_token_reprompts
+    prompt, output = make_prompt("ghost\n1,3\n")
+
+    assert_equal %w[claude pi], prompt.collect
+    assert_match(/unknown backend selection "ghost"/, output.string)
+  end
+
+  def test_eof_raises_aborted
+    prompt, = make_prompt("", tty: true)
+
+    err = assert_raises(Hive::Commands::Setup::BackendPrompt::Aborted) { prompt.collect }
+    assert_match(/EOF/, err.message)
+  end
+
+  def test_registered_backends_filter_prompt_choices
+    prompt, output, summary_io = make_prompt("\n", tty: false, registered_agents: %w[claude])
+
+    assert_equal %w[claude], prompt.collect
+    assert_equal "", output.string
+    assert_match(/claude/, summary_io.string)
+    refute_match(/codex/, summary_io.string)
+  end
+end

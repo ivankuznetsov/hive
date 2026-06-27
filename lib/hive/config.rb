@@ -545,6 +545,8 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi].freeze
+    DEFAULT_GLOBAL_AGENTS = %w[claude codex].freeze
     # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
     # Kept as an explicit policy literal rather than derived via
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
@@ -562,6 +564,11 @@ module Hive
 
     def global_config_path
       File.join(hive_home, "config.yml")
+    end
+
+    def default_global_agents
+      registered = AgentProfiles.registered_names.map(&:to_s)
+      DEFAULT_GLOBAL_AGENTS.select { |name| registered.include?(name) }.freeze
     end
 
     def hive_state_dir(project_root, hive_state_name = ".hive-state")
@@ -771,6 +778,66 @@ module Hive
           "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state")
         }
       end
+    end
+
+    def load_global_agents
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      agents = data["agents"]
+      return default_global_agents if agents.nil?
+
+      unless agents.is_a?(Hash)
+        raise ConfigError, "agents in #{describe_source(path)} must be a Hash; got #{agents.class}"
+      end
+
+      selected = agents["selected"]
+      return default_global_agents if selected.nil?
+
+      normalize_global_agents(selected, source_path: path)
+    end
+
+    def write_global_agents!(agents)
+      normalized = normalize_global_agents(agents, source_path: global_config_path)
+      update_global_config! do |data|
+        existing = data["agents"]
+        unless existing.nil? || existing.is_a?(Hash)
+          raise ConfigError, "agents in #{describe_source(global_config_path)} must be a Hash; got #{existing.class}"
+        end
+
+        data["agents"] = (existing || {}).merge("selected" => normalized)
+        normalized
+      end
+    end
+
+    def normalize_global_agents(agents, source_path:)
+      unless agents.is_a?(Array)
+        raise ConfigError,
+              "agents.selected in #{describe_source(source_path)} must be an Array of agent names; got #{agents.class}"
+      end
+
+      allowed = GLOBAL_AGENT_BACKENDS & AgentProfiles.registered_names.map(&:to_s)
+      selected = {}
+      agents.each do |agent|
+        unless agent.is_a?(String) && !agent.strip.empty?
+          raise ConfigError,
+                "agents.selected in #{describe_source(source_path)} must contain non-empty strings"
+        end
+
+        name = agent.strip
+        unless allowed.include?(name)
+          raise ConfigError,
+                "agents.selected in #{describe_source(source_path)} contains unknown backend #{name.inspect}; " \
+                "expected one of #{allowed.inspect}"
+        end
+
+        selected[name] = true
+      end
+
+      GLOBAL_AGENT_BACKENDS.select { |name| selected[name] }
     end
 
     # Shape gate shared by the loader and `prune`'s predicate so the

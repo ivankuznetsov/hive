@@ -153,6 +153,48 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_bot_json_usage_errors_emit_bot_envelopes
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "bot", "status", "--force", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-bot-status", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "wrong_subcommand_flag", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/--force only applies/, payload["message"])
+      assert_match(/^hive: hive bot status: --force only applies/, err.lines.last)
+
+      out, err, status = run_hive(home, "bot", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-bot-status", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "missing_subcommand", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/missing SUBCOMMAND/, payload["message"])
+      assert_match(/^hive: hive bot: missing SUBCOMMAND/, err.lines.last)
+
+      out, err, status = run_hive(home, "bot", "unknown", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-bot-status", payload["schema"]
+      assert_equal false, payload["ok"]
+      assert_equal "unknown_subcommand", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/unknown subcommand "unknown"/, payload["message"])
+      assert_match(/^hive: hive bot: unknown subcommand "unknown"/, err.lines.last)
+    end
+  end
+
   def test_invalid_byte_json_arg_uses_command_usage_envelope
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "run", "--json", "bad\xFF".b)

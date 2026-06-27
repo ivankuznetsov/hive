@@ -18,6 +18,7 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
 require "hive/daemon/digest_scheduler"
+require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/pr_merge_watcher"
 require "hive/lock"
@@ -56,7 +57,8 @@ module Hive
       # @param patrol_scheduler [PatrolScheduler, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
-                     merge_watcher: nil, patrol_scheduler: nil, digest_scheduler: nil, dry_run: false,
+                     merge_watcher: nil, patrol_scheduler: nil, digest_scheduler: nil,
+                     answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
         @config = config
@@ -67,6 +69,7 @@ module Hive
         @merge_watcher = merge_watcher
         @patrol_scheduler = patrol_scheduler
         @digest_scheduler = digest_scheduler
+        @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -219,6 +222,16 @@ module Hive
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "digest_scheduler.tick raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
+        begin
+          @answer_digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
+            dispatch_digest(digest_dispatch, now: now)
+          end
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "answer_digest_scheduler.tick raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -599,7 +612,7 @@ module Hive
           # project would emit a misleading :project_dropped event and leave
           # a permanent phantom entry the digest gate never consults.
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
-             entry.stage != Hive::Daemon::DigestScheduler::DIGEST_STAGE
+             !global_digest_stage?(entry.stage)
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
           end
@@ -615,6 +628,15 @@ module Hive
             rescue StandardError => e
               @logger.event(:fatal,
                             message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
+                            keeping_previous: true)
+            end
+          end
+          if entry.stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+            begin
+              @answer_digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+            rescue StandardError => e
+              @logger.event(:fatal,
+                            message: "answer_digest_scheduler.complete raised: #{e.class}: #{e.message}",
                             keeping_previous: true)
             end
           end
@@ -740,6 +762,15 @@ module Hive
             rescue StandardError => e
               @logger.event(:fatal,
                             message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
+                            keeping_previous: true)
+            end
+          end
+          if entry.stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+            begin
+              @answer_digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+            rescue StandardError => e
+              @logger.event(:fatal,
+                            message: "answer_digest_scheduler.complete raised: #{e.class}: #{e.message}",
                             keeping_previous: true)
             end
           end
@@ -1133,6 +1164,9 @@ module Hive
       def dispatch_digest(digest_dispatch, now:)
         date = digest_dispatch[:slug]
         project = digest_dispatch[:project]
+        stage = digest_dispatch[:stage]
+        action = global_digest_action(stage)
+        scheduler = global_digest_scheduler(stage)
 
         # Gate the global digest through the controller so it (a) never
         # holds a task slot or pushes the daemon past max_concurrent_runs,
@@ -1144,9 +1178,9 @@ module Hive
         gate = digest_dispatch_gate(project: project, date: date, now: now)
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: date,
-                                  stage: digest_dispatch[:stage],
-                                  action: "digest", reason: gate.to_s)
-          @digest_scheduler&.cancel(date: date)
+                                  stage: stage,
+                                  action: action, reason: gate.to_s)
+          scheduler&.cancel(date: date)
           return
         end
 
@@ -1154,12 +1188,12 @@ module Hive
           digest_dispatch[:command],
           project: project,
           slug: date,
-          stage: digest_dispatch[:stage],
+          stage: stage,
           state_file_mtime: digest_dispatch[:state_file_mtime],
           state_file_path: digest_dispatch[:state_file_path],
           hive_state_path: digest_dispatch[:hive_state_path],
           now: now,
-          trigger: "digest",
+          trigger: action,
           kind: :digest
         )
       rescue StandardError => e
@@ -1169,9 +1203,9 @@ module Hive
         # dispatch, double-incrementing the backoff count. Only complete when
         # no child is in flight for this date (spawn failed before recording).
         if date && !@controller.running_task?(project: project, slug: date)
-          @digest_scheduler&.complete(date: date, exit_code: 1, now: now)
+          scheduler&.complete(date: date, exit_code: 1, now: now)
         end
-        @logger.event(:fatal, message: "digest dispatch error: #{e.class}: #{e.message}",
+        @logger.event(:fatal, message: "#{action} dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)
       end
 
@@ -1179,6 +1213,24 @@ module Hive
         return :in_flight if @controller.running_task?(project: project, slug: date)
 
         @controller.can_dispatch_digest?(now: now)
+      end
+
+      def global_digest_stage?(stage)
+        stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE ||
+          stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+      end
+
+      def global_digest_scheduler(stage)
+        case stage
+        when Hive::Daemon::DigestScheduler::DIGEST_STAGE
+          @digest_scheduler
+        when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+          @answer_digest_scheduler
+        end
+      end
+
+      def global_digest_action(stage)
+        stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE ? "answer_digest" : "digest"
       end
 
       # Consume the file-backed dispatch-request queue (plan
@@ -1722,7 +1774,13 @@ module Hive
         @daemon_cfg = Hive::Config.load_global_daemon
         @update_cfg = Hive::Config.load_global_update
         @digest_cfg = Hive::Config.load_global_digest_block
-        @config = { "daemon" => @daemon_cfg, "update" => @update_cfg, "digest" => @digest_cfg }
+        @answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        @config = {
+          "daemon" => @daemon_cfg,
+          "update" => @update_cfg,
+          "digest" => @digest_cfg,
+          "answer_digest" => @answer_digest_cfg
+        }
         @update_check_enabled = @update_cfg.fetch("check", true)
         # Reconfigure the digest scheduler in place so enabling the digest
         # (or retuning max_catchup_days) via config + SIGHUP takes effect
@@ -1732,6 +1790,12 @@ module Hive
           enabled: @digest_cfg.fetch("enabled", false),
           max_catchup_days: @digest_cfg.fetch(
             "max_catchup_days", Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+          )
+        )
+        @answer_digest_scheduler&.reconfigure(
+          enabled: @answer_digest_cfg.fetch("enabled", false),
+          hour: @answer_digest_cfg.fetch(
+            "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
           )
         )
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)

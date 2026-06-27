@@ -230,6 +230,34 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     assert_match(/hive status unavailable: status failed/, error.message)
   end
 
+  def test_default_config_loader_and_now_are_used
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "registered_projects: []\n")
+      output = StringIO.new
+      cmd = Hive::Commands::AnswerDigest.new(
+        dry_run: true,
+        output: output,
+        status_watcher: StubStatusWatcher.new(result: FetchResult.new(ok: true, rows: [])),
+        env_loader: StubEnvLoader.new(calls: [])
+      )
+
+      result = cmd.call
+
+      assert_equal false, result.sent
+      assert_kind_of Date, result.date
+    end
+  end
+
+  def test_daemon_enabled_resolver_degrades_on_project_config_error
+    cmd, = command(rows: [])
+    resolver = cmd.send(:daemon_enabled_resolver)
+    broken = row(slug: "plan-260625-abcd", project_path: "/tmp/broken")
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_equal false, resolver.call(broken)
+    end
+  end
+
   def test_malformed_project_config_does_not_suppress_plan_pause
     output = StringIO.new
     with_tmp_dir do |project_path|

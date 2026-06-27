@@ -1670,6 +1670,28 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_waiting_row_project_path_falls_back_to_registered_project_path
+    project_only_row = Struct.new(:project).new("hive")
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/fallback" } }) do
+      assert_equal "/tmp/fallback", @supervisor.send(:waiting_row_project_path, project_only_row)
+    end
+  end
+
+  def test_waiting_daemon_enabled_resolver_logs_project_config_errors
+    bad_row = row(project: "hive", project_path: "/tmp/bad-config")
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_equal false, @supervisor.send(:waiting_daemon_enabled_resolver).call(bad_row)
+    end
+
+    event = @logger.events.find { |entry| entry[:name] == :poll_failure }
+    refute_nil event
+    assert_equal "waiting_daemon_check", event[:payload][:source]
+    assert_equal "hive", event[:payload][:project]
+    assert_equal "Hive::ConfigError", event[:payload][:error_class]
+  end
+
   def test_next_step_hint_maps_findings_reject_primary
     # Mirror of the emoji parity above for next_step_hint: `:findings_reject` is
     # never the primary today (review_waiting makes findings_accept primary), so

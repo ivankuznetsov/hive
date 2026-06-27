@@ -368,6 +368,24 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     end
   end
 
+  def test_needs_input_raises_for_unmapped_resolution_kind
+    action = Hive::Bot::RowActions.action(:details, "details:hive:slug-260514-abcd:3-plan", primary: true)
+    unexpected_resolution = Struct.new(:suppress, :actions, :kind).new(false, [ action ], :mystery)
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_row| unexpected_resolution }
+
+    error = begin
+      assert_raises(ArgumentError) do
+        Hive::Bot::NotificationBuilders.build(row(action: "needs_input", marker: "waiting"))
+      end
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_match(/unexpected resolution kind :mystery/, error.message)
+  end
+
   def test_details_reply_for_default_needs_input_has_summary_and_laptop_hint
     text = Hive::Bot::NotificationBuilders.details_reply(
       row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" },

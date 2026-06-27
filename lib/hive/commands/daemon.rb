@@ -14,6 +14,7 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/digest_scheduler"
+require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
 require "hive/invoked_binary"
@@ -151,7 +152,13 @@ module Hive
         # path in Dispatcher#reload_config!, which also calls the config
         # method straight) so the two stay symmetric.
         digest_cfg = Hive::Config.load_global_digest_block
-        config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update, "digest" => digest_cfg }
+        answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        config = {
+          "daemon" => daemon_cfg,
+          "update" => Hive::Config.load_global_update,
+          "digest" => digest_cfg,
+          "answer_digest" => answer_digest_cfg
+        }
 
         # Build the logger BEFORE the controller so both the controller and
         # the persisted-baselines store get wired to it. Otherwise a torn
@@ -196,12 +203,20 @@ module Hive
           ),
           logger: logger
         )
+        answer_digest_scheduler = Hive::Daemon::AnswerDigestScheduler.new(
+          enabled: answer_digest_cfg.fetch("enabled", false),
+          hour: answer_digest_cfg.fetch(
+            "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
+          ),
+          logger: logger
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
           merge_watcher: merge_watcher, patrol_scheduler: patrol_scheduler,
-          digest_scheduler: digest_scheduler, dry_run: @dry_run,
+          digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
+          dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new
         )
 

@@ -74,6 +74,8 @@ module Hive
         digest_catchup_skipped
         digest_failure_backoff
         digest_state_unreadable
+        answer_digest_failure_backoff
+        answer_digest_state_unreadable
         fatal
       ].freeze
 

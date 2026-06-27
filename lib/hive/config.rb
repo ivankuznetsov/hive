@@ -447,6 +447,13 @@ module Hive
         "agent" => nil,
         "max_catchup_days" => 7
       },
+      # Daily pending-answer digest. The daemon schedules one global
+      # `hive answer-digest` subprocess at/after the configured local hour;
+      # the subprocess is silent when no task is waiting on human input.
+      "answer_digest" => {
+        "enabled" => false,
+        "hour" => 9
+      },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
       # from the global config via load_global_bot. The token lives
@@ -1148,6 +1155,24 @@ module Hive
       merged
     end
 
+    def load_global_answer_digest_block
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["answer_digest"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "answer_digest in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["answer_digest"]), override)
+      validate_answer_digest!({ "answer_digest" => merged }, path)
+      merged
+    end
+
     # True when the global Telegram bot is enabled and has at least one
     # allowlisted chat to deliver to — the signal that "the user has Telegram
     # set up", used to default the daily digest on. Reads the raw config so
@@ -1486,6 +1511,7 @@ module Hive
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_digest!(cfg, source_path)
+      validate_answer_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1515,6 +1541,7 @@ module Hive
       babysitter
       patrol
       digest
+      answer_digest
       bot
       rebase
     ].freeze
@@ -2468,6 +2495,26 @@ module Hive
               "#{group}.digest in #{describe_source(source_path)} must be a positive number; " \
               "got #{value.inspect} (#{value.class})"
       end
+    end
+
+    def validate_answer_digest!(cfg, source_path)
+      answer_digest = cfg["answer_digest"]
+      return if answer_digest.nil?
+
+      enabled = answer_digest["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "answer_digest.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      hour = answer_digest["hour"]
+      return if hour.nil?
+      return if hour.is_a?(Integer) && hour.between?(0, 23)
+
+      raise ConfigError,
+            "answer_digest.hour in #{describe_source(source_path)} must be an integer between 0 and 23; " \
+            "got #{hour.inspect} (#{hour.class})"
     end
 
     BOT_NUMERIC_BOUNDS = [

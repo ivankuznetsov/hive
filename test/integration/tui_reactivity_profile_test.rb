@@ -10,6 +10,8 @@ class TuiReactivityProfileTest < Minitest::Test
   ACTIVE_PER_PROJECT = 8
 
   def test_scale_fixture_is_parseable_and_profiled
+    skip "set HIVE_TUI_PROFILE=1 to run the diagnostic profile" unless ENV["HIVE_TUI_PROFILE"] == "1"
+
     with_tmp_global_config do |home|
       projects = HiveTuiScaleFixture.build(
         root: File.join(home, "projects"),

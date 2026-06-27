@@ -49,6 +49,43 @@ class SetupBackendPromptTest < Minitest::Test
     assert_equal %w[claude pi], prompt.collect
   end
 
+  def test_interactive_accepts_mixed_names_and_numbers
+    prompt, = make_prompt("claude,3\n")
+
+    assert_equal %w[claude pi], prompt.collect
+  end
+
+  def test_zero_index_reprompts
+    # `index >= 1` stops "0" from selecting @backends[-1] (= pi); exercise
+    # the false branch of that guard so dropping it would fail here.
+    prompt, output = make_prompt("0\nclaude\n")
+
+    assert_equal %w[claude], prompt.collect
+    assert_match(/unknown backend selection "0"/, output.string)
+  end
+
+  def test_out_of_range_index_reprompts
+    # `index <= @backends.size` rejects a number past the listing.
+    prompt, output = make_prompt("9\nclaude\n")
+
+    assert_equal %w[claude], prompt.collect
+    assert_match(/unknown backend selection "9"/, output.string)
+  end
+
+  def test_whitespace_only_answer_uses_default_selection
+    # read_line's .strip turns a spaces-only line into "", so #collect takes
+    # the blank-Enter default path instead of reprompting.
+    prompt, = make_prompt("   \n")
+
+    assert_equal %w[claude codex], prompt.collect
+  end
+
+  def test_collect_returns_frozen_selection
+    prompt, = make_prompt("claude,3\n")
+
+    assert prompt.collect.frozen?, "BackendPrompt#collect must return a frozen array"
+  end
+
   def test_unknown_token_reprompts
     prompt, output = make_prompt("ghost\n1,3\n")
 

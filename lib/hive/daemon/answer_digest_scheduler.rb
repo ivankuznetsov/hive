@@ -48,17 +48,39 @@ module Hive
         local_date = Hive::Digest::Window.parse_date(date)
         @pending.delete(local_date.iso8601)
 
+        # ChildSupervisor reports a nil exit status for a signalled child
+        # (killed by SIGTERM/SIGKILL on shutdown or timeout). `nil.to_i` is 0,
+        # so a bare `exit_code.to_i.zero?` would treat a killed digest as a
+        # success and silently advance the cursor past that date. Treat a nil
+        # (signalled / unknown) exit as a failure so the day is retried.
+        # (Rationale carried verbatim from DigestScheduler#complete, the
+        # deliberate mirror.)
         unless exit_code && exit_code.to_i.zero?
           record_failure(now)
           return
         end
 
-        @failure = nil
         state = read_state
         last = parse_date(state["last_fired_date"])
-        return if last && last >= local_date
+        if last && last >= local_date
+          # The cursor already covers this date (a stale/older completion); the
+          # send is durably recorded, so clear any backoff and stop.
+          @failure = nil
+          return
+        end
 
+        # Advance the cursor FIRST and clear the failure backoff only once the
+        # write durably lands. Clearing `@failure` before persisting would let a
+        # write_state fault (ENOSPC/EROFS on the atomic rename) leave the day
+        # owed with NO backoff, so the next tick re-fires and re-sends the same
+        # daily Telegram digest in an unbounded loop. On a write failure we
+        # instead (re-)engage the bounded backoff and re-raise so the dispatcher
+        # logs it; the day stays owed and is retried on the backoff schedule.
         write_state("last_fired_date" => local_date.iso8601, "updated_at" => now.utc.iso8601)
+        @failure = nil
+      rescue StandardError
+        record_failure(now)
+        raise
       end
 
       def cancel(date:)

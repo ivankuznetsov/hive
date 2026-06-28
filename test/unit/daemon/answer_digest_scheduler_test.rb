@@ -212,6 +212,38 @@ class HiveDaemonAnswerDigestSchedulerTest < Minitest::Test
     end
   end
 
+  # A successful send whose cursor write fails (ENOSPC/EROFS on the atomic
+  # rename) must NOT silently advance/clear backoff: the day stays owed AND the
+  # bounded backoff is engaged, so the next eligible tick retries on the
+  # schedule instead of re-firing immediately and re-sending the same digest.
+  def test_complete_write_failure_keeps_day_owed_and_backs_off
+    with_utc do
+      with_tmp_dir do |dir|
+        write_state(dir, "last_fired_date" => "2026-06-13")
+        logger = StubLogger.new
+        scheduler = scheduler(dir, enabled: true, logger: logger)
+        assert_equal "2026-06-14", scheduler.tick(now: AT_9).first.fetch(:slug)
+
+        scheduler.define_singleton_method(:write_state) do |_data|
+          raise Errno::ENOSPC, "no space left on device"
+        end
+
+        assert_raises(Errno::ENOSPC) do
+          scheduler.complete(date: "2026-06-14", exit_code: 0, now: AT_9 + 1)
+        end
+
+        assert_equal "2026-06-13", state(dir).fetch("last_fired_date"),
+                     "a failed cursor write must leave the day owed, not advance it"
+        assert logger.events.any? { |name, _| name == :answer_digest_failure_backoff },
+               "a failed cursor write after a successful send must engage the backoff"
+        assert_empty scheduler.tick(now: AT_9 + 30),
+                     "the backoff must suppress an immediate re-fire of the same digest"
+        assert_equal "2026-06-14", scheduler.tick(now: AT_9 + 61).first.fetch(:slug),
+                     "the owed day re-fires once the backoff elapses"
+      end
+    end
+  end
+
   def test_corrupt_state_emits_unreadable_event
     with_utc do
       with_tmp_dir do |dir|

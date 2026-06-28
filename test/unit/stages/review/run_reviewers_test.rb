@@ -416,8 +416,36 @@ class RunReviewersTest < Minitest::Test
       end
 
       refute enabled, "unreadable source must disable auto-fix (fail closed)"
-      assert_match(/adhoc_task\? could not read/, err)
-      assert_match(/treating as ad-hoc \(auto-fix disabled\)/, err)
+      assert_match(/adhoc fix-gate could not read/, err)
+      assert_match(/failing closed \(auto-fix disabled, source unconfirmable\)/, err)
+    end
+  end
+
+  def test_adhoc_fix_gate_classifies_the_three_source_states
+    # The gate must report WHY auto-fix is disabled so a Phase 4 park reason
+    # can tell a review-only ad-hoc task apart from a normal task whose source
+    # couldn't be read (otherwise a normal task halts as adhoc_fix_disabled).
+    fix_off = { "review" => { "adhoc" => { "fix" => false } } }
+    fix_on = { "review" => { "adhoc" => { "fix" => true } } }
+
+    with_tmp_dir do |dir|
+      adhoc_file = File.join(dir, "adhoc.md")
+      File.write(adhoc_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc\n")
+      normal_file = File.join(dir, "normal.md")
+      File.write(normal_file, "---\nsource: telegram\n---\n\n# Normal\n")
+
+      assert_equal :disabled_adhoc,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, adhoc_file))
+      assert_equal :enabled,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_on, Task.new(dir, adhoc_file))
+      assert_equal :enabled,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, normal_file))
+
+      capture_io do
+        assert_equal :disabled_source_unknown,
+                     Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, dir)),
+                     "an unreadable source must classify as source-unknown, not adhoc"
+      end
     end
   end
 
@@ -462,8 +490,31 @@ class RunReviewersTest < Minitest::Test
       end
 
       assert_equal :ok, result, "empty ad-hoc reviewers still returns :ok (explicit opt-out)"
-      assert_match(/zero review\.adhoc\.reviewers/, err,
-                   "an ad-hoc review with no reviewers must warn rather than pass silently")
+      assert_match(/zero reviewers \(review\.adhoc\.reviewers is empty\)/, err,
+                   "an explicit empty review.adhoc.reviewers must name that knob")
+    end
+  end
+
+  def test_empty_inherited_reviewers_warns_and_names_review_reviewers
+    # nil review.adhoc.reviewers inherits review.reviewers; when that is ALSO
+    # empty (the DEFAULT) the ad-hoc task DOES reach the zero-reviewer branch,
+    # and the warning must name review.reviewers (the actually-empty knob),
+    # not review.adhoc.reviewers.
+    cfg = { "review" => { "reviewers" => [] } } # adhoc.reviewers omitted → inherits
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result
+      assert_match(/zero reviewers \(review\.reviewers is empty\)/, err,
+                   "the inherit case must name review.reviewers, not review.adhoc.reviewers")
     end
   end
 

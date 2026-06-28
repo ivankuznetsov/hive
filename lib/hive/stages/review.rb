@@ -504,12 +504,17 @@ module Hive
                      status: :review_waiting }
           end
 
-          unless adhoc_fix_enabled?(cfg, task)
+          fix_gate = adhoc_fix_gate(cfg, task)
+          unless fix_gate == :enabled
+            # Distinguish the deliberate review-only ad-hoc park from a normal
+            # task that halted only because its source was unconfirmable, so
+            # the reason string doesn't misdescribe why it stopped.
+            reason = fix_gate == :disabled_source_unknown ? "fix_source_unknown" : "adhoc_fix_disabled"
             Hive::Markers.set(task.state_file, :review_waiting,
-                              reason: "adhoc_fix_disabled",
+                              reason: reason,
                               accepted: accepted_findings.count,
                               pass: pass)
-            return { commit: "review_waiting_adhoc_fix_disabled_pass_#{format('%02d', pass)}",
+            return { commit: "review_waiting_#{reason}_pass_#{format('%02d', pass)}",
                      status: :review_waiting }
           end
 
@@ -1191,14 +1196,18 @@ module Hive
                  "6-review will pass with no reviewers run — set patrol.review.reviewers " \
                  "in .hive-state/config.yml to review patrol PRs"
           elsif adhoc_task?(task)
-            # An explicit `review.adhoc.reviewers: []` is the footgun the
-            # config comment itself flags ("a silently unreviewed PR"): the
-            # ad-hoc PR would clear 6-review with nobody reviewing it. Mirror
-            # the patrol warning so it is observable instead of silent. (nil
-            # inherits review.reviewers and never reaches here.)
-            warn "[hive.review] ad-hoc review resolved to zero review.adhoc.reviewers; " \
+            # An ad-hoc review that resolves to zero reviewers would clear
+            # 6-review with nobody reviewing the PR — the footgun the config
+            # comment flags ("a silently unreviewed PR"). Mirror the patrol
+            # warning so it is observable instead of silent. The empty knob
+            # differs by case: an explicit `review.adhoc.reviewers: []` is empty
+            # itself, while a nil (omitted) `review.adhoc.reviewers` inherits an
+            # equally-empty `review.reviewers` (the DEFAULT) and DOES reach
+            # here — so name whichever knob is actually empty.
+            empty_knob = cfg.dig("review", "adhoc", "reviewers").nil? ? "review.reviewers" : "review.adhoc.reviewers"
+            warn "[hive.review] ad-hoc review resolved to zero reviewers (#{empty_knob} is empty); " \
                  "6-review will pass with no reviewers run — set review.adhoc.reviewers " \
-                 "(or omit it to inherit review.reviewers) in .hive-state/config.yml to review the PR"
+                 "or review.reviewers in .hive-state/config.yml to review the PR"
           end
           return :ok
         end
@@ -1318,11 +1327,41 @@ module Hive
       end
 
       def adhoc_fix_enabled?(cfg, task)
-        # Safety gate: a state-file read error must fail CLOSED. If we cannot
-        # confirm the source, treat the task as ad-hoc so a genuine
-        # ad-hoc/fix-off task never has the fix agent run + auto-commit on it.
-        # (Reviewer SELECTION fails open — see adhoc_task?'s on_read_error.)
-        !adhoc_task?(task, on_read_error: true) || cfg.dig("review", "adhoc", "fix") == true
+        adhoc_fix_gate(cfg, task) == :enabled
+      end
+
+      # Classify whether the auto-fix agent may run, and WHY when it may not.
+      # Returns:
+      #   :enabled                 — run the fix agent (normal task, or ad-hoc
+      #                              with `review.adhoc.fix: true`)
+      #   :disabled_adhoc          — confirmed ad-hoc review with fix off
+      #                              (review-only; the deliberate park)
+      #   :disabled_source_unknown — task.md unreadable, so the source can't be
+      #                              confirmed; fail CLOSED (never auto-commit on
+      #                              a possibly-borrowed PR) but report the real
+      #                              cause so a NORMAL task's halt isn't
+      #                              mislabeled adhoc_fix_disabled.
+      # (Reviewer SELECTION fails open — see adhoc_task?'s on_read_error.)
+      def adhoc_fix_gate(cfg, task)
+        case adhoc_source_status(task)
+        when :source_unknown then :disabled_source_unknown
+        when :normal then :enabled
+        else # :adhoc
+          cfg.dig("review", "adhoc", "fix") == true ? :enabled : :disabled_adhoc
+        end
+      end
+
+      # Tri-state read of the task source for the fix gate: :adhoc, :normal, or
+      # :source_unknown (task.md unreadable). Distinct from adhoc_task?'s
+      # boolean so the Phase 4 park reason can tell a review-only ad-hoc task
+      # apart from a normal task whose source merely couldn't be read.
+      def adhoc_source_status(task)
+        frontmatter = task_frontmatter(task.state_file)
+        frontmatter["source"].to_s.strip.casecmp?("ad-hoc") ? :adhoc : :normal
+      rescue SystemCallError => e
+        warn "[hive.review] adhoc fix-gate could not read #{task.state_file.inspect}: " \
+             "#{e.class}: #{e.message} — failing closed (auto-fix disabled, source unconfirmable)"
+        :source_unknown
       end
 
       # Group reviewers that share an effective permission scope so they can

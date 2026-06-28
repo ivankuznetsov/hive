@@ -298,6 +298,49 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
+  def test_enqueue_resolves_relative_hive_state_path_against_project_root_not_cwd
+    # register_project only ever writes absolute paths, but a hand-edited
+    # *relative* hive_state_path must resolve against the project root (the
+    # resolver registered_project! validates with), not the caller's cwd.
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |repo|
+        hive_state = File.join(repo, ".hive-state")
+        worktree_root = File.join(repo, "adhoc-worktrees")
+        FileUtils.mkdir_p(File.join(hive_state, "stages", "6-review"))
+        File.write(File.join(hive_state, "config.yml"), { "worktree_root" => worktree_root }.to_yaml)
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              { "name" => "demo", "path" => repo, "hive_state_path" => ".hive-state" }
+            ]
+          }.to_yaml
+        )
+
+        pr_metadata = metadata
+        with_tmp_dir do |elsewhere|
+          Dir.chdir(elsewhere) do
+            with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(_number, **_kwargs) { pr_metadata }) do
+              with_replaced_singleton_method(Hive::Worktree, :materialize_pr, lambda { |**kwargs|
+                FileUtils.mkdir_p(kwargs.fetch(:path))
+                { path: kwargs.fetch(:path), branch: kwargs.fetch(:branch), head_sha: "head-197" }
+              }) do
+                result = Hive::Commands::AdhocReview.new(pr: "197", project: "demo").enqueue
+
+                expected = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
+                assert_equal expected, result.fetch(:task_folder)
+                assert File.directory?(expected),
+                       "relative hive_state_path must resolve against the project root"
+                refute File.directory?(File.join(elsewhere, ".hive-state")),
+                       "must not write task state under the caller's cwd"
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_enqueue_skips_head_check_and_warns_when_gh_reports_no_head_sha
     with_registered_project do |_repo, hive_state, _worktree_root|
       pr_metadata = metadata(head: "")

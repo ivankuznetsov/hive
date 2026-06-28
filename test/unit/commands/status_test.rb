@@ -1761,6 +1761,27 @@ class CommandsStatusTest < Minitest::Test
     assert_nil cmd.send(:safe_mtime, "/tmp/missing-diagnose-evidence-source")
   end
 
+  def test_evidence_diagnostic_detail_is_capped_at_detail_max
+    # Round-trip tests use short tmpdir paths, so the cap is never stressed
+    # there. Feed a pathologically long source_path directly and assert the
+    # hand-built detail line is truncated to the schema's detail.maxLength.
+    Dir.mktmpdir("hive-status-evidence-detail") do |project_root|
+      slug = "evi-task-260628-abcd"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      cap = Hive::TaskAction::Diagnostic::DETAIL_MAX
+      evidence = { summary: "s", source_path: "/#{'a' * (cap + 500)}", kind: :log }
+
+      diag = Hive::Commands::Status.new.send(:evidence_diagnostic, task, marker, evidence)
+
+      assert_operator diag["detail"].length, :<=, cap
+      assert diag["detail"].end_with?("…"), "over-long detail must be truncated with an ellipsis"
+    end
+  end
+
   def test_invalid_task_row_degrades_when_folder_mtime_is_unreadable
     cmd = Hive::Commands::Status.new
     folder = "/tmp/missing-invalid-task"

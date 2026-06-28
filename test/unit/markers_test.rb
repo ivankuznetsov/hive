@@ -11,6 +11,23 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  # `summary` returns null (not the string "NONE") for the :none marker and a
+  # nil marker, so a markerless task's diagnose envelope reads marker_summary:
+  # null and the evidence resolver omits the prefix. Produce it end-to-end from
+  # a real markerless state file rather than asserting a hand-built literal — a
+  # regression rendering "NONE" would otherwise pass on hard-coded fixtures.
+  def test_summary_is_null_for_none_and_nil_marker
+    assert_nil Hive::Markers.summary(nil)
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, "no marker here, just prose\n")
+      none = Hive::Markers.current(file)
+      assert none.none?, "a markerless file must classify as :none"
+      assert_nil Hive::Markers.summary(none),
+                 "Markers.summary(:none) must be null, not \"NONE\""
+    end
+  end
+
   def test_reads_simple_waiting_marker
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

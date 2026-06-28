@@ -778,6 +778,27 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # Mirror of DiagnosticEvidence's dir-symlink guard: a logs/ *directory*
+  # symlink pointing outside the task roots must not resolve into a trusted
+  # diagnostic root, otherwise every *.log under the target leaks.
+  def test_diagnostic_rejects_log_dir_symlink_escape
+    Dir.mktmpdir("hive-task-action-symlink") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- ERROR reason=boom -->\n")
+      outside = File.join(root, "outside-logs")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "agent.log"), "outside log secret\n")
+      File.symlink(outside, File.join(task.folder, "logs"))
+
+      diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => "boom")).diagnostic
+
+      refute_includes diagnostic["detail"].to_s, "outside log secret"
+      refute(diagnostic["artifact_paths"].any? { |path| path.end_with?("agent.log") },
+             "a symlinked log dir's contents must not enter artifact_paths")
+    end
+  end
+
   def test_review_ci_stale_diagnostic_points_at_ci_blocked_artifact
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

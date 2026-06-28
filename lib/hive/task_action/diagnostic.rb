@@ -24,7 +24,6 @@ module Hive
       # the two diagnose surfaces can't drift (SUMMARY_MAX is schema-pinned).
       SUMMARY_MAX = Hive::DiagnosticHelpers::SUMMARY_MAX
       DETAIL_MAX = 4_000
-      TAIL_BYTES = Hive::DiagnosticHelpers::TAIL_BYTES
       # The schema pins artifact_paths maxItems=20; this is the producer-side
       # enforcement so a marker with hundreds of matching artifacts (legacy
       # reviews/ dirs) cannot blow past the contract.
@@ -308,7 +307,11 @@ module Hive
 
         # The synthetic prefixes above are this surface's own; everything else
         # is the shared NAME+attrs rendering (plan R-5). Diagnostic only reaches
-        # here for red markers, never :none, so the nil case can't occur.
+        # here for red markers, never :none, so the nil case can't occur — but
+        # that invariant is derived (enforced upstream by diagnostic_action?),
+        # not local: if a future widening of diagnostic_action? ever let :none
+        # through, Markers.summary(:none)→nil degrades to a *silent empty*
+        # summary (redact(nil)→""), not the old visible "NONE" and not a crash.
         Hive::Markers.summary(marker)
       end
 
@@ -547,12 +550,20 @@ module Hive
         # project_root.realpath and every diagnostic gets silently dropped. The
         # symlink-escape guard is already provided by checking that the
         # artifact's realpath is inside the (also realpath'd) task.folder /
-        # log_dir.
+        # log_dir, and realpath_or_expand rejects a root *directory* that is
+        # itself a symlink so a `logs -> /outside` dir symlink can't enter the
+        # trusted set in the first place.
         ([ task.folder ] + log_dirs).filter_map { |root| realpath_or_expand(root) }.uniq
       end
 
       def realpath_or_expand(path)
         return nil if path.nil? || path.to_s.empty?
+        # Reject a root whose own leaf is a symlink: a symlinked evidence dir
+        # (e.g. `logs -> /outside`) would otherwise resolve into a TRUSTED root
+        # and let safe_diagnostic_artifact? approve every file under the target.
+        # A symlinked *ancestor* (the legit `.hive-state -> /vol` case above)
+        # still resolves normally because File.symlink? checks only the leaf.
+        return nil if File.symlink?(path)
 
         File.realpath(path)
       rescue Errno::ENOENT

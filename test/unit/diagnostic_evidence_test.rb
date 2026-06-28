@@ -257,14 +257,14 @@ class DiagnosticEvidenceTest < Minitest::Test
       # task.md is a directory here → EISDIR (a real, non-ENOENT fault) must
       # degrade to nil with a stderr breadcrumb rather than crash.
       _out, err = capture_io do
-        marker = Hive::DiagnosticEvidence.current_marker(File.join(folder, "task.md"))
+        marker = Hive::DiagnosticEvidence.send(:current_marker, File.join(folder, "task.md"))
       end
       assert_nil marker
       assert_match(/cannot read marker/, err)
 
-      assert_equal "", Hive::DiagnosticEvidence.safe_read_head(File.join(folder, "missing.md"))
-      assert_nil Hive::DiagnosticEvidence.safe_mtime(File.join(folder, "missing.md"))
-      assert_nil Hive::DiagnosticEvidence.last_meaningful_line(File.join(folder, "missing.log"))
+      assert_equal "", Hive::DiagnosticEvidence.send(:safe_read_head, File.join(folder, "missing.md"))
+      assert_nil Hive::DiagnosticEvidence.send(:safe_mtime, File.join(folder, "missing.md"))
+      assert_nil Hive::DiagnosticEvidence.send(:last_meaningful_line, File.join(folder, "missing.log"))
     end
   end
 
@@ -275,7 +275,7 @@ class DiagnosticEvidenceTest < Minitest::Test
     end
 
     result = nil
-    _out, err = capture_io { result = Hive::DiagnosticEvidence.log_candidates("/tmp/anything") }
+    _out, err = capture_io { result = Hive::DiagnosticEvidence.send(:log_candidates, "/tmp/anything") }
     assert_equal [], result
     # A real I/O fault (not ENOENT) must leave a stderr breadcrumb, not vanish.
     assert_match(/log glob failed/, err)
@@ -290,7 +290,7 @@ class DiagnosticEvidenceTest < Minitest::Test
     end
 
     result = nil
-    _out, err = capture_io { result = Hive::DiagnosticEvidence.state_file_candidates("/tmp/anything") }
+    _out, err = capture_io { result = Hive::DiagnosticEvidence.send(:state_file_candidates, "/tmp/anything") }
     assert_equal [], result
     assert_match(/state-file glob failed/, err)
   ensure
@@ -324,8 +324,10 @@ class DiagnosticEvidenceTest < Minitest::Test
         assert_equal state_file, evidence.fetch(:source_path)
         refute_empty evidence.fetch(:summary)
         assert_includes evidence.fetch(:summary), marker_text.split.first
-        refute_includes "#{evidence.fetch(:summary)}\nMarker: #{evidence.fetch(:source_path)}",
-                        "No diagnostic available"
+        # NOTE: the "No diagnostic available" R7 guard belongs at the bot/CLI
+        # render layer (covered there), not here — the resolver returns a hash
+        # and structurally never emits that phrase, so asserting its absence on
+        # a string built from that hash would be tautological.
       end
     end
   end
@@ -356,7 +358,12 @@ class DiagnosticEvidenceTest < Minitest::Test
       # Stale agent (orphaned): AGENT_WORKING placeholder older than the grace.
       [ "4-execute", "task.md", "<!-- AGENT_WORKING -->\n",
         { pid_alive: nil, state_file_mtime: Time.now - 3600, agent_marker_grace_sec: 1 },
-        "agent never attached" ]
+        "agent never attached" ],
+      # Stale agent (died): AGENT_WORKING with a recorded pid that is not alive
+      # (the :agent_died branch the plan's stale-agent requirement also names).
+      [ "4-execute", "task.md", "<!-- AGENT_WORKING pid=999999 -->\n",
+        { pid_alive: false },
+        "agent process not alive" ]
     ]
 
     cases.each do |stage_dir, state_filename, content, for_kwargs, expected|
@@ -501,9 +508,9 @@ class DiagnosticEvidenceTest < Minitest::Test
     longpath = "a" * 5000
     head = line = mtime = :unset
     _out, err = capture_io do
-      head = Hive::DiagnosticEvidence.safe_read_head(longpath)
-      line = Hive::DiagnosticEvidence.last_meaningful_line(longpath)
-      mtime = Hive::DiagnosticEvidence.safe_mtime(longpath)
+      head = Hive::DiagnosticEvidence.send(:safe_read_head, longpath)
+      line = Hive::DiagnosticEvidence.send(:last_meaningful_line, longpath)
+      mtime = Hive::DiagnosticEvidence.send(:safe_mtime, longpath)
     end
 
     assert_equal "", head
@@ -515,13 +522,20 @@ class DiagnosticEvidenceTest < Minitest::Test
   end
 
   # Invalid UTF-8 in a state file makes Markers.current's scan raise
-  # ArgumentError; current_marker treats it as "no marker", not a crash.
-  def test_current_marker_invalid_utf8_degrades_to_nil
+  # ArgumentError; current_marker treats it as "no marker", not a crash — and
+  # leaves a breadcrumb (matching the SystemCallError branch) so a corrupt
+  # state file doesn't vanish from the evidence with zero signal.
+  def test_current_marker_invalid_utf8_degrades_to_nil_with_breadcrumb
     Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
       path = File.join(folder, "task.md")
       File.binwrite(path, "<!-- ERROR \xFF reason=boom -->\n".b)
 
-      assert_nil Hive::DiagnosticEvidence.current_marker(path)
+      marker = :unset
+      _out, err = capture_io do
+        marker = Hive::DiagnosticEvidence.send(:current_marker, path)
+      end
+      assert_nil marker
+      assert_match(/cannot parse marker/, err)
     end
   end
 
@@ -544,6 +558,196 @@ class DiagnosticEvidenceTest < Minitest::Test
       assert_match(/summarize degraded/, err)
     ensure
       Hive::DiagnosticEvidence.define_singleton_method(:red_status_summary, original) if original
+    end
+  end
+
+  # An oversized state file (> MARKER_READ_MAX) is junk for a marker scan and
+  # must be skipped rather than slurped whole — otherwise the bot reaper thread
+  # could OOM (NoMemoryError) straight through the never-raise rescue.
+  def test_oversized_state_file_marker_read_is_skipped_with_breadcrumb
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      path = File.join(folder, "task.md")
+      File.write(path, "#{'x' * (Hive::DiagnosticEvidence::MARKER_READ_MAX + 10)}\n<!-- ERROR reason=boom -->\n")
+
+      marker = :unset
+      _out, err = capture_io do
+        marker = Hive::DiagnosticEvidence.send(:current_marker, path)
+      end
+      assert_nil marker, "an oversized state file must be skipped, not slurped"
+      assert_match(/skipping marker read/, err)
+    end
+  end
+
+  # The marker size probe must not become a second silent failure point: a stat
+  # fault (here ENAMETOOLONG) degrades to "not oversized" and lets the read
+  # attempt and its own rescue handle the fault.
+  def test_marker_size_probe_degrades_when_stat_faults
+    assert_nil Hive::DiagnosticEvidence.send(:current_marker, "b" * 5000)
+  end
+
+  # The lazy `require "hive/task"` raises LoadError (a ScriptError, not a
+  # StandardError) if hive/task can't load; that must degrade the inferred-log
+  # tier to nil with a breadcrumb, not escape summarize's StandardError rescue.
+  def test_inferred_task_log_dir_load_error_degrades_with_breadcrumb
+    folder = File.join("/tmp", ".hive-state", "stages", "4-execute", "slug-260628-abcd")
+    Hive::DiagnosticEvidence.define_singleton_method(:require) { |*| raise LoadError, "simulated" }
+
+    result = :unset
+    _out, err = capture_io do
+      result = Hive::DiagnosticEvidence.send(:inferred_task_log_dir, folder)
+    end
+    assert_nil result
+    assert_match(%r{cannot load hive/task}, err)
+  ensure
+    Hive::DiagnosticEvidence.singleton_class.send(:remove_method, :require)
+  end
+
+  # A FIFO named like evidence must be rejected by the regular-file guard so no
+  # later tier ever attempts a blocking open(2) on it (which would wedge the
+  # bot reaper thread permanently). realpath + File.file? are both non-blocking,
+  # so asserting the guard directly can't itself hang on a regression.
+  def test_fifo_named_log_is_rejected_by_regular_file_guard
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      fifo = File.join(logs, "newest.log")
+      File.mkfifo(fifo)
+
+      refute Hive::DiagnosticEvidence.send(:contained?, fifo, folder),
+             "a FIFO named like evidence must be rejected before any open"
+    end
+  end
+
+  # No-trailing-newline sibling of the boundary-secret test: a single log line
+  # longer than TAIL_BYTES with NO internal newline exercises drop_first_line's
+  # `: ""` arm (the whole partial fragment is dropped). A regression that
+  # returned the partial buffer would leak the prefix-anchored secret's tail.
+  def test_secret_single_line_longer_than_tail_no_newline_does_not_leak
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "<!-- ERROR reason=boom -->\n")
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "huge.log"), "sk-#{'A' * 9000}")
+
+      evidence = Hive::DiagnosticEvidence.summarize(
+        folder: folder,
+        marker_summary: "ERROR reason=boom"
+      )
+
+      refute_match(/A{30,}/, evidence.fetch(:summary), "boundary-split secret must not leak")
+      refute_includes evidence.fetch(:summary), "sk-"
+      assert_equal "ERROR reason=boom", evidence.fetch(:summary)
+      assert_equal :marker, evidence.fetch(:kind)
+      assert_equal state_file, evidence.fetch(:source_path)
+    end
+  end
+
+  # The actually-exploitable High #2 case: a symlinked logs/ *directory* (not a
+  # file) pointing outside the task roots must NOT be resolved into a trusted
+  # root, otherwise every *.log under the target leaks. Falls back to the
+  # contained marker tier.
+  def test_symlinked_log_directory_outside_roots_is_not_followed
+    Dir.mktmpdir("hive-diagnostic-evidence-outside") do |outside|
+      File.write(File.join(outside, "leak.log"), "TOP_SECRET_HOST_FILE\n")
+
+      Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+        state_file = File.join(folder, "task.md")
+        File.write(state_file, "<!-- ERROR reason=boom -->\n")
+        # logs/ is itself a directory symlink to the outside dir.
+        File.symlink(outside, File.join(folder, "logs"))
+
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: folder,
+          marker_summary: "ERROR reason=boom"
+        )
+
+        refute_includes evidence.fetch(:summary), "TOP_SECRET_HOST_FILE"
+        assert_equal :marker, evidence.fetch(:kind)
+        assert_equal state_file, evidence.fetch(:source_path)
+      end
+    end
+  end
+
+  # The red-status tier's contained? refusal: a diagnostics/red-status.md that
+  # is a symlink to an outside file must not surface the host content; evidence
+  # falls back to the marker tier.
+  def test_symlinked_red_status_outside_roots_is_refused
+    Dir.mktmpdir("hive-diagnostic-evidence-outside") do |outside|
+      secret = File.join(outside, "secret.md")
+      File.write(secret, <<~MD)
+        ---
+        summary: HOST_RED_STATUS_LEAK
+        ---
+        body
+      MD
+
+      Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+        state_file = File.join(folder, "task.md")
+        File.write(state_file, "<!-- ERROR reason=boom -->\n")
+        diagnostics = File.join(folder, "diagnostics")
+        FileUtils.mkdir_p(diagnostics)
+        File.symlink(secret, File.join(diagnostics, "red-status.md"))
+
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: folder,
+          marker_summary: "ERROR reason=boom"
+        )
+
+        refute_includes evidence.fetch(:summary), "HOST_RED_STATUS_LEAK"
+        assert_equal :marker, evidence.fetch(:kind)
+        assert_equal state_file, evidence.fetch(:source_path)
+      end
+    end
+  end
+
+  # The marker tier's contained? refusal: a *.md state-file candidate that is a
+  # symlink to an outside file carrying a marker must not surface; the resolver
+  # uses the contained sibling instead and the host marker never appears.
+  def test_symlinked_marker_state_file_outside_roots_is_refused
+    Dir.mktmpdir("hive-diagnostic-evidence-outside") do |outside|
+      secret = File.join(outside, "secret.md")
+      File.write(secret, "<!-- REVIEW_STALE pass=99 leak=HOST_MARKER_LEAK -->\n")
+
+      Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+        File.symlink(secret, File.join(folder, "task.md"))
+        File.write(File.join(folder, "notes.md"), "<!-- ERROR reason=contained -->\n")
+
+        evidence = Hive::DiagnosticEvidence.summarize(folder: folder)
+
+        refute_includes evidence.fetch(:summary), "HOST_MARKER_LEAK"
+        assert_equal :marker, evidence.fetch(:kind)
+        assert_equal File.join(folder, "notes.md"), evidence.fetch(:source_path)
+        assert_equal "ERROR reason=contained", evidence.fetch(:summary)
+      end
+    end
+  end
+
+  # plan R2: the newest log by MTIME must be picked even when its filename sorts
+  # earlier than older logs and the candidate set exceeds LOG_GLOB_CAP. The old
+  # cap-by-filename-then-mtime ordering dropped a newest-but-early-named log
+  # before the mtime sort ever saw it.
+  def test_newest_log_by_mtime_wins_even_with_early_filename
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      cap = Hive::DiagnosticEvidence::LOG_GLOB_CAP
+      newest = File.join(logs, "log_00.log") # sorts FIRST lexically
+      File.write(newest, "NEWEST_BY_MTIME\n")
+      File.utime(Time.now, Time.now, newest)
+      # cap older logs whose filenames all sort AFTER log_00 → the filename cap
+      # would have dropped log_00 (the freshest) before any stat.
+      (1..cap).each do |i|
+        older = File.join(logs, format("log_%02d.log", i))
+        File.write(older, "older line #{i}\n")
+        File.utime(Time.now - 3600, Time.now - 3600, older)
+      end
+
+      evidence = Hive::DiagnosticEvidence.summarize(folder: folder)
+
+      assert_equal :log, evidence.fetch(:kind)
+      assert_equal newest, evidence.fetch(:source_path)
+      assert_includes evidence.fetch(:summary), "NEWEST_BY_MTIME"
     end
   end
 end

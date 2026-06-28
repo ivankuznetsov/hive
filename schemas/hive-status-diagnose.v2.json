@@ -23,7 +23,6 @@
         "id",
         "display_name",
         "task_folder",
-        "marker_summary",
         "diagnostic",
         "path"
       ],
@@ -56,7 +55,14 @@
           "type": "string"
         },
         "marker_summary": {
-          "description": "Current marker name plus display attrs, used by bots and agents as a cheap evidence summary prefix.",
+          "description": "Current marker name plus display attrs, used by bots and agents as a cheap evidence summary prefix. Optional (not required) so adding it stayed a non-breaking additive change per lib/hive.rb; null on a markerless task.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state_file": {
+          "description": "Absolute path of the authoritative task state file the marker_summary was read from. Lets the bot evidence fallback pin the marker-tier source_path to the same file the CLI did. Optional/additive; absent on older binaries.",
           "type": [
             "string",
             "null"
@@ -180,7 +186,7 @@
           "maxLength": 120
         },
         "detail": {
-          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic.",
+          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic. On the on-disk evidence fallback path (nil production diagnostic) this is instead a one-line `Label: path` pointer to the backing artifact/log/state file, not a multi-line excerpt.",
           "type": "string",
           "maxLength": 4000
         },

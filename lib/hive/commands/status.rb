@@ -418,6 +418,12 @@ module Hive
             "display_name" => task.display_name,
             "task_folder" => task.folder,
             "marker_summary" => marker_summary,
+            # The authoritative task state file the marker_summary was read
+            # from. Threaded so the bot's evidence fallback can pin the marker
+            # tier's source_path to the SAME file (mirroring the CLI's
+            # state_file: pin), instead of mislabelling whatever *.md it globs
+            # first under an advanced folder.
+            "state_file" => task.state_file,
             "diagnostic" => diagnostic,
             "path" => path
           )
@@ -457,10 +463,14 @@ module Hive
       def evidence_diagnostic(task, marker, evidence)
         kind = evidence.fetch(:kind)
         source_path = evidence.fetch(:source_path)
-        source = kind == :marker ? "marker" : "artifact"
+        source = Hive::DiagnosticEvidence.source_kind(kind)
+        detail = "#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}"
         {
           "summary" => evidence.fetch(:summary),
-          "detail" => "#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}",
+          # Cap like the canonical Diagnostic#to_h (truncate(detail, DETAIL_MAX))
+          # so a pathologically long source_path can't emit an envelope that
+          # fails the schema's own detail.maxLength.
+          "detail" => Hive::DiagnosticHelpers.truncate(detail, Hive::TaskAction::Diagnostic::DETAIL_MAX),
           "source" => source,
           "source_path" => source_path,
           "artifact_paths" => source == "artifact" ? [ source_path ] : [],

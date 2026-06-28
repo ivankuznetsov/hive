@@ -197,6 +197,27 @@ class StatusDiagnoseTest < Minitest::Test
     end
   end
 
+  def test_diagnose_json_markerless_task_emits_null_marker_summary
+    # A markerless folder with no red-status/log evidence: marker_summary must
+    # serialize as null (not "NONE") end-to-end and the diagnostic stays null.
+    Dir.mktmpdir("hive-status-diagnose-null") do |project_root|
+      slug = "markerless-task-260628-null"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "plan.md"), "plan body, no marker\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert payload.key?("marker_summary")
+      assert_nil payload["marker_summary"]
+      assert_nil payload["diagnostic"]
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
   def test_diagnose_human_output_prints_evidence_for_non_red_task_with_logs
     Dir.mktmpdir("hive-status-diagnose-evidence") do |project_root|
       slug = "rotated-task-260628-abcd"

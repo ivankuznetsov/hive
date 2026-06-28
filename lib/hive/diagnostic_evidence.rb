@@ -15,26 +15,51 @@ module Hive
   # Each result carries an explicit `kind` so consumers label the source
   # correctly (Diagnostics:/Log:/Marker:) instead of hardcoding "Log:".
   #
-  # Contract: summarize NEVER raises — it degrades to nil (or a best-effort
-  # lower tier) on any error, because the CLI re-wraps a raise as InternalError
-  # (exit 70) and the bot drops every other child's reply in the same tick.
+  # Contract: summarize must not raise and must not block — it degrades to nil
+  # (or a best-effort lower tier) on failure, because the CLI re-wraps a raise
+  # as InternalError (exit 70) and the bot's reaper has no per-child rescue, so
+  # a raise OR a blocking open(2) there drops every other child's reply.
+  # `summarize` rescues StandardError at the boundary; the non-StandardError
+  # vectors are closed at their sources instead: the lazy `require "hive/task"`
+  # rescues LoadError, the evidence reads are byte-bounded so an oversized file
+  # can't raise NoMemoryError, and every tier gates on File.file? (via
+  # `contained?`) so a FIFO / device / directory named like evidence can't
+  # wedge a blocking read.
   module DiagnosticEvidence
-    # Aliased to the shared single source so the schema-pinned cap and the
-    # boundary-safe tail helper can't drift from Hive::TaskAction::Diagnostic.
+    # Aliased to the shared single source so the schema-pinned cap can't drift
+    # from Hive::TaskAction::Diagnostic. (TAIL_BYTES is intentionally NOT
+    # aliased: every tail read goes through Hive::DiagnosticHelpers.tail_file,
+    # which uses the helper's own constant, so a local alias would be dead.)
     SUMMARY_MAX = Hive::DiagnosticHelpers::SUMMARY_MAX
-    TAIL_BYTES = Hive::DiagnosticHelpers::TAIL_BYTES
     LOG_GLOB_CAP = Hive::DiagnosticHelpers::LOG_GLOB_CAP
     FRONTMATTER_SCAN_BYTES = Hive::DiagnosticHelpers::FRONTMATTER_SCAN_BYTES
     STATE_FILE_NAMES = %w[brainstorm.md plan.md task.md pr.md artifacts.md idea.md notes.md].freeze
 
-    # Human-facing prefix per evidence tier. Shared by the CLI detail line and
-    # the bot reply so the two surfaces label a tier identically.
-    SOURCE_LABELS = { red_status: "Diagnostics", log: "Log", marker: "Marker" }.freeze
+    # Cap on the marker-tier read. Markers live at a state file's tail and a
+    # real hive state file is a few KB, so a candidate above this is junk (e.g.
+    # a multi-MB artifacts.md the bot glob swept up): skip it rather than slurp
+    # it whole on the no-timeout reaper thread, where an oversized read could
+    # also raise NoMemoryError and escape the never-raise rescue.
+    MARKER_READ_MAX = 1 << 20
+
+    # How each evidence kind renders across the two diagnose surfaces: the
+    # schema `source` enum value and the human-facing detail-line label. One
+    # `.fetch`-ed table (no default) so a future kind that isn't mapped raises
+    # loudly here instead of silently shipping source:"artifact"/label:"Source".
+    KIND_RENDERING = {
+      red_status: { source: "artifact", label: "Diagnostics" },
+      log: { source: "artifact", label: "Log" },
+      marker: { source: "marker", label: "Marker" }
+    }.freeze
 
     module_function
 
     def source_label(kind)
-      SOURCE_LABELS.fetch(kind, "Source")
+      KIND_RENDERING.fetch(kind).fetch(:label)
+    end
+
+    def source_kind(kind)
+      KIND_RENDERING.fetch(kind).fetch(:source)
     end
 
     # `state_file` is the caller's authoritative task state file (the bot only
@@ -49,7 +74,7 @@ module Hive
       red_status = red_status_summary(root)
       return red_status if red_status
 
-      authoritative = present(state_file)
+      authoritative = present_path(state_file)
       resolved_state_file = authoritative || marker_state_file(root)
       marker_text = present(marker_summary) || marker_summary_from_state_file(resolved_state_file)
       log = latest_log_summary(root, marker_text)
@@ -119,8 +144,14 @@ module Hive
       candidates = log_dirs(folder).flat_map { |dir| Dir[File.join(dir, "*.log")] }
       return [] if candidates.empty?
 
-      candidates.sort.last(LOG_GLOB_CAP)
-                .sort_by { |path| safe_mtime(path) || Time.at(0) }
+      # Sort by mtime FIRST, then cap, so the newest log by mtime is always
+      # considered even when its filename sorts earlier than an older log's
+      # (plan R2 requires newest-log evidence). The diagnose read path runs
+      # once per task on demand, so stat'ing every candidate is acceptable —
+      # unlike Diagnostic#latest_log_artifacts, which caps by filename first to
+      # avoid an O(N) stat sweep on every status poll.
+      candidates.sort_by { |path| safe_mtime(path) || Time.at(0) }
+                .last(LOG_GLOB_CAP)
                 .reverse
     rescue SystemCallError => e
       # Dir[] returns [] for a missing dir (never ENOENT) and safe_mtime swallows
@@ -147,6 +178,14 @@ module Hive
       return nil unless match
 
       File.join(match[:root], match[:state_dir], "logs", match[:slug])
+    rescue LoadError => e
+      # `require` failure is a ScriptError, not a StandardError, so it would
+      # escape summarize's StandardError boundary and (on the bot reaper) drop
+      # sibling replies. Degrade this tier to nil instead. Unreachable in
+      # production today (both entry points eager-require hive/task), but a cold
+      # caller must not be able to reintroduce the escape.
+      warn "hive: diagnose-evidence: cannot load hive/task (#{e.message}); skipping inferred log dir"
+      nil
     end
 
     def marker_state_file(folder)
@@ -177,6 +216,7 @@ module Hive
 
     def current_marker(path)
       return nil if path.to_s.empty?
+      return nil if marker_file_oversized?(path)
 
       marker = Hive::Markers.current(path)
       marker.none? ? nil : marker
@@ -188,13 +228,33 @@ module Hive
       # — there is no separate benign-ENOENT clause to split off here.
       warn "hive: diagnose-evidence: cannot read marker at #{path} (#{e.class}: #{e.message})"
       nil
-    rescue ArgumentError
+    rescue ArgumentError => e
       # Markers.current reads with encoding: "UTF-8", which tags (not
       # transcodes) the bytes; an invalid UTF-8 sequence then makes the internal
       # `scan` raise ArgumentError ("invalid byte sequence in UTF-8"). Treat a
-      # malformed state file as "no marker" rather than crash. (EncodingError is
-      # not rescued: tagging never raises it here, so the old rescue was dead.)
+      # malformed state file as "no marker" rather than crash — but leave a
+      # breadcrumb (matching the SystemCallError branch) so a corrupt-encoding
+      # state file doesn't drop out of the evidence with zero signal.
+      warn "hive: diagnose-evidence: cannot parse marker at #{path} (#{e.class}: #{e.message})"
       nil
+    end
+
+    # Markers live at a state file's tail and a real one is a few KB, so a
+    # candidate above MARKER_READ_MAX is junk (a multi-MB artifacts.md the bot
+    # glob swept up). Skip it rather than slurp it whole: the marker read is
+    # otherwise unbounded — asymmetric with the byte-capped red (16 KB) and log
+    # (8 KB) tiers — and an oversized read on the no-timeout reaper thread could
+    # raise NoMemoryError straight through the never-raise rescue.
+    def marker_file_oversized?(path)
+      size = File.size(path)
+      return false unless size > MARKER_READ_MAX
+
+      warn "hive: diagnose-evidence: state file #{path} is #{size}B (> #{MARKER_READ_MAX}B); skipping marker read"
+      true
+    rescue SystemCallError
+      # Let the read attempt and its own rescue handle a stat fault; don't make
+      # the size probe a second silent failure point.
+      false
     end
 
     def last_meaningful_line(path)
@@ -222,14 +282,23 @@ module Hive
 
     def safe_mtime(path) = Hive::DiagnosticHelpers.safe_mtime(path)
 
-    # Symlink-escape guard, mirroring Hive::TaskAction::Diagnostic's
-    # safe_diagnostic_artifact?. A `*.log`, `*.md`, or red-status.md symlink
-    # under the task folder or its log dirs could otherwise point at an
-    # arbitrary readable host file and leak it through CLI JSON or the Telegram
-    # fallback. Require the realpath to sit inside one of the (also realpath'd)
-    # evidence roots before any read.
+    # Symlink-escape + regular-file guard, mirroring Hive::TaskAction::
+    # Diagnostic's safe_diagnostic_artifact?. Two distinct hazards:
+    #   * A `*.log` / `*.md` / red-status.md *file* symlink could point at an
+    #     arbitrary readable host file; require the realpath to sit inside one
+    #     of the (also realpath'd) evidence roots — and evidence_roots itself
+    #     rejects an evidence *directory* that is a symlink, so a `logs ->
+    #     /outside` dir symlink can't smuggle its target in as a trusted root.
+    #   * A FIFO / socket / device / directory named like evidence would make
+    #     the subsequent open(2) block or read unbounded (the never-block hazard
+    #     the red tier already guarded with File.file?); gate on File.file? so
+    #     the log and marker tiers reject non-regular files before any read.
+    # realpath runs first so a symlink loop still surfaces its ELOOP breadcrumb;
+    # File.file? then runs on the resolved path (FIFO/dir → false, no open).
     def contained?(path, folder)
       real = File.realpath(path)
+      return false unless File.file?(real)
+
       evidence_roots(folder).any? { |root| path_inside?(real, root) }
     rescue Errno::ENOENT
       false
@@ -244,6 +313,12 @@ module Hive
 
     def realpath_or_expand(path)
       return nil if path.nil? || path.to_s.empty?
+      # A symlinked evidence *directory* (e.g. `logs -> /outside`) would
+      # otherwise resolve into a TRUSTED root and let contained? approve every
+      # file under the link target. Reject a root whose own leaf is a symlink;
+      # a symlinked *ancestor* (the legitimate `.hive-state -> /vol` deployment)
+      # still resolves normally because File.symlink? checks only the leaf.
+      return nil if File.symlink?(path)
 
       File.realpath(path)
     rescue Errno::ENOENT
@@ -265,6 +340,14 @@ module Hive
       text.empty? ? nil : text
     end
 
+    # Blank-check a filesystem path WITHOUT the display normaliser one_line
+    # applies — a project root containing a tab or a run of spaces must reach
+    # the marker read and the emitted source_path verbatim, not whitespace-
+    # collapsed. present() stays reserved for display strings.
+    def present_path(value)
+      value unless value.to_s.strip.empty?
+    end
+
     def one_line(value)
       utf8(value.to_s).gsub(/\s+/, " ").strip
     end
@@ -272,5 +355,19 @@ module Hive
     def utf8(value)
       Hive::DiagnosticHelpers.utf8(value)
     end
+
+    # The module's intended public surface is summarize (mint a result) plus the
+    # two render helpers the CLI/bot label tiers with. Everything else is
+    # internal: keep it private so an external caller can't invoke e.g.
+    # summary_payload to mint a result that bypasses the redact/truncate +
+    # closed-`kind` invariants.
+    private_class_method :red_status_summary, :red_status_frontmatter_summary,
+                         :red_status_body_summary, :latest_log_summary, :log_candidates,
+                         :log_dirs, :inferred_task_log_dir, :marker_state_file,
+                         :state_file_candidates, :marker_summary_from_state_file,
+                         :current_marker, :marker_file_oversized?, :last_meaningful_line,
+                         :safe_read_head, :safe_mtime, :contained?, :evidence_roots,
+                         :realpath_or_expand, :path_inside?, :summary_payload,
+                         :present, :present_path, :one_line, :utf8
   end
 end

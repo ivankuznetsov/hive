@@ -1324,7 +1324,12 @@ module Hive
         title = Hive::Bot::TitleFormatter.title_from_slug(slug)
         evidence = Hive::DiagnosticEvidence.summarize(
           folder: envelope["task_folder"],
-          marker_summary: envelope["marker_summary"]
+          marker_summary: envelope["marker_summary"],
+          # Pin the marker tier to the authoritative state file the CLI read
+          # marker_summary from, so the marker-tier source_path can't name a
+          # different *.md than the summary describes (older envelopes omit this
+          # field; summarize treats nil as "glob the folder", the prior path).
+          state_file: envelope["state_file"]
         )
         if evidence
           # Label the source by its tier (Diagnostics:/Log:/Marker:) rather than

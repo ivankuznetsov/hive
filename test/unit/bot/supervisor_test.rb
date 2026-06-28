@@ -428,6 +428,33 @@ class HiveBotSupervisorTest < Minitest::Test
       # The marker state file is labelled Marker:, not Log:.
       assert_includes text, "Marker: #{state_file}"
       refute_includes text, "Log: #{state_file}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_marker_tier_pins_threaded_state_file
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # An advanced folder carries a stale marker in an earlier-stage file
+      # (task.md) AND the authoritative state file (pr.md). Without the threaded
+      # state_file the bot would glob task.md first and mislabel the source.
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      pr_md = File.join(folder, "pr.md")
+      File.write(pr_md, "<!-- REVIEW_STALE pass=2 -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "advanced-task",
+        "task_folder" => folder,
+        "marker_summary" => "REVIEW_STALE pass=2",
+        "state_file" => pr_md
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "REVIEW_STALE pass=2"
+      assert_includes text, "Marker: #{pr_md}"
+      refute_includes text, "Marker: #{File.join(folder, 'task.md')}"
     end
   end
 
@@ -447,6 +474,10 @@ class HiveBotSupervisorTest < Minitest::Test
       text = @telegram.messages.first.fetch(:text)
       assert_includes text, "Couldn't find a cached diagnosis"
       assert_includes text, "Task folder: #{folder}"
+      # The empty-folder case is the original bug's exact scenario — guard the
+      # stale "No diagnostic available" copy explicitly, not just the positive
+      # "Couldn't find a cached diagnosis" assertion.
+      refute_includes text, "No diagnostic available"
     end
   end
 

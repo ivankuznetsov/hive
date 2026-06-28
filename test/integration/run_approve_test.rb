@@ -659,11 +659,12 @@ class RunApproveTest < Minitest::Test
         assert_equal Hive::Schemas::NextActionKind::RUN, next_action["kind"]
         assert_includes Hive::Schemas::NextActionKind::ALL, next_action["kind"]
         assert_match(%r{/3-plan/#{slug}\z}, next_action["folder"])
-        # After advancing INTO 3-plan, "next" is "run the plan agent
-        # at 3-plan" — `hive plan <slug> --from 3-plan` hits StageAction's
-        # at-target branch. Emitting a verb that would advance OUT (e.g.
-        # `hive develop`) would refuse on the non-terminal marker.
-        assert_equal "hive plan #{slug} --from 3-plan", next_action["command"]
+        # After advancing INTO 3-plan, "next" is "run the plan agent at
+        # 3-plan". The freshly-approved task is markerless, which now
+        # classifies as ready_to_run, so the command is `hive run <slug>`
+        # (runs the current stage). Emitting a verb that would advance OUT
+        # (e.g. `hive develop`) would refuse on the non-terminal marker.
+        assert_equal "hive run #{slug}", next_action["command"]
       end
     end
   end

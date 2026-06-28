@@ -78,6 +78,53 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_default_path_matches_explicit_full_stage_inputs
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(hive_state, "4-execute", "active-task-260626-abcd",
+                        state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      write_status_task(hive_state, "9-done", "archived-task-260626-abcd",
+                        state_file: "task.md", marker: "COMPLETE")
+      projects = [ status_project(project_root, hive_state) ]
+      now = Time.utc(2026, 6, 26, 12, 0, 0)
+
+      default_json = explicit_json = nil
+      with_replaced_singleton_method(Time, :now, -> { now }) do
+        default_json = JSON.generate(Hive::Commands::Status.new.json_payload(projects))
+        explicit_json = JSON.generate(
+          Hive::Commands::Status.new.json_payload(
+            projects,
+            stages: Hive::Workflows.all_stage_dirs,
+            extra_dependency_tasks: {}
+          )
+        )
+      end
+
+      assert_equal default_json, explicit_json,
+                   "no-kwargs status JSON must match the explicit full-snapshot path byte-for-byte"
+    end
+  end
+
+  def test_json_payload_with_stage_filter_returns_only_requested_stages
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      active = write_status_task(hive_state, "4-execute", "active-task-260626-abcd",
+                                 state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      archived = write_status_task(hive_state, "9-done", "archived-task-260626-abcd",
+                                   state_file: "task.md", marker: "COMPLETE")
+      Hive::TaskMeta.write(active, id: 1, slug: File.basename(active), display_name: nil)
+      Hive::TaskMeta.write(archived, id: 2, slug: File.basename(archived), display_name: nil)
+      active_stages = Hive::Workflows.all_stage_dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+
+      tasks = Hive::Commands::Status.new.json_payload(
+        [ status_project(project_root, hive_state) ],
+        stages: active_stages
+      ).fetch("projects").first.fetch("tasks")
+
+      assert_equal [ "active-task-260626-abcd" ], tasks.map { |task| task.fetch("slug") }
+    end
+  end
+
   def test_json_payload_emits_workflow_id_for_scanned_tasks
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -346,6 +393,49 @@ class CommandsStatusTest < Minitest::Test
       assert_equal File.basename(base), row.fetch("blocked_by")
       assert_equal "8-finalize", row.fetch("dependency_stage")
       assert_equal false, row.fetch("blocked")
+    end
+  end
+
+  def test_active_only_payload_resolves_dependency_from_extra_dependency_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260626-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: "archived-task-260626-aaaa")
+      active_stages = Hive::Workflows.all_stage_dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+      project = status_project(project_root, hive_state)
+
+      unresolved = Hive::Commands::Status.new.json_payload([ project ], stages: active_stages)
+                      .fetch("projects").first.fetch("tasks").first
+      blocked = Hive::Commands::Status.new.json_payload(
+        [ project ],
+        stages: active_stages,
+        extra_dependency_tasks: {
+          project.fetch("path") => [
+            { slug: "archived-task-260626-aaaa", id: 1, stage: "7-artifacts", stage_index: 7 }
+          ]
+        }
+      ).fetch("projects").first.fetch("tasks").first
+      unblocked = Hive::Commands::Status.new.json_payload(
+        [ project ],
+        stages: active_stages,
+        extra_dependency_tasks: {
+          project.fetch("path") => [
+            { "slug" => "archived-task-260626-aaaa", "id" => 1, "stage" => "9-done" }
+          ]
+        }
+      ).fetch("projects").first.fetch("tasks").first
+
+      assert_equal true, unresolved.fetch("blocked")
+      assert_nil unresolved.fetch("blocked_by"),
+                 "without archived identities, active-only dependency resolution is unresolved"
+      assert_equal true, blocked.fetch("blocked")
+      assert_equal "archived-task-260626-aaaa", blocked.fetch("blocked_by")
+      assert_equal "7-artifacts", blocked.fetch("dependency_stage")
+      assert_equal false, unblocked.fetch("blocked")
+      assert_equal "archived-task-260626-aaaa", unblocked.fetch("blocked_by")
+      assert_equal "9-done", unblocked.fetch("dependency_stage")
     end
   end
 

@@ -49,6 +49,7 @@ module Hive
         idea_voice_edit_text
         answer_voice
         idea_media
+        idea_bare_text
         idea_text_capture
         free_text_answer
         unauthorized
@@ -106,8 +107,7 @@ module Hive
           projects_provider: @projects_provider,
           status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
-          logger: @logger,
-          status_snapshot_provider: status_snapshot_provider
+          logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
           conversation_store: @conversation_store,
@@ -160,7 +160,15 @@ module Hive
           return :idea_media if update.respond_to?(:media?) && update.media?
           return :idea_text_capture if draft&.phase == :awaiting_text
 
-          :unknown
+          # Bare non-slash text now defaults to idea capture. Text-less updates
+          # with no media/voice (stickers, locations, contacts, video) reach
+          # here too with an empty `text` and likewise open idea capture
+          # (`idea` -> awaiting_text draft) rather than the unknown-command
+          # reply. Unknown slash commands must keep the unknown-command reply
+          # instead of being swallowed as idea text.
+          return :unknown if text.start_with?("/")
+
+          :idea_bare_text
         end
       end
 
@@ -284,6 +292,10 @@ module Hive
         }
       end
 
+      # Nil-able: returns nil when neither read is set (SlashHandlers#effective_text
+      # is byte-identical; FreeTextHandler's variant coerces to "" instead). The
+      # respond_to? guard supports lean test fixtures that expose only #text;
+      # production Telegram::Update always responds to #effective_text (telegram.rb).
       def effective_text(update)
         update.respond_to?(:effective_text) ? update.effective_text : update.text
       end
@@ -306,6 +318,7 @@ module Hive
         when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
+        when :idea_bare_text then @slash_handlers.idea(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
         when :callback_expired

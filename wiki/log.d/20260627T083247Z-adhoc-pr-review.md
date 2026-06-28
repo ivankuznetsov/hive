@@ -21,7 +21,9 @@ Review-stage behavior now treats `source: ad-hoc` specially:
 `review.adhoc.reviewers` overrides the normal reviewer list when set, falls
 back to `review.reviewers` when nil, and `review.adhoc.fix` defaults false so
 accepted findings pause as `REVIEW_WAITING reason=adhoc_fix_disabled` instead
-of pushing fixes to someone else's PR.
+of committing fixes to someone else's PR (the review stage never pushes to the
+remote; the same fix-off gate also skips Phase 1 CI-fix so a configured
+`review.ci.command` cannot auto-commit on the borrowed worktree).
 
 Updated [[cli]], [[commands/stage_action]], [[state-model]],
 [[stages/review]], [[modules/config]], [[modules/pr]], [[modules/gh]], and

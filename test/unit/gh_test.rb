@@ -272,6 +272,35 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_pr_metadata_passes_chdir_to_capture3_so_project_scoping_targets_the_right_repo
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    captured = []
+    responses = [
+      [ "", "", status ],
+      [
+        {
+          "number" => 197, "url" => "https://github.com/o/r/pull/197",
+          "baseRefName" => "main", "headRefOid" => "abc",
+          "isCrossRepository" => false, "state" => "OPEN"
+        }.to_json,
+        "",
+        status
+      ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+      captured << [ cmd, kwargs ]
+      responses.shift
+    }) do
+      Hive::Gh.pr_metadata(197, chdir: "/tmp/some-project")
+    end
+
+    view_call = captured.find { |cmd, _kwargs| cmd.include?("view") }
+    refute_nil view_call, "expected a `gh pr view` call"
+    assert_equal "/tmp/some-project", view_call.last.fetch(:chdir),
+                 "pr_metadata must forward chdir: to capture3 so --project queries the right repo"
+  end
+
   def test_pr_metadata_raises_on_gh_pr_view_failure
     ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
     failed = Hive::Gh::CommandStatus.new(exitstatus: 1)

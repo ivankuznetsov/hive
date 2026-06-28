@@ -33,7 +33,12 @@ module Hive
         project = Hive::Config.registered_project!(name: @project_name, cwd: Dir.pwd)
         project_root = project.fetch("path")
         project_name = project.fetch("name")
-        hive_state_path = project.fetch("hive_state_path")
+        # Resolve hive_state_path through the SAME resolver registered_project!
+        # validates with (project-relative entries are joined against the
+        # project root). Consuming the raw registry value here would interpret
+        # a hand-edited *relative* hive_state_path against the caller's cwd —
+        # validation would pass while sidecars landed in the wrong place.
+        hive_state_path = Hive::Config.project_hive_state_path(project)
         # Parse the identifier in its own narrow rescue (see parse_pr_number!)
         # so only an invalid identifier maps to a USAGE error; an ArgumentError
         # from anywhere else stays a genuine InternalError below.
@@ -96,15 +101,41 @@ module Hive
       # adopted and re-run as the ad-hoc review; refuse it instead, mirroring
       # the refuse-to-shadow guard in refuse_if_owned!.
       def validate_reusable!(folder, slug, pr_number)
-        frontmatter = Hive::Gh.pr_frontmatter(File.join(folder, "pr.md"))
+        # Read pr.md through the SystemCallError-guarded helper the collision
+        # scan uses (not bare pr_frontmatter, which rescues only Psych) so a
+        # permission/IO error on this one file surfaces as a clean collision
+        # message rather than a wrapped InternalError. nil (unreadable) falls
+        # through to the refuse branch, which already points at `hive drop`.
+        frontmatter = read_pr_frontmatter_for_scan(File.join(folder, "pr.md")) || {}
+        # casecmp? matches the review stage's reader (review.rb adhoc_task?):
+        # a drifted `source: Ad-Hoc` must not route as ad-hoc there yet be
+        # rejected here.
         source = frontmatter["source"].to_s.strip
         owned_pr = frontmatter["pr_number"].to_i
-        return if source == SOURCE && owned_pr == pr_number.to_i
+        unless source.casecmp?(SOURCE) && owned_pr == pr_number.to_i
+          raise CollisionError,
+                "review folder #{slug} already exists but is not an ad-hoc review for PR ##{pr_number} " \
+                "(source=#{source.inspect}, pr_number=#{owned_pr}); " \
+                "run `hive drop #{slug}` before creating an ad-hoc review"
+        end
+
+        verify_reusable_worktree!(folder, slug)
+      end
+
+      # The reuse path returns the existing task without re-materializing, so
+      # its carried-over worktree must still be on disk. A pruned or
+      # hand-removed worktree would otherwise pass enqueue and only fail deep
+      # in the review stage ("worktree pointer present but worktree missing").
+      # Surface it cleanly here, pointing at the explicit-teardown path.
+      def verify_reusable_worktree!(folder, slug)
+        pointer = Hive::Worktree.read_pointer(folder)
+        worktree_path = pointer && pointer["path"]
+        return if worktree_path && File.directory?(worktree_path)
 
         raise CollisionError,
-              "review folder #{slug} already exists but is not an ad-hoc review for PR ##{pr_number} " \
-              "(source=#{source.inspect}, pr_number=#{owned_pr}); " \
-              "run `hive drop #{slug}` before creating an ad-hoc review"
+              "ad-hoc review folder #{slug} exists but its worktree is missing " \
+              "(#{worktree_path || 'no worktree.yml path'}); " \
+              "run `hive drop #{slug}` and re-run to recreate it"
       end
 
       def refuse_if_owned!(hive_state_path, slug, pr_number)
@@ -174,6 +205,13 @@ module Hive
       def create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
         task_folder = File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        # Proactively clear an orphan worktree/branch/ref BEFORE materializing
+        # (mirrors Hive::Babysitter::Worktree#remove_existing!): a prior
+        # SIGKILL after `git worktree add` leaves `.git/worktrees/<slug>` admin
+        # metadata that makes this run's add fail with "already exists in the
+        # worktree list". Without this the first retry fails and only the
+        # second self-heals; with it a single retry is clean.
+        remove_orphan_worktree!(project_root, slug, pr_number)
         materialized = materialize(project_root, slug, pr_number)
         verify_head!(pr_number, metadata, materialized)
         write_sidecars(task_folder, slug, metadata, materialized, now)
@@ -183,18 +221,40 @@ module Hive
         raise
       end
 
-      # Mirror Hive::Babysitter::Worktree#remove_existing!: a failure after
-      # `git worktree add` succeeds — a verify_head! head-race (benign PR
-      # re-push between metadata fetch and materialize) or a sidecar write
-      # error — would otherwise orphan the worktree at canonical_root/<slug>
-      # plus its `hive/review/pr-N` branch and `refs/hive/review/pr-N` ref, so
-      # the next `hive review --pr N` wedges on "already exists in the worktree
-      # list" until an operator runs `git worktree prune` by hand. Remove the
-      # task folder, the worktree (force + prune), the branch, and the ref so a
-      # retry starts clean. Best-effort: git non-zero exits are ignored so they
-      # cannot mask the original failure being re-raised.
+      # Roll back a partially-created task after a create-phase failure — a
+      # verify_head! head-race (benign PR re-push between metadata fetch and
+      # materialize) or a sidecar write error would otherwise orphan the
+      # worktree at canonical_root/<slug> plus its `hive/review/pr-N` branch
+      # and `refs/hive/review/pr-N` ref, wedging the next `hive review --pr N`
+      # on "already exists in the worktree list". Guarded twice over:
+      #   * the whole body is wrapped so cleanup's OWN spawn/IO errors
+      #     (Errno::ENOENT from a missing git, Errno::EACCES from rm_rf) can
+      #     never mask the original create-phase error create_task! re-raises
+      #     immediately after — the "cannot mask the original failure"
+      #     guarantee now covers exceptions, not just non-zero git exits;
+      #   * after removal it checks for surviving residue (a stale
+      #     `git worktree list` entry or the branch ref) and warns, so a
+      #     partial cleanup failure is observable rather than silently
+      #     re-wedging the next run.
       def cleanup_failed_task!(project_root, slug, pr_number, task_folder)
         FileUtils.rm_rf(task_folder) if task_folder
+        remove_orphan_worktree!(project_root, slug, pr_number)
+        residue = cleanup_residue(project_root, slug, pr_number)
+        unless residue.empty?
+          warn "[hive.review] ad-hoc cleanup could not fully remove #{residue.join(' and ')} for #{slug}; " \
+               "run `git -C #{project_root} worktree prune` before retrying `hive review --pr #{pr_number}`"
+        end
+      rescue StandardError => e
+        warn "[hive.review] ad-hoc cleanup after a failed create did not complete: " \
+             "#{e.class}: #{e.message} — run `git -C #{project_root} worktree prune` if a retry wedges"
+      end
+
+      # Best-effort removal of any worktree + branch + fetch ref for this
+      # slug/PR. Exit codes are intentionally ignored: the common (clean) case
+      # has nothing to remove, so the proactive pre-materialize caller must not
+      # warn, and the cleanup caller surfaces a genuine partial failure via
+      # cleanup_residue instead.
+      def remove_orphan_worktree!(project_root, slug, pr_number)
         worktree_path = worktree_path_for(project_root, slug)
         branch = branch_for(pr_number)
         Open3.capture3("git", "-C", project_root, "worktree", "remove", "--force", worktree_path)
@@ -202,6 +262,31 @@ module Hive
         Open3.capture3("git", "-C", project_root, "branch", "-D", branch)
         Open3.capture3("git", "-C", project_root, "update-ref", "-d", "refs/#{branch}")
         FileUtils.rm_rf(worktree_path)
+      end
+
+      # Artifacts that survived remove_orphan_worktree!: the stale
+      # `git worktree list` entry (the actual "already exists in the worktree
+      # list" wedge) and the `hive/review/pr-N` branch. Empty in the common
+      # case (nothing was created, or everything was removed), so the cleanup
+      # warning fires only on a genuine partial-cleanup failure.
+      def cleanup_residue(project_root, slug, pr_number)
+        residue = []
+        worktree_path = worktree_path_for(project_root, slug)
+        residue << "worktree #{worktree_path}" if worktree_listed?(project_root, worktree_path)
+        branch = branch_for(pr_number)
+        residue << "branch #{branch}" if Hive::Worktree.local_branch_ref_exists?(project_root, branch)
+        residue
+      end
+
+      def worktree_listed?(project_root, worktree_path)
+        out, _err, status = Open3.capture3("git", "-C", project_root, "worktree", "list", "--porcelain")
+        return false unless status.success?
+
+        expanded = File.expand_path(worktree_path)
+        out.each_line.any? do |line|
+          line.start_with?("worktree ") &&
+            File.expand_path(line.delete_prefix("worktree ").strip) == expanded
+        end
       end
 
       def verify_head!(pr_number, metadata, materialized)

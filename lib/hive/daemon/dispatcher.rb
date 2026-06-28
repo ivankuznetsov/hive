@@ -594,11 +594,12 @@ module Hive
                           envelope_ok: entry.json_envelope&.dig("ok"))
             notify_dispatch_result(entry, meta, now: now) unless continuation
           end
-          # The global digest is a pseudo-project ("digest"), not a real
-          # registry entry. A digest ConfigError (exit 78) is handled by the
-          # scheduler's own backoff (below); dropping a phantom "digest"
-          # project would emit a misleading :project_dropped event and leave
-          # a permanent phantom entry the digest gate never consults.
+          # The global digests are pseudo-projects ("digest" and "answer_digest"),
+          # not real registry entries. A digest ConfigError (exit 78) is handled
+          # by the scheduler's own backoff (below); dropping a phantom digest
+          # project would emit a misleading :project_dropped event and leave a
+          # permanent phantom entry the digest gate never consults. The
+          # `!global_digest_stage?` guard covers BOTH pseudo-projects.
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
              !global_digest_stage?(entry.stage)
             @controller.record_project_dropped(project: entry.project)
@@ -1207,9 +1208,18 @@ module Hive
         @controller.can_dispatch_digest?(now: now)
       end
 
+      # The two global-digest pseudo-stages mapped to their action label. Both
+      # `global_digest_stage?` and `global_digest_action` read this so the
+      # stage↔label pairing lives in one place; `global_digest_scheduler` still
+      # maps a stage to the per-instance scheduler ivar, which can't live in a
+      # frozen constant.
+      GLOBAL_DIGEST_ACTIONS = {
+        Hive::Daemon::DigestScheduler::DIGEST_STAGE => "digest",
+        Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest"
+      }.freeze
+
       def global_digest_stage?(stage)
-        stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE ||
-          stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+        GLOBAL_DIGEST_ACTIONS.key?(stage)
       end
 
       def global_digest_scheduler(stage)
@@ -1222,12 +1232,7 @@ module Hive
       end
 
       def global_digest_action(stage)
-        case stage
-        when Hive::Daemon::DigestScheduler::DIGEST_STAGE
-          "digest"
-        when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
-          "answer_digest"
-        end
+        GLOBAL_DIGEST_ACTIONS[stage]
       end
 
       # Consume the file-backed dispatch-request queue (plan

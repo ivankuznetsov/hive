@@ -721,6 +721,36 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "answer_digest" }
   end
 
+  def test_both_global_digests_contend_for_the_single_slot_in_one_tick
+    dispatcher, sup, _ctrl, logger, _mw, _patrol, digest, answer_digest = make_dispatcher(
+      rows: [], with_digest_scheduler: true, with_answer_digest_scheduler: true
+    )
+    digest.next_dispatches = [
+      {
+        project: "digest", slug: "2026-06-13", stage: "digest",
+        command: "hive digest --date 2026-06-13 --json",
+        state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
+      }
+    ]
+    answer_digest.next_dispatches = [
+      {
+        project: "answer_digest", slug: "2026-06-13", stage: "answer_digest",
+        command: "hive answer-digest --date 2026-06-13 --json",
+        state_file_mtime: nil, state_file_path: nil, hive_state_path: nil
+      }
+    ]
+
+    dispatcher.tick(now: T0)
+
+    # The shipped digest ticks first (dispatch ordering) and takes the single
+    # global digest slot; the answer-digest is blocked and cancelled the SAME
+    # tick. Pins the ordering so a silent flip is caught.
+    assert_equal 1, sup.spawned.size
+    assert_equal "hive digest --date 2026-06-13 --json", sup.spawned.first[:command]
+    assert_equal [ "2026-06-13" ], answer_digest.cancelled
+    assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "answer_digest" }
+  end
+
   def test_answer_digest_scheduler_completes_on_answer_digest_child_exit
     dispatcher, sup, = make_dispatcher(rows: [], with_answer_digest_scheduler: true)
     answer_digest = dispatcher.instance_variable_get(:@answer_digest_scheduler)
@@ -756,6 +786,47 @@ class HiveDaemonDispatcherTest < Minitest::Test
     event = logger.events.find { |name, _| name == :fatal }
     refute_nil event
     assert_match(/answer_digest_scheduler\.tick raised/, event.last.fetch(:message))
+  end
+
+  # The fatal-dedup (@digest_scheduler_fatal_signatures) is the whole point of
+  # the "dedup scheduler fatals" refactor: a persistently-raising scheduler
+  # must log :fatal once (not every ~30s tick), a clean run must re-arm the
+  # dedup, and a distinct fault must re-log. Mirrors the sibling
+  # brainstorm-parse dedup test. Without this, a regression that never re-arms
+  # (silent forever) or never dedups (per-poll :fatal spam) ships green.
+  def test_answer_digest_scheduler_tick_fatal_is_deduped_and_rearms
+    dispatcher, sup, _ctrl, logger, = make_dispatcher(rows: [], with_answer_digest_scheduler: true)
+    controllable = Object.new
+    controllable.define_singleton_method(:error=) { |e| @error = e }
+    controllable.define_singleton_method(:tick) { |now:| raise @error if @error; [] }
+    dispatcher.instance_variable_set(:@answer_digest_scheduler, controllable)
+
+    tick_fatals = lambda do
+      logger.events.count do |name, attrs|
+        name == :fatal && attrs[:message].to_s.include?("answer_digest_scheduler.tick")
+      end
+    end
+
+    # Same fault across three ticks logs :fatal exactly once.
+    controllable.error = IOError.new("ENOSPC on answer digest state")
+    3.times { dispatcher.tick(now: T0) }
+    assert_empty sup.spawned
+    assert_equal 1, tick_fatals.call,
+                 "a persistent scheduler fault must log :fatal once across ticks, not every poll"
+
+    # A clean tick clears the dedup so a later recurrence of the SAME fault re-logs.
+    controllable.error = nil
+    dispatcher.tick(now: T0)
+    controllable.error = IOError.new("ENOSPC on answer digest state")
+    dispatcher.tick(now: T0)
+    assert_equal 2, tick_fatals.call,
+                 "a clean run must re-arm the dedup so the same fault re-logs afterward"
+
+    # A distinct fault signature re-logs even while the prior one was deduped.
+    controllable.error = IOError.new("EROFS on answer digest state")
+    dispatcher.tick(now: T0)
+    assert_equal 3, tick_fatals.call,
+                 "a distinct fault signature must re-log rather than be swallowed by the dedup"
   end
 
   def test_answer_digest_scheduler_complete_raise_is_isolated_as_a_fatal_event

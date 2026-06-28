@@ -5,6 +5,7 @@ require "yaml"
 require "hive/execute_waiting_action"
 require "hive/markers"
 require "hive/secret_patterns"
+require "hive/diagnostic_helpers"
 
 module Hive
   class TaskAction
@@ -19,9 +20,11 @@ module Hive
     # object stays a pure function of its inputs and never reaches back into
     # the classifier.
     class Diagnostic
-      SUMMARY_MAX = 120
+      # Caps shared with Hive::DiagnosticEvidence via Hive::DiagnosticHelpers so
+      # the two diagnose surfaces can't drift (SUMMARY_MAX is schema-pinned).
+      SUMMARY_MAX = Hive::DiagnosticHelpers::SUMMARY_MAX
       DETAIL_MAX = 4_000
-      TAIL_BYTES = 8_192
+      TAIL_BYTES = Hive::DiagnosticHelpers::TAIL_BYTES
       # The schema pins artifact_paths maxItems=20; this is the producer-side
       # enforcement so a marker with hundreds of matching artifacts (legacy
       # reviews/ dirs) cannot blow past the contract.
@@ -29,11 +32,11 @@ module Hive
       # Cap on .log files probed per task per status invocation. Bounds the
       # File.mtime cost when a task accumulated many agent-run logs over a
       # long-lived branch (saw 50+ on auto-rebase test fixtures).
-      LOG_GLOB_CAP = 20
+      LOG_GLOB_CAP = Hive::DiagnosticHelpers::LOG_GLOB_CAP
       # Real frontmatter is < 1KB; 16KB is generous for human-written
       # artifacts and tight enough to reject a runaway file masquerading as
       # frontmatter.
-      FRONTMATTER_SCAN_BYTES = 16_384
+      FRONTMATTER_SCAN_BYTES = Hive::DiagnosticHelpers::FRONTMATTER_SCAN_BYTES
 
       AUTO_COMMIT_MANUAL_FAILURE_REASONS = %w[
         fix_auto_commit_scope_failed
@@ -303,10 +306,10 @@ module Hive
         return "FINALIZE_MISSING_PR_URL" if finalize_missing_pr_url?
         return "FINALIZE_PR_URL_MISMATCH" if finalize_pr_url_mismatch?
 
-        attrs = Hive::Markers.display_attrs(marker.attrs)
-                             .map { |key, value| "#{key}=#{value}" }.join(" ")
-        marker_name = marker.name.to_s.upcase
-        attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
+        # The synthetic prefixes above are this surface's own; everything else
+        # is the shared NAME+attrs rendering (plan R-5). Diagnostic only reaches
+        # here for red markers, never :none, so the nil case can't occur.
+        Hive::Markers.summary(marker)
       end
 
       def marker_detail
@@ -375,22 +378,9 @@ module Hive
         "#{path}: #{e.class}: #{e.message}"
       end
 
-      def tail_file(path)
-        raw = File.open(path, "rb") do |file|
-          begin
-            file.seek(-TAIL_BYTES, IO::SEEK_END)
-          rescue Errno::EINVAL
-            file.rewind
-          end
-          file.read.to_s
-        end
-        # Coerce to UTF-8 with invalid byte replacement so downstream redact /
-        # truncate / JSON.generate never raises Encoding::CompatibilityError on
-        # a binary log tail. A single corrupt byte in one task's log used to
-        # abort the entire `hive status --json` snapshot, breaking every
-        # downstream consumer (bot, daemon, TUI). See PR #84 review finding #4.
-        raw.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
-      end
+      # Boundary-safe UTF-8 tail; shared with Hive::DiagnosticEvidence so both
+      # surfaces redact a secret split across the tail window identically.
+      def tail_file(path) = Hive::DiagnosticHelpers.tail_file(path)
 
       def diagnostic_updated_at(primary)
         safe_mtime(primary) || safe_mtime(task.state_file) || Time.now
@@ -529,13 +519,7 @@ module Hive
         "#{task.stage_index}-#{task.stage_name}"
       end
 
-      def safe_mtime(path)
-        return nil if path.nil? || path.to_s.empty?
-
-        File.mtime(path)
-      rescue SystemCallError
-        nil
-      end
+      def safe_mtime(path) = Hive::DiagnosticHelpers.safe_mtime(path)
 
       def safe_diagnostic_artifact?(path)
         return false if path.nil? || path.to_s.empty? || !File.file?(path)
@@ -583,11 +567,7 @@ module Hive
         Hive::SecretPatterns.redact(text)
       end
 
-      def truncate(text, max)
-        return text if text.length <= max
-
-        "#{text[0, max - 1]}…"
-      end
+      def truncate(text, max) = Hive::DiagnosticHelpers.truncate(text, max)
 
       def execute_waiting_input?
         task.stage_name == "execute" &&

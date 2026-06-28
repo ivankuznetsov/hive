@@ -402,8 +402,51 @@ class HiveBotSupervisorTest < Minitest::Test
 
       text = @telegram.messages.first.fetch(:text)
       assert_includes text, "Cached agent verdict"
-      assert_includes text, "Log: #{path}"
+      # red-status.md is a diagnostic artifact, not a log — labelled accordingly.
+      assert_includes text, "Diagnostics: #{path}"
+      refute_includes text, "Log: #{path}"
       refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_marker
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "<!-- ERROR reason=worktree_git_failed -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "marker-only-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=worktree_git_failed"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "ERROR reason=worktree_git_failed"
+      # The marker state file is labelled Marker:, not Log:.
+      assert_includes text, "Marker: #{state_file}"
+      refute_includes text, "Log: #{state_file}"
+    end
+  end
+
+  def test_reply_for_child_empty_success_with_evidence_empty_folder_hints_task_folder
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # A real folder that exists but holds no red-status / log / marker
+      # evidence: the resolver returns nil and the reply appends the folder hint.
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "no-evidence-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Couldn't find a cached diagnosis"
+      assert_includes text, "Task folder: #{folder}"
     end
   end
 

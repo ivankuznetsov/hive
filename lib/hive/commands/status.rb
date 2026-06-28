@@ -11,6 +11,8 @@ require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
 require "hive/diagnostic_evidence"
+require "hive/diagnostic_helpers"
+require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -374,7 +376,11 @@ module Hive
           emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary)
         else
           if diagnostic.nil?
-            evidence = Hive::DiagnosticEvidence.summarize(folder: task.folder, marker_summary: marker_summary)
+            evidence = Hive::DiagnosticEvidence.summarize(
+              folder: task.folder,
+              marker_summary: marker_summary,
+              state_file: task.state_file
+            )
             diagnostic = evidence_diagnostic(task, marker, evidence) if evidence
           end
           emit_diagnose_result(task, diagnostic, nil, marker_summary: marker_summary)
@@ -428,23 +434,36 @@ module Hive
         end
       end
 
+      # The canonical NAME+attrs marker rendering (shared with the diagnostic
+      # surfaces via Hive::Markers.summary, plan R-5), routed through redact for
+      # symmetry with the rest of the diagnose payload — the field is emitted
+      # raw into the envelope and only the bot re-feeds it through SecretPatterns
+      # otherwise. Returns nil for the :none marker so a markerless task's
+      # envelope reads `marker_summary: null` (not "NONE") and the evidence
+      # resolver omits the prefix, matching its unsupplied-marker_summary path.
       def marker_summary(marker)
-        attrs = Hive::Markers.display_attrs(marker.attrs)
-                             .map { |key, value| "#{key}=#{value}" }
-                             .join(" ")
-        marker_name = marker.name.to_s.upcase
-        attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
+        summary = Hive::Markers.summary(marker)
+        summary && Hive::SecretPatterns.redact(summary)
       end
 
+      # Synthesizes the schema-governed Diagnostic shape (hive-status-diagnose
+      # `diagnostic`) from on-disk evidence for the nil-diagnostic read path.
+      # Keep these nine keys in sync with Hive::TaskAction::Diagnostic#to_h and
+      # the published schema — a field added there must be mirrored here or this
+      # branch emits an invalid envelope (guarded by a JSONSchemer round-trip in
+      # status_diagnose_test.rb). The evidence `kind` tier picks the detail
+      # prefix (Diagnostics:/Log:/Marker:) and the schema `source` value
+      # (marker tier -> "marker", artifact tiers -> "artifact").
       def evidence_diagnostic(task, marker, evidence)
+        kind = evidence.fetch(:kind)
         source_path = evidence.fetch(:source_path)
-        artifact_paths = evidence_source(task, source_path) == "artifact" ? [ source_path ] : []
+        source = kind == :marker ? "marker" : "artifact"
         {
           "summary" => evidence.fetch(:summary),
-          "detail" => "Log: #{source_path}",
-          "source" => evidence_source(task, source_path),
+          "detail" => "#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}",
+          "source" => source,
           "source_path" => source_path,
-          "artifact_paths" => artifact_paths,
+          "artifact_paths" => source == "artifact" ? [ source_path ] : [],
           "generated_by" => "local",
           "marker_signature" => Hive::TaskAction.marker_signature(marker),
           "suggested_next_action" => nil,
@@ -452,19 +471,7 @@ module Hive
         }
       end
 
-      def evidence_source(task, source_path)
-        return "marker" if source_path.to_s == task.state_file.to_s
-
-        "artifact"
-      end
-
-      def safe_mtime(path)
-        return nil if path.to_s.empty?
-
-        File.mtime(path)
-      rescue SystemCallError
-        nil
-      end
+      def safe_mtime(path) = Hive::DiagnosticHelpers.safe_mtime(path)
 
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |entry| entry["path"] == task.project_root }

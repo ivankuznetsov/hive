@@ -2,12 +2,28 @@ require "test_helper"
 require "digest"
 require "fileutils"
 require "json"
+require "json_schemer"
 require "tmpdir"
 require "hive/commands/status"
 require "hive/diagnosis_agent"
 require "hive/task_meta"
 
 class StatusDiagnoseTest < Minitest::Test
+  # Validate a real --diagnose envelope against the published schema. The
+  # evidence (nil-diagnostic) branch hand-assembles the schema-governed
+  # Diagnostic shape in Hive::Commands::Status#evidence_diagnostic; without a
+  # JSONSchemer round-trip on the actual producer, a field added to
+  # Diagnostic#to_h + the schema would leave this branch emitting an invalid
+  # envelope (additionalProperties:false, the source/generated_by enums, the
+  # summary/detail maxLengths) and ship silently.
+  def assert_diagnose_envelope_valid(payload)
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "evidence diagnose envelope must validate (errors: #{errors.inspect})"
+  end
+
   def with_review_task
     Dir.mktmpdir("hive-status-diagnose") do |project_root|
       slug = "red-task-260516-aaaa"
@@ -124,6 +140,60 @@ class StatusDiagnoseTest < Minitest::Test
       assert_equal "artifact", payload.dig("diagnostic", "source")
       assert_equal log_path, payload.dig("diagnostic", "source_path")
       assert_equal [ log_path ], payload.dig("diagnostic", "artifact_paths")
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
+  def test_diagnose_json_evidence_marker_tier_payload_and_schema
+    Dir.mktmpdir("hive-status-diagnose-marker") do |project_root|
+      slug = "rotated-task-260628-mkr0"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "plan.md")
+      # A non-red marker with no red-status and no log → marker-tier evidence.
+      File.write(state_file, "<!-- COMPLETE -->\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "COMPLETE", payload.dig("diagnostic", "summary")
+      assert_equal "marker", payload.dig("diagnostic", "source")
+      # The state file is labelled Marker:, not Log:.
+      assert_equal "Marker: #{state_file}", payload.dig("diagnostic", "detail")
+      assert_equal state_file, payload.dig("diagnostic", "source_path")
+      assert_equal [], payload.dig("diagnostic", "artifact_paths")
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
+  def test_diagnose_json_evidence_red_status_tier_uses_diagnostics_prefix
+    Dir.mktmpdir("hive-status-diagnose-redstatus") do |project_root|
+      slug = "rotated-task-260628-rst0"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(File.join(folder, "diagnostics"))
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      red_status = File.join(folder, "diagnostics", "red-status.md")
+      File.write(red_status, <<~MD)
+        ---
+        summary: Cached agent verdict
+        generated_by: codex
+        ---
+        body ignored
+      MD
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "Cached agent verdict", payload.dig("diagnostic", "summary")
+      assert_equal "artifact", payload.dig("diagnostic", "source")
+      # A diagnostic artifact, labelled Diagnostics:, not Log:.
+      assert_equal "Diagnostics: #{red_status}", payload.dig("diagnostic", "detail")
+      assert_equal [ red_status ], payload.dig("diagnostic", "artifact_paths")
+      assert_diagnose_envelope_valid(payload)
     end
   end
 

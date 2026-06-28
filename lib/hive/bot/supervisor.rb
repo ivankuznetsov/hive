@@ -1295,7 +1295,9 @@ module Hive
           # Show details renders directly from the cached status row now.
           # This remains defensive for the refresh_diagnose child path, the
           # sole producer of this envelope, which can still return an empty
-          # success envelope.
+          # success envelope — which `empty_diagnose_success_reply` now backfills
+          # from on-disk evidence (red-status / newest log / marker) before
+          # falling back to a try-again message.
           if diagnostic.empty? && envelope["path"].to_s.strip.empty?
             return empty_diagnose_success_reply(envelope, slug)
           end
@@ -1325,9 +1327,12 @@ module Hive
           marker_summary: envelope["marker_summary"]
         )
         if evidence
+          # Label the source by its tier (Diagnostics:/Log:/Marker:) rather than
+          # hardcoding "Log:" — the top tier is a diagnostic artifact and the
+          # marker tier is a state file, neither of which is a log.
           return "Refreshed diagnosis for \"#{title}\".\n" \
                  "#{evidence.fetch(:summary)}\n" \
-                 "Log: #{evidence.fetch(:source_path)}"
+                 "#{Hive::DiagnosticEvidence.source_label(evidence.fetch(:kind))}: #{evidence.fetch(:source_path)}"
         end
 
         folder = envelope["task_folder"].to_s.strip

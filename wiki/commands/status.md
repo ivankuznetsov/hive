@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-20
+updated: 2026-06-28
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
@@ -112,11 +112,11 @@ hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] [--
 hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] --write [--json]
 ```
 
-Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and prints the same local diagnostic payload used by `hive status --json`. This is read-only.
+Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and prints the same local diagnostic payload used by `hive status --json`. This is read-only. If the task's current marker no longer classifies as a red recovery action but the task folder still has evidence on disk, `Hive::DiagnosticEvidence` fills the nil-diagnostic gap from `diagnostics/red-status.md`, the newest meaningful `logs/*.log` line, or the current marker file. That fallback emits a one-line summary plus a source path instead of a bare "no diagnostic" result.
 
 With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (`execute.agent` via `Hive::Stages::Base.stage_profile`) to produce a concise markdown diagnosis, then atomically writes `<task>/diagnostics/red-status.md`. Defaults are `timeout_sec.diagnose || 600` and `budget_usd.diagnose || 5`. The agent gets the task folder as an add-dir and runs from the task worktree when one exists, otherwise the project root. The worktree pointer is validated against the configured worktree root before it is used as cwd. Custom execute profiles are rejected for diagnose unless their `generated_by` value has first been added to `Hive::Schemas::DIAGNOSTIC_GENERATORS` and the published schemas. The command does not claim the task lock and does not write workflow markers.
 
-JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
+JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `marker_summary`, `diagnostic`, and `path` (set only when `--write` wrote an artifact). `marker_summary` is the current marker name plus display attrs and is present even when `diagnostic` is null.
 
 ## Read-only
 

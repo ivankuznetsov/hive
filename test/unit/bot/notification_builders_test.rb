@@ -3,6 +3,8 @@ require "hive/bot/status_watcher"
 require "hive/bot/notification_builders"
 
 class HiveBotNotificationBuildersTest < Minitest::Test
+  include HiveTestHelper
+
   Row = Hive::Bot::StatusWatcher::Row
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
@@ -340,6 +342,23 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       "rerun:hive:slug-260514-abcd:8-finalize:finalize",
       "details:hive:slug-260514-abcd:8-finalize"
     ], callbacks
+  end
+
+  def test_needs_input_rejects_unexpected_row_action_resolution_kind
+    primary = Hive::Bot::RowActions::Action.new(
+      role: :approve,
+      callback: "approve:run:hive:slug-260514-abcd:3-plan",
+      primary: true
+    )
+    unexpected = Hive::Bot::RowActions::Resolution.new(actions: [ primary ], kind: :stage_approval)
+
+    error = with_replaced_singleton_method(Hive::Bot::RowActions, :resolve, ->(_row) { unexpected }) do
+      assert_raises(ArgumentError) do
+        Hive::Bot::NotificationBuilders.build(row(action: "needs_input", marker: "waiting"))
+      end
+    end
+
+    assert_match(/unexpected resolution kind :stage_approval/, error.message)
   end
 
   def test_none_and_complete_needs_input_rows_are_suppressed

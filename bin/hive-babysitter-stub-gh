@@ -1,9 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require "tmpdir"
-require "uri"
-
 def log_skip(argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
   message = "[dry-run] gh #{escaped_argv(argv)} skipped"
@@ -125,13 +122,8 @@ def target_operands(operands)
 end
 
 def uri_scheme_or_host?(value)
-  value = value.to_s
-  return true if value.match?(/\A[A-Za-z][A-Za-z0-9+\-.]*:/) || value.start_with?("//")
-
-  uri = URI.parse(value)
-  !uri.scheme.to_s.empty? || (uri.respond_to?(:host) && !uri.host.to_s.empty?)
-rescue URI::InvalidURIError
-  false
+  value = value.to_s.b
+  value.match?(/\A[A-Za-z][A-Za-z0-9+\-.]*:/n) || value.start_with?("//")
 end
 
 API_ENDPOINT_VALUE_OPTIONS = %w[
@@ -418,6 +410,28 @@ def external_launcher_option?(rest)
   false
 end
 
+def make_gh_config_home
+  root = "/tmp"
+
+  128.times do
+    nonce = "%d-%d-%08x" % [
+      Process.pid,
+      Process.clock_gettime(Process::CLOCK_REALTIME, :nanosecond),
+      rand(0x1_0000_0000)
+    ]
+    path = File.join(root, "hive-babysitter-gh-#{nonce}")
+
+    begin
+      Dir.mkdir(path, 0o700)
+      return path
+    rescue Errno::EEXIST
+      next
+    end
+  end
+
+  raise IOError, "failed to create temporary gh config dir under #{root}"
+end
+
 rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv) && !positional_host_override?(rest)
@@ -454,7 +468,13 @@ end
 # config to honor (the user's real ~/.config/gh is out of reach) yet still has a writable home for
 # its own state. The directory is intentionally left in place — passthrough replaces this process,
 # so the stub never regains control to clean it up; it is empty and the OS tmp reaper sweeps it.
-config_home = Dir.mktmpdir("hive-babysitter-gh")
+config_home = make_gh_config_home
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
-exec(real, *argv)
+
+begin
+  exec real, *argv
+rescue SystemCallError => e
+  warn "hive-babysitter dry-run: cannot exec real gh at #{real.inspect}: #{e.message}"
+  exit 127
+end

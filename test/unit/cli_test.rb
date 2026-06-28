@@ -323,6 +323,17 @@ class HiveCliTest < Minitest::Test
     assert_match(/pass either TARGET or --pr/, err)
   end
 
+  def test_review_pr_rejects_from_flag
+    # --from only disambiguates a TARGET lookup; combining it with --pr must
+    # be a usage error, not a silently-dropped flag.
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "--pr", "197", "--from", "6-review" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/--from is not valid with --pr/, err)
+  end
+
   def test_review_requires_target_or_pr
     _out, err, status = with_captured_exit { Hive::CLI.start([ "review" ]) }
 

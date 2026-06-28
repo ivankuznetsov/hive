@@ -545,6 +545,11 @@ module Hive
     def review(target = nil)
       if options[:pr]
         emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
+        # `--from` only disambiguates same-slug tasks for a TARGET lookup; an
+        # ad-hoc `--pr` review resolves a deterministic slug and never consults
+        # it. Refuse the combo (mirroring the TARGET + `--pr` guard above)
+        # rather than silently dropping the flag.
+        emit_review_usage_error("hive review: --from is not valid with --pr") if options[:from]
 
         require "hive/commands/adhoc_review"
         require "hive/commands/stage_action"
@@ -1206,9 +1211,13 @@ module Hive
           )
           begin
             puts JSON.generate(payload)
-          rescue Errno::EPIPE, JSON::GeneratorError
-            # caller went away or payload not serialisable — fall through to
-            # the bare-text rescue in bin/hive.
+          rescue Errno::EPIPE
+            # caller went away — fall through to the bare-text rescue in bin/hive.
+          rescue JSON::GeneratorError => e
+            # A non-serialisable payload is a bug, not a closed pipe — surface
+            # it rather than hide it (the bare-text rescue in bin/hive still
+            # carries the failure for the exit code + stderr line).
+            warn "[hive.review] review usage-error envelope was not serialisable: #{e.class}: #{e.message}"
           end
         end
         raise error

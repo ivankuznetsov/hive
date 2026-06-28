@@ -144,14 +144,19 @@ module Hive
     end
 
     # Read `key` (a symbol) from `task`, which is either a Hash (symbol- or
-    # string-keyed) or an object exposing `key` as a reader. EVERY production
-    # caller passes a SYMBOL-keyed Hash: Status#apply_dependency_result and
+    # string-keyed) or an object exposing `key` as a reader. Most production
+    # callers pass a SYMBOL-keyed Hash: Status#apply_dependency_result and
     # DependencySnapshot#stacked_base both project their rows/tasks into
     # symbol-keyed Hashes before calling in (the snapshot deliberately does
-    # not duck-type other inputs). The string-key arm and the reader arm are
-    # test-ergonomics / forward-compat only — no production path passes a
-    # string-keyed Hash or a reader-exposing object (e.g. a `Hive::Task`)
-    # today. Returns nil only when the key is genuinely absent from a
+    # not duck-type other inputs). The STRING-key arm is ALSO a live
+    # production contract: the TUI's StateSource caches archived rows and
+    # feeds their string-keyed dependency identities (`{"slug"=>, "id"=>,
+    # "stage"=>}`, via Status#json_payload's `extra_dependency_tasks` →
+    # annotate_dependencies' snapshot) into the resolver, so deleting it
+    # would silently re-block dependents whose prerequisite has moved into
+    # `9-done`. The reader arm (e.g. a `Hive::Task`) is test-ergonomics /
+    # forward-compat only — no production path passes a reader-exposing
+    # object today. Returns nil only when the key is genuinely absent from a
     # recognized shape; warns (and returns nil) when `task` is neither
     # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves
     # a breadcrumb instead of silently resolving every field to "missing".

@@ -438,6 +438,16 @@ module Hive
     def plan_action
       return ACTIONS.fetch(:plan_complete) if marker.name == :complete
       return ACTIONS.fetch(:error) if incomplete_plan_artifact?
+      # Markerless (:none) with no plan run yet is runnable, not an input gate.
+      # incomplete_plan_artifact? above already routes a crashed/empty plan run
+      # to :error, so reaching here with :none means the plan agent simply has
+      # not run (e.g. the task was moved into 3-plan via `hive approve` / a
+      # manual mv / a crash before the run). Classify it ready_to_run so the
+      # daemon dispatches the plan agent instead of skipping it as un-approvable
+      # (plan-approval auto-dispatch requires :waiting/:complete) — without this
+      # it wedges in 3-plan with a misleading "Needs your input" label. Mirrors
+      # finalize_action's :none handling.
+      return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
 
       ACTIONS.fetch(:plan_waiting)
     end

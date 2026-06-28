@@ -71,12 +71,14 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal :reply, result.action
     assert_match(/Connected/, result.text)
     assert_match(%r{/status}, result.text, "the welcome must hand the operator a next step")
+    assert_match(/send any message to capture a new idea/, result.text)
     assert_match(%r{/help}, result.text)
   end
 
   def test_help_documents_project_status_argument
     result = @handlers.help(Update.new(text: "/help"))
 
+    assert_includes result.text, "Send any message to capture an idea."
     assert_includes result.text, "/status [project]"
     assert_includes result.text, "/answer <id|slug>"
     assert_includes result.text, "/approve <id|slug>"

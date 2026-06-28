@@ -74,6 +74,20 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan demo-260426-aaaa --from 3-plan", action.command
   end
 
+  def test_markerless_plan_is_ready_to_run_not_needs_input
+    # A task moved into 3-plan without a plan run yet (e.g. via `hive approve`)
+    # must be runnable so the daemon dispatches the plan agent — not classified
+    # as a plan-approval gate, which mislabels it "Needs your input" and leaves
+    # the daemon skipping it (plan-approval auto-dispatch requires :waiting).
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    action = Hive::TaskAction.for(task, marker(:none))
+    assert_equal Hive::Schemas::TaskActionKind::READY_TO_RUN, action.key
+    assert_equal "Ready to run", action.label
+    assert_equal "hive run demo-260426-aaaa", action.command
+    refute_equal Hive::Schemas::TaskActionKind::NEEDS_INPUT, action.key,
+                 "markerless plan must not classify as a needs-input gate"
+  end
+
   def test_plan_missing_or_empty_output_is_error_not_needs_input
     Dir.mktmpdir("task-action-plan") do |dir|
       folder = File.join(dir, ".hive-state", "stages", "3-plan", "demo-260426-aaaa")
@@ -81,9 +95,9 @@ class TaskActionTest < Minitest::Test
       task = Hive::Task.new(folder)
 
       missing = Hive::TaskAction.for(task, marker(:none))
-      assert_equal "needs_input", missing.key,
-                   "freshly approved plan-stage folders start without plan.md and must remain runnable"
-      assert_equal "hive plan demo-260426-aaaa --from 3-plan", missing.command
+      assert_equal "ready_to_run", missing.key,
+                   "freshly approved plan-stage folders start without plan.md and must be runnable, not a needs-input gate"
+      assert_equal "hive run demo-260426-aaaa", missing.command
 
       FileUtils.mkdir_p(File.join(dir, ".hive-state", "logs", task.slug))
       File.write(File.join(dir, ".hive-state", "logs", task.slug, "plan-20260519T221007Z.log"), "spawned\n")
@@ -1162,7 +1176,7 @@ class TaskActionTest < Minitest::Test
       terminal: "ready_to_plan"
     },
     "plan" => {
-      none: "needs_input",
+      none: "ready_to_run",
       waiting: "needs_input",
       terminal: "ready_to_develop"
     },

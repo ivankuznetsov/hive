@@ -17,6 +17,11 @@ module Hive
           state = @conversation_store.get(chat_id: update.chat_id)
           unless state
             reattached = reattach_from_reply(update)
+            # Router-unreachable today: classify routes :free_text_answer only
+            # when answer_context is truthy, which re-derives these same
+            # conversation-state / reattach facts. Reachable only if
+            # #reattach_from_reply drifts from Router#reattach_target — keep the
+            # two in sync. Pinned by an isolated unit test as a defensive fallback.
             return @result_class.new(action: :reply, text: "Send /help for commands.") unless reattached
             return blank_answer_refusal if blank?(answer_text)
 
@@ -44,6 +49,10 @@ module Hive
 
         private
 
+        # Coerces to "" (never nil), unlike the byte-identical, nil-able
+        # Router#effective_text / SlashHandlers#effective_text. Callers here treat
+        # a blank read as "no answer text", so "" and nil are equivalent; the
+        # `.to_s` just lets blank?/strip run without a nil guard.
         def effective_text(update)
           (update.respond_to?(:effective_text) ? update.effective_text : update.text).to_s
         end

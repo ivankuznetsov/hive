@@ -26,18 +26,76 @@ xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 # A misbehaving candidate must not hang `hv`: one that blocks reading
 # stdin, or a slow/JVM-based Apache Hive that takes seconds to boot,
 # would otherwise stall the probe indefinitely with no fallback. We
-# always close the probe's stdin (</dev/null) and, when `timeout` is
-# available, cap each probe so a slow candidate falls through to the
-# next instead of hanging. `timeout` is absent on stock macOS, so the
-# cap is best-effort — stdin redirection covers the common blocking case
-# even without it.
+# always close the probe's stdin (</dev/null) and cap each probe so a
+# slow candidate falls through to the next instead of hanging.
 timeout_bin="$(command -v timeout 2>/dev/null || true)"
 
 probe_version() {
   if [[ -n "$timeout_bin" ]]; then
     "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null
   else
-    "$1" --version </dev/null 2>/dev/null
+    local output_file pid status watchdog
+    output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return
+
+    # Launch the probe in its own process group so the watchdog can signal the
+    # whole probe tree, not just the direct child. GNU `timeout` group-kills on
+    # expiry; on this fallback path we must match it. A candidate that forks a
+    # child without `exec` — e.g. a wrapper that boots a JVM/helper and `wait`s
+    # on it — would otherwise survive: TERMing only the wrapper PID leaves the
+    # JVM orphaned, so repeated probes accrete stray processes. Monitor mode
+    # (`set -m`) places the next background job in a fresh process group whose
+    # PGID equals its PID, so `kill -TERM -"$pid"` reaches every descendant. We
+    # restore `set +m` immediately to suppress job-control chatter; the
+    # already-forked job keeps its process group regardless.
+    set -m
+    "$1" --version </dev/null >"$output_file" 2>/dev/null &
+    pid=$!
+    set +m
+    (
+      # As soon as the probe finishes, the cleanup below TERMs this watchdog so
+      # a fast candidate is never made to wait out the full timeout. Run each
+      # delay as a background job we `wait` on, with a TERM trap that kills the
+      # sleeping grandchild and exits. The `wait` builtin is interruptible by a
+      # trapped signal, so teardown is immediate. A foreground `sleep` would
+      # not be: on bash 3.2 (stock macOS) the watchdog cannot be torn down
+      # until the sleep elapses, leaving the cleanup `wait` below to block for
+      # the entire five seconds on every fast probe.
+      nap=""
+      trap 'kill "$nap" 2>/dev/null || true; exit 0' TERM
+      sleep 5 &
+      nap=$!
+      wait "$nap" 2>/dev/null
+      # Signal the probe's whole process group (negative PID). Fall back to the
+      # bare PID if the group is gone; `exit 0` only when both miss, i.e. the
+      # probe already finished and there is nothing left to escalate against.
+      kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || exit 0
+      sleep 1 &
+      nap=$!
+      wait "$nap" 2>/dev/null
+      kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    ) &
+    watchdog=$!
+
+    if wait "$pid"; then
+      status=0
+    else
+      status=$?
+    fi
+
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+    # The watchdog's KILL escalation only fires if it survives to run it. A
+    # wrapper that exits on TERM releases the `wait "$pid"` above, so we tear the
+    # watchdog down before it reaches that escalation — leaving a TERM-ignoring or
+    # TERM-delaying helper in the probe's process group orphaned. Sweep the group
+    # ourselves. On the fast path the probe (and its group) is already gone, so
+    # this KILL matches nothing and is a no-op.
+    kill -KILL "-$pid" 2>/dev/null || true
+    if [[ "$status" -eq 0 ]]; then
+      cat "$output_file" || status=$?
+    fi
+    rm -f "$output_file"
+    return "$status"
   fi
 }
 

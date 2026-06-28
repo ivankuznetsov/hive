@@ -341,6 +341,18 @@ class HiveCliTest < Minitest::Test
     assert_match(/missing TARGET/, err)
   end
 
+  def test_review_usage_error_warns_when_envelope_is_not_serialisable
+    # The JSON usage-error envelope's GeneratorError arm must warn (a
+    # non-serialisable payload is a bug) rather than be silently swallowed;
+    # the bare-text rescue in bin/hive still carries the failure.
+    with_replaced_singleton_method(JSON, :generate, ->(*_args) { raise JSON::GeneratorError, "nope" }) do
+      _out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--json" ]) }
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/review usage-error envelope was not serialisable/, err)
+    end
+  end
+
   def test_review_help_mentions_pr_option
     out, _err = capture_io { Hive::CLI.start([ "help", "review" ]) }
 

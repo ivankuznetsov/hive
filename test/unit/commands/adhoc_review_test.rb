@@ -252,6 +252,55 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
+  def test_enqueue_tolerates_task_counter_contention_and_proceeds_with_null_id
+    # Mirror the patrol handoff: >30s commit-lock contention on
+    # TaskCounter.next! must NOT discard the completed fetch + worktree —
+    # proceed with id: nil (the daemon backfills a real id later).
+    with_registered_project do |_repo, hive_state, _worktree_root|
+      pr_metadata = metadata
+      with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(_number, **_kwargs) { pr_metadata }) do
+        with_replaced_singleton_method(Hive::Worktree, :materialize_pr, lambda { |**kwargs|
+          FileUtils.mkdir_p(kwargs.fetch(:path))
+          { path: kwargs.fetch(:path), branch: kwargs.fetch(:branch), head_sha: "head-197" }
+        }) do
+          with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise Hive::ConcurrentRunError, "busy" }) do
+            result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+
+            assert_equal "adhoc-review-pr-197", result.fetch(:slug)
+            folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
+            assert_nil Hive::TaskMeta.read(folder)[:id],
+                       "lock contention must fall back to id: nil, not discard the completed task"
+          end
+        end
+      end
+    end
+  end
+
+  def test_enqueue_reuse_refuses_when_the_worktree_pointer_has_no_path
+    # worktree.yml exists but carries no usable path (unreadable, or path-less
+    # as here): the diagnostic must blame the pointer, not a deleted worktree.
+    with_registered_project do |_repo, hive_state, _worktree_root|
+      slug = "adhoc-review-pr-197"
+      folder = File.join(hive_state, "stages", "6-review", slug)
+      write_frontmatter(
+        File.join(folder, "pr.md"),
+        "pr_number" => 197, "source" => "ad-hoc",
+        "pr_url" => "https://github.com/o/r/pull/197"
+      )
+      File.write(File.join(folder, "worktree.yml"), { "branch" => "hive/review/pr-197" }.to_yaml)
+
+      with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "must not materialize" }) do
+        err = assert_raises(Hive::Commands::AdhocReview::CollisionError) do
+          Hive::Commands::AdhocReview.new(pr: "197").enqueue
+        end
+
+        assert_match(/worktree pointer/, err.message)
+        assert_match(/unreadable or has no path/, err.message)
+        assert_match(/hive drop adhoc-review-pr-197/, err.message)
+      end
+    end
+  end
+
   def test_enqueue_reuse_refuses_when_the_worktree_pointer_is_missing
     # An ad-hoc reuse folder with NO worktree.yml at all must fail cleanly at
     # enqueue, naming the missing pointer (not a deleted worktree) so the

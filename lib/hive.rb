@@ -674,3 +674,5 @@ module Hive
     end
   end
 end
+
+require_relative "hive/diagnostic_evidence"

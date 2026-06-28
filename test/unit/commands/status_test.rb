@@ -1755,6 +1755,12 @@ class CommandsStatusTest < Minitest::Test
     assert_includes out, "no diagnostic evidence on disk"
   end
 
+  def test_diagnose_safe_mtime_degrades_for_missing_source_path
+    cmd = Hive::Commands::Status.new
+
+    assert_nil cmd.send(:safe_mtime, "/tmp/missing-diagnose-evidence-source")
+  end
+
   def test_invalid_task_row_degrades_when_folder_mtime_is_unreadable
     cmd = Hive::Commands::Status.new
     folder = "/tmp/missing-invalid-task"

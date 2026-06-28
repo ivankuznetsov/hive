@@ -673,6 +673,6 @@ module Hive
       ExitCodes::GENERIC
     end
   end
-end
 
-require_relative "hive/diagnostic_evidence"
+  autoload :DiagnosticEvidence, File.expand_path("hive/diagnostic_evidence.rb", __dir__)
+end

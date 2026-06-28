@@ -369,6 +369,33 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  def test_reap_with_escalation_force_kills_a_child_after_grace_expires
+    with_tmp_global_config do
+      sup = build
+      pid = Process.spawn(RbConfig.ruby, "-e", "Signal.trap('TERM','IGNORE'); sleep 30", pgroup: true)
+      child = Child.new(name: "web", argv: %w[x], pid: pid, started_at: Time.now)
+
+      sup.send(:reap_with_escalation, child, 0)
+
+      assert_equal true, reaped?(pid), "a child that ignores the grace window must be force-killed and reaped"
+    ensure
+      Process.kill("KILL", -pid) if pid && !reaped?(pid)
+      Process.waitpid(pid) rescue nil
+    end
+  end
+
+  def test_signal_group_treats_a_vanished_pid_as_a_no_op
+    # pgroup: true means the reaped child was its group's leader, so the group
+    # is deterministically gone. No global Process.kill stubbing: the suite
+    # runs tests concurrently and a leaked stub breaks neighbors.
+    pid = Process.spawn("true", pgroup: true)
+    Process.wait(pid)
+    supervisor = Hive::Web::Supervisor.new
+
+    assert_nil supervisor.send(:signal_group, pid, "TERM"),
+               "a child that died before the signal is a clean no-op, not a crash"
+  end
+
   # P0-1: loading hive/web/supervisor WITHOUT a preceding `require "hive"` must
   # not raise NameError (uninitialized Hive::ConfigError). test_helper.rb
   # requires "hive" first and masks this, so assert it in a fresh subprocess.
@@ -439,15 +466,5 @@ class WebSupervisorTest < Minitest::Test
 
       sleep 0.02
     end
-  end
-  def test_signal_group_treats_a_vanished_pid_as_a_no_op
-    # pgroup: true → the reaped child WAS its group's leader, so the group
-    # is deterministically gone. (No global Process.kill stubbing: the
-    # suite runs tests concurrently and a leaked stub breaks neighbors.)
-    pid = Process.spawn("true", pgroup: true)
-    Process.wait(pid)
-    supervisor = Hive::Web::Supervisor.new
-    assert_nil supervisor.send(:signal_group, pid, "TERM"),
-               "a child that died before the signal is a clean no-op, not a crash"
   end
 end

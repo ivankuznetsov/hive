@@ -34,6 +34,12 @@ class PrTest < Minitest::Test
       "",
       "abc",
       "-5",
+      # Non-positive numbers parse to a 0 that would otherwise become a
+      # bogus adhoc-review-pr-0 slug + a doomed `gh pr view 0`.
+      "0",
+      "#0",
+      "00",
+      "https://github.com/o/r/pull/0",
       "https://github.com/o/r/pull/197/files"
     ].each do |identifier|
       err = assert_raises(ArgumentError) { Hive::Pr.identifier_to_number(identifier) }

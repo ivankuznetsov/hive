@@ -44,11 +44,20 @@ module Hive
     def identifier_to_number(identifier)
       value = identifier.to_s.strip
 
-      match = value.match(/\A#?(\d+)\z/)
-      return match[1].to_i if match
+      parsed =
+        if (match = value.match(/\A#?(\d+)\z/))
+          match[1].to_i
+        elsif (pr_number = number(value))
+          pr_number.delete_prefix("#").to_i
+        end
 
-      pr_number = number(value)
-      return pr_number.delete_prefix("#").to_i if pr_number
+      # A real PR number is always >= 1. `0`, `#0`, and `…/pull/0` all parse
+      # to a non-positive Integer that would otherwise yield a bogus
+      # `adhoc-review-pr-0` slug, a doomed `gh pr view 0`, and a false
+      # collision against any pr.md lacking a pr_number (nil.to_i == 0).
+      # Reject it here so the parser stays loud on junk rather than
+      # materialising the wrong PR.
+      return parsed if parsed&.positive?
 
       raise ArgumentError,
             "invalid PR identifier #{identifier.inspect}; pass a PR number, #number, or GitHub pull request URL"

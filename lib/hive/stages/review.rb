@@ -186,7 +186,18 @@ module Hive
         # green when we got there (otherwise we'd be at :review_ci_stale).
         # Skip CI on REVIEW_WAITING resume to honor the user's manual
         # edits without re-running everything.
-        unless marker.name == :review_waiting
+        #
+        # Ad-hoc fix-off gate: an ad-hoc review with `review.adhoc.fix`
+        # disabled (the default) is review-only. CiFix.run! spawns a fix
+        # agent that edits files and auto-commits when `review.ci.command`
+        # is set, so running it here would mutate a borrowed PR worktree
+        # and burn budget despite the review-only contract. Skip CI
+        # entirely in that case and review the PR as-is (brainstorm A5/A6:
+        # comment, don't auto-fix someone else's PR; acceptance bar A9:
+        # the review is still produced). This mirrors the Phase 4
+        # `adhoc_fix_enabled?` gate below — both must agree or an ad-hoc
+        # review would still write fix commits here.
+        if marker.name != :review_waiting && adhoc_fix_enabled?(cfg, task)
           @current_phase = :ci
           mark_working(task, phase: :ci, pass: 1)
           ci_result = Hive::Stages::Review::CiFix.run!(
@@ -1179,6 +1190,15 @@ module Hive
             warn "[hive.review] patrol task resolved to zero patrol.review.reviewers; " \
                  "6-review will pass with no reviewers run — set patrol.review.reviewers " \
                  "in .hive-state/config.yml to review patrol PRs"
+          elsif adhoc_task?(task)
+            # An explicit `review.adhoc.reviewers: []` is the footgun the
+            # config comment itself flags ("a silently unreviewed PR"): the
+            # ad-hoc PR would clear 6-review with nobody reviewing it. Mirror
+            # the patrol warning so it is observable instead of silent. (nil
+            # inherits review.reviewers and never reaches here.)
+            warn "[hive.review] ad-hoc review resolved to zero review.adhoc.reviewers; " \
+                 "6-review will pass with no reviewers run — set review.adhoc.reviewers " \
+                 "(or omit it to inherit review.reviewers) in .hive-state/config.yml to review the PR"
           end
           return :ok
         end

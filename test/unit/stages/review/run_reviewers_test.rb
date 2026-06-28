@@ -443,6 +443,30 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_empty_adhoc_reviewers_warns_so_adhoc_pr_is_not_silently_unreviewed
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => [] } # explicit [] runs zero reviewers
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result, "empty ad-hoc reviewers still returns :ok (explicit opt-out)"
+      assert_match(/zero review\.adhoc\.reviewers/, err,
+                   "an ad-hoc review with no reviewers must warn rather than pass silently")
+    end
+  end
+
   def test_reviewer_compare_ref_configured_branch_falls_back_to_local_with_warn
     # Configured branch is the explicit operator opt-in, so we use it
     # even when the remote ref is missing — but still warn so the

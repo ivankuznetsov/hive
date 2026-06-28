@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-21
+updated: 2026-06-26
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -66,7 +66,7 @@ JSON callers receive the normal `hive-e2e-error` envelope with
 
 | Path | Purpose |
 |------|---------|
-| `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
+| `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer, and attached background-process manager for daemon/bot children. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
@@ -141,6 +141,8 @@ On failure, the harness writes a scenario bundle containing:
 ## Operational Notes
 
 The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
+
+`Hive::E2E::BackgroundProcess` is the long-lived subprocess wrapper for e2e helpers that need an attached daemon or bot child rather than a blocking CLI call. It starts `ruby -Ilib bin/hive ...` with `pgroup: true` under `SandboxEnv`, captures stdout/stderr when a log path is provided, and deliberately does not detach immediately: keeping the child unreaped prevents the original pid/pgid from being reused while `stop` is still responsible for cleanup. `stop` polls `waitpid(WNOHANG)`, sends TERM and then KILL to the recorded process group only while the original child remains unreaped, and detaches only as final cleanup if the child is still alive. This avoids signaling an unrelated reused process group when the child has already exited.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 

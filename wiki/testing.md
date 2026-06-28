@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-06-25
+updated: 2026-06-26
 tags: [test, minitest, fixtures]
 ---
 
@@ -118,7 +118,8 @@ task default: :test
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive and scan boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, explicit archive views remain age-unfiltered, and stage-move race coverage pins vanished-folder skips, surviving-folder `ENOENT` re-raises, and duplicate-pruning behavior. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb`, `tui/views/tasks_pane_test.rb`, `tui/views/hyperlink_test.rb` | Status/TUI archive, dependency state, quota-held state, PR column, and scan boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` and `pr_url` are preserved, dependency fields render blocked/unblocked states, `ERROR`/`REVIEW_ERROR reason=limits_reached` rows render the shared held label and JSON `held` field without overloading `blocked_by`, text status/archive rows and the tasks pane render fixed PR-number columns with dash fallback, OSC 8 links validate/sanitize http URLs and stay disabled in captured non-TTY output, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, explicit archive views remain age-unfiltered, stage-move race coverage pins vanished-folder skips, surviving-folder `ENOENT` re-raises, duplicate-pruning behavior, and quiet `pr.md` ENOENT degradation during PR URL reads. |
 | `tui/clipboard_test.rb` | `Hive::Tui::Clipboard` — Wayland/X11/macOS clipboard-command selection, image-byte/file probes, image signature and size guards, test-only fixture clipboard sequencing, timeout sentinels, and `DefaultShim.capture3` stdout/stderr/timeout behavior. Generic subprocess checks use tiny executable fixture scripts rather than nested `RbConfig.ruby` children so coverage-injected `RUBYOPT` does not dominate unrelated timeout assertions. |
-| `tui/app_test.rb`, `tui/state_source_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, mtime-gated refresh reuse, and liveness-fallback reparsing. |
+| `tui/app_test.rb`, `tui/state_source_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, active-only mtime-gated refresh reuse, archived-cache refresh/dedup, active dependency resolution against archived identities, registry project-set changes, archive-refresher teardown, and liveness-fallback reparsing. |
+| `integration/tui_reactivity_perf_test.rb`, `integration/tui_reactivity_profile_test.rb`, `support/tui_scale_fixture.rb` | TUI scale guard — generates real parseable 8-project task trees with mostly `9-done` rows, gates idle active-poll and active-reparse cost against archive growth, and keeps the verbose baseline profile opt-in via `HIVE_TUI_PROFILE=1`. |
 
 ## Integration suite (`test/integration/`)
 
@@ -165,6 +166,12 @@ malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
 replay path safety, missing, non-executable, and symlinked replay artifact
 validation, including symlinked parent directories, cleanup retention
 validation, and the single-dispatch invariant for successful JSON commands.
+
+`test/e2e/lib/background_process_test.rb` pins the attached background-child
+harness used by daemon/bot e2e helpers: the child inherits the sandbox
+`HIVE_HOME`, `stop` terminates the spawned process group, and the reaped-child
+guard skips TERM/KILL once `waitpid(WNOHANG)` has already consumed the original
+child so cleanup does not signal a reused process group.
 
 The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
 runs `packaging/verify-release.sh --version=v0.1.0` against the published

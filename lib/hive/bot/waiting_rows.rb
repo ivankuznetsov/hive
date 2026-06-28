@@ -1,5 +1,8 @@
+# frozen_string_literal: true
+
 require "hive/bot/notification_builders"
 require "hive/bot/row_actions"
+require "hive/config"
 
 module Hive
   module Bot
@@ -97,7 +100,9 @@ module Hive
       rescue StandardError => e
         # A row that genuinely needs input must not vanish from /waiting and the
         # digest without a trace — for a feature whose whole job is reminding
-        # about human-blocking tasks, log the drop, then keep the rescue.
+        # about human-blocking tasks, log the drop, then keep the rescue. Every
+        # selection surface (/waiting and the digest) now injects a logger
+        # before selection, so the drop is observable on all of them.
         logger&.event(:poll_failure, source: "waiting_row_resolve",
                                       project: (row.project if row.respond_to?(:project)),
                                       slug: (row.slug if row.respond_to?(:slug)),
@@ -108,8 +113,10 @@ module Hive
       def daemon_plan_pause?(row, resolution, daemon_enabled, logger: nil)
         resolution.kind == :plan_waiting && daemon_enabled.call(row)
       rescue StandardError => e
-        # Fail-open (over-remind) so this stays low severity, but log once so a
-        # real bug in the daemon-enabled check isn't invisible.
+        # Fail-open (over-remind) so this stays low severity, but log the drop
+        # when a logger is present — which every selection surface now injects
+        # before selection — so a real bug in the daemon-enabled check is not
+        # invisible.
         logger&.event(:poll_failure, source: "waiting_daemon_pause",
                                       project: (row.project if row.respond_to?(:project)),
                                       slug: (row.slug if row.respond_to?(:slug)),
@@ -122,6 +129,46 @@ module Hive
       # default would silently down-rank a future-drifted kind.
       def urgency_rank(kind)
         URGENCY_RANK.fetch(kind)
+      end
+
+      # Resolve a status row's project path the same way on every surface
+      # (/waiting, /status, the digest): prefer the row's own `project_path`,
+      # then fall back to the registered project's configured path when the
+      # snapshot row lacks one. Without the fallback a project_path-less
+      # plan_waiting row the bot would hide could leak into the digest. Single
+      # source for the supervisor and answer-digest delegators.
+      def row_project_path(row)
+        path = row.project_path if row.respond_to?(:project_path)
+        path = path.to_s
+        return path unless path.empty?
+
+        entry = Hive::Config.find_project(row.project) if row.respond_to?(:project)
+        entry && entry["path"]
+      end
+
+      # Build the resolver `select` uses to suppress daemon-managed plan_waiting
+      # rows. Memoizes per resolved project path so a broken config loads (and
+      # logs) once per project, not once per waiting row, and fails open
+      # (returns false → the plan row still surfaces) on a ConfigError while
+      # logging the drop under `source`. Shared by /waiting (supervisor) and the
+      # answer-digest, which differ only in the log `source:` string.
+      def daemon_enabled_resolver(source:, logger: nil)
+        cache = {}
+        lambda do |row|
+          path = row_project_path(row)
+          next false if path.to_s.empty?
+
+          cache.fetch(path) do
+            cache[path] = begin
+              Hive::Config.load(path).dig("daemon", "enabled") == true
+            rescue Hive::ConfigError => e
+              logger&.event(:poll_failure, source: source,
+                                           project: (row.project if row.respond_to?(:project)),
+                                           error_class: e.class.name, message: e.message)
+              false
+            end
+          end
+        end
       end
     end
   end

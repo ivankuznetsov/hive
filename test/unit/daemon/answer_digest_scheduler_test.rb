@@ -268,6 +268,18 @@ class HiveDaemonAnswerDigestSchedulerTest < Minitest::Test
     end
   end
 
+  def test_clamp_hour_clamps_out_of_range_values_at_construction_and_reconfigure
+    sched = Hive::Daemon::AnswerDigestScheduler.new(enabled: true, hour: -5)
+    assert_equal 0, sched.send(:clamp_hour, -5), "hours below 0 clamp to 0"
+    assert_equal 0, sched.send(:clamp_hour, 0), "0 is in range"
+    assert_equal 23, sched.send(:clamp_hour, 23), "23 is in range"
+    assert_equal 23, sched.send(:clamp_hour, 99), "hours above 23 clamp to 23"
+    assert_equal 0, sched.instance_variable_get(:@hour), "constructor clamps an out-of-range hour"
+
+    sched.reconfigure(enabled: true, hour: 30)
+    assert_equal 23, sched.instance_variable_get(:@hour), "reconfigure clamps an out-of-range hour"
+  end
+
   private
 
   def scheduler(dir, enabled:, hour: 9, logger: nil)

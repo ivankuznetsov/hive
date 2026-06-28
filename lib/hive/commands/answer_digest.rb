@@ -33,6 +33,13 @@ module Hive
       # state is unrepresentable.
       REASONS = [ nil, "empty", "dry_run" ].freeze
 
+      # One waiting task in the JSON envelope's `tasks[]`. Promoted to a Data
+      # type (matching the project's RowActions::Resolution/Action idiom) so
+      # `Result` can assert every element is a Task rather than trusting an
+      # unvalidated Array of string-keyed Hashes whose `{project,slug,id,title,
+      # stage,pr}` shape was previously asserted in three disconnected places.
+      Task = Data.define(:project, :slug, :id, :title, :stage, :pr)
+
       Result = Data.define(:date, :message, :button_count, :chat_id, :reason, :dry_run, :count, :tasks) do
         def initialize(date:, message:, button_count:, chat_id:, reason:, dry_run:, count:, tasks:)
           unless REASONS.include?(reason)
@@ -47,8 +54,30 @@ module Hive
             raise ArgumentError,
                   "an unsent answer-digest result (reason=#{reason.inspect}) must not carry a chat_id"
           end
+          # `reason` and `dry_run` are two views of the same outcome; pin the two
+          # cross-field combinations the reason↔chat_id guards above leave
+          # representable: the "dry_run" reason is exactly a previewed-but-unsent
+          # digest, and a real send (reason nil) is never a preview.
+          if reason == "dry_run" && !dry_run
+            raise ArgumentError, %(an answer-digest result with reason "dry_run" must have dry_run: true)
+          end
+          if reason.nil? && dry_run
+            raise ArgumentError, "a sent answer-digest result (reason nil) must not be a dry run"
+          end
+          unless button_count >= 0 && count >= 0
+            raise ArgumentError, "button_count and count must be non-negative (got #{button_count}, #{count})"
+          end
+          if button_count > count
+            raise ArgumentError, "button_count (#{button_count}) must not exceed count (#{count})"
+          end
+          unless tasks.all?(Task)
+            raise ArgumentError, "every answer-digest task must be a #{Task}"
+          end
 
-          super
+          # Freeze the collection so the value object is not shallowly mutable,
+          # matching the sibling RowActions::Resolution discipline.
+          super(date: date, message: message, button_count: button_count, chat_id: chat_id,
+                reason: reason, dry_run: dry_run, count: count, tasks: tasks.freeze)
         end
 
         # Fully derived from `reason`: a real send is the only outcome with no
@@ -78,6 +107,13 @@ module Hive
         date = parse_date
         cfg = @cfg || @config_loader.call
         @env_loader.load! unless @dry_run
+        # Build the logger before selection (it was previously built lazily only
+        # at send time, after selection). Otherwise on the daemon/CLI path the
+        # per-row drop (:poll_failure) and button-build (:status_button_failed)
+        # logging never fires, so a silently-dropped human-blocking row leaves no
+        # trace — defeating the feature's "never silently forget a waiting task"
+        # goal. /waiting already had a real logger; only this path was blind.
+        logger(cfg)
 
         waiting = waiting_rows(cfg)
         result = if waiting.empty?
@@ -88,14 +124,13 @@ module Hive
         end
         emit(result)
         result
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
       rescue StandardError => e
         # A non-Hive::Error (e.g. a Faraday transport fault) would otherwise
         # escape a manual `--json` run as a raw backtrace with no envelope. The
-        # daemon only reads the exit code, so re-raise to preserve it; the
-        # agent parsing stdout still gets a structured error.
+        # daemon only reads the exit code, so re-raise to preserve it; the agent
+        # parsing stdout still gets a structured error. Hive::Error <
+        # StandardError, so this one handler covers both the typed Hive faults
+        # and arbitrary transport faults.
         emit_error_envelope(e) if @json
         raise
       end
@@ -163,14 +198,14 @@ module Hive
       # reports the true total (not the 10-button display cap) and `tasks`
       # lists every waiting row, even on a real send where `message` is null.
       def task_descriptor(row)
-        {
-          "project" => (row.project if row.respond_to?(:project)),
-          "slug" => (row.slug if row.respond_to?(:slug)),
-          "id" => (row.id if row.respond_to?(:id)),
-          "title" => Hive::Bot::NotificationBuilders.display_title(row),
-          "stage" => (row.stage.to_s if row.respond_to?(:stage)),
-          "pr" => Hive::Pr.number(row.respond_to?(:pr_url) ? row.pr_url : nil)
-        }
+        Task.new(
+          project: (row.project if row.respond_to?(:project)),
+          slug: (row.slug if row.respond_to?(:slug)),
+          id: (row.id if row.respond_to?(:id)),
+          title: Hive::Bot::NotificationBuilders.display_title(row),
+          stage: (row.stage.to_s if row.respond_to?(:stage)),
+          pr: Hive::Pr.number(row.respond_to?(:pr_url) ? row.pr_url : nil)
+        )
       end
 
       def render_digest(rows, visible)
@@ -196,7 +231,7 @@ module Hive
           @output.puts result.message
           @output.puts "Buttons: #{result.button_count}"
         elsif result.sent
-          @output.puts "hive answer-digest: sent #{result.button_count} waiting task#{result.button_count == 1 ? '' : 's'}"
+          @output.puts "hive answer-digest: sent #{result.count} waiting task#{result.count == 1 ? '' : 's'}"
         end
       end
 
@@ -216,9 +251,20 @@ module Hive
           # QUEUE_DISPLAY_CAP); `count` is the true waiting total.
           "button_count" => result.button_count,
           "count" => result.count,
-          "tasks" => result.tasks,
-          "message" => @dry_run ? result.message : nil
+          "tasks" => result.tasks.map(&:to_h),
+          "message" => digest_message(result)
         }
+      end
+
+      # `message` carries the rendered digest text only for a dry-run preview;
+      # it is null on a real send (the text went to Telegram) and null on an
+      # empty waiting set (there is no digest), matching the schema. Derived
+      # from `result` so the empty+dry-run case is null, not "".
+      def digest_message(result)
+        return nil unless result.dry_run
+        return nil if result.reason == "empty"
+
+        result.message
       end
 
       def emit_error_envelope(error)
@@ -240,36 +286,13 @@ module Hive
         "internal"
       end
 
+      # Delegates to the shared WaitingRows builder so /waiting and the digest
+      # resolve daemon-managed plan pauses through one memoizing, fail-open,
+      # config-error-logging implementation; only the log `source:` differs.
+      # `@logger` is built before selection (see #call), so a broken project
+      # config is logged on the digest path too, not invisible.
       def daemon_enabled_resolver
-        cache = {}
-        lambda do |row|
-          path = answer_digest_row_project_path(row)
-          next false if path.to_s.empty?
-
-          cache.fetch(path) { cache[path] = Hive::Config.load(path).dig("daemon", "enabled") == true }
-        rescue Hive::ConfigError => e
-          # Match the supervisor's /waiting twin: a broken project config must
-          # not be invisible from the digest path. Logs only when a logger was
-          # injected (nil in the bare CLI selection phase).
-          @logger&.event(:poll_failure, source: "answer_digest_daemon_check",
-                                         project: (row.project if row.respond_to?(:project)),
-                                         error_class: e.class.name, message: e.message)
-          false
-        end
-      end
-
-      # Mirror Supervisor#waiting_row_project_path so /waiting and the digest
-      # resolve the same project path: prefer the row's own `project_path`, and
-      # fall back to the registered project's configured path when the snapshot
-      # row lacks it. Without the fallback a project_path-less plan_waiting row
-      # the bot would hide could leak into the digest.
-      def answer_digest_row_project_path(row)
-        path = row.project_path if row.respond_to?(:project_path)
-        path = path.to_s
-        return path unless path.empty?
-
-        entry = Hive::Config.find_project(row.project) if row.respond_to?(:project)
-        entry && entry["path"]
+        Hive::Bot::WaitingRows.daemon_enabled_resolver(source: "answer_digest_daemon_check", logger: @logger)
       end
 
       def status_watcher

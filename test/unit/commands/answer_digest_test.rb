@@ -1,6 +1,8 @@
 require "test_helper"
 require "hive/commands/answer_digest"
 require "hive/bot/status_watcher"
+require "hive/bot/row_actions"
+require "hive/bot/notification_builders"
 
 class HiveCommandsAnswerDigestTest < Minitest::Test
   include HiveTestHelper
@@ -91,6 +93,19 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     assert_equal "2026-06-27", payload.fetch("date")
   end
 
+  def test_empty_dry_run_json_emits_null_message_not_empty_string
+    output = StringIO.new
+    cmd, = command(rows: [], output: output, dry_run: true, json: true)
+
+    result = cmd.call
+
+    assert_equal false, result.sent
+    assert_equal "empty", result.reason
+    payload = JSON.parse(output.string)
+    assert_nil payload.fetch("message"),
+               "an empty waiting set must emit message: null even under --dry-run, matching the schema"
+  end
+
   def test_non_empty_waiting_set_sends_one_message_with_buttons
     output = StringIO.new
     telegram = StubTelegram.new(messages: [])
@@ -161,6 +176,74 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     message = telegram.messages.first
     assert_includes message.fetch(:text), "+ 1 more tasks"
     assert_equal 10, message.fetch(:reply_markup).flatten.length
+  end
+
+  def test_json_overflow_reports_full_count_capped_buttons_and_all_tasks
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    rows = 11.times.map { |i| row(slug: "waiting-#{i}-260625-abcd", display_name: "Waiting #{i}") }
+    cmd, = command(rows: rows, output: output, json: true, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    payload = JSON.parse(output.string)
+    assert_equal 11, payload.fetch("count"), "JSON count must report the true backlog, not the display cap"
+    assert_equal 10, payload.fetch("button_count"), "buttons stay capped at the 10-task display slice"
+    assert_equal 11, payload.fetch("tasks").length, "tasks[] must list every waiting task, not the capped slice"
+    assert_includes telegram.messages.first.fetch(:text), "⏳ Waiting on you (11)"
+  end
+
+  def test_real_send_plain_text_reports_total_count_not_button_cap
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    rows = 11.times.map { |i| row(slug: "waiting-#{i}-260625-abcd") }
+    cmd, = command(rows: rows, output: output, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    assert_includes output.string, "sent 11 waiting tasks",
+                    "the plain-text line must report the true backlog total, not the 10-button cap"
+  end
+
+  def test_real_send_plain_text_uses_singular_for_one_task
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    cmd, = command(rows: [ row(slug: "answer-me-260625-abcd") ], output: output, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    assert_includes output.string, "sent 1 waiting task\n"
+    refute_includes output.string, "sent 1 waiting tasks"
+  end
+
+  def test_digest_keyboard_nests_one_button_per_row
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    rows = 3.times.map { |i| row(slug: "waiting-#{i}-260625-abcd") }
+    cmd, = command(rows: rows, output: output, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    keyboard = telegram.messages.first.fetch(:reply_markup)
+    assert_equal 3, keyboard.length
+    assert(keyboard.all? { |kbd_row| kbd_row.length == 1 },
+           "each inline-keyboard row must hold exactly one button")
+  end
+
+  def test_digest_button_callback_is_byte_identical_to_row_actions_primary
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    waiting = row(slug: "answer-me-260625-abcd", id: 9281, display_name: "Answer Me")
+    cmd, = command(rows: [ waiting ], output: output, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    primary = Hive::Bot::RowActions.resolve(waiting).primary
+    expected = Hive::Bot::NotificationBuilders.button("x", primary.callback).fetch(:callback_data)
+    sent = telegram.messages.first.fetch(:reply_markup).flatten.first.fetch(:callback_data)
+    assert_equal expected, sent,
+                 "the digest button callback must derive from the same RowActions primary " \
+                 "(through the same compaction) as /waiting and the push button"
   end
 
   def test_invalid_date_emits_json_error_then_reraises
@@ -439,5 +522,41 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
                 chat_id: nil, reason: nil, dry_run: false, count: 1, tasks: [])
     end
     assert_raises(ArgumentError) { klass.new(**base, chat_id: 42) }
+  end
+
+  def test_result_reconciles_dry_run_counts_and_task_types
+    klass = Hive::Commands::AnswerDigest::Result
+    task = Hive::Commands::AnswerDigest::Task.new(
+      project: "hive", slug: "s", id: 1, title: "t", stage: "2-brainstorm", pr: nil
+    )
+    ok = {
+      date: Date.new(2026, 6, 27), message: "x", button_count: 1,
+      chat_id: nil, reason: "dry_run", dry_run: true, count: 1, tasks: [ task ]
+    }
+    assert_kind_of klass, klass.new(**ok)
+
+    # reason "dry_run" must be a dry run
+    assert_raises(ArgumentError) { klass.new(**ok.merge(dry_run: false)) }
+    # a real send (reason nil) must not be a dry run
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "x", button_count: 1,
+                chat_id: 42, reason: nil, dry_run: true, count: 1, tasks: [ task ])
+    end
+    # counts must be non-negative
+    assert_raises(ArgumentError) { klass.new(**ok.merge(button_count: -1, count: 0, tasks: [])) }
+    # button_count must not exceed count
+    assert_raises(ArgumentError) { klass.new(**ok.merge(button_count: 2, count: 1)) }
+    # every task must be a Task value object
+    assert_raises(ArgumentError) do
+      klass.new(**ok.merge(button_count: 0, count: 0, tasks: [ { "project" => "x" } ]))
+    end
+  end
+
+  def test_result_freezes_tasks_collection
+    klass = Hive::Commands::AnswerDigest::Result
+    result = klass.new(date: Date.new(2026, 6, 27), message: "", button_count: 0,
+                       chat_id: nil, reason: "empty", dry_run: false, count: 0, tasks: [])
+
+    assert_predicate result.tasks, :frozen?, "tasks must be frozen so the value object is not shallowly mutable"
   end
 end

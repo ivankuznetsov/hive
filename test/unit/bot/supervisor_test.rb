@@ -1585,6 +1585,17 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal 9, callbacks.length, "inert agent_running rows produce no button"
   end
 
+  def test_status_keyboard_caps_buttons_at_display_cap
+    rows = 11.times.map do |i|
+      row(slug: "ask-#{i}-260526-aaaa", stage: "2-brainstorm", action: "needs_input", marker: "waiting")
+    end
+
+    keyboard = @supervisor.send(:status_keyboard, rows)
+
+    assert_equal 10, keyboard.flatten.length,
+                 "Telegram rejects an oversized keyboard; >10 actionable rows must cap at the 10-button display slice"
+  end
+
   def test_status_keyboard_suppresses_none_and_complete_needs_input_rows
     suppressed = [
       row(slug: "none-260624-abcd", action: "needs_input", marker: "none"),

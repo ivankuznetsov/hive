@@ -1484,30 +1484,16 @@ module Hive
         Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(role)
       end
 
+      # Delegates to the shared WaitingRows builder so /waiting and the
+      # answer-digest resolve daemon-managed plan pauses through one
+      # memoizing, fail-open, config-error-logging implementation; only the log
+      # `source:` differs.
       def waiting_daemon_enabled_resolver
-        cache = {}
-        lambda do |row|
-          path = waiting_row_project_path(row)
-          next false if path.to_s.empty?
-
-          cache.fetch(path) do
-            cache[path] = Hive::Config.load(path).dig("daemon", "enabled") == true
-          end
-        rescue Hive::ConfigError => e
-          @logger&.event(:poll_failure, source: "waiting_daemon_check",
-                                          project: row.respond_to?(:project) ? row.project : nil,
-                                          error_class: e.class.name, message: e.message)
-          false
-        end
+        Hive::Bot::WaitingRows.daemon_enabled_resolver(source: "waiting_daemon_check", logger: @logger)
       end
 
       def waiting_row_project_path(row)
-        path = row.project_path if row.respond_to?(:project_path)
-        path = path.to_s
-        return path unless path.empty?
-
-        entry = Hive::Config.find_project(row.project) if row.respond_to?(:project)
-        entry && entry["path"]
+        Hive::Bot::WaitingRows.row_project_path(row)
       end
 
       def render_details(rows, project, slug, stage: nil)

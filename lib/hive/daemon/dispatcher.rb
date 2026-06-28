@@ -1222,7 +1222,12 @@ module Hive
       end
 
       def global_digest_action(stage)
-        stage == Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE ? "answer_digest" : "digest"
+        case stage
+        when Hive::Daemon::DigestScheduler::DIGEST_STAGE
+          "digest"
+        when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+          "answer_digest"
+        end
       end
 
       # Consume the file-backed dispatch-request queue (plan

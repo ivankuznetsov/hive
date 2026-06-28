@@ -140,6 +140,30 @@ class HiveCommandsDaemonTest < Minitest::Test
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 
+  def test_start_daemon_forwards_answer_digest_enabled_and_hour_to_scheduler
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    config = daemon_config
+    captured = nil
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_global_start_config(config, answer_digest_config: { "enabled" => true, "hour" => 14 }) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
+        end
+      end
+    end
+
+    scheduler = captured.fetch(:answer_digest_scheduler)
+    assert_equal true, scheduler.instance_variable_get(:@enabled),
+                 "answer_digest.enabled must be forwarded into the scheduler, not just instantiated"
+    assert_equal 14, scheduler.instance_variable_get(:@hour),
+                 "answer_digest.hour must be forwarded into the scheduler"
+  end
+
   def test_start_daemon_invokes_reexec_when_dispatcher_signals_drift
     command = daemon("start", dry_run: true)
     dispatcher = FakeDispatcher.new([], true) # signals drift

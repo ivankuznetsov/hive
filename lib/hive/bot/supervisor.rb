@@ -1341,8 +1341,14 @@ module Hive
         end
 
         folder = envelope["task_folder"].to_s.strip
+        # On a hard fault (e.g. an EACCES storm) the resolver logs a breadcrumb
+        # to daemon.log but returns nil here, so the operator sees only this
+        # copy. Append a soft pointer to daemon.log so a persistent failure
+        # doesn't read as merely transient, without changing the plan-specified
+        # no-evidence wording above it.
         text = "Couldn't find a cached diagnosis for \"#{title}\" yet. " \
-               "Tap Refresh diagnosis again, or open the task on a laptop."
+               "Tap Refresh diagnosis again, or open the task on a laptop. " \
+               "If this keeps happening, check daemon.log."
         folder.empty? ? text : "#{text}\nTask folder: #{folder}"
       end
 

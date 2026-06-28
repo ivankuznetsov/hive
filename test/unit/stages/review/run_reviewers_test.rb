@@ -242,6 +242,30 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_reviewer_specs_for_adhoc_task_passes_through_a_malformed_entry
+    # A malformed ENTRY (a non-Hash) inside review.adhoc.reviewers is distinct
+    # from a malformed array SHAPE: the ad-hoc branch is still taken (an
+    # explicit non-nil adhoc.reviewers does NOT fall back to the normal set),
+    # and the entry is threaded through unchanged for the reviewer dispatcher
+    # to reject — it is not silently dropped or swapped for the normal set.
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => [ "not-a-hash-entry" ] }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "not-a-hash-entry" ], specs,
+                   "an explicit ad-hoc reviewers list is used as-is, not replaced by the normal set"
+    end
+  end
+
   def test_reviewer_specs_for_adhoc_task_falls_back_to_standard_reviewers
     cfg = {
       "review" => {

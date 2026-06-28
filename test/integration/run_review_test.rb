@@ -398,6 +398,25 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_clean_adhoc_fix_off_review_reaches_review_complete
+    # The fix-off gate only fires when there are ACCEPTED findings. A clean
+    # ad-hoc review (no findings) must still reach REVIEW_COMPLETE rather than
+    # parking at REVIEW_WAITING — that terminal marker is what TaskAction then
+    # classifies as the non-advancing review_parked action.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir) # fix off by default
+        mark_task_adhoc(folder)
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name,
+                     "a clean ad-hoc review must finalize REVIEW_COMPLETE, not park at REVIEW_WAITING"
+      end
+    end
+  end
+
   # A8 fail-closed, end-to-end: a reviewer that declares a non-yolo permission
   # scope on a runner that can't enforce tool scoping (kind: codex_review)
   # passes LOAD validation (the shape is valid) but must fail at RUN time. The
@@ -1328,6 +1347,13 @@ class RunReviewTest < Minitest::Test
         end
 
         assert_match(/apply a fix/, accepted_seen)
+        # The opt-in path runs the fix and then finalizes: with no reviewers
+        # configured the post-fix re-review is clean, so the task lands on
+        # REVIEW_COMPLETE rather than re-parking at REVIEW_WAITING.
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name,
+                     "fix opt-in must finalize REVIEW_COMPLETE after a successful fix, " \
+                     "got #{marker.name} attrs=#{marker.attrs.inspect}"
       end
     end
   end

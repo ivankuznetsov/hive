@@ -222,6 +222,62 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
+  def test_enqueue_refuses_to_reuse_adhoc_folder_owning_a_different_pr
+    # A reuse folder that IS source: ad-hoc but whose pr.md records a different
+    # PR than requested (corrupted/hand-edited) must not be silently reused
+    # against the wrong PR's worktree — the PR-number half of the
+    # refuse-to-shadow guard.
+    with_registered_project do |_repo, hive_state, worktree_root|
+      slug = "adhoc-review-pr-197"
+      folder = File.join(hive_state, "stages", "6-review", slug)
+      write_frontmatter(
+        File.join(folder, "pr.md"),
+        "pr_number" => 198, "source" => "ad-hoc",
+        "pr_url" => "https://github.com/o/r/pull/198"
+      )
+      worktree_path = File.join(worktree_root, slug)
+      FileUtils.mkdir_p(worktree_path)
+      File.write(File.join(folder, "worktree.yml"),
+                 { "path" => worktree_path, "branch" => "hive/review/pr-197" }.to_yaml)
+
+      with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "must not materialize" }) do
+        err = assert_raises(Hive::Commands::AdhocReview::CollisionError) do
+          Hive::Commands::AdhocReview.new(pr: "197").enqueue
+        end
+
+        assert_match(/not an ad-hoc review for PR #197/, err.message)
+        assert_match(/pr_number=198/, err.message)
+        assert_match(/hive drop adhoc-review-pr-197/, err.message)
+      end
+    end
+  end
+
+  def test_enqueue_reuse_refuses_when_the_worktree_pointer_is_missing
+    # An ad-hoc reuse folder with NO worktree.yml at all must fail cleanly at
+    # enqueue, naming the missing pointer (not a deleted worktree) so the
+    # remediation matches the real cause.
+    with_registered_project do |_repo, hive_state, _worktree_root|
+      slug = "adhoc-review-pr-197"
+      folder = File.join(hive_state, "stages", "6-review", slug)
+      write_frontmatter(
+        File.join(folder, "pr.md"),
+        "pr_number" => 197, "source" => "ad-hoc",
+        "pr_url" => "https://github.com/o/r/pull/197"
+      )
+      # No worktree.yml written.
+
+      with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "must not materialize" }) do
+        err = assert_raises(Hive::Commands::AdhocReview::CollisionError) do
+          Hive::Commands::AdhocReview.new(pr: "197").enqueue
+        end
+
+        assert_match(/worktree pointer/, err.message)
+        assert_match(/is missing/, err.message)
+        assert_match(/hive drop adhoc-review-pr-197/, err.message)
+      end
+    end
+  end
+
   def test_enqueue_reuses_folder_whose_source_casing_drifted
     # The review stage routes `source: Ad-Hoc` as ad-hoc (strip + casecmp?);
     # the reuse validator must agree, not reject it as "not an ad-hoc review".

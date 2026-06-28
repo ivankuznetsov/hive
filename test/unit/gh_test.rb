@@ -341,6 +341,22 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_pr_metadata_raises_when_json_is_not_a_hash
+    # Mirror the pr_stats sibling guard: a well-formed but non-object JSON
+    # response (e.g. `[]`) must raise rather than be coerced into a PrMetadata.
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    responses = [
+      [ "", "", ok ],
+      [ "[]", "", ok ]
+    ]
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
+      err = assert_raises(Hive::GhError) { Hive::Gh.pr_metadata(197) }
+
+      assert_match(/expected Hash/, err.message)
+    end
+  end
+
   def test_pr_state_raises_on_gh_pr_view_failure
     status = Hive::Gh::CommandStatus.new(exitstatus: 1)
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "", "auth required", status ] }) do

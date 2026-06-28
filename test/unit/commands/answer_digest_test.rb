@@ -240,10 +240,17 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
 
     primary = Hive::Bot::RowActions.resolve(waiting).primary
     expected = Hive::Bot::NotificationBuilders.button("x", primary.callback).fetch(:callback_data)
-    sent = telegram.messages.first.fetch(:reply_markup).flatten.first.fetch(:callback_data)
-    assert_equal expected, sent,
+    sent_button = telegram.messages.first.fetch(:reply_markup).flatten.first
+    assert_equal expected, sent_button.fetch(:callback_data),
                  "the digest button callback must derive from the same RowActions primary " \
                  "(through the same compaction) as /waiting and the push button"
+
+    # Plan A4 byte-identity also covers the button TEXT: emoji + display_title,
+    # asserted against the actual push output (a short title is not bounded).
+    expected_text = "#{Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(primary.role)} " \
+                    "#{Hive::Bot::NotificationBuilders.display_title(waiting)}"
+    assert_equal expected_text, sent_button.fetch(:text),
+                 "the digest button text must be emoji + display_title (plan A4 byte-identity)"
   end
 
   def test_invalid_date_emits_json_error_then_reraises
@@ -290,17 +297,32 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
   def test_call_argv_rejects_unknown_option
     cmd, = command(rows: [])
 
-    error = assert_raises(Hive::ConfigError) { cmd.call([ "--bogus" ]) }
+    error = assert_raises(Hive::Commands::AnswerDigest::UsageError) { cmd.call([ "--bogus" ]) }
 
     assert_match(/invalid option/, error.message)
+    assert_equal Hive::ExitCodes::USAGE, error.exit_code,
+                 "a malformed flag is a usage error (exit 64), not a ConfigError (78)"
   end
 
   def test_call_argv_rejects_unexpected_positional_argument
     cmd, = command(rows: [])
 
-    error = assert_raises(Hive::ConfigError) { cmd.call([ "extra" ]) }
+    error = assert_raises(Hive::Commands::AnswerDigest::UsageError) { cmd.call([ "extra" ]) }
 
     assert_match(/unexpected arguments/, error.message)
+    assert_equal Hive::ExitCodes::USAGE, error.exit_code
+  end
+
+  def test_usage_error_json_envelope_uses_usage_kind_and_exit_64
+    output = StringIO.new
+    cmd, = command(rows: [], output: output, json: true)
+
+    assert_raises(Hive::Commands::AnswerDigest::UsageError) { cmd.call([ "--bogus" ]) }
+
+    payload = JSON.parse(output.string)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "usage", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
   end
 
   def test_status_fetch_failure_raises_hive_error
@@ -347,6 +369,24 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     end
   end
 
+  def test_daemon_enabled_resolver_degrades_on_malformed_or_unreadable_config
+    cmd, = command(rows: [])
+    resolver = cmd.send(:daemon_enabled_resolver)
+    psych_row = row(slug: "plan-a-260625-abcd", project_path: "/tmp/psych", stage: "3-plan")
+    eacces_row = row(slug: "plan-b-260625-abcd", project_path: "/tmp/eacces", stage: "3-plan")
+
+    with_replaced_singleton_method(Hive::Config, :load, lambda { |path|
+      raise Psych::Exception, "bad yaml" if path == "/tmp/psych"
+
+      raise Errno::EACCES, path
+    }) do
+      assert_equal false, resolver.call(psych_row),
+                   "a malformed (Psych) project config must degrade to not-suppressed, not escape the rescue"
+      assert_equal false, resolver.call(eacces_row),
+                   "an unreadable (SystemCallError) project config must degrade to not-suppressed"
+    end
+  end
+
   def test_malformed_project_config_does_not_suppress_plan_pause
     output = StringIO.new
     with_tmp_dir do |project_path|
@@ -362,6 +402,26 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     end
 
     assert_includes output.string, "Plan…"
+  end
+
+  def test_daemon_enabled_project_plan_pause_is_suppressed_end_to_end
+    with_tmp_dir do |project_path|
+      FileUtils.mkdir_p(File.join(project_path, ".hive-state"))
+      File.write(File.join(project_path, ".hive-state", "config.yml"), "daemon:\n  enabled: true\n")
+      cmd, = command(
+        rows: [ row(slug: "plan-260625-abcd", project_path: project_path, stage: "3-plan") ],
+        dry_run: true,
+        json: true,
+        output: StringIO.new
+      )
+
+      result = cmd.call
+
+      assert_equal "empty", result.reason,
+                   "a plan_waiting row whose project has daemon.enabled: true must be suppressed " \
+                   "from the digest end-to-end, not just by the resolver in isolation"
+      assert_equal 0, result.count
+    end
   end
 
   def test_default_factories_construct_collaborators
@@ -483,7 +543,8 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     assert_equal false, payload.fetch("ok")
     assert_equal "status_unavailable", payload.fetch("error_kind")
     assert_equal "StatusUnavailableError", payload.fetch("error_class")
-    assert_equal Hive::ExitCodes::GENERIC, payload.fetch("exit_code")
+    assert_equal Hive::ExitCodes::UNAVAILABLE, payload.fetch("exit_code"),
+                 "a status outage maps to EX_UNAVAILABLE (69) so an exit-code-only caller can retry"
   end
 
   def test_non_hive_error_json_envelope_uses_internal_error_kind_and_reraises
@@ -496,11 +557,16 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
       telegram_factory: ->(token:, logger:) { StubTelegram.new(messages: []) }
     )
 
-    assert_raises(RuntimeError) { cmd.call }
+    # The untyped fault is wrapped in Hive::InternalError (exit 70) so the
+    # documented `internal → exit 70` contract is reachable.
+    error = assert_raises(Hive::InternalError) { cmd.call }
+    assert_equal Hive::ExitCodes::SOFTWARE, error.exit_code
 
     payload = JSON.parse(output.string)
     assert_equal false, payload.fetch("ok")
     assert_equal "internal", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+    assert_equal "InternalError", payload.fetch("error_class")
   end
 
   def test_result_validates_reason_chat_id_and_derives_sent
@@ -510,10 +576,13 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     }
     klass = Hive::Commands::AnswerDigest::Result
 
+    task = Hive::Commands::AnswerDigest::Task.new(
+      project: "hive", slug: "s", id: 1, title: "t", stage: "2-brainstorm", pr: nil
+    )
     empty = klass.new(**base, chat_id: nil)
     assert_equal false, empty.sent
     sent = klass.new(date: Date.new(2026, 6, 27), message: "x", button_count: 1,
-                     chat_id: 42, reason: nil, dry_run: false, count: 1, tasks: [])
+                     chat_id: 42, reason: nil, dry_run: false, count: 1, tasks: [ task ])
     assert_equal true, sent.sent
 
     assert_raises(ArgumentError) { klass.new(**base, chat_id: nil, reason: "bogus") }
@@ -558,5 +627,153 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
                        chat_id: nil, reason: "empty", dry_run: false, count: 0, tasks: [])
 
     assert_predicate result.tasks, :frozen?, "tasks must be frozen so the value object is not shallowly mutable"
+  end
+
+  def test_result_enforces_count_tasks_and_zero_chat_invariants
+    klass = Hive::Commands::AnswerDigest::Result
+    task = Hive::Commands::AnswerDigest::Task.new(
+      project: "hive", slug: "s", id: 1, title: "t", stage: "2-brainstorm", pr: nil
+    )
+
+    # count must equal tasks.size — a count:2 / one-task self-contradiction.
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "x", button_count: 1, chat_id: 99,
+                reason: nil, dry_run: false, count: 2, tasks: [ task ])
+    end
+    # tasks: nil yields a clean ArgumentError, not a NoMethodError from nil.size.
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "", button_count: 0, chat_id: nil,
+                reason: "empty", dry_run: false, count: 0, tasks: nil)
+    end
+    # a sent result rejects a zero chat_id (Telegram chat ids are never 0).
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "x", button_count: 1, chat_id: 0,
+                reason: nil, dry_run: false, count: 1, tasks: [ task ])
+    end
+    # reason "empty" must carry no count and a blank message.
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "still here", button_count: 0, chat_id: nil,
+                reason: "empty", dry_run: false, count: 0, tasks: [])
+    end
+    # reason "dry_run" must preview a NON-empty set (an empty preview is "empty").
+    assert_raises(ArgumentError) do
+      klass.new(date: Date.new(2026, 6, 27), message: "", button_count: 0, chat_id: nil,
+                reason: "dry_run", dry_run: true, count: 0, tasks: [])
+    end
+  end
+
+  def test_task_requires_a_string_title
+    klass = Hive::Commands::AnswerDigest::Task
+    assert_raises(ArgumentError) do
+      klass.new(project: "p", slug: "s", id: 1, title: nil, stage: "2-brainstorm", pr: nil)
+    end
+    ok = klass.new(project: "p", slug: "s", id: 1, title: "t", stage: "2-brainstorm", pr: nil)
+    assert_equal "t", ok.title
+  end
+
+  def test_per_row_failure_is_isolated_and_the_rest_of_the_digest_still_sends
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    logger = CapturingLogger.new(events: [])
+    boom = Object.new
+    def boom.to_s = raise("boom title")
+    malformed = row(slug: "boom-260625-abcd", display_name: boom)
+    good = row(slug: "good-260625-abcd", display_name: "Good One")
+    cmd = Hive::Commands::AnswerDigest.new(
+      date: "2026-06-27", json: true, output: output, cfg: cfg,
+      status_watcher: StubStatusWatcher.new(result: FetchResult.new(ok: true, rows: [ malformed, good ])),
+      env_loader: StubEnvLoader.new(calls: []),
+      telegram_factory: ->(token:, logger:) { telegram },
+      logger: logger
+    )
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    assert_equal 1, telegram.messages.length, "one malformed row must not abort the whole send"
+    text = telegram.messages.first.fetch(:text)
+    assert_includes text, "Good One", "the healthy row's line must still render"
+    assert_includes text, "⏳ Waiting on you (2)", "the count still reflects both waiting rows"
+    payload = JSON.parse(output.string)
+    assert_equal 2, payload.fetch("count")
+    assert_equal 2, payload.fetch("tasks").length, "count must equal tasks.size even with a placeholder task"
+    assert_includes payload.fetch("tasks").map { |t| t.fetch("title") }, "(unavailable)",
+                    "the malformed row degrades to a placeholder descriptor"
+    assert(logger.events.any? { |e| e[:name] == :poll_failure && e[:payload][:source] == "answer_digest_render_line" },
+           "the dropped digest line must be logged")
+    assert(logger.events.any? { |e| e[:name] == :poll_failure && e[:payload][:source] == "answer_digest_task_descriptor" },
+           "the degraded task descriptor must be logged")
+  end
+
+  def test_oversized_title_is_bounded_in_message_and_button
+    output = StringIO.new
+    telegram = StubTelegram.new(messages: [])
+    cmd, = command(rows: [ row(slug: "huge-260625-abcd", display_name: "X" * 5000) ],
+                   output: output, telegram: telegram)
+
+    with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    message = telegram.messages.first
+    assert_operator message.fetch(:text).length, :<, 400,
+                    "an oversized title must be bounded so the aggregate message can't blow Telegram's limit"
+    assert_includes message.fetch(:text), "…", "the bounded title is visibly truncated"
+    button_text = message.fetch(:reply_markup).flatten.first.fetch(:text)
+    assert_operator button_text.length, :<=, 120, "the button text must be bounded"
+    assert_includes button_text, "…"
+  end
+
+  def test_mid_delivery_send_fault_emits_internal_envelope_and_reraises
+    output = StringIO.new
+    raising = Object.new
+    def raising.send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
+      raise "telegram 500"
+    end
+    cmd = Hive::Commands::AnswerDigest.new(
+      date: "2026-06-27", json: true, output: output, cfg: cfg,
+      status_watcher: StubStatusWatcher.new(result: FetchResult.new(ok: true, rows: [ row(slug: "answer-me-260625-abcd") ])),
+      env_loader: StubEnvLoader.new(calls: []),
+      telegram_factory: ->(token:, logger:) { raising }
+    )
+
+    error = assert_raises(Hive::InternalError) do
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+    end
+    assert_equal Hive::ExitCodes::SOFTWARE, error.exit_code
+
+    payload = JSON.parse(output.string)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "internal", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+  end
+
+  def test_stdout_epipe_after_successful_send_is_swallowed_not_re_sent
+    telegram = StubTelegram.new(messages: [])
+    broken = Object.new
+    def broken.puts(*_args) = raise(Errno::EPIPE, "broken pipe")
+    cmd = Hive::Commands::AnswerDigest.new(
+      date: "2026-06-27", json: true, output: broken, cfg: cfg,
+      status_watcher: StubStatusWatcher.new(result: FetchResult.new(ok: true, rows: [ row(slug: "answer-me-260625-abcd") ])),
+      env_loader: StubEnvLoader.new(calls: []),
+      telegram_factory: ->(token:, logger:) { telegram }
+    )
+
+    result = with_env("HIVE_TELEGRAM_BOT_TOKEN" => "token") { cmd.call }
+
+    assert_equal true, result.sent, "a broken stdout pipe must not turn a delivered digest into a failure"
+    assert_equal 1, telegram.messages.length, "the digest must be sent exactly once, never retried by re-raising"
+  end
+
+  def test_status_failure_with_broken_stdout_reraises_original_not_pipe_error
+    broken = Object.new
+    def broken.puts(*_args) = raise(Errno::EPIPE, "broken pipe")
+    cmd = Hive::Commands::AnswerDigest.new(
+      date: "2026-06-27", json: true, output: broken, cfg: cfg,
+      status_watcher: StubStatusWatcher.new(result: FetchResult.new(ok: false, rows: [], error: "boom")),
+      env_loader: StubEnvLoader.new(calls: []),
+      telegram_factory: ->(token:, logger:) { StubTelegram.new(messages: []) }
+    )
+
+    # A broken pipe while emitting the error envelope must not clobber the
+    # original StatusUnavailableError's exit code with Errno::EPIPE.
+    assert_raises(Hive::Commands::AnswerDigest::StatusUnavailableError) { cmd.call }
   end
 end

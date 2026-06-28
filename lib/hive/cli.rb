@@ -1121,6 +1121,24 @@ module Hive
         end
         raise Hive::InvalidTaskPath, message
       end
+
+      def emit_bot_argv_error(message:, error_kind:)
+        require "hive/commands/bot"
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Commands::Bot.json_usage_error_payload(
+            error: error,
+            error_kind: error_kind
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE, JSON::GeneratorError
+            nil
+          end
+        end
+        raise error
+      end
     end
 
     desc "bot SUBCOMMAND", "Manage the Telegram bot (start / stop / status / reload / tail / install)"
@@ -1173,13 +1191,17 @@ module Hive
     def bot(subcommand = nil)
       require "hive/commands/bot"
       if options[:foreground] && options[:detach]
-        raise Hive::InvalidTaskPath,
-              "hive bot start: --detach is the default; do not combine it with --foreground"
+        emit_bot_argv_error(
+          message: "hive bot start: --detach is the default; do not combine it with --foreground",
+          error_kind: "wrong_subcommand_flag"
+        )
       end
       if options[:force] && subcommand != "install"
-        raise Hive::InvalidTaskPath,
-              "hive bot #{subcommand}: --force only applies to `install`; " \
-              "drop it or use `hive bot install --force`"
+        emit_bot_argv_error(
+          message: "hive bot #{subcommand}: --force only applies to `install`; " \
+                   "drop it or use `hive bot install --force`",
+          error_kind: "wrong_subcommand_flag"
+        )
       end
 
       Hive::Commands::Bot.new(

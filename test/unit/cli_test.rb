@@ -389,6 +389,19 @@ class HiveCliTest < Minitest::Test
     assert_match(/--force only applies to `install`/, err)
   end
 
+  # A closed stdout (broken pipe) while writing the bot argv-error --json
+  # envelope must be swallowed: emit_bot_argv_error still raises the
+  # InvalidTaskPath usage failure rather than letting a raw Errno::EPIPE
+  # escape. Covers the `rescue Errno::EPIPE, JSON::GeneratorError` arm around
+  # `puts JSON.generate(payload)`.
+  def test_bot_argv_error_json_swallows_broken_pipe
+    cli = Hive::CLI.new([], { json: true, force: true })
+    cli.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "closed pipe" }
+
+    error = assert_raises(Hive::InvalidTaskPath) { cli.bot("status") }
+    assert_match(/--force only applies to `install`/, error.message)
+  end
+
   # P3: `hive web --json` previously accepted the global --json and silently
   # ignored it. Mirror `hive tui`'s rejection: emit a structured error
   # envelope and exit with EX_USAGE rather than booting a long-lived server.

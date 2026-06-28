@@ -1076,8 +1076,12 @@ class ConfigTest < Minitest::Test
           Hive::Config.registered_project!(cwd: repo)
         end
 
-        assert_includes err.message, "not a hive-invited repo"
+        # Distinct from the not-invited message: the project is registered but
+        # its hive state directory is gone.
+        assert_includes err.message, "registered but its hive state directory"
+        assert_includes err.message, "is missing"
         assert_includes err.message, "hive init"
+        refute_includes err.message, "not a hive-invited repo"
       end
     end
   end

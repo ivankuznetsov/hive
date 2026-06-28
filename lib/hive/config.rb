@@ -1112,8 +1112,13 @@ module Hive
       hive_state_path = project_hive_state_path(project)
       return project if File.directory?(hive_state_path)
 
+      # The project IS registered but its hive state directory is gone — a
+      # different failure from "not invited". `hive init` here still repairs
+      # it, but say so accurately rather than implying the repo was never
+      # invited.
       raise ConfigError,
-            "not a hive-invited repo — run `hive init` here first, or pass --project NAME"
+            "project #{project.fetch('name').inspect} is registered but its hive state directory " \
+            "#{hive_state_path} is missing — run `hive init` in #{project.fetch('path')} to repair it"
     end
 
     def path_prefix?(path, prefix)

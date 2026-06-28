@@ -3,7 +3,7 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-06-14
+updated: 2026-06-27
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
@@ -63,7 +63,7 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
   "marker_after": "waiting",
   "next_action": {
     "key": "needs_input",
-    "label": "Needs your input",
+    "label": "Review plan draft",
     "command": "hive plan fix-bug-260424-aaaa --from 3-plan"
   }
 }

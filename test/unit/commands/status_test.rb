@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/status"
+require "hive/task_action"
 
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
@@ -1344,25 +1345,37 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  # Generic-workflow labels ("Ready to run" / "Ready to advance") must sort with
-  # the actionable rows, ABOVE "Error" — a regression dropping either entry from
-  # ACTION_LABEL_ORDER gives it index `length` (an unknown label) and silently
-  # sinks generic status rows below "Error". `action_labels` is the live sorter
-  # consumed by render_project and the TUI snapshot, so pin both labels here.
-  def test_action_labels_sorts_generic_labels_above_error
+  # Generic and differentiated needs-input labels must sort with the actionable
+  # rows, ABOVE "Error" — a regression dropping any entry from ACTION_LABEL_ORDER
+  # gives it index `length` (an unknown label) and silently sinks those status
+  # rows below "Error". `action_labels` is the live sorter consumed by
+  # render_project and the TUI snapshot, so pin the labels here.
+  def test_action_labels_sorts_actionable_waiting_labels_above_error
     cmd = Hive::Commands::Status.new
     rows = [
       { action_label: "Error" },
       { action_label: "Ready to advance" },
-      { action_label: "Ready to run" }
+      { action_label: "Ready to run" },
+      { action_label: "Answer questions" },
+      { action_label: "Review plan draft" },
+      { action_label: "Needs your input" },
+      { action_label: "Needs review decision" },
+      { action_label: "Confirm finalize" }
     ]
 
     sorted = cmd.send(:action_labels, rows)
 
-    assert_operator sorted.index("Ready to run"), :<, sorted.index("Error"),
-                    "generic 'Ready to run' rows must sort above 'Error'"
-    assert_operator sorted.index("Ready to advance"), :<, sorted.index("Error"),
-                    "generic 'Ready to advance' rows must sort above 'Error'"
+    [ "Ready to run", "Ready to advance", "Answer questions", "Review plan draft",
+      "Needs your input", "Needs review decision", "Confirm finalize" ].each do |label|
+      assert_operator sorted.index(label), :<, sorted.index("Error"),
+                      "#{label.inspect} rows must sort above 'Error'"
+    end
+  end
+
+  def test_action_label_order_covers_every_task_action_label
+    action_labels = Hive::TaskAction::ACTIONS.values.map { |action| action.fetch(:label) }.uniq
+
+    assert_empty action_labels - Hive::Commands::Status::ACTION_LABEL_ORDER
   end
 
   def test_render_project_skips_empty_action_label_groups

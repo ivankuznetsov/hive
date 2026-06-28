@@ -719,6 +719,20 @@ class InitPromptsTest < Minitest::Test
     refute p_pipe.interactive?
   end
 
+  def test_interactive_predicate_degrades_when_tty_raises_ioerror
+    # A closed real IO answers respond_to?(:tty?) with true but raises
+    # IOError on #tty? — interactive? must treat that as non-interactive
+    # (hive init under a closed stdin: daemon / CI) rather than crash.
+    input = StringIO.new("")
+    input.define_singleton_method(:tty?) { raise IOError, "closed stream" }
+    prompts = Hive::Commands::Init::Prompts.new(
+      input: input, output: StringIO.new, summary_io: StringIO.new,
+      registered_agents: AGENT_NAMES
+    )
+
+    refute prompts.interactive?
+  end
+
   # --- EOF / Ctrl-D handling (ce-code-review F3) ---------------------------
 
   def test_eof_at_confirmation_raises_aborted_not_silent_yes

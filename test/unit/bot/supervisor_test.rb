@@ -1227,6 +1227,9 @@ class HiveBotSupervisorTest < Minitest::Test
     # Pin the A5 discoverability copy: the typeable command menu must advertise
     # the <id|slug> argument so operators learn they can paste a numeric id.
     descriptions = commands.to_h { |cmd| [ cmd.fetch(:command), cmd.fetch(:description) ] }
+    # Pin the bare-text discoverability copy so a silent revert to a terser
+    # "Capture an idea" fails here: the menu must advertise that any message works.
+    assert_equal "Capture an idea, or just send any message", descriptions.fetch("idea")
     assert_includes descriptions.fetch("answer"), "/answer <id|slug>"
     assert_includes descriptions.fetch("approve"), "/approve <id|slug>"
     assert_includes descriptions.fetch("autofix"), "/autofix <id|slug>"

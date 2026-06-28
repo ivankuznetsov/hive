@@ -545,6 +545,24 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
+    # The agent backends `hive setup` can persist globally, in canonical
+    # listing/storage order. Every method that filters or reorders a
+    # selection iterates this list so the on-disk order is stable
+    # regardless of the order the operator typed. The names are frozen so
+    # callers that receive them back from `normalize_global_agents` cannot
+    # mutate the shared constant in place.
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi].map(&:freeze).freeze
+    # Recommended default selection when the operator accepts the prompt
+    # default or runs non-interactively — Claude + Codex; Pi is opt-in.
+    DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
+    # Boot-time parity guard, the analogue of Init::Prompts' CHOICES/MODES
+    # check (init/prompts.rb): a recommended default that isn't also a
+    # known backend would let `default_global_agents` emit a value that
+    # `normalize_global_agents`/`write_global_agents!` then reject. Enforce
+    # the subset here rather than letting it surface only as a runtime
+    # ConfigError. Single-line modifier (like the sibling guard) so the
+    # never-taken raise stays on the evaluated line for the coverage gate.
+    raise "DEFAULT_GLOBAL_AGENTS must be a subset of GLOBAL_AGENT_BACKENDS: #{(DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).inspect} not in #{GLOBAL_AGENT_BACKENDS.inspect}" unless (DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).empty?
     # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
     # Kept as an explicit policy literal rather than derived via
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
@@ -562,6 +580,42 @@ module Hive
 
     def global_config_path
       File.join(hive_home, "config.yml")
+    end
+
+    # Single source of the registry's string representation. The agent
+    # registry keys on symbols, but every backend-selection path (the
+    # defaults, normalize, the setup prompt) compares against backend-name
+    # *strings*, so the symbol→string projection lives here — the
+    # registry-representation coupling is then a one-line edit rather than
+    # several drifting copies.
+    def registered_agent_names
+      AgentProfiles.registered_names.map(&:to_s)
+    end
+
+    # The default selection filtered down to the backends actually
+    # registered on this machine, in canonical order. Returns a frozen
+    # array of frozen strings with at least one entry — the same return
+    # contract as `normalize_global_agents` on BOTH mutability and
+    # cardinality, so a consumer never sees a mutable result on one path and
+    # a frozen one on the other (a latent FrozenError trap), nor an empty
+    # selection the prompt boundary can never produce. Raises ConfigError
+    # when no default backend is registered — unreachable while claude/codex
+    # auto-register on `require "hive/config"`, but the guarantee is enforced
+    # here rather than merely asserted in this comment.
+    def default_global_agents
+      registered = registered_agent_names
+      # Derive order from the canonical GLOBAL_AGENT_BACKENDS rather than
+      # iterating the DEFAULT_* literal, so reordering the default literal
+      # can't make this producer disagree with `normalize_global_agents`,
+      # and the result is guaranteed ⊆ GLOBAL_AGENT_BACKENDS (a value
+      # normalize/write would accept). Left-ordered `&` dedups too.
+      selected = GLOBAL_AGENT_BACKENDS & DEFAULT_GLOBAL_AGENTS & registered
+      if selected.empty?
+        raise ConfigError,
+              "no default agent backend is registered (expected one of #{DEFAULT_GLOBAL_AGENTS.inspect})"
+      end
+
+      selected.freeze
     end
 
     def hive_state_dir(project_root, hive_state_name = ".hive-state")
@@ -773,6 +827,118 @@ module Hive
       end
     end
 
+    # The operator's persisted backend selection from the global config,
+    # or `default_global_agents` when nothing is stored yet. Three "unset"
+    # shapes all fall through to the defaults: an absent `agents:` block, an
+    # absent `agents.selected` key, and a present-but-null `selected:` (a
+    # bare `selected:` with no value). A present-but-malformed block
+    # (non-Hash `agents:`, non-Array `selected`) is a hand-edit error and
+    # raises ConfigError. Note the deliberate asymmetry against an empty
+    # `selected: []`: a null `selected:` is treated as "unset" and yields
+    # the defaults, whereas an explicit empty list raises via
+    # `normalize_global_agents` — an empty array is a hand-edit mistake the
+    # prompt can never produce, a null value is just "nothing stored yet".
+    def load_global_agents
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      agents = data["agents"]
+      return default_global_agents if agents.nil?
+
+      unless agents.is_a?(Hash)
+        raise ConfigError, "agents in #{describe_source(path)} must be a Hash; got #{agents.class}"
+      end
+
+      selected = agents["selected"]
+      return default_global_agents if selected.nil?
+
+      normalize_global_agents(selected, source: describe_source(path))
+    end
+
+    # Persist a backend selection, writing the normalized (validated,
+    # canonical-order) list to `agents.selected` and returning it. Merging
+    # into `(existing || {})` preserves any operator-owned sibling keys
+    # under `agents:` (e.g. per-agent override blocks, freeform notes) —
+    # only `selected` is rewritten. A pre-existing non-Hash `agents:` value
+    # is a hand-edit error and raises rather than being clobbered.
+    def write_global_agents!(agents)
+      normalized = normalize_global_agents(agents, source: "the write_global_agents! argument")
+      update_global_config! do |data|
+        existing = data["agents"]
+        unless existing.nil? || existing.is_a?(Hash)
+          raise ConfigError, "agents in #{describe_source(global_config_path)} must be a Hash; got #{existing.class}"
+        end
+
+        data["agents"] = (existing || {}).merge("selected" => normalized)
+        normalized
+      end
+    end
+
+    # Validate and canonicalize a raw selection (from disk or a caller)
+    # into the persisted contract: a frozen array of frozen backend names
+    # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
+    # Enforcing "≥1 backend" here mirrors the prompt boundary
+    # (BackendPrompt) so neither a hand-edited `selected: []` nor a
+    # `write_global_agents!([])` can persist a zero-backend state the
+    # prompt can never produce. Each name must be a non-empty String that
+    # resolves to a registered backend; anything else is a hand-edit error
+    # and raises ConfigError.
+    def normalize_global_agents(agents, source:)
+      unless agents.is_a?(Array)
+        raise ConfigError,
+              "agents.selected in #{source} must be an Array of agent names; got #{agents.class}"
+      end
+
+      if agents.empty?
+        raise ConfigError,
+              "agents.selected in #{source} must list at least one backend " \
+              "(omit or null out the `selected:` key to fall back to the " \
+              "defaults #{DEFAULT_GLOBAL_AGENTS.inspect})"
+      end
+
+      registered = registered_agent_names
+      allowed = GLOBAL_AGENT_BACKENDS & registered
+      selected = []
+      agents.each do |agent|
+        unless agent.is_a?(String) && !agent.strip.empty?
+          raise ConfigError,
+                "agents.selected in #{source} must contain non-empty strings"
+        end
+
+        # Downcase before the allowed-list check so a hand-edited
+        # `selected: [Claude]` — the exact capitalization the setup prompt
+        # displays — loads, matching the prompt's case-insensitive name
+        # resolution (BackendPrompt#resolve_token).
+        name = agent.strip.downcase
+        unless allowed.include?(name)
+          if GLOBAL_AGENT_BACKENDS.include?(name)
+            # Valid backend name, just not installed/registered on THIS
+            # machine — the synced-dotfiles case. Distinct from a typo so
+            # the operator knows to install it / re-run `hive setup`, not
+            # to hunt for a misspelling.
+            raise ConfigError,
+                  "agents.selected in #{source} names backend #{name.inspect}, which is valid but " \
+                  "not installed or registered on this machine; install it or re-run `hive setup` " \
+                  "(registered here: #{allowed.inspect})"
+          end
+
+          raise ConfigError,
+                "agents.selected in #{source} contains unknown backend #{name.inspect}; " \
+                "expected one of #{GLOBAL_AGENT_BACKENDS.inspect}"
+        end
+
+        selected << name
+      end
+
+      # Reorder to canonical order and dedupe in a single intersection over
+      # the canonical constant (iterating the unique constant means a
+      # repeated name collapses to a single entry).
+      (GLOBAL_AGENT_BACKENDS & selected).freeze
+    end
+
     # Shape gate shared by the loader and `prune`'s predicate so the
     # two surfaces agree on what counts as a valid registry row.
     # Without this, the loader would silently skip a corrupted entry
@@ -800,7 +966,11 @@ module Hive
       YAML.safe_load(File.read(path)) || {}
     rescue Psych::Exception => e
       raise ConfigError, "global config at #{path} is not valid YAML: #{e.message}"
-    rescue Errno::EACCES, Errno::EISDIR => e
+    rescue Errno::EACCES, Errno::EISDIR, Errno::ENOENT => e
+      # ENOENT closes the narrow TOCTOU on every `File.exist?(path) ?
+      # load_global_config(path) : {}` reader: a config deleted between the
+      # existence check and the read here surfaces as exit-78 ConfigError
+      # instead of an exit-70 InternalError.
       raise ConfigError, "global config at #{path} is not readable: #{e.message}"
     end
 

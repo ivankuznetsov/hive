@@ -181,6 +181,77 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_does_not_load_caller_rubylib
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "rubylib")
+      FileUtils.mkdir_p(poison_dir)
+      marker = File.join(dir, "rubylib-loaded")
+      %w[tmpdir uri].each do |feature|
+        File.write(File.join(poison_dir, "#{feature}.rb"), "File.write(#{marker.dump}, #{feature.dump})\n")
+      end
+
+      env = {
+        "RUBYLIB" => poison_dir,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] gh pr comment 42 --body hi skipped"
+      refute_path_exists marker, "gh stub loaded caller-controlled Ruby before the skip gate"
+
+      real_gh = recording_binary(dir, "real-gh")
+      _out, err, status = Open3.capture3(
+        env.merge("HIVE_BABYSITTER_REAL_GH" => real_gh),
+        stub_path("gh"),
+        "repo",
+        "view",
+        "owner/repo"
+      )
+
+      assert status.success?, err
+      assert_includes File.read(File.join(dir, "real.log")), "real-gh repo view owner/repo"
+      refute_path_exists marker, "gh stub loaded caller-controlled Ruby before passthrough"
+    end
+  end
+
+  def test_overlay_shims_scrub_ruby_startup_environment_before_stub_handoff
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "poison")
+      marker = File.join(dir, "rubyopt-loaded")
+      FileUtils.mkdir_p(poison_dir)
+      File.write(
+        File.join(poison_dir, "pwn.rb"),
+        "File.write(ENV.fetch(\"HIVE_RUBYOPT_MARKER\"), \"loaded\")\n"
+      )
+      recording_binary(dir, "git")
+      recording_binary(dir, "gh")
+
+      with_env("PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          injected = {
+            "RUBYOPT" => "-rpwn",
+            "RUBYLIB" => poison_dir,
+            "HIVE_RUBYOPT_MARKER" => marker
+          }
+
+          _out, git_err, git_status = Open3.capture3(injected, "git", "status", "--short")
+          _out, gh_err, gh_status = Open3.capture3(injected, "gh", "repo", "view", "owner/repo")
+
+          assert git_status.success?, git_err
+          assert gh_status.success?, gh_err
+        end
+      end
+
+      refute_path_exists marker, "RUBYOPT/RUBYLIB loaded code before the dry-run stub guarded the call"
+      real_invocations = File.read(File.join(dir, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+      assert_includes real_invocations, "gh repo view owner/repo"
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")
@@ -205,6 +276,22 @@ class BabysitterDryRunEnvTest < Minitest::Test
         assert_includes err, "#{env_name} must be an absolute path"
         refute_path_exists pwn_path
       end
+    end
+  end
+
+  def test_gh_stub_reports_missing_real_gh_without_backtrace
+    with_tmp_dir do |dir|
+      missing_gh = File.join(dir, "missing-gh")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => missing_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "gh-skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
+
+      assert_equal 127, status.exitstatus, err
+      assert_includes err, "hive-babysitter dry-run: cannot exec real gh at #{missing_gh.inspect}:"
+      refute_includes err, "hive-babysitter-stub-gh:"
     end
   end
 
@@ -313,6 +400,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_equal "existing\n", File.read(target)
       assert_includes git_err, "[dry-run] failed to write skip log #{link}:"
       assert_includes gh_err, "[dry-run] failed to write skip log #{link}:"
+    end
+  end
+
+  def test_stubs_refuse_hardlinked_skip_log
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target.log")
+      link = File.join(dir, "skipped.log")
+      File.write(target, "existing\n")
+      File.link(target, link)
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => link }
+
+      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "through-hardlink")
+      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+
+      assert git_status.success?, git_err
+      assert gh_status.success?, gh_err
+      assert_equal "existing\n", File.read(target)
+      assert_includes git_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
+      assert_includes gh_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
     end
   end
 
@@ -799,6 +905,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env_keys = %w[
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+        SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
       ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
@@ -815,7 +923,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GH_FORCE_TTY" => "80",
         "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
         "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
-        "HOME" => File.join(dir, "evil-home")
+        "HOME" => File.join(dir, "evil-home"),
+        "HTTP_PROXY" => "http://127.0.0.1:8080",
+        "HTTPS_PROXY" => "http://127.0.0.1:8443",
+        "ALL_PROXY" => "socks5://127.0.0.1:1080",
+        "NO_PROXY" => "",
+        "http_proxy" => "http://127.0.0.1:8081",
+        "https_proxy" => "http://127.0.0.1:8444",
+        "all_proxy" => "socks5://127.0.0.1:1081",
+        "no_proxy" => "",
+        "SSL_CERT_FILE" => File.join(dir, "agent-ca.pem"),
+        "SSL_CERT_DIR" => File.join(dir, "agent-ca-dir"),
+        "ssl_cert_file" => File.join(dir, "agent-ca-lower.pem"),
+        "ssl_cert_dir" => File.join(dir, "agent-ca-dir-lower")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")

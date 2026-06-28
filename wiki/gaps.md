@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-06-25
+updated: 2026-06-26
 tags: [gap, todo]
 ---
 
@@ -39,11 +39,17 @@ tags: [gap, todo]
 | `openclaw/skills/hive/SKILL.md`, `openclaw/README.md` | ✓ [[commands]], [[operating]], and [[commands/wiki]] cover the single ClawHub `hive-cli` skill, `/hive` slash-command dispatch, guided setup, wiki changelog verification, and publish-shape constraints. |
 | `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage and eval-runner selector coverage. |
 | `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage and the checkout-only Telegram bot eval runner. |
-| `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage, eval-runner selector coverage, `bin/hive-eval`'s checkout-local usage boundary, the explicit `HIVE_EVAL_NO_JUDGE` env-clearing contract, and `bin/hive-e2e replay`'s unusable-repro config error contract. |
+| `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage, eval-runner selector coverage, `bin/hive-eval`'s checkout-local usage boundary, the explicit `HIVE_EVAL_NO_JUDGE` env-clearing contract, `bin/hive-e2e replay`'s unusable-repro config error contract, and the attached `Hive::E2E::BackgroundProcess` child process-group lifecycle. |
 
 Uncertainty: this table was refreshed manually from targeted source, dependency-manifest, executable-entrypoint, and wiki reads on 2026-06-16, with the eval-runner row targeted again on 2026-06-17. It verifies domain coverage, not exact one-to-one file coverage or installed release-bundle behavior. The 2026-06-15 wrapper refresh source-inspected `bin/hive` and `test/integration/cli_version_test.rb`, and the 2026-06-16 e2e refresh source-inspected `bin/hive-e2e` plus `test/e2e/lib/hive_e2e_binary_test.rb`; neither found an in-tree artifact proving packaged RubyGems/Homebrew/AUR `hive` wrapper behavior or live patrol/babysitter consumption of `bin/hive-e2e` replay error envelopes. The 2026-06-16 clipboard refresh source-inspected `lib/hive/tui/clipboard.rb` and `test/unit/tui/clipboard_test.rb`; it found the fixture stabilization documented in [[testing]], but no checked-in artifact proving the hosted Ruby 3.4.9 coverage job passed after commit `5389920e` or that the real Wayland/X11/macOS clipboard probes were live-smoked after the test-only fixture change. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 
 Latest refresh note (2026-06-16): the babysitter gh-hostname dry-run audit remains source- and unit-pinned only. This refresh found no in-tree artifact for a full live-agent `hive babysit --once PROJECT --dry-run` run after commits `a86ca033` and `ede81ac7`.
+
+Latest refresh note (2026-06-26): `Hive::E2E::BackgroundProcess` process-group
+cleanup is source- and e2e-lib-test-pinned after commit `efb669b6`; this
+refresh found no in-tree artifact from a full `bin/hive-e2e run` or hivebox
+golden-path run proving a long-lived daemon/bot background child exited early
+and cleanup avoided signaling a reused process group in a full scenario.
 
 ## Open questions about the codebase
 

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "psych"
 require "hive/bot/notification_builders"
 require "hive/bot/row_actions"
 require "hive/config"
@@ -28,10 +29,10 @@ module Hive
       }.freeze
 
       # The push-notification button emoji per primary-capable RowActions role.
-      # Single source for both this module and Supervisor#status_action_emoji,
-      # which delegates here — a previous byte-identical second copy meant a new
-      # role added to one map raised a Hash#fetch KeyError only on whichever
-      # surface (/status, /waiting, or the digest) rendered it first.
+      # Single source for every surface that renders a primary button — /status,
+      # /waiting, and the answer-digest all reach it through #button_for. A
+      # previous byte-identical second copy meant a new role added to one map
+      # raised a Hash#fetch KeyError only on whichever surface rendered it first.
       ROLE_EMOJI = {
         answer: "✏️",
         approve: "✅",
@@ -43,15 +44,27 @@ module Hive
         rerun: "▶️"
       }.freeze
 
+      # The RowActions kinds the /waiting + digest selector deliberately does
+      # NOT treat as human-input gates: the inert none/suppressed cases and the
+      # stage_approval/recovery surfaces. Declared so the drift guard below can
+      # be bidirectional — every RowActions::KINDS kind must be classified as
+      # either a needs-input kind or an explicitly-excluded one.
+      NON_NEEDS_INPUT_KINDS = %i[none suppressed stage_approval recovery].freeze
+
       # Fail loud at load if the hand-maintained tables ever drift from the
-      # closed RowActions vocabularies they sample. Without these guards, a new
-      # upstream needs-input kind is silently excluded from /waiting and the
-      # digest, a new urgency-less kind sorts by a stale default, and a new
-      # primary-capable role renders no emoji — each a quiet correctness bug
-      # that only surfaces at the consuming call site, far from the cause.
-      # (Single-line modifier form so the guard line stays covered when it
+      # closed RowActions vocabularies they sample. Without these guards a new
+      # urgency-less kind would sort by a stale default and a new primary-capable
+      # role would render no emoji — each a quiet correctness bug that only
+      # surfaces at the consuming call site, far from the cause. The needs-input
+      # guard is a partition-EQUALITY check, not a one-directional subset: a kind
+      # ADDED to RowActions::KINDS but mirrored into NEITHER list fails here, so a
+      # newly-added upstream needs-input kind can't be silently excluded from
+      # /waiting and the digest — precisely the "never silently forget a waiting
+      # task" failure this feature exists to prevent. A removed/renamed kind
+      # fails it too (the lists would no longer cover KINDS exactly).
+      # (Single-line modifier form so each guard line stays covered when it
       # passes — a block-body `raise` would be an uncovered line until drift.)
-      raise "WaitingRows::NEEDS_INPUT_KINDS must be a subset of RowActions::KINDS" unless (NEEDS_INPUT_KINDS - Hive::Bot::RowActions::KINDS).empty?
+      raise "WaitingRows NEEDS_INPUT_KINDS + NON_NEEDS_INPUT_KINDS must partition RowActions::KINDS exactly" unless (NEEDS_INPUT_KINDS + NON_NEEDS_INPUT_KINDS).sort == Hive::Bot::RowActions::KINDS.sort
       raise "WaitingRows::URGENCY_RANK keys must equal NEEDS_INPUT_KINDS" unless URGENCY_RANK.keys.sort == NEEDS_INPUT_KINDS.sort
       raise "WaitingRows::ROLE_EMOJI keys must equal RowActions::ROLES" unless ROLE_EMOJI.keys.sort == Hive::Bot::RowActions::ROLES.sort
 
@@ -96,6 +109,11 @@ module Hive
       end
 
       def resolve(row, logger: nil)
+        # Hoist the log identifiers BEFORE the fallible call, matching
+        # #button_for: reading them inside the rescue (where a row with a
+        # malformed reader could re-raise) would defeat the per-row isolation.
+        project = row.project if row.respond_to?(:project)
+        slug = row.slug if row.respond_to?(:slug)
         Hive::Bot::RowActions.resolve(row)
       rescue StandardError => e
         # A row that genuinely needs input must not vanish from /waiting and the
@@ -104,13 +122,14 @@ module Hive
         # selection surface (/waiting and the digest) now injects a logger
         # before selection, so the drop is observable on all of them.
         logger&.event(:poll_failure, source: "waiting_row_resolve",
-                                      project: (row.project if row.respond_to?(:project)),
-                                      slug: (row.slug if row.respond_to?(:slug)),
+                                      project: project, slug: slug,
                                       error_class: e.class.name, message: e.message)
         nil
       end
 
       def daemon_plan_pause?(row, resolution, daemon_enabled, logger: nil)
+        project = row.project if row.respond_to?(:project)
+        slug = row.slug if row.respond_to?(:slug)
         resolution.kind == :plan_waiting && daemon_enabled.call(row)
       rescue StandardError => e
         # Fail-open (over-remind) so this stays low severity, but log the drop
@@ -118,8 +137,7 @@ module Hive
         # before selection — so a real bug in the daemon-enabled check is not
         # invisible.
         logger&.event(:poll_failure, source: "waiting_daemon_pause",
-                                      project: (row.project if row.respond_to?(:project)),
-                                      slug: (row.slug if row.respond_to?(:slug)),
+                                      project: project, slug: slug,
                                       error_class: e.class.name, message: e.message)
         false
       end
@@ -131,12 +149,13 @@ module Hive
         URGENCY_RANK.fetch(kind)
       end
 
-      # Resolve a status row's project path the same way on every surface
-      # (/waiting, /status, the digest): prefer the row's own `project_path`,
-      # then fall back to the registered project's configured path when the
-      # snapshot row lacks one. Without the fallback a project_path-less
-      # plan_waiting row the bot would hide could leak into the digest. Single
-      # source for the supervisor and answer-digest delegators.
+      # Resolve a status row's project path for the surfaces that suppress
+      # daemon-managed plan pauses (/waiting and the answer-digest, both via
+      # #daemon_enabled_resolver — its only caller): prefer the row's own
+      # `project_path`, then fall back to the registered project's configured
+      # path when the snapshot row lacks one. Without the fallback a
+      # project_path-less plan_waiting row the bot would hide could leak into the
+      # digest.
       def row_project_path(row)
         path = row.project_path if row.respond_to?(:project_path)
         path = path.to_s
@@ -149,9 +168,15 @@ module Hive
       # Build the resolver `select` uses to suppress daemon-managed plan_waiting
       # rows. Memoizes per resolved project path so a broken config loads (and
       # logs) once per project, not once per waiting row, and fails open
-      # (returns false → the plan row still surfaces) on a ConfigError while
-      # logging the drop under `source`. Shared by /waiting (supervisor) and the
-      # answer-digest, which differ only in the log `source:` string.
+      # (returns false → the plan row still surfaces) while logging the drop
+      # under `source`. The rescue catches not just Hive::ConfigError but the
+      # raw Psych::Exception / SystemCallError that `Hive::Config.load`'s bare
+      # `YAML.safe_load(File.read(...))` raises on a malformed/unreadable
+      # project config — otherwise those escaped the rescue, defeated the
+      # per-project memoization (re-loading and re-logging per plan_waiting row),
+      # and relied on daemon_plan_pause?'s broad rescue as the only backstop.
+      # Shared by /waiting (supervisor) and the answer-digest, which differ only
+      # in the log `source:` string.
       def daemon_enabled_resolver(source:, logger: nil)
         cache = {}
         lambda do |row|
@@ -161,7 +186,7 @@ module Hive
           cache.fetch(path) do
             cache[path] = begin
               Hive::Config.load(path).dig("daemon", "enabled") == true
-            rescue Hive::ConfigError => e
+            rescue Hive::ConfigError, Psych::Exception, SystemCallError => e
               logger&.event(:poll_failure, source: source,
                                            project: (row.project if row.respond_to?(:project)),
                                            error_class: e.class.name, message: e.message)

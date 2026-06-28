@@ -1650,7 +1650,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_status_action_button_isolates_a_resolver_failure
     # A row whose resolution raises (typo'd/unmapped role at the RowActions
-    # boundary, or an unmapped status_action_emoji key) must drop only its own
+    # boundary, or an unmapped ROLE_EMOJI key) must drop only its own
     # /status button, not abort the whole keyboard's filter_map.
     bad = row(slug: "boom-260624-abcd", action: "ready_to_develop", marker: "complete")
     original = Hive::Bot::RowActions.method(:resolve)
@@ -1667,25 +1667,26 @@ class HiveBotSupervisorTest < Minitest::Test
            "the dropped button must be logged for an audit trail")
   end
 
-  def test_status_action_emoji_covers_every_row_action_role
-    # status_action_emoji renders the primary /status button; `.fetch` raises on
-    # an unmapped role and status_action_button's rescue swallows it (silently
-    # dropping the button). `:findings_reject` is structurally never the primary
-    # today, so button_coverage_test's primary-role sweep never reaches it —
-    # this parity sweep is what pins the table to the closed RowActions::ROLES
+  def test_role_emoji_covers_every_row_action_role
+    # WaitingRows::ROLE_EMOJI renders the primary button on every surface
+    # (/status via status_action_button, /waiting, the digest); `.fetch` raises
+    # on an unmapped role and button_for's rescue swallows it (silently dropping
+    # the button). `:findings_reject` is structurally never the primary today,
+    # so button_coverage_test's primary-role sweep never reaches it — this
+    # parity sweep is what pins the table to the closed RowActions::ROLES
     # vocabulary if a future refactor ever promotes it to primary.
     Hive::Bot::RowActions::ROLES.each do |role|
-      emoji = @supervisor.send(:status_action_emoji, role)
-      assert_kind_of String, emoji, "status_action_emoji must map #{role.inspect}"
-      refute_empty emoji, "status_action_emoji must not be blank for #{role.inspect}"
+      emoji = Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(role)
+      assert_kind_of String, emoji, "ROLE_EMOJI must map #{role.inspect}"
+      refute_empty emoji, "ROLE_EMOJI must not be blank for #{role.inspect}"
     end
   end
 
-  def test_waiting_row_project_path_falls_back_to_registered_project_path
+  def test_row_project_path_falls_back_to_registered_project_path
     project_only_row = Struct.new(:project).new("hive")
 
     with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/fallback" } }) do
-      assert_equal "/tmp/fallback", @supervisor.send(:waiting_row_project_path, project_only_row)
+      assert_equal "/tmp/fallback", Hive::Bot::WaitingRows.row_project_path(project_only_row)
     end
   end
 

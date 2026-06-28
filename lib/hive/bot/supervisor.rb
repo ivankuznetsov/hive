@@ -1477,23 +1477,12 @@ module Hive
         Hive::Bot::WaitingRows.button_for(row, logger: @logger)
       end
 
-      # Single-sourced from WaitingRows::ROLE_EMOJI (validated against the
-      # closed RowActions::ROLES at load). Kept as a one-line delegator because
-      # the parity sweep in supervisor_test pins it directly.
-      def status_action_emoji(role)
-        Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(role)
-      end
-
       # Delegates to the shared WaitingRows builder so /waiting and the
       # answer-digest resolve daemon-managed plan pauses through one
       # memoizing, fail-open, config-error-logging implementation; only the log
       # `source:` differs.
       def waiting_daemon_enabled_resolver
         Hive::Bot::WaitingRows.daemon_enabled_resolver(source: "waiting_daemon_check", logger: @logger)
-      end
-
-      def waiting_row_project_path(row)
-        Hive::Bot::WaitingRows.row_project_path(row)
       end
 
       def render_details(rows, project, slug, stage: nil)
@@ -1534,7 +1523,7 @@ module Hive
         # every other role maps to a static line below.
         return rerun_hint(action.verb) if action.role == :rerun
 
-        # Static per-role hints, mirroring status_action_emoji: a `.fetch` so a
+        # Static per-role hints, mirroring WaitingRows::ROLE_EMOJI's `.fetch` so a
         # new primary-capable role added to RowActions::ROLES without a hint
         # fails loud (KeyError) here instead of silently degrading to the laptop
         # hint. button_coverage_test sweeps every representative row's primary

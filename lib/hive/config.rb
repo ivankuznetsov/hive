@@ -1131,49 +1131,48 @@ module Hive
       merged
     end
 
+    # Shared loader for a single named global config block (`digest`,
+    # `answer_digest`): runs the ensure_migrated!/validate_hive_home!/path +
+    # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
+    # block's own validator, and returns the merged hash. An optional block
+    # receives (merged, data, override) for per-block derivations (e.g. the
+    # digest's telegram-default `enabled`) and returns the merged hash to validate.
+    def load_global_block(key, validator:)
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data[key] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "#{key} in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS[key]), override)
+      merged = yield(merged, data, override) if block_given?
+      send(validator, { key => merged }, path)
+      merged
+    end
+
     # The `digest` block only (enabled / agent / max_catchup_days), merged
     # over defaults. Used by the daemon scheduler. Distinct from
     # `load_global_digest_config`, which returns the FULL merged config
     # (incl. `bot`) for the digest runner.
     def load_global_digest_block
-      Hive::Paths.ensure_migrated!
-      validate_hive_home!
-      path = global_config_path
-      data = File.exist?(path) ? load_global_config(path) : {}
-      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
-
-      override = data["digest"] || {}
-      unless override.is_a?(Hash)
-        raise ConfigError,
-              "digest in #{describe_source(path)} must be a Hash; got #{override.class}"
+      load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
+        # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
+        # either way, default it ON for anyone who already has the Telegram bot
+        # configured with a deliverable chat. An explicit digest.enabled (true
+        # OR false) is always honored — only the unset case is derived.
+        merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
+        merged
       end
-
-      merged = deep_merge(deep_dup(DEFAULTS["digest"]), override)
-      # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
-      # either way, default it ON for anyone who already has the Telegram bot
-      # configured with a deliverable chat. An explicit digest.enabled (true
-      # OR false) is always honored — only the unset case is derived.
-      merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
-      validate_digest!({ "digest" => merged }, path)
-      merged
     end
 
     def load_global_answer_digest_block
-      Hive::Paths.ensure_migrated!
-      validate_hive_home!
-      path = global_config_path
-      data = File.exist?(path) ? load_global_config(path) : {}
-      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
-
-      override = data["answer_digest"] || {}
-      unless override.is_a?(Hash)
-        raise ConfigError,
-              "answer_digest in #{describe_source(path)} must be a Hash; got #{override.class}"
-      end
-
-      merged = deep_merge(deep_dup(DEFAULTS["answer_digest"]), override)
-      validate_answer_digest!({ "answer_digest" => merged }, path)
-      merged
+      load_global_block("answer_digest", validator: :validate_answer_digest!)
     end
 
     # True when the global Telegram bot is enabled and has at least one

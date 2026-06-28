@@ -248,6 +248,7 @@
             "ready_to_archive",
             "ready_to_advance",
             "ready_to_run",
+            "review_parked",
             "needs_input",
             "recover_execute",
             "recover_review",

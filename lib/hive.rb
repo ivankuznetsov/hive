@@ -163,6 +163,11 @@ module Hive
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       READY_TO_ADVANCE    = "ready_to_advance".freeze
       READY_TO_RUN        = "ready_to_run".freeze
+      # A clean ad-hoc PR review that has completed: it stays PARKED at
+      # 6-review rather than advancing to 7-artifacts. Deliberately NOT in
+      # Daemon::Policy::ADVANCE_ACTIONS, so a daemon-enrolled project never
+      # auto-dispatches `hive artifacts` to finalize someone else's PR.
+      REVIEW_PARKED       = "review_parked".freeze
       NEEDS_INPUT         = "needs_input".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze

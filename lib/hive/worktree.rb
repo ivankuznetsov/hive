@@ -289,7 +289,14 @@ module Hive
       local_ref = "refs/#{branch}"
 
       FileUtils.mkdir_p(File.dirname(path))
-      run_materialize_git!(repo_root, "fetch", "origin", "+pull/#{pr_number}/head:#{local_ref}")
+      # Use the same non-interactive fetch env as every other fetch in this
+      # file (GIT_TERMINAL_PROMPT=0 + SSH BatchMode + the HTTPS low-speed
+      # abort). `hive review --pr N` fetches a PR head from an arbitrary
+      # origin through the new CLI/--json entry point; without this an
+      # unreachable or auth-required remote could hang on a credential
+      # prompt or a dead connection instead of failing fast.
+      run_materialize_git!(repo_root, "fetch", "origin", "+pull/#{pr_number}/head:#{local_ref}",
+                           env: NONINTERACTIVE_FETCH_ENV)
       run_materialize_git!(repo_root, "worktree", "add", "-B", branch, path, local_ref)
       {
         path: path,
@@ -319,8 +326,8 @@ module Hive
       File.expand_path(path)
     end
 
-    def self.run_materialize_git!(repo_root, *args)
-      out, err, status = Open3.capture3("git", "-C", repo_root, *args)
+    def self.run_materialize_git!(repo_root, *args, env: {})
+      out, err, status = Open3.capture3(env, "git", "-C", repo_root, *args)
       return if status.success?
 
       raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"

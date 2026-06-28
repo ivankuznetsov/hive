@@ -437,6 +437,30 @@ class WorktreeTest < Minitest::Test
     assert calls.any? { |cmd| cmd.include?("+pull/44/head:refs/hive/review/pr-44") }
   end
 
+  def test_materialize_pr_fetch_uses_non_interactive_env_so_it_cannot_hang_on_a_prompt
+    ok = Class.new { def success? = true }.new
+    fetch_env = nil
+
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*cmd|
+      env = cmd.first.is_a?(Hash) ? cmd.first : {}
+      fetch_env = env if cmd.include?("+pull/45/head:refs/hive/review/pr-45")
+      cmd.include?("rev-parse") ? [ "abc\n", "", ok ] : [ "", "", ok ]
+    }) do
+      Hive::Worktree.materialize_pr(
+        repo_root: "/tmp/repo",
+        pr_number: 45,
+        path: "/tmp/worktrees/adhoc-review-pr-45",
+        branch: "hive/review/pr-45"
+      )
+    end
+
+    refute_nil fetch_env, "the PR-head fetch must run through Open3.capture3 with an env hash"
+    assert_equal "0", fetch_env["GIT_TERMINAL_PROMPT"],
+                 "the materialize fetch must disable terminal credential prompts"
+    assert_equal Hive::Worktree::NONINTERACTIVE_FETCH_ENV, fetch_env,
+                 "the materialize fetch must reuse the shared non-interactive fetch env"
+  end
+
   # Regression for the origin-ahead-of-local placeholder miss: a prior run
   # created the placeholder from origin/<default> (freshest_base), so it sits
   # at origin/master's tip while local master lags behind. Measured against

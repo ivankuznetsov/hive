@@ -1,4 +1,6 @@
 require "test_helper"
+require "hive/task"
+require "hive/task_action"
 
 class DiagnosticEvidenceTest < Minitest::Test
   def test_prefers_red_status_frontmatter_summary
@@ -253,5 +255,68 @@ class DiagnosticEvidenceTest < Minitest::Test
     assert_equal [], Hive::DiagnosticEvidence.state_file_candidates("/tmp/anything")
   ensure
     Dir.define_singleton_method(:[], original) if original
+  end
+
+  def test_no_empty_fallback_net_for_marker_and_synthetic_evidence
+    cases = [
+      { label: "ERROR", marker: "ERROR reason=exit_code exit_code=1" },
+      { label: "REVIEW_ERROR", marker: "REVIEW_ERROR phase=fix pass=1" },
+      { label: "REVIEW_STALE", marker: "REVIEW_STALE pass=1 reason=max_passes" },
+      { label: "REVIEW_CI_STALE", marker: "REVIEW_CI_STALE attempts=2" },
+      { label: "EXECUTE_STALE", marker: "EXECUTE_STALE findings_count=3" },
+      { label: "AGENT_WORKING", marker: "AGENT_WORKING" },
+      { label: "PLAN_MISSING_OUTPUT", marker_summary: "PLAN_MISSING_OUTPUT" },
+      { label: "FINALIZE_MISSING_PR_MD", marker_summary: "FINALIZE_MISSING_PR_MD" },
+      { label: "FINALIZE_MISSING_PR_URL", marker_summary: "FINALIZE_MISSING_PR_URL" },
+      { label: "FINALIZE_PR_URL_MISMATCH", marker_summary: "FINALIZE_PR_URL_MISMATCH" },
+      { label: "COMPLETE", marker: "COMPLETE" }
+    ]
+
+    cases.each do |entry|
+      Dir.mktmpdir("hive-diagnostic-evidence-sweep") do |folder|
+        File.write(File.join(folder, "task.md"), "<!-- #{entry[:marker]} -->\n") if entry[:marker]
+        logs = File.join(folder, "logs")
+        FileUtils.mkdir_p(logs)
+        log_path = File.join(logs, "#{entry[:label].downcase}.log")
+        File.write(log_path, "last log line for #{entry[:label]}\n")
+
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: folder,
+          marker_summary: entry[:marker_summary]
+        )
+        reply = "#{evidence.fetch(:summary)}\nLog: #{evidence.fetch(:source_path)}"
+
+        assert_includes evidence.fetch(:summary), entry[:label]
+        assert_includes evidence.fetch(:summary), "last log line for #{entry[:label]}"
+        assert_equal log_path, evidence.fetch(:source_path)
+        refute_includes reply, "No diagnostic available"
+      end
+    end
+  end
+
+  def test_red_recovery_markers_have_non_empty_task_action_diagnostics
+    cases = [
+      [ "4-execute", "ERROR reason=exit_code exit_code=1" ],
+      [ "6-review", "REVIEW_ERROR phase=fix pass=1" ],
+      [ "6-review", "REVIEW_STALE pass=1 reason=max_passes" ],
+      [ "6-review", "REVIEW_CI_STALE attempts=2" ],
+      [ "4-execute", "EXECUTE_STALE findings_count=3" ]
+    ]
+
+    cases.each do |stage_dir, marker_text|
+      Dir.mktmpdir("hive-task-action-diagnostic") do |project_root|
+        slug = "red-task-260628-abcd"
+        folder = File.join(project_root, ".hive-state", "stages", stage_dir, slug)
+        FileUtils.mkdir_p(folder)
+        task = Hive::Task.new(folder)
+        File.write(task.state_file, "<!-- #{marker_text} -->\n")
+
+        marker = Hive::Markers.current(task.state_file)
+        diagnostic = Hive::TaskAction.for(task, marker).diagnostic
+
+        assert_kind_of Hash, diagnostic
+        refute_empty diagnostic.fetch("summary")
+      end
+    end
   end
 end

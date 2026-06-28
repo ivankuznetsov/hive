@@ -369,6 +369,70 @@ class StatusDiagnoseTest < Minitest::Test
     end
   end
 
+  # The JSONSchemer round-trips catch a REQUIRED-key drift between
+  # evidence_diagnostic and the canonical Diagnostic#to_h, but NOT an OPTIONAL
+  # one — a future optional Diagnostic key would be silently omitted on the
+  # evidence path while the canonical path emits it. Assert the two key sets
+  # are identical so that gap is closed.
+  def test_evidence_diagnostic_key_set_matches_canonical_to_h
+    Dir.mktmpdir("hive-status-diagnose-parity") do |project_root|
+      # Canonical (production) Diagnostic#to_h from a red task.
+      red_slug = "red-task-260628-aaaa"
+      red_folder = File.join(project_root, ".hive-state", "stages", "6-review", red_slug)
+      FileUtils.mkdir_p(File.join(red_folder, "reviews"))
+      File.write(File.join(red_folder, "task.md"), "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      File.write(File.join(red_folder, "reviews", "errors-01.md"), "fix failed\n")
+      red_task = Hive::Task.new(red_folder)
+      red_marker = Hive::Markers.current(red_task.state_file)
+      canonical = Hive::TaskAction.for(red_task, red_marker).diagnostic
+      refute_nil canonical, "fixture must produce a canonical production diagnostic"
+
+      # Evidence (fallback) shape from a non-red task's marker tier.
+      ev_slug = "green-task-260628-bbbb"
+      ev_folder = File.join(project_root, ".hive-state", "stages", "3-plan", ev_slug)
+      FileUtils.mkdir_p(ev_folder)
+      File.write(File.join(ev_folder, "plan.md"), "<!-- COMPLETE -->\n")
+      ev_task = Hive::Task.new(ev_folder)
+      ev_marker = Hive::Markers.current(ev_task.state_file)
+      evidence = Hive::DiagnosticEvidence.summarize(
+        folder: ev_folder, marker_summary: "COMPLETE", state_file: ev_task.state_file
+      )
+      refute_nil evidence
+      evidence_shape = Hive::Commands::Status.new.send(:evidence_diagnostic, ev_task, ev_marker, evidence)
+
+      assert_equal canonical.keys.sort, evidence_shape.keys.sort,
+                   "evidence_diagnostic must emit the same key set as Diagnostic#to_h " \
+                   "(optional-key drift the schema round-trip misses)"
+    end
+  end
+
+  # No existing round-trip forces an evidence summary at exactly the schema's
+  # 120-char cap (truncate emits 119 chars + "…" = 120 code points). Pin the
+  # boundary so a counting-semantics drift (bytes vs code points) is caught.
+  def test_diagnose_evidence_summary_at_120_char_cap_validates
+    Dir.mktmpdir("hive-status-diagnose-capped") do |project_root|
+      slug = "rotated-task-260628-cap0"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      # "COMPLETE: <200 x's>" comfortably exceeds 120 chars, so the summary is
+      # truncated to exactly the cap.
+      File.write(File.join(logs, "plan.log"), "#{'x' * 200}\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      summary = payload.dig("diagnostic", "summary")
+      assert_equal 120, summary.length,
+                   "evidence summary must sit exactly at the 120-code-point cap"
+      assert summary.end_with?("…")
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
   def test_diagnose_write_short_circuits_when_fresh_artifact_already_present
     # When a previous agent run already wrote diagnostics/red-status.md
     # and its marker_signature matches the current marker, --write

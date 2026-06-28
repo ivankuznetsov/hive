@@ -343,7 +343,9 @@ module Hive
           stage_filter: @stage
         ).resolve
         marker = Hive::Markers.current(task.state_file)
-        marker_summary = marker_summary(marker)
+        # Local renamed off the same-named method (marker_summary) it is the
+        # result of, so the shadowing doesn't obscure intent at the call sites.
+        marker_summary_text = marker_summary(marker)
         liveness = liveness_kwargs_for(task)
         action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
         diagnostic = action.diagnostic
@@ -366,24 +368,24 @@ module Hive
           # generated_by != "local"). Pass --force to re-spawn anyway.
           # See PR #84 review finding #21.
           if !@force && diagnostic["source"] == "artifact" && diagnostic["generated_by"] != "local"
-            emit_diagnose_result(task, diagnostic, diagnostic["source_path"], marker_summary: marker_summary)
+            emit_diagnose_result(task, diagnostic, diagnostic["source_path"], marker_summary: marker_summary_text)
             return
           end
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
           diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
-          emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary)
+          emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary_text)
         else
           if diagnostic.nil?
             evidence = Hive::DiagnosticEvidence.summarize(
               folder: task.folder,
-              marker_summary: marker_summary,
+              marker_summary: marker_summary_text,
               state_file: task.state_file
             )
             diagnostic = evidence_diagnostic(task, marker, evidence) if evidence
           end
-          emit_diagnose_result(task, diagnostic, nil, marker_summary: marker_summary)
+          emit_diagnose_result(task, diagnostic, nil, marker_summary: marker_summary_text)
         end
       end
 
@@ -462,9 +464,16 @@ module Hive
       # (marker tier -> "marker", artifact tiers -> "artifact").
       def evidence_diagnostic(task, marker, evidence)
         kind = evidence.fetch(:kind)
-        source_path = evidence.fetch(:source_path)
         source = Hive::DiagnosticEvidence.source_kind(kind)
-        detail = "#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}"
+        raw_source_path = evidence.fetch(:source_path)
+        # Redact the path-bearing fields (detail / source_path / artifact_paths)
+        # for symmetry with the already-redacted summary and the canonical
+        # Diagnostic#to_h. The source_path is server-controlled under
+        # .hive-state/, so this is cheap defense-in-depth rather than a known
+        # leak. The mtime stat below uses the RAW path so a (hypothetical)
+        # redaction can't break the timestamp.
+        source_path = raw_source_path && Hive::SecretPatterns.redact(raw_source_path)
+        detail = Hive::SecretPatterns.redact("#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}")
         {
           "summary" => evidence.fetch(:summary),
           # Cap like the canonical Diagnostic#to_h (truncate(detail, DETAIL_MAX))
@@ -473,11 +482,13 @@ module Hive
           "detail" => Hive::DiagnosticHelpers.truncate(detail, Hive::TaskAction::Diagnostic::DETAIL_MAX),
           "source" => source,
           "source_path" => source_path,
-          "artifact_paths" => source == "artifact" ? [ source_path ] : [],
+          # [source_path].compact so a future artifact-kind tier returning a nil
+          # source_path can't emit schema-invalid artifact_paths:[nil].
+          "artifact_paths" => source == "artifact" ? [ source_path ].compact : [],
           "generated_by" => "local",
           "marker_signature" => Hive::TaskAction.marker_signature(marker),
           "suggested_next_action" => nil,
-          "updated_at" => (safe_mtime(source_path) || safe_mtime(task.state_file) || Time.now).utc.iso8601
+          "updated_at" => (safe_mtime(raw_source_path) || safe_mtime(task.state_file) || Time.now).utc.iso8601
         }
       end
 

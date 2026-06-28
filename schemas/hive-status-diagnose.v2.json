@@ -181,12 +181,12 @@
       ],
       "properties": {
         "summary": {
-          "description": "Single-line operator summary. Producer caps at 120 chars (TaskAction::DIAGNOSTIC_SUMMARY_MAX); see Hive::TaskAction#diagnostic.",
+          "description": "Single-line operator summary. Producer caps at 120 chars (Hive::TaskAction::Diagnostic::SUMMARY_MAX); see Hive::TaskAction#diagnostic.",
           "type": "string",
           "maxLength": 120
         },
         "detail": {
-          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic. On the on-disk evidence fallback path (nil production diagnostic) this is instead a one-line `Label: path` pointer to the backing artifact/log/state file, not a multi-line excerpt.",
+          "description": "Multi-line operator detail. Producer caps at 4000 chars (Hive::TaskAction::Diagnostic::DETAIL_MAX); see Hive::TaskAction#diagnostic. On the on-disk evidence fallback path (nil production diagnostic) this is instead a one-line `Label: path` pointer to the backing artifact/log/state file, not a multi-line excerpt.",
           "type": "string",
           "maxLength": 4000
         },

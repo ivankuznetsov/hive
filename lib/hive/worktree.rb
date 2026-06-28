@@ -301,7 +301,7 @@ module Hive
       {
         path: path,
         branch: branch,
-        head_sha: materialize_git_stdout!(path, "rev-parse", "HEAD").strip
+        head_sha: run_materialize_git!(path, "rev-parse", "HEAD").strip
       }
     end
 
@@ -326,17 +326,14 @@ module Hive
       File.expand_path(path)
     end
 
-    def self.run_materialize_git!(repo_root, *args, env: {})
-      out, err, status = Open3.capture3(env, "git", "-C", repo_root, *args)
-      return if status.success?
-
-      raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"
-    end
-
-    # `dir` is the directory to run git in (`git -C <dir>`); the sole caller
-    # passes the worktree `path`, not the repo root, for `rev-parse HEAD`.
-    def self.materialize_git_stdout!(dir, *args)
-      out, err, status = Open3.capture3("git", "-C", dir, *args)
+    # Run one `git -C <dir>` command for the materialize path and return its
+    # stdout. `dir` is the directory git runs in — the repo root for fetch /
+    # worktree-add, or the worktree `path` for `rev-parse HEAD`. `env: {}` is
+    # an empty env (≡ no env arg to Open3.capture3); pass NONINTERACTIVE_FETCH_ENV
+    # for the network fetch. Callers that ignore the return value simply discard
+    # the stdout.
+    def self.run_materialize_git!(dir, *args, env: {})
+      out, err, status = Open3.capture3(env, "git", "-C", dir, *args)
       return out if status.success?
 
       raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"

@@ -14,6 +14,8 @@ require "hive/worktree"
 module Hive
   module Commands
     class AdhocReview
+      include Hive::Schemas::EnvelopeEmitter
+
       class CollisionError < Hive::Error; end
 
       SOURCE = "ad-hoc".freeze
@@ -30,40 +32,61 @@ module Hive
       end
 
       def enqueue(now: Time.now)
-        project = Hive::Config.registered_project!(name: @project_name, cwd: Dir.pwd)
-        project_root = project.fetch("path")
-        project_name = project.fetch("name")
-        # Resolve hive_state_path through the SAME resolver registered_project!
-        # validates with (project-relative entries are joined against the
-        # project root). Consuming the raw registry value here would interpret
-        # a hand-edited *relative* hive_state_path against the caller's cwd —
-        # validation would pass while sidecars landed in the wrong place.
-        hive_state_path = Hive::Config.project_hive_state_path(project)
-        # Parse the identifier in its own narrow rescue (see parse_pr_number!)
-        # so only an invalid identifier maps to a USAGE error; an ArgumentError
-        # from anywhere else stays a genuine InternalError below.
-        pr_number = parse_pr_number!
-        slug = slug_for(pr_number)
+        # call_with_envelope (Hive::Schemas::EnvelopeEmitter) owns the twin
+        # Hive::Error / StandardError rescue + --json error-envelope emission so
+        # this command can't drift from the shared emitter. `next` (not
+        # `return`) yields the reuse short-circuit value back through the block.
+        call_with_envelope do
+          project = Hive::Config.registered_project!(name: @project_name, cwd: Dir.pwd)
+          project_root = project.fetch("path")
+          project_name = project.fetch("name")
+          # Resolve hive_state_path through the SAME resolver registered_project!
+          # validates with (project-relative entries are joined against the
+          # project root). Consuming the raw registry value here would interpret
+          # a hand-edited *relative* hive_state_path against the caller's cwd —
+          # validation would pass while sidecars landed in the wrong place.
+          hive_state_path = Hive::Config.project_hive_state_path(project)
+          # Parse the identifier in its own narrow rescue (see parse_pr_number!)
+          # so only an invalid identifier maps to a USAGE error; an ArgumentError
+          # from anywhere else stays a genuine InternalError below.
+          pr_number = parse_pr_number!
+          slug = slug_for(pr_number)
 
-        return reuse(slug, hive_state_path, project_name) if reusable_folder?(hive_state_path, slug, pr_number)
+          next reuse(slug, hive_state_path, project_name) if reusable_folder?(hive_state_path, slug, pr_number)
 
-        refuse_if_owned!(hive_state_path, slug, pr_number)
+          refuse_if_owned!(hive_state_path, slug, pr_number)
 
-        # Fetch PR metadata only once we know we will create — after the reuse
-        # short-circuit and ownership check — so a re-run reuses offline and a
-        # collision fails without a needless `gh pr view` round-trip. chdir to
-        # the resolved project so `--project` queries the right repo, not cwd.
-        metadata = Hive::Gh.pr_metadata(pr_number, chdir: project_root)
+          # Fetch PR metadata only once we know we will create — after the reuse
+          # short-circuit and ownership check — so a re-run reuses offline and a
+          # collision fails without a needless `gh pr view` round-trip. chdir to
+          # the resolved project so `--project` queries the right repo, not cwd.
+          # Thread the project cfg so the configured `gh.network_timeout_sec`
+          # applies, matching the sibling gh helpers.
+          cfg = Hive::Config.load(project_root)
+          metadata = Hive::Gh.pr_metadata(pr_number, cfg: cfg, chdir: project_root)
 
-        task_folder = create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
-        { slug: slug, project: project_name, task_folder: task_folder, reused: false }
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+          task_folder = create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
+          { slug: slug, project: project_name, task_folder: task_folder, reused: false }
+        end
+      end
+
+      # EnvelopeEmitter hooks — emit the standard hive-stage-action error
+      # envelope on stdout under `--json` so a create-phase failure (bad
+      # identifier, not-invited, refuse-to-shadow collision, gh/auth/worktree
+      # setup error) surfaces the same structured JSON an agent gets from
+      # StageAction. bin/hive still maps the exit code + prints the stderr line
+      # after the re-raise; StageAction owns the envelope once the task exists,
+      # so the two never double-emit.
+      def envelope_schema
+        "hive-stage-action"
+      end
+
+      def envelope_extras
+        { "verb" => "review" }
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       private
@@ -78,7 +101,7 @@ module Hive
         {
           slug: slug,
           project: project_name,
-          task_folder: File.join(hive_state_path, "stages", REVIEW_STAGE, slug),
+          task_folder: review_task_folder(hive_state_path, slug),
           reused: true
         }
       end
@@ -87,8 +110,14 @@ module Hive
         "adhoc-review-pr-#{pr_number}"
       end
 
+      # The deterministic 6-review folder for an ad-hoc slug. One home for the
+      # path so `reuse`, `reusable_folder?`, and `create_task!` can't drift.
+      def review_task_folder(hive_state_path, slug)
+        File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
+      end
+
       def reusable_folder?(hive_state_path, slug, pr_number)
-        folder = File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
+        folder = review_task_folder(hive_state_path, slug)
         return false unless File.directory?(folder)
 
         validate_reusable!(folder, slug, pr_number)
@@ -132,9 +161,22 @@ module Hive
         worktree_path = pointer && pointer["path"]
         return if worktree_path && File.directory?(worktree_path)
 
+        # Distinguish the three failure modes so the remediation hint matches
+        # the real cause. read_pointer swallows a permission/parse error on
+        # worktree.yml to nil, which previously surfaced an unreadable pointer
+        # as "worktree is missing (no worktree.yml path)" — pointing at the
+        # wrong cause.
+        detail =
+          if worktree_path
+            "its worktree is missing (#{worktree_path})"
+          elsif File.exist?(File.join(folder, "worktree.yml"))
+            "its worktree pointer #{File.join(folder, 'worktree.yml')} is unreadable or has no path"
+          else
+            "its worktree pointer #{File.join(folder, 'worktree.yml')} is missing"
+          end
+
         raise CollisionError,
-              "ad-hoc review folder #{slug} exists but its worktree is missing " \
-              "(#{worktree_path || 'no worktree.yml path'}); " \
+              "ad-hoc review folder #{slug} exists but #{detail}; " \
               "run `hive drop #{slug}` and re-run to recreate it"
       end
 
@@ -151,7 +193,7 @@ module Hive
           stage = File.basename(File.dirname(folder))
           next if stage == REVIEW_STAGE
 
-          { stage: stage, slug: slug, folder: folder }
+          { stage: stage, slug: slug }
         end.first
       end
 
@@ -162,7 +204,7 @@ module Hive
           next unless frontmatter["pr_number"].to_i == pr_number.to_i
 
           folder = File.dirname(path)
-          { stage: File.basename(File.dirname(folder)), slug: File.basename(folder), folder: folder }
+          { stage: File.basename(File.dirname(folder)), slug: File.basename(folder) }
         end.first
       end
 
@@ -203,7 +245,7 @@ module Hive
       end
 
       def create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
-        task_folder = File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
+        task_folder = review_task_folder(hive_state_path, slug)
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
         # Proactively clear an orphan worktree/branch/ref BEFORE materializing
         # (mirrors Hive::Babysitter::Worktree#remove_existing!): a prior
@@ -214,7 +256,7 @@ module Hive
         remove_orphan_worktree!(project_root, slug, pr_number)
         materialized = materialize(project_root, slug, pr_number)
         verify_head!(pr_number, metadata, materialized)
-        write_sidecars(task_folder, slug, metadata, materialized, now)
+        write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
         task_folder
       rescue StandardError
         cleanup_failed_task!(project_root, slug, pr_number, task_folder)
@@ -303,23 +345,38 @@ module Hive
               "PR ##{pr_number} materialized at #{actual}, but GitHub reported head #{expected}"
       end
 
-      def write_sidecars(task_folder, slug, metadata, materialized, now)
-        pr_number = metadata.number
+      # Thread the VALIDATED parsed pr_number (the same value the slug, branch,
+      # and reuse check use) into every sidecar — never the gh-sourced
+      # metadata.number (which coerces an absent `number` to 0) — so the
+      # `…-pr-N` slug and the pr.md `pr_number` can't disagree and mis-fire
+      # reuse detection.
+      def write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
         write_meta(task_folder, slug, pr_number)
         write_idea_md(task_folder, slug, pr_number, now)
-        write_task_md(task_folder, slug, metadata, now)
+        write_task_md(task_folder, slug, pr_number, metadata, now)
         write_worktree_pointer(task_folder, materialized, now)
-        write_pr_md(task_folder, metadata)
+        write_pr_md(task_folder, pr_number, metadata)
       end
 
       def write_meta(task_folder, slug, pr_number)
         Hive::TaskMeta.write(
           task_folder,
-          id: Hive::TaskCounter.next!,
+          id: allocate_task_id,
           slug: slug,
           display_name: "Ad-hoc review: PR ##{pr_number}",
           workflow: Hive::Workflows::CODING_ID.to_s
         )
+      end
+
+      # Mirror the patrol handoff (Hive::Patrol::ReviewHandoff#allocate_task_id):
+      # under >30s commit-lock contention TaskCounter.next! raises
+      # ConcurrentRunError. Proceed with id: nil rather than discarding the
+      # already-completed fetch + worktree; the daemon's TaskIdBackfiller
+      # assigns a real id on a later tick.
+      def allocate_task_id
+        Hive::TaskCounter.next!
+      rescue Hive::ConcurrentRunError
+        nil
       end
 
       def write_idea_md(task_folder, slug, pr_number, now)
@@ -338,7 +395,7 @@ module Hive
         )
       end
 
-      def write_task_md(task_folder, slug, metadata, now)
+      def write_task_md(task_folder, slug, pr_number, metadata, now)
         write_frontmatter_md(
           File.join(task_folder, "task.md"),
           {
@@ -348,7 +405,7 @@ module Hive
             "pr_url" => metadata.url
           },
           <<~MD
-          # Ad-hoc review: PR ##{metadata.number}
+          # Ad-hoc review: PR ##{pr_number}
 
           This task runs the standard 6-review flow against #{metadata.url}.
         MD
@@ -367,12 +424,12 @@ module Hive
         )
       end
 
-      def write_pr_md(task_folder, metadata)
+      def write_pr_md(task_folder, pr_number, metadata)
         write_frontmatter_md(
           File.join(task_folder, "pr.md"),
           {
             "pr_url" => metadata.url,
-            "pr_number" => metadata.number,
+            "pr_number" => pr_number,
             "source" => SOURCE,
             "base_ref_name" => metadata.base_ref_name,
             "head_ref_oid" => metadata.head_ref_oid,
@@ -381,7 +438,7 @@ module Hive
           },
           <<~MD
           ## Summary
-          Ad-hoc review for PR ##{metadata.number}.
+          Ad-hoc review for PR ##{pr_number}.
 
           ## Base
           #{metadata.base_ref_name}
@@ -391,26 +448,6 @@ module Hive
 
       def write_frontmatter_md(path, data, body)
         File.write(path, "#{data.to_yaml}---\n\n#{body}")
-      end
-
-      # Emit the standard hive-stage-action error envelope on stdout so a
-      # create-phase failure (bad identifier, not-invited, refuse-to-shadow
-      # collision, gh/auth/worktree setup error) surfaces the same structured
-      # JSON an agent gets from StageAction on the `hive review <slug> --json`
-      # path. The caller re-raises afterwards so bin/hive still maps the exit
-      # code and prints the stderr line; StageAction owns the envelope once the
-      # task exists, so the two never double-emit.
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-stage-action",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: { "verb" => "review" }
-        )
-        puts JSON.generate(payload)
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # stdout closed or payload not serialisable; the re-raise still carries
-        # the failure to bin/hive for the exit code + stderr line.
       end
 
       def error_kind_for(error)

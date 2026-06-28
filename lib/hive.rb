@@ -233,12 +233,16 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`, and
-    # `Hive::Commands::Daemon` (enable/disable). The eight pre-existing
-    # emit sites (Approve, Markers, Metrics, FindingToggle, Status, Run,
-    # Findings, StageAction) have not yet been migrated — see Issue for
-    # the full sweep. This module exists so new emit sites do not add
-    # an 11th copy.
+    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`,
+    # `Hive::Commands::Daemon` (enable/disable), and
+    # `Hive::Commands::AdhocReview`. The eight pre-existing emit sites
+    # (Approve, Markers, Metrics, FindingToggle, Status, Run, Findings,
+    # StageAction) have not yet been migrated — see Issue for the full
+    # sweep. This module exists so new emit sites do not add an 11th copy.
+    #
+    # Consumers may also override `envelope_extras` to merge per-command
+    # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
+    # no extras.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
@@ -256,12 +260,26 @@ module Hive
         payload = Hive::Schemas::ErrorEnvelope.build(
           schema: envelope_schema,
           error: error,
-          error_kind: envelope_error_kind(error)
+          error_kind: envelope_error_kind(error),
+          extras: envelope_extras
         )
         puts JSON.generate(payload)
         @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
+      rescue Errno::EPIPE
+        # stdout closed; the re-raise still carries the failure to bin/hive
+        # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
+      rescue JSON::GeneratorError => e
+        # A non-serialisable payload is a bug, not a closed pipe — don't hide
+        # it. The real error still re-raises through call_with_envelope.
+        warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        @stdout_written = true
+      end
+
+      # Per-command fields merged into the error envelope. Override to add
+      # e.g. `{"verb" => "review"}`; the default is no extras.
+      def envelope_extras
+        {}
       end
     end
 

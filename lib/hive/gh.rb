@@ -29,8 +29,10 @@ module Hive
       end
     end
 
-    PrMetadata = Struct.new(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state,
-                            keyword_init: true)
+    # Immutable value object (Ruby 3.4 Data.define) so `pr_metadata` stays the
+    # single validated constructor and the result is tamper-proof downstream.
+    # Keyword construction + field readers are unchanged for consumers.
+    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that

@@ -410,7 +410,14 @@ module Hive
 
         parsed = YAML.safe_load(match[1], permitted_classes: [ Time ]) || {}
         parsed.is_a?(Hash) ? parsed.transform_keys(&:to_s) : {}
-      rescue Psych::Exception, SystemCallError
+      rescue Psych::Exception, SystemCallError, SystemStackError, NoMemoryError
+        # Deeply-nested flow YAML in a corrupt red-status.md raises
+        # SystemStackError (NOT a StandardError), which would escape the
+        # per-project `rescue StandardError` in Hive::Commands::Status and crash
+        # the whole `hive status --json` snapshot — freezing daemon auto-advance.
+        # Catch it (and the sibling NoMemoryError) so a hostile artifact degrades
+        # to "no frontmatter" instead. Mirrors the same widening in
+        # Hive::DiagnosticEvidence#red_status_frontmatter_summary.
         {}
       end
 
@@ -528,7 +535,7 @@ module Hive
         return false if path.nil? || path.to_s.empty? || !File.file?(path)
 
         real = File.realpath(path)
-        diagnostic_roots.any? { |root| path_inside?(real, root) }
+        diagnostic_roots.any? { |root| Hive::DiagnosticHelpers.path_inside?(real, root) }
       rescue Errno::ENOENT
         false
       rescue SystemCallError => e
@@ -550,28 +557,17 @@ module Hive
         # project_root.realpath and every diagnostic gets silently dropped. The
         # symlink-escape guard is already provided by checking that the
         # artifact's realpath is inside the (also realpath'd) task.folder /
-        # log_dir, and realpath_or_expand rejects a root *directory* that is
-        # itself a symlink so a `logs -> /outside` dir symlink can't enter the
-        # trusted set in the first place.
-        ([ task.folder ] + log_dirs).filter_map { |root| realpath_or_expand(root) }.uniq
-      end
-
-      def realpath_or_expand(path)
-        return nil if path.nil? || path.to_s.empty?
-        # Reject a root whose own leaf is a symlink: a symlinked evidence dir
-        # (e.g. `logs -> /outside`) would otherwise resolve into a TRUSTED root
-        # and let safe_diagnostic_artifact? approve every file under the target.
-        # A symlinked *ancestor* (the legit `.hive-state -> /vol` case above)
-        # still resolves normally because File.symlink? checks only the leaf.
-        return nil if File.symlink?(path)
-
-        File.realpath(path)
-      rescue Errno::ENOENT
-        File.expand_path(path)
-      end
-
-      def path_inside?(path, root)
-        path == root || path.start_with?(root + File::SEPARATOR)
+        # log_dir. task.folder is the trust ANCHOR — realpath'd even when it is
+        # itself a symlink (Task uses File.expand_path, which doesn't resolve
+        # symlinks), so an operator-symlinked task folder isn't dropped from the
+        # trusted set and its red-status.md keeps surfacing; the logs/ subdir
+        # roots still reject a symlinked leaf so a `logs -> /outside` dir symlink
+        # can't enter the trusted set. Both rules live in
+        # Hive::DiagnosticHelpers.evidence_root_realpath so this surface and
+        # Hive::DiagnosticEvidence can't drift (plan R-5).
+        roots = [ Hive::DiagnosticHelpers.evidence_root_realpath(task.folder, trust_anchor: true) ]
+        roots.concat(log_dirs.map { |dir| Hive::DiagnosticHelpers.evidence_root_realpath(dir, trust_anchor: false) })
+        roots.compact.uniq
       end
 
       def redact(text)

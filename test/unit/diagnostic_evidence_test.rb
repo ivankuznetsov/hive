@@ -579,9 +579,14 @@ class DiagnosticEvidenceTest < Minitest::Test
   end
 
   # The marker size probe must not become a second silent failure point: a stat
-  # fault (here ENAMETOOLONG) degrades to "not oversized" and lets the read
-  # attempt and its own rescue handle the fault.
+  # fault (here ENAMETOOLONG from File.size on an over-long path) degrades to
+  # "not oversized" (false) and lets the read attempt and its own rescue handle
+  # the fault. Exercised directly because current_marker's regular-file gate
+  # now short-circuits an unstattable path before the size probe runs.
   def test_marker_size_probe_degrades_when_stat_faults
+    refute Hive::DiagnosticEvidence.send(:marker_file_oversized?, "b" * 5000)
+    # current_marker still degrades to nil for the same over-long path (via the
+    # regular-file gate, one step earlier).
     assert_nil Hive::DiagnosticEvidence.send(:current_marker, "b" * 5000)
   end
 
@@ -748,6 +753,139 @@ class DiagnosticEvidenceTest < Minitest::Test
       assert_equal :log, evidence.fetch(:kind)
       assert_equal newest, evidence.fetch(:source_path)
       assert_includes evidence.fetch(:summary), "NEWEST_BY_MTIME"
+    end
+  end
+
+  # Deeply-nested flow YAML in diagnostics/red-status.md frontmatter makes
+  # YAML.safe_load raise SystemStackError — NOT a Psych::Exception and NOT a
+  # StandardError — so without the widened rescue it would escape both
+  # red_status_frontmatter_summary and summarize's boundary and kill the
+  # no-timeout bot reaper thread. The parse must degrade to the body-line
+  # fallback instead of raising.
+  def test_nested_red_status_frontmatter_degrades_without_raising
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      path = File.join(folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      nested = ("[" * 6000) + ("]" * 6000) # ~12 KB, inside the 16 KB scan window
+      File.write(path, "---\nsummary: #{nested}\n---\nBody fallback after nested yaml\n")
+
+      evidence = nil
+      _out, _err = capture_io do
+        evidence = Hive::DiagnosticEvidence.summarize(folder: folder)
+      end
+
+      refute_nil evidence, "nested frontmatter must degrade to the body tier, not raise"
+      assert_equal "Body fallback after nested yaml", evidence.fetch(:summary)
+      assert_equal :red_status, evidence.fetch(:kind)
+    end
+  end
+
+  # Never-block: the caller-supplied authoritative state_file is read by
+  # current_marker WITHOUT going through contained?, so a FIFO / char-device
+  # there would wedge the no-timeout reaper on a blocking open(2). The
+  # File.file? gate must reject it before any read (File.file? is a
+  # non-blocking stat, so asserting the guard directly can't itself hang).
+  def test_current_marker_rejects_fifo_state_file_without_blocking
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      fifo = File.join(folder, "task.md")
+      File.mkfifo(fifo)
+
+      marker = :unset
+      _out, err = capture_io do
+        marker = Hive::DiagnosticEvidence.send(:current_marker, fifo)
+      end
+      assert_nil marker, "a FIFO state file must be skipped before any blocking read"
+      assert_match(/cannot read marker/, err)
+    end
+  end
+
+  # A regular state file that passes the File.file? never-block gate but raises
+  # a real I/O fault (EACCES) during Markers.current's read must still degrade
+  # to nil with a breadcrumb — the gate handles non-regular files, this branch
+  # handles a regular-but-unreadable one.
+  def test_current_marker_regular_file_read_fault_degrades_with_breadcrumb
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      path = File.join(folder, "task.md")
+      File.write(path, "<!-- ERROR reason=boom -->\n")
+      sentinel = Hive::Markers.method(:current)
+      Hive::Markers.define_singleton_method(:current) { |*| raise Errno::EACCES, "simulated" }
+
+      marker = :unset
+      _out, err = capture_io do
+        marker = Hive::DiagnosticEvidence.send(:current_marker, path)
+      end
+      assert_nil marker
+      assert_match(/cannot read marker/, err)
+    ensure
+      Hive::Markers.define_singleton_method(:current, sentinel) if sentinel
+    end
+  end
+
+  # The marker-tier priority list must derive from the canonical workflow state
+  # files, not a drifted hand-maintained literal. The coding artifacts stage's
+  # state file is `artifact.md` (singular); the old literal carried
+  # `artifacts.md` (plural), which never matched.
+  def test_state_file_names_derive_from_canonical_workflow_state_files
+    require "hive/task"
+    names = Hive::DiagnosticEvidence.send(:state_file_names)
+
+    assert_includes names, "artifact.md", "must include the canonical singular artifact.md"
+    refute_includes names, "artifacts.md", "must not carry the drifted plural artifacts.md"
+    assert_equal Hive::Task::STATE_FILES.values.uniq, names
+  end
+
+  # A cold caller that can't load hive/task must degrade the priority hint to
+  # the `*.md` glob fallback (returning []) with a breadcrumb — the require
+  # failure is a ScriptError, which must NOT escape summarize's StandardError
+  # boundary.
+  def test_state_file_names_load_error_degrades_to_empty_with_breadcrumb
+    Hive::DiagnosticEvidence.define_singleton_method(:require) { |*| raise LoadError, "simulated" }
+
+    result = :unset
+    _out, err = capture_io { result = Hive::DiagnosticEvidence.send(:state_file_names) }
+    assert_equal [], result
+    assert_match(%r{cannot load hive/task}, err)
+  ensure
+    Hive::DiagnosticEvidence.singleton_class.send(:remove_method, :require)
+  end
+
+  # A future tier minting an unmapped evidence kind must raise INSIDE
+  # summarize's never-raise boundary (summary_payload), where it degrades to
+  # nil — not later at the consumer render helpers (source_label/source_kind
+  # .fetch) which sit OUTSIDE the rescue, in the reaper context the contract
+  # protects.
+  def test_summary_payload_rejects_unknown_kind_inside_boundary
+    error = assert_raises(ArgumentError) do
+      Hive::DiagnosticEvidence.send(:summary_payload, [ "x" ], "/path", :totally_unknown)
+    end
+    assert_match(/unknown evidence kind/, error.message)
+  end
+
+  # task.folder itself being a symlink (Task uses File.expand_path, which does
+  # NOT resolve symlinks) must not drop the folder from the trusted evidence
+  # roots: the folder is the trust ANCHOR (realpath'd unconditionally), so a
+  # diagnostics/red-status.md inside it still surfaces. Regression for the
+  # pass-2 symlink-leaf rejection over-firing on the trust anchor.
+  def test_symlinked_task_folder_still_surfaces_red_status
+    Dir.mktmpdir("hive-diagnostic-evidence-real") do |real|
+      FileUtils.mkdir_p(File.join(real, "diagnostics"))
+      File.write(File.join(real, "diagnostics", "red-status.md"), <<~MD)
+        ---
+        summary: Agent verdict via symlinked folder
+        ---
+        body
+      MD
+
+      Dir.mktmpdir("hive-diagnostic-evidence-link") do |linkparent|
+        link = File.join(linkparent, "task-folder")
+        File.symlink(real, link)
+
+        evidence = Hive::DiagnosticEvidence.summarize(folder: link)
+
+        refute_nil evidence, "a symlinked task folder must stay a trusted root"
+        assert_equal :red_status, evidence.fetch(:kind)
+        assert_equal "Agent verdict via symlinked folder", evidence.fetch(:summary)
+      end
     end
   end
 end

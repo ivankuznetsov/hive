@@ -26,14 +26,16 @@ module Hive
   # `contained?`) so a FIFO / device / directory named like evidence can't
   # wedge a blocking read.
   module DiagnosticEvidence
-    # Aliased to the shared single source so the schema-pinned cap can't drift
-    # from Hive::TaskAction::Diagnostic. (TAIL_BYTES is intentionally NOT
-    # aliased: every tail read goes through Hive::DiagnosticHelpers.tail_file,
-    # which uses the helper's own constant, so a local alias would be dead.)
+    # Aliased to the single shared source, Hive::DiagnosticHelpers — only
+    # SUMMARY_MAX is additionally schema-pinned (to hive-status-diagnose.v2
+    # `summary.maxLength`); LOG_GLOB_CAP and FRONTMATTER_SCAN_BYTES are not.
+    # Aliasing keeps the two diagnose surfaces from drifting on these caps.
+    # (TAIL_BYTES is intentionally NOT aliased: every tail read goes through
+    # Hive::DiagnosticHelpers.tail_file, which uses the helper's own constant,
+    # so a local alias would be dead.)
     SUMMARY_MAX = Hive::DiagnosticHelpers::SUMMARY_MAX
     LOG_GLOB_CAP = Hive::DiagnosticHelpers::LOG_GLOB_CAP
     FRONTMATTER_SCAN_BYTES = Hive::DiagnosticHelpers::FRONTMATTER_SCAN_BYTES
-    STATE_FILE_NAMES = %w[brainstorm.md plan.md task.md pr.md artifacts.md idea.md notes.md].freeze
 
     # Cap on the marker-tier read. Markers live at a state file's tail and a
     # real hive state file is a few KB, so a candidate above this is junk (e.g.
@@ -62,11 +64,13 @@ module Hive
       KIND_RENDERING.fetch(kind).fetch(:source)
     end
 
-    # `state_file` is the caller's authoritative task state file (the bot only
-    # has the folder string, so it stays nil there). When supplied it pins the
-    # marker tier's source_path and marker, so the marker-tier summary,
-    # source_path, and the caller's marker_signature all describe the same file
-    # rather than whatever `marker_state_file` happens to glob first.
+    # `state_file` is the caller's authoritative task state file. Older bot
+    # envelopes predate the field and pass nil; current callers (the CLI and
+    # the bot reaper, via the envelope `state_file` field) pass an authoritative
+    # state file. When supplied it pins the marker tier's source_path and marker,
+    # so the marker-tier summary, source_path, and the caller's marker_signature
+    # all describe the same file rather than whatever `marker_state_file` happens
+    # to glob first.
     def summarize(folder:, marker_summary: nil, state_file: nil)
       root = folder.to_s
       return nil if root.strip.empty? || !File.directory?(root)
@@ -82,11 +86,14 @@ module Hive
       return nil unless resolved_state_file && marker_text
 
       summary_payload([ marker_text ], resolved_state_file, :marker)
-    rescue StandardError => e
+    rescue StandardError, SystemStackError, NoMemoryError => e
       # Never crash a reply (plan R-4): the CLI re-wraps a raise as exit 70 and
-      # the bot's reap loop has no per-child rescue. Surface a breadcrumb, but
-      # degrade to nil so the caller falls back to its try-again copy.
-      warn "hive: diagnose-evidence: summarize degraded for #{root} (#{e.class}: #{e.message})"
+      # the bot's reap loop has no per-child rescue. SystemStackError and
+      # NoMemoryError are NOT StandardError (deeply-nested frontmatter YAML can
+      # raise the former on the no-timeout reaper thread), so catch them
+      # explicitly here too. Surface a breadcrumb, but degrade to nil so the
+      # caller falls back to its try-again copy.
+      breadcrumb("summarize degraded for #{root} (#{e.class}: #{e.message})")
       nil
     end
 
@@ -109,7 +116,13 @@ module Hive
       return nil unless parsed.is_a?(Hash)
 
       present(parsed["summary"] || parsed[:summary])
-    rescue Psych::Exception
+    rescue Psych::Exception, SystemStackError, NoMemoryError
+      # YAML.safe_load on deeply-nested flow YAML (well inside the 16 KB scan
+      # window) raises SystemStackError, NOT a Psych::Exception or any
+      # StandardError — so it would escape both this rescue and summarize's
+      # boundary and kill the no-timeout bot reaper thread. Catch it (and the
+      # sibling NoMemoryError) at the parse site so a hostile red-status.md
+      # degrades to "no frontmatter summary" instead.
       nil
     end
 
@@ -157,7 +170,7 @@ module Hive
       # Dir[] returns [] for a missing dir (never ENOENT) and safe_mtime swallows
       # its own faults, so anything reaching here (EIO/EACCES on the glob) is a
       # real fault worth a breadcrumb, not a benign empty result.
-      warn "hive: diagnose-evidence: log glob failed under #{folder} (#{e.class}: #{e.message})"
+      breadcrumb("log glob failed under #{folder} (#{e.class}: #{e.message})")
       []
     end
 
@@ -184,7 +197,7 @@ module Hive
       # sibling replies. Degrade this tier to nil instead. Unreachable in
       # production today (both entry points eager-require hive/task), but a cold
       # caller must not be able to reintroduce the escape.
-      warn "hive: diagnose-evidence: cannot load hive/task (#{e.message}); skipping inferred log dir"
+      breadcrumb("cannot load hive/task (#{e.message}); skipping inferred log dir")
       nil
     end
 
@@ -192,18 +205,37 @@ module Hive
       state_file_candidates(folder).find do |path|
         next false unless contained?(path, folder)
 
-        marker = current_marker(path)
-        marker && !marker.none?
+        # current_marker already normalizes :none → nil, so a truthy return is
+        # a real marker.
+        current_marker(path)
       end
     end
 
     def state_file_candidates(folder)
-      known = STATE_FILE_NAMES.map { |name| File.join(folder, name) }
+      known = state_file_names.map { |name| File.join(folder, name) }
       (known + Dir[File.join(folder, "*.md")].sort).uniq
     rescue SystemCallError => e
       # As in log_candidates: Dir[] never raises ENOENT, so a SystemCallError
       # here is a real I/O fault that should leave a breadcrumb.
-      warn "hive: diagnose-evidence: state-file glob failed under #{folder} (#{e.class}: #{e.message})"
+      breadcrumb("state-file glob failed under #{folder} (#{e.class}: #{e.message})")
+      []
+    end
+
+    # Priority hint for the marker tier: try the canonical workflow state-file
+    # names before the `*.md` glob fallback so the marker that matters is found
+    # first. Derived from Hive::Task::STATE_FILES.values rather than a
+    # hand-maintained literal — the old literal had already drifted
+    # (`artifacts.md` plural never matched the coding `artifact.md`, `notes.md`
+    # matched no workflow). The require is lazy and LoadError-guarded, exactly
+    # like inferred_task_log_dir: the bot/CLI hand this module a folder string,
+    # not a Hive::Task, and a require failure (a ScriptError, not a
+    # StandardError) must degrade to the glob fallback rather than escape
+    # summarize's StandardError boundary.
+    def state_file_names
+      require "hive/task"
+      Hive::Task::STATE_FILES.values.uniq
+    rescue LoadError => e
+      breadcrumb("cannot load hive/task (#{e.message}); using *.md glob fallback only")
       []
     end
 
@@ -216,17 +248,25 @@ module Hive
 
     def current_marker(path)
       return nil if path.to_s.empty?
+      # Never-block gate: the caller-supplied authoritative state_file reaches
+      # here via marker_summary_from_state_file WITHOUT passing through
+      # contained?, so this is the only regular-file gate on that path. A FIFO /
+      # char-device at `path` would otherwise make Hive::Markers.current's
+      # File.read block forever on the no-timeout reaper thread
+      # (File.size(fifo)==0 sails past marker_file_oversized?). Reject any
+      # non-regular file before any read.
+      return nil unless regular_marker_file?(path)
       return nil if marker_file_oversized?(path)
 
       marker = Hive::Markers.current(path)
       marker.none? ? nil : marker
     rescue SystemCallError => e
-      # A real, readable-but-unreadable state file (EISDIR/EACCES, or a rare
-      # TOCTOU ENOENT after Markers.current's File.exist? guard) must not vanish
+      # A real, readable-but-unreadable state file (EACCES, or a rare TOCTOU
+      # ENOENT after Markers.current's File.exist? guard) must not vanish
       # silently; leave a breadcrumb and degrade to "no marker". Markers.current
       # guards File.exist?, so a plain missing file returns :none without raising
       # — there is no separate benign-ENOENT clause to split off here.
-      warn "hive: diagnose-evidence: cannot read marker at #{path} (#{e.class}: #{e.message})"
+      breadcrumb("cannot read marker at #{path} (#{e.class}: #{e.message})")
       nil
     rescue ArgumentError => e
       # Markers.current reads with encoding: "UTF-8", which tags (not
@@ -235,8 +275,21 @@ module Hive
       # malformed state file as "no marker" rather than crash — but leave a
       # breadcrumb (matching the SystemCallError branch) so a corrupt-encoding
       # state file doesn't drop out of the evidence with zero signal.
-      warn "hive: diagnose-evidence: cannot parse marker at #{path} (#{e.class}: #{e.message})"
+      breadcrumb("cannot parse marker at #{path} (#{e.class}: #{e.message})")
       nil
+    end
+
+    # File.file? follows symlinks and is false for a FIFO / char-device /
+    # directory, so it is the regular-file gate the marker read needs. A
+    # present-but-irregular path leaves a breadcrumb (preserving the prior
+    # EISDIR-on-directory signal); a genuinely missing path stays silent
+    # (Markers.current treats absence as :none). Both checks are non-blocking
+    # stats, so the gate itself can never wedge on a FIFO.
+    def regular_marker_file?(path)
+      return true if File.file?(path)
+
+      breadcrumb("cannot read marker at #{path} (not a regular file); skipping") if File.exist?(path)
+      false
     end
 
     # Markers live at a state file's tail and a real one is a few KB, so a
@@ -249,7 +302,7 @@ module Hive
       size = File.size(path)
       return false unless size > MARKER_READ_MAX
 
-      warn "hive: diagnose-evidence: state file #{path} is #{size}B (> #{MARKER_READ_MAX}B); skipping marker read"
+      breadcrumb("state file #{path} is #{size}B (> #{MARKER_READ_MAX}B); skipping marker read")
       true
     rescue SystemCallError
       # Let the read attempt and its own rescue handle a stat fault; don't make
@@ -266,7 +319,7 @@ module Hive
     rescue Errno::ENOENT
       nil
     rescue SystemCallError, IOError => e
-      warn "hive: diagnose-evidence: cannot read log tail at #{path} (#{e.class}: #{e.message})"
+      breadcrumb("cannot read log tail at #{path} (#{e.class}: #{e.message})")
       nil
     end
 
@@ -276,7 +329,7 @@ module Hive
     rescue Errno::ENOENT
       ""
     rescue SystemCallError, IOError => e
-      warn "hive: diagnose-evidence: cannot read head of #{path} (#{e.class}: #{e.message})"
+      breadcrumb("cannot read head of #{path} (#{e.class}: #{e.message})")
       ""
     end
 
@@ -299,37 +352,37 @@ module Hive
       real = File.realpath(path)
       return false unless File.file?(real)
 
-      evidence_roots(folder).any? { |root| path_inside?(real, root) }
+      evidence_roots(folder).any? { |root| Hive::DiagnosticHelpers.path_inside?(real, root) }
     rescue Errno::ENOENT
       false
     rescue SystemCallError => e
-      warn "hive: diagnose-evidence: cannot realpath #{path} (#{e.class}: #{e.message}); skipping"
+      breadcrumb("cannot realpath #{path} (#{e.class}: #{e.message}); skipping")
       false
     end
 
+    # The task folder is the trust ANCHOR (realpath'd even when it is itself a
+    # symlink — Task uses File.expand_path, which doesn't resolve symlinks, so
+    # an operator-symlinked task folder must not be dropped from the trusted
+    # set); the logs/ subdir roots reject a symlinked leaf so a `logs ->
+    # /outside` dir symlink can't smuggle its target in as a trusted root. Both
+    # rules live in Hive::DiagnosticHelpers.evidence_root_realpath so this
+    # surface and the red-status producer can't drift (plan R-5).
     def evidence_roots(folder)
-      ([ folder ] + log_dirs(folder)).filter_map { |root| realpath_or_expand(root) }.uniq
-    end
-
-    def realpath_or_expand(path)
-      return nil if path.nil? || path.to_s.empty?
-      # A symlinked evidence *directory* (e.g. `logs -> /outside`) would
-      # otherwise resolve into a TRUSTED root and let contained? approve every
-      # file under the link target. Reject a root whose own leaf is a symlink;
-      # a symlinked *ancestor* (the legitimate `.hive-state -> /vol` deployment)
-      # still resolves normally because File.symlink? checks only the leaf.
-      return nil if File.symlink?(path)
-
-      File.realpath(path)
-    rescue Errno::ENOENT
-      File.expand_path(path)
-    end
-
-    def path_inside?(path, root)
-      path == root || path.start_with?(root + File::SEPARATOR)
+      roots = [ Hive::DiagnosticHelpers.evidence_root_realpath(folder, trust_anchor: true) ]
+      roots.concat(
+        log_dirs(folder).map { |dir| Hive::DiagnosticHelpers.evidence_root_realpath(dir, trust_anchor: false) }
+      )
+      roots.compact.uniq
     end
 
     def summary_payload(parts, source_path, kind)
+      # Validate kind INSIDE the never-raise boundary: KIND_RENDERING is only
+      # consulted later by the consumer render helpers (source_label/source_kind),
+      # OUTSIDE summarize's rescue. A future tier minting an unmapped kind would
+      # otherwise raise KeyError in exactly the reaper context the contract
+      # protects; raising ArgumentError here degrades it to nil within the rescue.
+      raise ArgumentError, "unknown evidence kind #{kind.inspect}" unless KIND_RENDERING.key?(kind)
+
       summary = parts.compact.map { |part| one_line(part) }.reject(&:empty?).join(": ")
       summary = Hive::DiagnosticHelpers.truncate(Hive::SecretPatterns.redact(summary), SUMMARY_MAX)
       { summary: summary, source_path: source_path, kind: kind }
@@ -356,6 +409,13 @@ module Hive
       Hive::DiagnosticHelpers.utf8(value)
     end
 
+    # Single spelling of the "hive: diagnose-evidence: " breadcrumb prefix so
+    # the ~10 degrade sites can't drift on it; each passes its own per-site
+    # message verbatim.
+    def breadcrumb(message)
+      warn "hive: diagnose-evidence: #{message}"
+    end
+
     # The module's intended public surface is summarize (mint a result) plus the
     # two render helpers the CLI/bot label tiers with. Everything else is
     # internal: keep it private so an external caller can't invoke e.g.
@@ -364,10 +424,11 @@ module Hive
     private_class_method :red_status_summary, :red_status_frontmatter_summary,
                          :red_status_body_summary, :latest_log_summary, :log_candidates,
                          :log_dirs, :inferred_task_log_dir, :marker_state_file,
-                         :state_file_candidates, :marker_summary_from_state_file,
-                         :current_marker, :marker_file_oversized?, :last_meaningful_line,
-                         :safe_read_head, :safe_mtime, :contained?, :evidence_roots,
-                         :realpath_or_expand, :path_inside?, :summary_payload,
-                         :present, :present_path, :one_line, :utf8
+                         :state_file_candidates, :state_file_names,
+                         :marker_summary_from_state_file,
+                         :current_marker, :regular_marker_file?, :marker_file_oversized?,
+                         :last_meaningful_line, :safe_read_head, :safe_mtime, :contained?,
+                         :evidence_roots, :summary_payload,
+                         :present, :present_path, :one_line, :utf8, :breadcrumb
   end
 end

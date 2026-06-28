@@ -72,5 +72,38 @@ module Hive
     def utf8(value)
       value.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
     end
+
+    # Resolve an evidence root to its realpath for the symlink-escape
+    # containment check shared by both diagnose surfaces
+    # (Hive::TaskAction::Diagnostic#diagnostic_roots and
+    # Hive::DiagnosticEvidence#evidence_roots). One implementation so the
+    # security-relevant guard can't drift and leave one surface exploitable
+    # (plan R-5).
+    #
+    # `trust_anchor:` distinguishes the task folder from the subdirectory
+    # evidence roots:
+    #   * The task folder IS the trust anchor — realpath it UNCONDITIONALLY.
+    #     Task uses File.expand_path, which does not resolve symlinks, so an
+    #     operator-symlinked task folder (or a `.hive-state -> /vol` ancestor)
+    #     must still resolve to its real location rather than being dropped
+    #     from the trusted roots — dropping it silently discards every artifact
+    #     under that folder.
+    #   * The logs/ subdir roots are NOT trust anchors — reject one whose own
+    #     leaf is a symlink, so a `logs -> /outside` dir symlink can't resolve
+    #     into the trusted set and let containment approve every file under the
+    #     link target. A symlinked *ancestor* still resolves normally because
+    #     File.symlink? checks only the leaf.
+    def evidence_root_realpath(path, trust_anchor:)
+      return nil if path.nil? || path.to_s.empty?
+      return nil if !trust_anchor && File.symlink?(path)
+
+      File.realpath(path)
+    rescue Errno::ENOENT
+      File.expand_path(path)
+    end
+
+    def path_inside?(path, root)
+      path == root || path.start_with?(root + File::SEPARATOR)
+    end
   end
 end

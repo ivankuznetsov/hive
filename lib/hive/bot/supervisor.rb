@@ -25,6 +25,7 @@ require "hive/bot/row_actions"
 require "hive/bot/waiting_rows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
+require "hive/diagnostic_evidence"
 require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
@@ -1295,7 +1296,9 @@ module Hive
           # This remains defensive for the refresh_diagnose child path, the
           # sole producer of this envelope, which can still return an empty
           # success envelope.
-          return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+          if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+            return empty_diagnose_success_reply(envelope, slug)
+          end
 
           # The freshly written verdict isn't in the cached snapshot row until
           # the next poll, and Show details renders a summary, not a raw dump —
@@ -1313,6 +1316,24 @@ module Hive
         prefix += " (#{kind})" unless kind.empty?
         text = "#{prefix}: #{message.empty? ? "exit #{exit_code}" : message}"
         child.log_path ? "#{text}; see #{child.log_path}" : text
+      end
+
+      def empty_diagnose_success_reply(envelope, slug)
+        title = Hive::Bot::TitleFormatter.title_from_slug(slug)
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: envelope["task_folder"],
+          marker_summary: envelope["marker_summary"]
+        )
+        if evidence
+          return "Refreshed diagnosis for \"#{title}\".\n" \
+                 "#{evidence.fetch(:summary)}\n" \
+                 "Log: #{evidence.fetch(:source_path)}"
+        end
+
+        folder = envelope["task_folder"].to_s.strip
+        text = "Couldn't find a cached diagnosis for \"#{title}\" yet. " \
+               "Tap Refresh diagnosis again, or open the task on a laptop."
+        folder.empty? ? text : "#{text}\nTask folder: #{folder}"
       end
 
       # Success is gated on the process exit code alone. The hive-status-

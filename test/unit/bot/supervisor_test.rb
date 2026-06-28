@@ -356,12 +356,66 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "exit 0"
   end
 
-  def test_reply_for_child_renders_empty_success_diagnostic_fallback
+  def test_reply_for_child_renders_empty_success_diagnostic_from_logs
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "diagnose.log")
+      File.write(log_path, "first line\nlast useful line\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "stuck-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=boom"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Refreshed diagnosis for"
+      assert_includes text, "ERROR reason=boom: last useful line"
+      assert_includes text, "Log: #{log_path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_red_status
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      path = File.join(folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, <<~MD)
+        ---
+        summary: Cached agent verdict
+        generated_by: codex
+        ---
+        ignored body
+      MD
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "red-status-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Cached agent verdict"
+      assert_includes text, "Log: #{path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_empty_success_without_evidence_is_graceful
     envelope = { "schema" => "hive-status-diagnose", "ok" => true, "slug" => "stuck-task" }
 
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
-    assert_equal "No diagnostic available for stuck-task.", @telegram.messages.first.fetch(:text)
+    text = @telegram.messages.first.fetch(:text)
+    assert_includes text, "Couldn't find a cached diagnosis"
+    assert_includes text, "Stuck task"
+    refute_includes text, "No diagnostic available for"
   end
 
   CallbackUpdate = Struct.new(:callback_query_id, :update_id, keyword_init: true) do

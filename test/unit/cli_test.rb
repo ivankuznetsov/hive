@@ -36,6 +36,13 @@ class HiveCliTest < Minitest::Test
       calls << :call
       return_value
     end
+
+    # `hive review --pr` drives AdhocReview through #enqueue (not #call) so it
+    # can return the resolved {slug:, project:} the CLI forwards to StageAction.
+    def enqueue
+      calls << :enqueue
+      return_value
+    end
   end
 
 
@@ -275,18 +282,22 @@ class HiveCliTest < Minitest::Test
   end
 
   def test_review_pr_dispatches_adhoc_enqueue_then_stage_action
-    with_command_new_stub(Hive::Commands::AdhocReview, return_value: "adhoc-review-pr-197") do |adhoc_calls|
+    # enqueue returns the RESOLVED project (here "resolved-proj"), deliberately
+    # different from the raw --project "proj", so the assertion proves the CLI
+    # forwards the resolved name to StageAction rather than the raw option.
+    enqueue_result = { slug: "adhoc-review-pr-197", project: "resolved-proj" }
+    with_command_new_stub(Hive::Commands::AdhocReview, return_value: enqueue_result) do |adhoc_calls|
       with_command_new_stub(Hive::Commands::StageAction) do |stage_calls|
         Hive::CLI.start([ "review", "--pr", "#197", "--project", "proj", "--json" ])
 
         adhoc_ctor = adhoc_calls.grep(Hash).first
         assert_equal [], adhoc_ctor.fetch(:args)
         assert_equal({ pr: "#197", project: "proj", json: true }, adhoc_ctor.fetch(:kwargs))
-        assert_equal :call, adhoc_calls.last
+        assert_equal :enqueue, adhoc_calls.last
 
         stage_ctor = stage_calls.grep(Hash).first
         assert_equal [ "review", "adhoc-review-pr-197" ], stage_ctor.fetch(:args)
-        assert_equal({ project: "proj", json: true }, stage_ctor.fetch(:kwargs))
+        assert_equal({ project: "resolved-proj", json: true }, stage_ctor.fetch(:kwargs))
         assert_equal :call, stage_calls.last
       end
     end

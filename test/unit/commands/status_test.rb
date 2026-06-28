@@ -1752,7 +1752,7 @@ class CommandsStatusTest < Minitest::Test
     assert_includes out, "detail"
 
     out, = capture_io { cmd.send(:emit_diagnose_result, task, nil, nil) }
-    assert_includes out, "no red-status diagnostic"
+    assert_includes out, "no diagnostic evidence on disk"
   end
 
   def test_invalid_task_row_degrades_when_folder_mtime_is_unreadable

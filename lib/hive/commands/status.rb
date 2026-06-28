@@ -10,6 +10,7 @@ require "hive/workflows"
 require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
+require "hive/diagnostic_evidence"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -340,6 +341,7 @@ module Hive
           stage_filter: @stage
         ).resolve
         marker = Hive::Markers.current(task.state_file)
+        marker_summary = marker_summary(marker)
         liveness = liveness_kwargs_for(task)
         action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
         diagnostic = action.diagnostic
@@ -362,16 +364,20 @@ module Hive
           # generated_by != "local"). Pass --force to re-spawn anyway.
           # See PR #84 review finding #21.
           if !@force && diagnostic["source"] == "artifact" && diagnostic["generated_by"] != "local"
-            emit_diagnose_result(task, diagnostic, diagnostic["source_path"])
+            emit_diagnose_result(task, diagnostic, diagnostic["source_path"], marker_summary: marker_summary)
             return
           end
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
           diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
-          emit_diagnose_result(task, diagnostic, result[:path])
+          emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary)
         else
-          emit_diagnose_result(task, diagnostic, nil)
+          if diagnostic.nil?
+            evidence = Hive::DiagnosticEvidence.summarize(folder: task.folder, marker_summary: marker_summary)
+            diagnostic = evidence_diagnostic(task, marker, evidence) if evidence
+          end
+          emit_diagnose_result(task, diagnostic, nil, marker_summary: marker_summary)
         end
       end
 
@@ -395,7 +401,7 @@ module Hive
         }
       end
 
-      def emit_diagnose_result(task, diagnostic, path)
+      def emit_diagnose_result(task, diagnostic, path, marker_summary: nil)
         if @json
           puts JSON.generate(
             "schema" => "hive-status-diagnose",
@@ -405,6 +411,7 @@ module Hive
             "id" => task.id,
             "display_name" => task.display_name,
             "task_folder" => task.folder,
+            "marker_summary" => marker_summary,
             "diagnostic" => diagnostic,
             "path" => path
           )
@@ -416,9 +423,47 @@ module Hive
             puts diagnostic["summary"]
             puts diagnostic["detail"]
           else
-            puts "no red-status diagnostic for #{task.slug}"
+            puts "no diagnostic evidence on disk for #{task.slug}"
           end
         end
+      end
+
+      def marker_summary(marker)
+        attrs = Hive::Markers.display_attrs(marker.attrs)
+                             .map { |key, value| "#{key}=#{value}" }
+                             .join(" ")
+        marker_name = marker.name.to_s.upcase
+        attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
+      end
+
+      def evidence_diagnostic(task, marker, evidence)
+        source_path = evidence.fetch(:source_path)
+        artifact_paths = evidence_source(task, source_path) == "artifact" ? [ source_path ] : []
+        {
+          "summary" => evidence.fetch(:summary),
+          "detail" => "Log: #{source_path}",
+          "source" => evidence_source(task, source_path),
+          "source_path" => source_path,
+          "artifact_paths" => artifact_paths,
+          "generated_by" => "local",
+          "marker_signature" => Hive::TaskAction.marker_signature(marker),
+          "suggested_next_action" => nil,
+          "updated_at" => (safe_mtime(source_path) || safe_mtime(task.state_file) || Time.now).utc.iso8601
+        }
+      end
+
+      def evidence_source(task, source_path)
+        return "marker" if source_path.to_s == task.state_file.to_s
+
+        "artifact"
+      end
+
+      def safe_mtime(path)
+        return nil if path.to_s.empty?
+
+        File.mtime(path)
+      rescue SystemCallError
+        nil
       end
 
       def project_name_for(task)

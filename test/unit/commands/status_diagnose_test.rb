@@ -101,6 +101,52 @@ class StatusDiagnoseTest < Minitest::Test
     end
   end
 
+  def test_diagnose_json_emits_evidence_diagnostic_for_non_red_task_with_logs
+    Dir.mktmpdir("hive-status-diagnose-evidence") do |project_root|
+      slug = "rotated-task-260628-abcd"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      state_file = File.join(folder, "plan.md")
+      log_path = File.join(logs, "plan.log")
+      File.write(state_file, "<!-- COMPLETE -->\n")
+      File.write(log_path, "working\nlast useful failure\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "COMPLETE", payload["marker_summary"]
+      assert_kind_of Hash, payload["diagnostic"]
+      assert_equal "COMPLETE: last useful failure", payload.dig("diagnostic", "summary")
+      assert_equal "Log: #{log_path}", payload.dig("diagnostic", "detail")
+      assert_equal "artifact", payload.dig("diagnostic", "source")
+      assert_equal log_path, payload.dig("diagnostic", "source_path")
+      assert_equal [ log_path ], payload.dig("diagnostic", "artifact_paths")
+    end
+  end
+
+  def test_diagnose_human_output_prints_evidence_for_non_red_task_with_logs
+    Dir.mktmpdir("hive-status-diagnose-evidence") do |project_root|
+      slug = "rotated-task-260628-abcd"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "plan.log")
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      File.write(log_path, "last useful failure\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(diagnose: folder).call
+      end
+
+      assert_includes out, "COMPLETE: last useful failure"
+      assert_includes out, "Log: #{log_path}"
+      refute_includes out, "no red-status diagnostic"
+    end
+  end
+
   # Run the given diagnose invocation expecting `err_class`; capture
   # the JSON envelope written to stdout BEFORE the exception propagates
   # so the test can assert on both the exit code and the envelope

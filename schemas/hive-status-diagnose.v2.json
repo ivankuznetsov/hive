@@ -23,6 +23,7 @@
         "id",
         "display_name",
         "task_folder",
+        "marker_summary",
         "diagnostic",
         "path"
       ],
@@ -53,6 +54,13 @@
         },
         "task_folder": {
           "type": "string"
+        },
+        "marker_summary": {
+          "description": "Current marker name plus display attrs, used by bots and agents as a cheap evidence summary prefix.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "diagnostic": {
           "description": "Mirrors the Diagnostic shape under hive-status.v2 `tasks[].diagnostic`. Inlined here so the schema validates standalone (JSONSchemer + most validators reject external URN refs without a registry).",

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-answer-digest.v1.json",
   "title": "hive answer-digest output (v1)",
-  "description": "Stable contract emitted by `hive answer-digest --json`. The success envelope reports whether a Telegram digest of human-blocking tasks was sent (sent/reason/dry_run/chat_id), the attached button count, and the full waiting set (count/tasks) so an agent can learn how many and which tasks wait even on a real send where message is null. Usage errors emit the ErrorPayload: a bad --date (Hive::ConfigError, error_kind=config) and a status outage (StatusUnavailableError, error_kind=status_unavailable) via the in-command envelope, and bad flags (Thor::Error, error_kind=usage) via JSON_USAGE_ERROR_CONTRACTS. A Telegram send error mid-delivery (a non-Hive transport fault) emits the ErrorPayload with error_kind=internal and exits non-zero before re-raising.",
+  "description": "Stable contract emitted by `hive answer-digest --json`. The success envelope reports whether a Telegram digest of human-blocking tasks was sent (sent/reason/dry_run/chat_id), the attached button count, and the full waiting set (count/tasks) so an agent can learn how many and which tasks wait even on a real send where message is null. `--dry-run --json` is side-effect-free (loads no .env, resolves no chat/token, sends nothing) — the read path for an agent. Error conditions emit the ErrorPayload: a bad --date / missing chat (Hive::ConfigError, error_kind=config, exit 78) and a status outage (StatusUnavailableError, error_kind=status_unavailable, exit 69) via the in-command envelope, and a malformed invocation (error_kind=usage, exit 64) via JSON_USAGE_ERROR_CONTRACTS (Thor) or the in-command envelope (programmatic call). A Telegram send error mid-delivery (a non-Hive transport fault) is wrapped in Hive::InternalError (error_kind=internal, exit 70) and re-raised after the ErrorPayload is emitted.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -54,7 +54,7 @@
         "button_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "The number of inline buttons attached to the sent message, capped at the 10-task display cap. Use `count` for the true total."
+          "description": "The number of inline buttons rendered for the digest — attached to the sent message, or (on a --dry-run) that WOULD be attached — capped at the 10-task display cap. Use `count` for the true total."
         },
         "count": {
           "type": "integer",
@@ -113,12 +113,12 @@
             "status_unavailable",
             "internal"
           ],
-          "description": "usage = malformed invocation caught before command dispatch (exit 64). config = bad --date / missing chat config (exit 78). status_unavailable = `hive status --json` came back unusable (exit 1, retryable). internal = uncategorised crash (exit 1/70)."
+          "description": "usage = malformed invocation (bad flag / unexpected arg), exit 64. config = bad --date / missing chat config (Hive::ConfigError), exit 78. status_unavailable = `hive status --json` came back unusable (StatusUnavailableError), exit 69, retryable. internal = an untyped fault wrapped in Hive::InternalError, exit 70."
         },
         "exit_code": {
           "type": "integer",
-          "enum": [1, 64, 70, 78],
-          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 78=CONFIG."
+          "enum": [1, 64, 69, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC (catch-all), 64=USAGE, 69=UNAVAILABLE, 70=SOFTWARE, 78=CONFIG."
         },
         "message": { "type": "string" }
       }

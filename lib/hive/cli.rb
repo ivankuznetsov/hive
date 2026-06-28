@@ -717,16 +717,27 @@ module Hive
       chat), `status_unavailable` (status snapshot unusable — retryable),
       `usage` (bad flags), or `internal`.
 
+      Agent read path: `--dry-run --json` is side-effect-free — it loads no .env,
+      resolves no chat/token, and sends NOTHING to Telegram — so an agent may run
+      it purely to READ the waiting set (count / tasks[]). Omitting --dry-run
+      SENDS a Telegram message as a side effect.
+
+      There is no `hive answer` verb for the brainstorm "answer" button an agent
+      sees as an answer-waiting task: to clear one, an agent fills the matching
+      `### A` slot in that task's brainstorm.md — the same edit the bot/web
+      "Answer" button performs via BrainstormAnswerWriter.
+
       Examples:
         hive answer-digest
         hive answer-digest --date 2026-06-27 --json
-        hive answer-digest --dry-run
+        hive answer-digest --dry-run --json   # side-effect-free read
 
       Exit codes:
         0  sent / nothing waiting (empty is silent) / dry-run
-        1  status snapshot unavailable (error_kind=status_unavailable) or internal
-        64 bad flags / malformed --json (Thor usage error)
-        78 bad --date or missing chat config (Hive::ConfigError)
+        64 bad flags / malformed invocation (error_kind=usage)
+        69 status snapshot unavailable (error_kind=status_unavailable, retryable)
+        70 internal error (error_kind=internal)
+        78 bad --date or missing chat config (error_kind=config)
     DESC
     option :date, type: :string,
                   desc: "local calendar date echoed into the JSON `date` field; does not scope data or dedup (YYYY-MM-DD)"

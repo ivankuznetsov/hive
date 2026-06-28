@@ -34,8 +34,10 @@ Options:
 1. Loads the global digest-shaped config via
    `Hive::Config.load_global_digest_config` so the existing bot runtime paths
    and `bot.chat_id_allowlist[0]` resolution apply.
-2. For real sends only, calls `Hive::EnvFile.load!` before reading
-   `HIVE_TELEGRAM_BOT_TOKEN`, matching `hive digest`'s daemon-auth behavior.
+2. On any non-`--dry-run` invocation — including a non-dry-run empty snapshot
+   that sends nothing — calls `Hive::EnvFile.load!` (`@env_loader.load! unless
+   @dry_run`) before reading `HIVE_TELEGRAM_BOT_TOKEN`, matching `hive digest`'s
+   daemon-auth behavior. `--dry-run` skips it entirely.
 3. Fetches the global status snapshot through `Hive::Bot::StatusWatcher`.
 4. Filters rows through `Hive::Bot::WaitingRows.select`, including
    brainstorm, plan, review, execute, finalize, and generic `needs_input`
@@ -65,6 +67,41 @@ The command is intentionally separate from `hive digest`: it does not collect
 completed work, spawn a categorizer agent, or write the shipped-digest state
 file. See [[commands/digest]] and [[modules/digest]] for the completed-work
 digest.
+
+## Agent surface
+
+`--dry-run --json` is the **side-effect-free read path**: it loads no `.env`,
+resolves no chat/token, and sends nothing to Telegram, so an agent can run it
+purely to read the waiting set (`count` / `tasks[]`). Omitting `--dry-run`
+*sends* a Telegram message as a side effect — never use the plain `--json` form
+just to inspect what is waiting.
+
+Per-row resilience extends through the single send: an oversized task title is
+length-bounded (message line and button text) and a row that raises while
+rendering or building its descriptor is dropped/degraded (logged
+`:poll_failure`) rather than failing the whole digest, so one malformed row
+can't strand the entire waiting set.
+
+There is no `hive answer` verb for the `brainstorm_waiting` "answer" button an
+agent sees in `tasks[]`. To clear an answer-waiting brainstorm task, an agent
+fills the matching `### A` slot in that task's `brainstorm.md` — the same edit
+the bot/web **Answer** button performs via `BrainstormAnswerWriter.append!`.
+
+## Error contract
+
+`--json` faults emit the `hive-answer-digest` ErrorPayload and a stable exit
+code an agent can branch on without parsing the envelope:
+
+| `error_kind` | Exit | Meaning |
+|--------------|------|---------|
+| `usage` | 64 | malformed invocation (bad flag / unexpected arg) |
+| `status_unavailable` | 69 | `hive status --json` came back unusable — retryable |
+| `internal` | 70 | an untyped fault, wrapped in `Hive::InternalError` |
+| `config` | 78 | bad `--date` or missing chat config |
+
+A successful send whose cursor write later fails leaves the day owed and engages
+the scheduler backoff, so the same digest is retried on the bounded schedule —
+not re-sent immediately.
 
 ## Daemon Scheduling
 

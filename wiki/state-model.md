@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/commands/adhoc_review.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-06-22
+updated: 2026-06-27
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
 ---
 
@@ -49,7 +49,7 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `3-plan` | `plan.md` | `Stages::Plan` agent on first run |
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
-| `6-review` | `task.md` | reused from `4-execute`, or created by `Hive::Patrol::ReviewHandoff` for patrol-opened PRs; markers driven by `Stages::Review` orchestrator |
+| `6-review` | `task.md` | reused from `4-execute`, created by `Hive::Patrol::ReviewHandoff` for patrol-opened PRs, or created by `Hive::Commands::AdhocReview` for `hive review --pr`; markers driven by `Stages::Review` orchestrator |
 | `7-artifacts` | `artifact.md` | `Stages::Artifacts` asks the configured artifact agent to write the artifact summary and stamp `COMPLETE` |
 | `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
 | `9-done` | `task.md` | reused from `4-execute` |
@@ -67,7 +67,16 @@ display_name:
 workflow:
 ```
 
-`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`, and the optional workflow selector are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil}`; `display_label` then falls back to the folder slug. `workflow:` was read-only in U3 (no writer emitted it); as of U6 `hive new` pins `meta.yml workflow:` only when an override was passed or the project `default_workflow` is non-coding (and then it pins that non-coding id) — a plain coding capture stays field-less (see [[commands/new]]). A manually tagged task still resolves the selected descriptor before validating its stage directory. `TaskMeta.update_id`/`update_display_name` preserve the selector on rewrite. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserves existing display names, and generates missing display names with `Hive::DisplayName::Generator` after the locked id/config/stage migration completes. When the global daemon is running, `Hive::Daemon::DisplayNameBackfiller` also retries tasks whose sidecar `display_name` remains nil/blank by spawning `hive generate-name <folder>` on later ticks; this is cosmetic sidecar repair only, so the daemon does not write task ids, markers, or stage transitions. Patrol review handoff writes `meta.yml` with a normal `Hive::TaskCounter` id and display name `Patrol: <finding title>` because the task joins the standard review flow after the PR opens; only counter lock contention leaves that id null.
+`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`, and the optional workflow selector are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil}`; `display_label` then falls back to the folder slug. `workflow:` was read-only in U3 (no writer emitted it); as of U6 `hive new` pins `meta.yml workflow:` only when an override was passed or the project `default_workflow` is non-coding (and then it pins that non-coding id) — a plain coding capture stays field-less (see [[commands/new]]). A manually tagged task still resolves the selected descriptor before validating its stage directory. `TaskMeta.update_id`/`update_display_name` preserve the selector on rewrite. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserves existing display names, and generates missing display names with `Hive::DisplayName::Generator` after the locked id/config/stage migration completes. When the global daemon is running, `Hive::Daemon::DisplayNameBackfiller` also retries tasks whose sidecar `display_name` remains nil/blank by spawning `hive generate-name <folder>` on later ticks; this is cosmetic sidecar repair only, so the daemon does not write task ids, markers, or stage transitions. Patrol review handoff writes `meta.yml` with a normal `Hive::TaskCounter` id and display name `Patrol: <finding title>` because the task joins the standard review flow after the PR opens; only counter lock contention leaves that id null. Ad-hoc PR review writes `meta.yml` directly in `6-review` with a normal counter id, display name `Ad-hoc review: PR #N`, and `workflow: coding`, so the review stage has the same descriptor context as a normal task even though stages `1-inbox` through `5-open-pr` never existed for that slug.
+
+## Synthetic review tasks
+
+Two entry points create task folders directly in `6-review`, skipping stages `1` through `5` while still preserving the standard sidecar contract:
+
+- **Patrol handoff** (`Hive::Patrol::ReviewHandoff`) creates `patrol-...` review tasks for PRs opened by patrol and marks `task.md` with `source: patrol`.
+- **Ad-hoc PR review** (`hive review --pr PR`, `Hive::Commands::AdhocReview`) creates or reuses `adhoc-review-pr-N`. It writes `meta.yml`, `idea.md`, `task.md`, `pr.md`, `worktree.yml`, and an empty `reviews/` directory, marks `idea.md`/`task.md`/`pr.md` with `source: ad-hoc`, and records the PR `base_ref_name`, `head_ref_oid`, cross-repo flag, and state in `pr.md` for transparency.
+
+Ad-hoc materialization uses the same fork-agnostic PR-head fetch pattern as the babysitter (`git fetch origin +pull/N/head:<ref>`), but places the worktree under the normal `worktree_root/<slug>` with branch `hive/review/pr-N`. That makes the folder visible to `hive status`, `hive drop`, markers, and the normal `6-review` runner. Collision detection scans both the reserved slug across stage dirs and every task `pr.md` frontmatter `pr_number`; if another Hive task owns the same PR, the command refuses rather than creating a shadow task that could double-post comments. Teardown is explicit `hive drop adhoc-review-pr-N`.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 

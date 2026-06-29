@@ -356,12 +356,140 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "exit 0"
   end
 
-  def test_reply_for_child_renders_empty_success_diagnostic_fallback
+  def test_reply_for_child_renders_empty_success_diagnostic_from_logs
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "diagnose.log")
+      File.write(log_path, "first line\nlast useful line\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "stuck-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=boom"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Refreshed diagnosis for"
+      assert_includes text, "ERROR reason=boom: last useful line"
+      assert_includes text, "Log: #{log_path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_red_status
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      path = File.join(folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, <<~MD)
+        ---
+        summary: Cached agent verdict
+        generated_by: codex
+        ---
+        ignored body
+      MD
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "red-status-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Cached agent verdict"
+      # red-status.md is a diagnostic artifact, not a log — labelled accordingly.
+      assert_includes text, "Diagnostics: #{path}"
+      refute_includes text, "Log: #{path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_marker
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "<!-- ERROR reason=worktree_git_failed -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "marker-only-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=worktree_git_failed"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "ERROR reason=worktree_git_failed"
+      # The marker state file is labelled Marker:, not Log:.
+      assert_includes text, "Marker: #{state_file}"
+      refute_includes text, "Log: #{state_file}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_marker_tier_pins_threaded_state_file
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # An advanced folder carries a stale marker in an earlier-stage file
+      # (task.md) AND the authoritative state file (pr.md). Without the threaded
+      # state_file the bot would glob task.md first and mislabel the source.
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      pr_md = File.join(folder, "pr.md")
+      File.write(pr_md, "<!-- REVIEW_STALE pass=2 -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "advanced-task",
+        "task_folder" => folder,
+        "marker_summary" => "REVIEW_STALE pass=2",
+        "state_file" => pr_md
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "REVIEW_STALE pass=2"
+      assert_includes text, "Marker: #{pr_md}"
+      refute_includes text, "Marker: #{File.join(folder, 'task.md')}"
+    end
+  end
+
+  def test_reply_for_child_empty_success_with_evidence_empty_folder_hints_task_folder
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # A real folder that exists but holds no red-status / log / marker
+      # evidence: the resolver returns nil and the reply appends the folder hint.
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "no-evidence-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Couldn't find a cached diagnosis"
+      assert_includes text, "Task folder: #{folder}"
+      # The empty-folder case is the original bug's exact scenario — guard the
+      # stale "No diagnostic available" copy explicitly, not just the positive
+      # "Couldn't find a cached diagnosis" assertion.
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_empty_success_without_evidence_is_graceful
     envelope = { "schema" => "hive-status-diagnose", "ok" => true, "slug" => "stuck-task" }
 
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
-    assert_equal "No diagnostic available for stuck-task.", @telegram.messages.first.fetch(:text)
+    text = @telegram.messages.first.fetch(:text)
+    assert_includes text, "Couldn't find a cached diagnosis"
+    assert_includes text, "Stuck task"
+    refute_includes text, "No diagnostic available for"
   end
 
   CallbackUpdate = Struct.new(:callback_query_id, :update_id, keyword_init: true) do

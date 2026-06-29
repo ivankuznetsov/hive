@@ -10,6 +10,9 @@ require "hive/workflows"
 require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
+require "hive/diagnostic_evidence"
+require "hive/diagnostic_helpers"
+require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -340,6 +343,9 @@ module Hive
           stage_filter: @stage
         ).resolve
         marker = Hive::Markers.current(task.state_file)
+        # Local renamed off the same-named method (marker_summary) it is the
+        # result of, so the shadowing doesn't obscure intent at the call sites.
+        marker_summary_text = marker_summary(marker)
         liveness = liveness_kwargs_for(task)
         action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
         diagnostic = action.diagnostic
@@ -362,16 +368,24 @@ module Hive
           # generated_by != "local"). Pass --force to re-spawn anyway.
           # See PR #84 review finding #21.
           if !@force && diagnostic["source"] == "artifact" && diagnostic["generated_by"] != "local"
-            emit_diagnose_result(task, diagnostic, diagnostic["source_path"])
+            emit_diagnose_result(task, diagnostic, diagnostic["source_path"], marker_summary: marker_summary_text)
             return
           end
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
           diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
-          emit_diagnose_result(task, diagnostic, result[:path])
+          emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary_text)
         else
-          emit_diagnose_result(task, diagnostic, nil)
+          if diagnostic.nil?
+            evidence = Hive::DiagnosticEvidence.summarize(
+              folder: task.folder,
+              marker_summary: marker_summary_text,
+              state_file: task.state_file
+            )
+            diagnostic = evidence_diagnostic(task, marker, evidence) if evidence
+          end
+          emit_diagnose_result(task, diagnostic, nil, marker_summary: marker_summary_text)
         end
       end
 
@@ -395,7 +409,7 @@ module Hive
         }
       end
 
-      def emit_diagnose_result(task, diagnostic, path)
+      def emit_diagnose_result(task, diagnostic, path, marker_summary: nil)
         if @json
           puts JSON.generate(
             "schema" => "hive-status-diagnose",
@@ -405,6 +419,13 @@ module Hive
             "id" => task.id,
             "display_name" => task.display_name,
             "task_folder" => task.folder,
+            "marker_summary" => marker_summary,
+            # The authoritative task state file the marker_summary was read
+            # from. Threaded so the bot's evidence fallback can pin the marker
+            # tier's source_path to the SAME file (mirroring the CLI's
+            # state_file: pin), instead of mislabelling whatever *.md it globs
+            # first under an advanced folder.
+            "state_file" => task.state_file,
             "diagnostic" => diagnostic,
             "path" => path
           )
@@ -416,10 +437,62 @@ module Hive
             puts diagnostic["summary"]
             puts diagnostic["detail"]
           else
-            puts "no red-status diagnostic for #{task.slug}"
+            puts "no diagnostic evidence on disk for #{task.slug}"
           end
         end
       end
+
+      # The canonical NAME+attrs marker rendering (shared with the diagnostic
+      # surfaces via Hive::Markers.summary, plan R-5), routed through redact for
+      # symmetry with the rest of the diagnose payload — the field is emitted
+      # raw into the envelope and only the bot re-feeds it through SecretPatterns
+      # otherwise. Returns nil for the :none marker so a markerless task's
+      # envelope reads `marker_summary: null` (not "NONE") and the evidence
+      # resolver omits the prefix, matching its unsupplied-marker_summary path.
+      def marker_summary(marker)
+        summary = Hive::Markers.summary(marker)
+        summary && Hive::SecretPatterns.redact(summary)
+      end
+
+      # Synthesizes the schema-governed Diagnostic shape (hive-status-diagnose
+      # `diagnostic`) from on-disk evidence for the nil-diagnostic read path.
+      # Keep these nine keys in sync with Hive::TaskAction::Diagnostic#to_h and
+      # the published schema — a field added there must be mirrored here or this
+      # branch emits an invalid envelope (guarded by a JSONSchemer round-trip in
+      # status_diagnose_test.rb). The evidence `kind` tier picks the detail
+      # prefix (Diagnostics:/Log:/Marker:) and the schema `source` value
+      # (marker tier -> "marker", artifact tiers -> "artifact").
+      def evidence_diagnostic(task, marker, evidence)
+        kind = evidence.fetch(:kind)
+        source = Hive::DiagnosticEvidence.source_kind(kind)
+        raw_source_path = evidence.fetch(:source_path)
+        # Redact the path-bearing fields (detail / source_path / artifact_paths)
+        # for symmetry with the already-redacted summary and the canonical
+        # Diagnostic#to_h. The source_path is server-controlled under
+        # .hive-state/, so this is cheap defense-in-depth rather than a known
+        # leak. The mtime stat below uses the RAW path so a (hypothetical)
+        # redaction can't break the timestamp.
+        source_path = raw_source_path && Hive::SecretPatterns.redact(raw_source_path)
+        detail = Hive::SecretPatterns.redact("#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}")
+        {
+          "summary" => evidence.fetch(:summary),
+          # Cap like the canonical Diagnostic#to_h (truncate(detail, DETAIL_MAX))
+          # so a pathologically long source_path can't emit an envelope that
+          # fails the schema's own detail.maxLength.
+          "detail" => Hive::DiagnosticHelpers.truncate(detail, Hive::TaskAction::Diagnostic::DETAIL_MAX),
+          "source" => source,
+          "source_path" => source_path,
+          # [source_path].compact so a future artifact-kind tier returning a nil
+          # source_path can't emit schema-invalid artifact_paths:[nil].
+          "artifact_paths" => source == "artifact" ? [ source_path ].compact : [],
+          "generated_by" => "local",
+          "marker_signature" => Hive::TaskAction.marker_signature(marker),
+          "suggested_next_action" => nil,
+          "updated_at" => (safe_mtime(raw_source_path) || safe_mtime(task.state_file) || Time.now).utc.iso8601
+        }
+      end
+
+      def safe_mtime(path) = Hive::DiagnosticHelpers.safe_mtime(path)
 
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |entry| entry["path"] == task.project_root }

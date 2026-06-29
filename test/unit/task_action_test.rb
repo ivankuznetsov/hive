@@ -778,6 +778,27 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # Mirror of DiagnosticEvidence's dir-symlink guard: a logs/ *directory*
+  # symlink pointing outside the task roots must not resolve into a trusted
+  # diagnostic root, otherwise every *.log under the target leaks.
+  def test_diagnostic_rejects_log_dir_symlink_escape
+    Dir.mktmpdir("hive-task-action-symlink") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- ERROR reason=boom -->\n")
+      outside = File.join(root, "outside-logs")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "agent.log"), "outside log secret\n")
+      File.symlink(outside, File.join(task.folder, "logs"))
+
+      diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => "boom")).diagnostic
+
+      refute_includes diagnostic["detail"].to_s, "outside log secret"
+      refute(diagnostic["artifact_paths"].any? { |path| path.end_with?("agent.log") },
+             "a symlinked log dir's contents must not enter artifact_paths")
+    end
+  end
+
   def test_review_ci_stale_diagnostic_points_at_ci_blocked_artifact
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
@@ -1688,13 +1709,67 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_private_path_helpers_cover_missing_and_empty_inputs
+  # The symlink-escape containment helper now lives in
+  # Hive::DiagnosticHelpers.evidence_root_realpath (shared with
+  # Hive::DiagnosticEvidence so the guard can't drift). Nil/blank inputs return
+  # nil; a missing path falls back to File.expand_path (the realpath ENOENT
+  # rescue) for BOTH the trust-anchor and the subdir-root callers.
+  def test_evidence_root_realpath_covers_missing_and_empty_inputs
     task = fake_task(stage_name: "review", stage_index: 6)
-    diagnostic = diagnostic_for(task, marker(:review_error))
 
-    assert_nil diagnostic.send(:realpath_or_expand, nil)
-    assert_equal File.expand_path(File.join(task.folder, "missing")),
-                 diagnostic.send(:realpath_or_expand, File.join(task.folder, "missing"))
+    assert_nil Hive::DiagnosticHelpers.evidence_root_realpath(nil, trust_anchor: true)
+    assert_nil Hive::DiagnosticHelpers.evidence_root_realpath("", trust_anchor: false)
+    expected = File.expand_path(File.join(task.folder, "missing"))
+    assert_equal expected,
+                 Hive::DiagnosticHelpers.evidence_root_realpath(File.join(task.folder, "missing"), trust_anchor: true)
+    assert_equal expected,
+                 Hive::DiagnosticHelpers.evidence_root_realpath(File.join(task.folder, "missing"), trust_anchor: false)
+  end
+
+  # The task folder is the trust ANCHOR: realpath'd even when it is itself a
+  # symlink (Task uses File.expand_path, which doesn't resolve symlinks). A
+  # red-status.md under a symlinked folder must therefore stay a trusted
+  # diagnostic artifact — regression for the pass-2 symlink-leaf rejection
+  # over-firing on the trust anchor (mirrors the DiagnosticEvidence guard).
+  def test_safe_diagnostic_artifact_accepts_red_status_under_symlinked_folder
+    Dir.mktmpdir("task-action-symlink-real") do |real_parent|
+      real = File.join(real_parent, ".hive-state", "stages", "6-review", "demo-260426-aaaa")
+      FileUtils.mkdir_p(File.join(real, "diagnostics"))
+      File.write(File.join(real, "diagnostics", "red-status.md"), "verdict\n")
+
+      Dir.mktmpdir("task-action-symlink-link") do |link_parent|
+        link = File.join(link_parent, "task-folder")
+        File.symlink(real, link)
+        task = FakeTask.new(
+          stage_name: "review", stage_index: 6, slug: "demo-260426-aaaa",
+          project_root: real_parent, project_name: File.basename(real_parent),
+          folder: link, state_file: File.join(link, "task.md")
+        )
+        diagnostic = diagnostic_for(task, marker(:review_error))
+
+        assert diagnostic.send(:safe_diagnostic_artifact?, File.join(link, "diagnostics", "red-status.md")),
+               "red-status.md under a symlinked task folder must stay a trusted artifact"
+      end
+    end
+  end
+
+  # Deeply-nested flow YAML in red-status.md frontmatter raises
+  # SystemStackError from YAML.safe_load — NOT a StandardError — which would
+  # otherwise escape the per-project `rescue StandardError` in
+  # Hive::Commands::Status and crash the whole `hive status --json` snapshot.
+  # diagnostic_frontmatter must degrade to {} instead.
+  def test_diagnostic_frontmatter_degrades_on_nested_yaml_system_stack_error
+    Dir.mktmpdir("task-action-nested-frontmatter") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      path = File.join(task.folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      nested = ("[" * 6000) + ("]" * 6000) # ~12 KB, inside the 16 KB scan window
+      File.write(path, "---\nsummary: #{nested}\n---\nbody\n")
+      diagnostic = diagnostic_for(task, marker(:review_error))
+
+      assert_equal({}, diagnostic.send(:diagnostic_frontmatter, path),
+                   "nested frontmatter must degrade to {}, not raise SystemStackError")
+    end
   end
 
   def test_safe_diagnostic_artifact_handles_realpath_failures

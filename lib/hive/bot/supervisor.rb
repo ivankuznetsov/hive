@@ -25,6 +25,7 @@ require "hive/bot/row_actions"
 require "hive/bot/waiting_rows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
+require "hive/diagnostic_evidence"
 require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
@@ -1294,8 +1295,12 @@ module Hive
           # Show details renders directly from the cached status row now.
           # This remains defensive for the refresh_diagnose child path, the
           # sole producer of this envelope, which can still return an empty
-          # success envelope.
-          return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+          # success envelope — which `empty_diagnose_success_reply` now backfills
+          # from on-disk evidence (red-status / newest log / marker) before
+          # falling back to a try-again message.
+          if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+            return empty_diagnose_success_reply(envelope, slug)
+          end
 
           # The freshly written verdict isn't in the cached snapshot row until
           # the next poll, and Show details renders a summary, not a raw dump —
@@ -1313,6 +1318,38 @@ module Hive
         prefix += " (#{kind})" unless kind.empty?
         text = "#{prefix}: #{message.empty? ? "exit #{exit_code}" : message}"
         child.log_path ? "#{text}; see #{child.log_path}" : text
+      end
+
+      def empty_diagnose_success_reply(envelope, slug)
+        title = Hive::Bot::TitleFormatter.title_from_slug(slug)
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: envelope["task_folder"],
+          marker_summary: envelope["marker_summary"],
+          # Pin the marker tier to the authoritative state file the CLI read
+          # marker_summary from, so the marker-tier source_path can't name a
+          # different *.md than the summary describes (older envelopes omit this
+          # field; summarize treats nil as "glob the folder", the prior path).
+          state_file: envelope["state_file"]
+        )
+        if evidence
+          # Label the source by its tier (Diagnostics:/Log:/Marker:) rather than
+          # hardcoding "Log:" — the top tier is a diagnostic artifact and the
+          # marker tier is a state file, neither of which is a log.
+          return "Refreshed diagnosis for \"#{title}\".\n" \
+                 "#{evidence.fetch(:summary)}\n" \
+                 "#{Hive::DiagnosticEvidence.source_label(evidence.fetch(:kind))}: #{evidence.fetch(:source_path)}"
+        end
+
+        folder = envelope["task_folder"].to_s.strip
+        # On a hard fault (e.g. an EACCES storm) the resolver logs a breadcrumb
+        # to daemon.log but returns nil here, so the operator sees only this
+        # copy. Append a soft pointer to daemon.log so a persistent failure
+        # doesn't read as merely transient, without changing the plan-specified
+        # no-evidence wording above it.
+        text = "Couldn't find a cached diagnosis for \"#{title}\" yet. " \
+               "Tap Refresh diagnosis again, or open the task on a laptop. " \
+               "If this keeps happening, check daemon.log."
+        folder.empty? ? text : "#{text}\nTask folder: #{folder}"
       end
 
       # Success is gated on the process exit code alone. The hive-status-

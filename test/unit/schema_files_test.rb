@@ -506,6 +506,7 @@ class SchemaFilesTest < Minitest::Test
       "id" => 42,
       "display_name" => "Probe",
       "task_folder" => "/tmp/probe",
+      "marker_summary" => "REVIEW_ERROR phase=fix pass=1",
       "path" => nil,
       "diagnostic" => {
         "summary" => "REVIEW_ERROR phase=fix pass=1",
@@ -539,6 +540,7 @@ class SchemaFilesTest < Minitest::Test
       "id" => nil,
       "display_name" => nil,
       "task_folder" => "/tmp/probe",
+      "marker_summary" => nil,
       "diagnostic" => nil,
       "path" => nil
     }

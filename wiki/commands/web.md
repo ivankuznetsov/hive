@@ -34,16 +34,19 @@ If no app exists and bootstrapping is allowed, it fetches the versioned
 `hive-web-<version>.tar.gz` release asset into the managed app dir and runs
 `bundle install`; `--no-bootstrap` reports the missing bundle instead. It then
 exports `SECRET_KEY_BASE` (derived from the same persisted
-`Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
+`Hive::Web::SessionSecret` file as before — sessions survive a web-service
+restart), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
-`Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
+`Hive::Paths.state_home/web-storage` so they survive a web-bundle upgrade,
+which replaces the app dir wholesale), runs
 `bin/rails db:prepare`, then execs `bin/rails server`. The gem itself still
 does not package `web/`; the managed bundle is a runtime dependency.
 
 Loopback binds (`127.0.0.0/8`, `::1`, `localhost`) export
-`HIVEBOX_LOCAL_LOOPBACK=1` and bypass login only for loopback peer requests.
+`HIVEBOX_LOCAL_LOOPBACK=1` and bypass login only for loopback peer requests —
+unless `web.local_loopback: false` is set, which keeps the GitHub login
+requirement even on a loopback bind.
 Non-loopback binds are refused unless `web.github.owner` is configured or the
 operator passes `--unsafe` / `--allow-public`, in which case the GitHub owner
 gate remains active.

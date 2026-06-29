@@ -1374,14 +1374,19 @@ module Hive
       end
 
       require "hive/commands/web"
-      kwargs = { bind: options[:bind], port: options[:port] }
-      kwargs[:no_bootstrap] = options[:no_bootstrap] if options[:no_bootstrap]
-      kwargs[:unsafe] = true if options[:unsafe] || options[:allow_public]
-      kwargs[:force] = true if options[:force]
-      kwargs[:json] = true if options[:json]
-      kwargs[:detach] = true if options[:detach]
-      command = subcommand ? Hive::Commands::Web.new(subcommand, **kwargs) : Hive::Commands::Web.new(**kwargs)
-      command.call
+      # Every option defaults to false/nil, so there is no present-vs-defaulted
+      # distinction to preserve — pass them straight through (subcommand is nil
+      # for the foreground server, which is the constructor's default).
+      Hive::Commands::Web.new(
+        subcommand,
+        bind: options[:bind],
+        port: options[:port],
+        no_bootstrap: options[:no_bootstrap],
+        unsafe: options[:unsafe] || options[:allow_public],
+        force: options[:force],
+        json: options[:json],
+        detach: options[:detach]
+      ).call
     end
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"

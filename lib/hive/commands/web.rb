@@ -39,30 +39,34 @@ module Hive
         env = {
           "RAILS_ENV" => ENV.fetch("RAILS_ENV", "production"),
           # Rails' secret_key_base derives from the same persisted secret the
-          # session cookies used pre-Rails, so recreating the container keeps
-          # sessions (the file lives on the /data mount).
+          # session cookies used pre-Rails, so restarting the web service keeps
+          # sessions signed in (the secret file is persisted under state_home).
           "SECRET_KEY_BASE" => ENV["SECRET_KEY_BASE"] ||
             Hive::Web::SessionSecret.load_or_create(cfg.fetch("session_secret_file")),
           "HIVEBOX_ORIGIN" => cfg.fetch("origin"),
-          # The solid_cable/cache/queue sqlite files must survive image
-          # upgrades — keep them in state_home (on /data in the container),
-          # not in the app dir.
+          # The solid_cable/cache/queue sqlite files must survive upgrades —
+          # keep them under state_home, not in the app dir (the managed web
+          # bundle is replaced wholesale on a version upgrade).
           "HIVEBOX_STORAGE_DIR" => ENV["HIVEBOX_STORAGE_DIR"] ||
             File.join(Hive::Paths.state_home, "web-storage"),
           "BUNDLE_GEMFILE" => File.join(app_dir, "Gemfile")
         }
-        env["HIVEBOX_LOCAL_LOOPBACK"] = "1" if loopback_bind?(bind)
+        # The loopback no-auth bypass is opt-out: an operator can set
+        # web.local_loopback: false to force GitHub login even on a loopback
+        # bind. Only signal the bypass when both the bind is loopback AND the
+        # config still allows it.
+        env["HIVEBOX_LOCAL_LOOPBACK"] = "1" if loopback_bind?(bind) && cfg.fetch("local_loopback", true)
         FileUtils.mkdir_p(env.fetch("HIVEBOX_STORAGE_DIR"))
 
         Dir.chdir(app_dir) do
           # Idempotent: creates/migrates the solid-stack sqlite databases on
           # first boot, no-ops afterwards. Array form — no shell involved.
           # Typed error so a persistent failure surfaces as guidance, not a
-          # raw backtrace looping every 5s under the container supervisor.
+          # raw backtrace looping on every restart under the service manager.
           unless system(env, "bin/rails", "db:prepare")
             raise Hive::Error,
                   "hive web: db:prepare failed — check that " \
-                  "#{env.fetch("HIVEBOX_STORAGE_DIR")} is writable (the /data mount) " \
+                  "#{env.fetch("HIVEBOX_STORAGE_DIR")} is writable " \
                   "and that the web bundle is installed (cd #{app_dir} && bundle install)"
           end
           puts "hive web: listening on http://#{bind}:#{port}"
@@ -122,8 +126,14 @@ module Hive
 
       def enforce_bind_policy!(bind, cfg)
         return if loopback_bind?(bind)
-        return if @unsafe
-        return if cfg.dig("github", "owner").to_s != ""
+
+        # Non-loopback bind. Allowed only with --unsafe or a configured owner
+        # gate. In BOTH allowed paths re-issue the 0.0.0.0-without-https
+        # DNS-rebinding warning — previously lost when an owner was configured.
+        if @unsafe || cfg.dig("github", "owner").to_s != ""
+          warn_on_public_bind(bind, cfg)
+          return
+        end
 
         raise Hive::InvalidTaskPath,
               "hive web: refusing to bind #{bind} without web.github.owner. " \
@@ -152,27 +162,25 @@ module Hive
       end
 
       def start_service
-        installer = Hive::Commands::Web::ServiceInstaller.new
-        argv =
-          if installer.envelope_platform == "macos"
-            [ "launchctl", "load", installer.target_path ]
-          else
-            [ "systemctl", "--user", "start", installer.service_name ]
-          end
-        ok = system(*argv)
-        raise Hive::Error, "hive web: could not start managed service" unless ok
+        run_service_action(launchctl: "load", systemctl: "start", verb: "start")
       end
 
       def stop_service
+        run_service_action(launchctl: "unload", systemctl: "stop", verb: "stop")
+      end
+
+      # start/stop differ only in the launchctl (load/unload) and systemctl
+      # (start/stop) verbs, so the platform branch lives here once.
+      def run_service_action(launchctl:, systemctl:, verb:)
         installer = Hive::Commands::Web::ServiceInstaller.new
         argv =
           if installer.envelope_platform == "macos"
-            [ "launchctl", "unload", installer.target_path ]
+            [ "launchctl", launchctl, installer.target_path ]
           else
-            [ "systemctl", "--user", "stop", installer.service_name ]
+            [ "systemctl", "--user", systemctl, installer.service_name ]
           end
         ok = system(*argv)
-        raise Hive::Error, "hive web: could not stop managed service" unless ok
+        raise Hive::Error, "hive web: could not #{verb} managed service" unless ok
       end
 
       def status_service

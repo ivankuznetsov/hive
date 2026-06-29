@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "time"
+require "timeout"
 require "yaml"
 require "hive/config"
 require "hive/paths"
@@ -43,6 +44,14 @@ module Hive
       # Actions for `hive daemon queue ACTION` (AN-1/2/3). `list` is the
       # default when no action is given.
       VALID_QUEUE_ACTIONS = %w[list show prune].freeze
+
+      # `binary_drift` states emitted in the status envelope. Shared so the
+      # JSON schema, the web `_daemon` view guard, and the docs table all
+      # read the same source and can't drift apart. ACTIONABLE is the subset
+      # that means "the installed unit points at the wrong/unreadable binary"
+      # and should surface a repair affordance; "none"/"not_applicable" do not.
+      BINARY_DRIFT_STATES = %w[none path version unparseable not_applicable].freeze
+      BINARY_DRIFT_ACTIONABLE = %w[path version unparseable].freeze
 
       # USAGE-class error specific to enable/disable. Carries an
       # error_kind drawn from Hive::Schemas::EnrollErrorKind so the
@@ -356,52 +365,76 @@ module Hive
       end
 
       def status_daemon
+        state = daemon_running_state
+        if @json
+          puts JSON.generate(build_status_payload(state))
+        elsif state[:running]
+          puts "hive daemon: running (pid #{state[:pid]}, uptime #{state[:uptime_sec]}s)"
+        else
+          puts "hive daemon: not running"
+        end
+        # Exit code: 0 for running, 1 for not running (per plan U8)
+        raise Hive::Error, "daemon not running" unless state[:running]
+      end
+
+      # In-process daemon-status snapshot as a plain Hash — the same envelope
+      # `status --json` prints, returned instead of written to $stdout. The
+      # web dashboard renders this directly rather than reassigning the
+      # process-global $stdout (which races concurrent Puma requests). Unlike
+      # the CLI it never raises on a not-running daemon; only an unexpected
+      # probe failure degrades to a minimal not-running hash.
+      def status_payload
+        build_status_payload(daemon_running_state)
+      rescue StandardError => e
+        { "ok" => false, "running" => false, "message" => e.message }
+      end
+      # Public despite living in the private section: the web dashboard calls
+      # this directly to render daemon status without a subprocess or $stdout
+      # capture.
+      public :status_payload
+
+      # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
+      def daemon_running_state
         running = false
         pid = nil
         uptime_sec = nil
-
         if File.exist?(pid_file)
           payload = read_pid_file_payload
           pid = payload && payload["pid"]
           if pid && pid > 0 && pid_alive?(pid) && pid_owned_by_us?(payload, pid)
             running = true
-            stat = File.stat(pid_file)
-            uptime_sec = (Time.now - stat.mtime).to_i
+            uptime_sec = (Time.now - File.stat(pid_file).mtime).to_i
           end
         end
+        { running: running, pid: pid, uptime_sec: uptime_sec }
+      end
 
-        if @json
-          service_state = probe_service_state
-          binary_state = daemon_binary_state(service_state)
-          puts JSON.generate(
-            "schema" => "hive-daemon-status",
-            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
-            "ok" => true,
-            "running" => running,
-            "pid" => running ? pid : nil,
-            "uptime_sec" => uptime_sec,
-            "pid_file" => pid_file,
-            "log_file" => log_file,
-            "service_installed" => service_state["service_installed"],
-            "service_enabled" => service_state["service_enabled"],
-            "unit_path" => service_state["unit_path"],
-            "installed_binary" => binary_state.fetch("installed_binary"),
-            "expected_binary" => binary_state.fetch("expected_binary"),
-            "installed_binary_version" => binary_state.fetch("installed_binary_version"),
-            "cli_version" => Hive::VERSION,
-            "binary_drift" => binary_state.fetch("binary_drift"),
-            # Agent-native parity with the TUI footer / bot push: expose the
-            # update nudge so a programmatic caller can detect "behind" too.
-            "current_version" => Hive::VERSION,
-            "update_nudge" => update_nudge_payload
-          )
-        elsif running
-          puts "hive daemon: running (pid #{pid}, uptime #{uptime_sec}s)"
-        else
-          puts "hive daemon: not running"
-        end
-        # Exit code: 0 for running, 1 for not running (per plan U8)
-        raise Hive::Error, "daemon not running" unless running
+      def build_status_payload(state)
+        running = state[:running]
+        service_state = probe_service_state
+        binary_state = daemon_binary_state(service_state)
+        {
+          "schema" => "hive-daemon-status",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
+          "ok" => true,
+          "running" => running,
+          "pid" => running ? state[:pid] : nil,
+          "uptime_sec" => state[:uptime_sec],
+          "pid_file" => pid_file,
+          "log_file" => log_file,
+          "service_installed" => service_state["service_installed"],
+          "service_enabled" => service_state["service_enabled"],
+          "unit_path" => service_state["unit_path"],
+          "installed_binary" => binary_state.fetch("installed_binary"),
+          "expected_binary" => binary_state.fetch("expected_binary"),
+          "installed_binary_version" => binary_state.fetch("installed_binary_version"),
+          "cli_version" => Hive::VERSION,
+          "binary_drift" => binary_state.fetch("binary_drift"),
+          # Agent-native parity with the TUI footer / bot push: expose the
+          # update nudge so a programmatic caller can detect "behind" too.
+          "current_version" => Hive::VERSION,
+          "update_nudge" => update_nudge_payload
+        }
       end
 
       # Read-only autostart-state snapshot for the status envelope. A status
@@ -428,8 +461,15 @@ module Hive
         expected = service_state["expected_binary"]
         installed_version = binary_version(installed)
         drift =
-          if !service_state["service_installed"] || installed.to_s.empty?
+          if !service_state["service_installed"]
+            # No autostart unit on disk (or the probe could not run): nothing
+            # to compare against.
             "not_applicable"
+          elsif installed.to_s.empty?
+            # Unit present but its ExecStart/ProgramArguments binary could not
+            # be parsed — distinct from "no service" so the operator gets a
+            # signal that the installed unit is corrupt and needs repair.
+            "unparseable"
           elsif expected.to_s != "" && File.expand_path(installed) != File.expand_path(expected)
             "path"
           elsif installed_version && installed_version != Hive::VERSION
@@ -448,11 +488,15 @@ module Hive
       def binary_version(binary)
         return nil if binary.to_s.empty?
 
-        out, _err, status = Open3.capture3(binary, "--version")
+        # Bound the probe: a wedged installed binary must not hang
+        # `daemon status --json` (and the web dashboard that calls it). A
+        # timeout or spawn failure returns nil, which the caller treats as a
+        # version it could not read.
+        out, _err, status = Timeout.timeout(10) { Open3.capture3(binary, "--version") }
         return nil unless status.success?
 
-        out.strip[/\d+(?:\.\d+)+(?:\.\d+)?/] || out.strip
-      rescue SystemCallError
+        out.strip[/\d+(?:\.\d+)+/] || out.strip
+      rescue SystemCallError, Timeout::Error
         nil
       end
 

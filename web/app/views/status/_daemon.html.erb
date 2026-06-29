@@ -1,17 +1,18 @@
 <section class="daemon-panel">
   <% running = daemon_status["running"] %>
   <% drift = daemon_status["binary_drift"].to_s %>
+  <% actionable_drift = Hive::Commands::Daemon::BINARY_DRIFT_ACTIONABLE.include?(drift) %>
   <div>
     <strong>Daemon</strong>
     <span class="task-meta"><%= running ? "running" : "not running" %></span>
     <% if daemon_status["service_installed"] == true %>
       <span class="task-meta">service installed</span>
     <% end %>
-    <% if %w[path version].include?(drift) %>
+    <% if actionable_drift %>
       <span class="task-meta">binary drift: <%= drift %></span>
     <% end %>
   </div>
-  <% if %w[path version].include?(drift) || daemon_status["service_installed"] == false %>
+  <% if actionable_drift || daemon_status["service_installed"] == false %>
     <%= button_to "Repair", daemon_repair_path, method: :post,
           class: "btn btn-sm",
           form: { data: { turbo_confirm: "Reinstall the daemon service with the current hive binary?" } } %>

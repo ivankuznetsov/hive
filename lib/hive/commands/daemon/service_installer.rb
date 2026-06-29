@@ -63,24 +63,23 @@ module Hive
           doc = REXML::Document.new(File.read(target_path))
           strings = []
           doc.elements.each("//array/string") { |el| strings << el.text.to_s }
-          idx = strings.index("exec \"$0\" \"$@\"") || strings.index { |value| value.end_with?("/hive") || File.basename(value) == "hive" }
-          return strings[idx + 1] if idx && strings[idx + 1]
-
-          strings.find { |value| File.basename(value) == "hive" }
+          # ProgramArguments wraps the real invocation in a /bin/sh precheck:
+          #   /bin/sh -c '[ -x "$0" ] || exit 0; exec "$0" "$@"' <hive> <subcmd...>
+          # The `exec "$0" "$@"` marker is embedded INSIDE the `-c` script
+          # string, so it is never an exact array element — and the element
+          # after the script is the hive binary itself ($0), not a subcommand.
+          # Return the `$0` slot directly: the array element that is the hive
+          # binary, not the element following any marker.
+          strings.find { |value| File.basename(value) == "hive" || value.end_with?("/hive") }
         rescue REXML::ParseException, SystemCallError
           nil
         end
 
         def render_systemd
-          template = File.read(File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__))
-          # systemd .service files are POSIX-shell-ish — escape the
-          # resolved binary path so whitespace, `%`, or other special
-          # characters don't produce a malformed unit.
-          escaped = Shellwords.escape(resolved_binary)
-          template
-            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} daemon start")
-            .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
-            .sub(/^Environment=PATH=.*$/, build_path_line)
+          render_systemd_from(
+            File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__),
+            "daemon start"
+          )
         end
 
         def render_launchd

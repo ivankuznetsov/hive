@@ -5,11 +5,24 @@ require "timeout"
 
 require "hive"
 require "hive/paths"
+require "hive/agent_profiles"
 
 module Hive
   module Setup
     class Diagnostics
       Result = Struct.new(:name, :status, :detail, :fix_command, :bootstrappable, keyword_init: true) do
+        # The closed set of diagnostic statuses. Validated at construction so a
+        # typo or a new state can't silently flow into the JSON contract.
+        STATUSES = %w[ok missing version_too_old unauthenticated].freeze
+
+        def initialize(...)
+          super
+          return if STATUSES.include?(status)
+
+          raise ArgumentError,
+                "invalid diagnostics status #{status.inspect} (expected one of #{STATUSES.join(', ')})"
+        end
+
         def ok?
           status == "ok"
         end
@@ -109,15 +122,29 @@ module Hive
 
       def check_web_bundle
         require "hive/web/app_bundle"
-        if Hive::Web::AppBundle.present?
-          status = Hive::Web::AppBundle.stale? ? "version_too_old" : "ok"
-          detail = Hive::Web::AppBundle.stale? ? "managed web bundle is stale" : Hive::Web::AppBundle.app_dir
-          Result.new(name: "web_bundle", status: status, detail: detail, fix_command: nil, bootstrappable: true)
-        else
-          bootstrappable("web_bundle", "managed web app can be installed by hive setup")
+        unless Hive::Web::AppBundle.present?
+          return bootstrappable("web_bundle", "managed web app can be installed by hive setup")
         end
-      rescue LoadError
-        bootstrappable("web_bundle", "managed web app can be installed by hive setup")
+
+        if Hive::Web::AppBundle.stale?
+          # Present but older than the CLI — `hive web`/`hive setup` refreshes
+          # it automatically, so still a bootstrap candidate.
+          Result.new(name: "web_bundle", status: "version_too_old",
+                     detail: "managed web bundle is stale", fix_command: nil, bootstrappable: true)
+        else
+          # Installed and current: a real success, NOT a bootstrap candidate
+          # (the old code emitted status "ok" with bootstrappable: true — an
+          # illegal ok? && bootstrappable state).
+          ok("web_bundle", Hive::Web::AppBundle.app_dir)
+        end
+      rescue LoadError => e
+        # A genuine code-load failure (missing dependency, syntax error) is NOT
+        # something `hive setup` bootstraps — report it as an un-bootstrappable
+        # failure so the user isn't misdirected toward a reinstall that can't
+        # fix a load problem.
+        Result.new(name: "web_bundle", status: "missing",
+                   detail: "web bundle support failed to load: #{e.message}",
+                   fix_command: nil, bootstrappable: false)
       end
 
       def check_sqlite
@@ -143,8 +170,7 @@ module Hive
         result = check_versioned_binary(name, [ path, "--version" ], required, install_command(name))
         return result unless result.ok?
 
-        token_keys = name == "claude" ? %w[ANTHROPIC_API_KEY CLAUDE_API_KEY] : %w[OPENAI_API_KEY CODEX_HOME]
-        return result if token_keys.any? { |key| @env[key].to_s != "" }
+        return result if agent_authenticated?(name)
 
         Result.new(
           name: name,
@@ -153,6 +179,20 @@ module Hive
           fix_command: auth_fix.join(" "),
           bootstrappable: false
         )
+      end
+
+      # Auth is satisfied by an env API key OR an on-disk token persisted by
+      # the CLI's own login flow (`claude setup-token` / `codex login`). The
+      # on-disk probe reuses Hive::AgentProfiles.logged_in? (the same artifact
+      # check the agent profiles use), so a token-authenticated user — who has
+      # no env var set — is no longer reported as a false negative (plan U1).
+      # CODEX_HOME is intentionally NOT treated as an auth signal: it only
+      # points at the config dir and is set even when no credential exists.
+      def agent_authenticated?(name)
+        env_keys = name == "claude" ? %w[ANTHROPIC_API_KEY CLAUDE_API_KEY] : %w[OPENAI_API_KEY]
+        return true if env_keys.any? { |key| @env[key].to_s != "" }
+
+        Hive::AgentProfiles.logged_in?(name, home: @env.fetch("HOME", Dir.home))
       end
 
       def check_versioned_binary(name, argv, required, fix_command)
@@ -195,7 +235,7 @@ module Hive
       end
 
       def extract_version(*parts)
-        parts.join(" ")[/\d+(?:\.\d+)+(?:\.\d+)?/]
+        parts.join(" ")[/\d+(?:\.\d+)+/]
       end
 
       def diagnostic(*parts)

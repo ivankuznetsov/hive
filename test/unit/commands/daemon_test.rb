@@ -345,6 +345,10 @@ class HiveCommandsDaemonTest < Minitest::Test
     }
     fake = Struct.new(:state) do
       def service_state = state
+      # Same path for installed + expected so binary_drift resolves to a
+      # deterministic non-drift state without depending on the host binary.
+      def installed_exec_binary = "/home/u/.local/bin/hive"
+      def expected_binary = "/home/u/.local/bin/hive"
     end.new(state)
     require "hive/commands/daemon/service_installer"
     out, _err = with_replaced_singleton_method(
@@ -356,6 +360,9 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal true, doc.fetch("service_installed")
     assert_equal true, doc.fetch("service_enabled")
     assert_equal "/home/u/.config/systemd/user/hive-daemon.service", doc.fetch("unit_path")
+    assert_equal "/home/u/.local/bin/hive", doc.fetch("installed_binary")
+    assert_equal "/home/u/.local/bin/hive", doc.fetch("expected_binary")
+    assert_equal "none", doc.fetch("binary_drift")
     # Existing fields must survive the merge.
     assert_equal true, doc.fetch("running")
     assert_equal 1234, doc.fetch("pid")

@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-18
+updated: 2026-06-29
 tags: [command, daemon, automation, json]
 ---
 
@@ -40,13 +40,42 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 |-----------|----------|
 | `start`    | Acquires the PID file (`~/Dev/hive/.daemon.pid`); without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
 | `stop`     | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. With `--json`, emits a `hive-daemon-stop` envelope (fields: `running`, `was_running`, `stale_pid?`, `reason?` — `pid_reused` / `unverified` for safety bailouts). |
-| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The JSON envelope also reports `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, or `not_applicable`) so local setup and the web UI can detect a stale unit. `unparseable` means the unit is present but its ExecStart/ProgramArguments binary could not be read — distinct from `not_applicable` (no unit installed). The allowed values are defined once as `Hive::Commands::Daemon::BINARY_DRIFT_STATES`. |
+| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The same envelope includes binary-drift fields: `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, `not_applicable`). `path` / `version` / `unparseable` mean the installed unit should be repaired; `not_applicable` means no unit or an unavailable probe. |
 | `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Exit 1 if no daemon running. With `--json`, emits a `hive-daemon-reload` envelope (`ok`, `reason`, `pid`, `message`). |
 | `tail`     | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
 | `queue`    | Read-only inspection of the dispatch-request queue the bot/web producers and `3-plan` healer write and the daemon consumes. Runs in the CLI process (no daemon contact); reads the same `<state_home>/dispatch_requests/` directory. Current pending request files use `hive-dispatch-request.v2`, whose `requestor` enum is `bot|healer`; older/wrong versions are reported as malformed and pruned like other bad files. `list` (default) prints each pending request with `request_id  age  project/slug  verb` plus `[EXPIRED]` / `[NOT-ALLOWLISTED]` flags and any malformed files. `show <id>` dumps one request's full payload (errors with exit 1 if the id is unknown; missing id is a USAGE error). `prune` removes expired + malformed request files (the daemon also does this lazily on its own tick) and reports the count. With `--json`, emits a `hive-daemon-queue.v1` envelope (`action`, `requests[]`, `request`, `malformed[]`, `pruned_count`). Unknown actions, missing `show` request ids, and unexpected queue-command exceptions emit the schema's `ErrorPayload` arm with `ok:false`, `error_kind` (`unknown_action` / `missing_request_id` / `internal`), and `message` before exiting non-zero. Claimed in-flight requests (`*.json.claimed`) are intentionally not listed — they are daemon-managed; see [[modules/daemon]] §"At-most-once dispatch via atomic claim". |
+
+## Binary Drift Probe
+
+`hive daemon status --json` builds the same status payload through
+`Commands::Daemon#status_payload` that hivebox renders in-process. This keeps
+the CLI and web dashboard on one payload shape without capturing `$stdout`.
+
+The service probe reads the installed unit through `Daemon::ServiceInstaller`.
+Linux parses `ExecStart=` with `Shellwords`; macOS parses the launchd plist
+`ProgramArguments` array and returns the hive binary slot itself (`$0`) from
+the `/bin/sh -c ... exec "$0" "$@"` wrapper, not the following subcommand. The
+installed binary version is read by running `<installed_binary> --version` under
+a 10-second timeout; timeouts and spawn failures return `nil` instead of
+hanging the CLI or web dashboard.
+
+`Daemon::BINARY_DRIFT_STATES` is the closed enum shared by code/schema/docs:
+
+| State | Meaning |
+|-------|---------|
+| `none` | Installed unit binary path matches the expected current binary, and the readable installed version matches `Hive::VERSION` when available. |
+| `path` | Installed unit points at a different binary path than the current invoked/expected Hive binary. |
+| `version` | Installed path matches, but the installed binary reports a different version. |
+| `unparseable` | A unit is present, but its binary path could not be parsed. This is actionable because a corrupt unit differs from "no unit installed". |
+| `not_applicable` | No service is installed, or the non-mutating service probe itself could not run. |
+
+The actionable subset is `Daemon::BINARY_DRIFT_ACTIONABLE`
+(`path`, `version`, `unparseable`). Hivebox uses that constant for its daemon
+panel repair affordance, so adding a future drift state requires changing the
+constant, schema enum, and docs together.
 
 ## Global Digest
 
@@ -195,14 +224,6 @@ new events are caught at CI rather than logged silently.
   not require `systemd`. Sample autostart units ship at
   `examples/systemd/hive-daemon.service` (Linux) and
   `examples/launchd/hive-daemon.plist` (macOS).
-- The web dashboard reads `hive daemon status --json` for daemon health and
-  binary drift. Its Repair button queues `hive daemon install --force` through
-  the daemon dispatch queue rather than executing from the Rails process. The
-  request is enqueued under the `__global__` maintenance sentinel
-  (`Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT`), which the
-  daemon consumer special-cases (`process_global_maintenance_request`) and runs
-  against the maintenance argv allowlist — so the repair executes end-to-end
-  instead of being dropped as `unknown_project`.
 - **Pausing a single task:** edit the state file to remove the terminal
   marker (e.g., delete `<!-- EXECUTE_COMPLETE -->`) so the row no
   longer classifies as advance-ready. Daemon will skip until you write

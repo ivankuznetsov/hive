@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-27
+updated: 2026-06-22
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -25,7 +25,6 @@ Class methods:
 ```ruby
 Hive::Worktree.read_pointer(task_folder) → Hash | nil
 Hive::Worktree.validate_pointer_path(path, expected_root) → expanded_path | raises
-Hive::Worktree.materialize_pr(repo_root:, pr_number:, path:, branch:) → {path:, branch:, head_sha:}
 ```
 
 ## `worktree_root` resolution
@@ -78,18 +77,6 @@ only when neither the remote nor local prerequisite branch is available.
 
 `git -C <project_root> worktree remove <path>`. Raises `WorktreeError` on failure (most commonly when the worktree has uncommitted changes — git refuses to remove dirty worktrees without `--force`).
 
-## `materialize_pr`
-
-Shared fork-agnostic PR-head materializer used by `hive review --pr` and the babysitter. It runs:
-
-```bash
-git -C <repo> fetch origin +pull/<n>/head:refs/<branch>
-git -C <repo> worktree add -B <branch> <path> refs/<branch>
-git -C <path> rev-parse HEAD
-```
-
-The caller chooses `path` and `branch`; ad-hoc review uses the normal `worktree_root/<slug>` path and branch `hive/review/pr-N`, while babysitter keeps its own babysitter worktree path. The returned `head_sha` lets callers compare the materialized checkout to GitHub's `headRefOid`. Failures raise `Hive::WorktreeError`.
-
 ## `exists?`
 
 Two checks: `File.directory?(path)` AND `path ∈ git worktree list --porcelain`. Both must be true. This catches the "directory deleted via Finder/`rm -rf`" case where git still thinks the worktree exists but the filesystem doesn't, and also the inverse (filesystem dir but no git registration).
@@ -126,12 +113,10 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Stages::OpenPr#run!` — reads pointer for the worktree path; `git push` runs there.
 - `Stages::Finalize#run!` — reads pointer to verify the final branch state before wrapping up the PR.
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
-- `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
-- `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
 
 ## Backlinks
 

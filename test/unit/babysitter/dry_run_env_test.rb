@@ -559,6 +559,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "pr", "view", "42", "-Revil.example.com/octo/repo"
       assert_stubbed env, "gh", "pr", "view", "42", "-R=evil.example.com/octo/repo"
       assert_stubbed env, "gh", "pr", "view", "42", "-Rhttps://evil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cRevil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cR", "evil.example.com/octo/repo"
       # `gh api`/`auth` honor `--hostname` after the subcommand too, so the gate must
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
@@ -600,6 +602,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # stays out of the trailing case.)
       assert_passes env, "gh", "-Rowner/repo", "pr", "view", "42"
       assert_passes env, "gh", "pr", "view", "42", "-Rocto/repo"
+      assert_passes env, "gh", "pr", "view", "42", "-cRocto/repo"
+      assert_passes env, "gh", "pr", "view", "42", "-cR", "octo/repo"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
@@ -825,6 +829,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr view 42 -Revil.example.com/octo/repo skipped"
       assert_includes skipped, "gh pr view 42 -R=evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -cRevil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -cR evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh api -ip shadow-cat https://evil.example.com skipped"
       assert_includes skipped, "gh api -iX POST repos/owner/repo/dispatches skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -if body=hi skipped"

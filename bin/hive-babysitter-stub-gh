@@ -57,15 +57,57 @@ def repo_value_selects_host?(value)
   value.include?(":") || value.count("/") != 1
 end
 
+# Value-taking short flags for allowlisted read commands, excluding `-R` itself.
+# When one appears before `R` in a shorthand cluster, pflag treats the rest of
+# the token as that option's value, not as more flags.
+GH_REPO_CLUSTER_VALUE_SHORT_OPTIONS = {
+  %w[api] => %w[H X F f q t p],
+  %w[pr checks] => %w[i q t],
+  %w[pr diff] => %w[e],
+  %w[pr list] => %w[a A B H q l L S s t],
+  %w[pr status] => %w[q t],
+  %w[pr view] => %w[q t],
+  %w[repo view] => %w[b q t],
+  %w[run list] => %w[b c e q L s t u w],
+  %w[run view] => %w[a j q t],
+  %w[run watch] => %w[i],
+  %w[workflow list] => %w[q L t],
+  %w[workflow view] => %w[r]
+}.freeze
+
+def repo_cluster_value_options(rest)
+  GH_REPO_CLUSTER_VALUE_SHORT_OPTIONS[rest[0, 2]] || GH_REPO_CLUSTER_VALUE_SHORT_OPTIONS[rest[0, 1]] || []
+end
+
+def short_cluster_repo_value(arg, next_arg, value_options)
+  return [ false, nil ] unless arg.start_with?("-") && !arg.start_with?("--") && arg.length > 2
+
+  chars = arg[1..].chars
+  chars.each_with_index do |char, char_index|
+    if char == "R"
+      glued = (chars[(char_index + 1)..] || []).join
+      return [ true, (glued[1..] || "") ] if glued.start_with?("=")
+
+      return [ true, glued.empty? ? next_arg : glued ]
+    end
+
+    return [ false, nil ] if value_options.include?(char)
+  end
+
+  [ false, nil ]
+end
+
 # Default-deny any host override anywhere in argv, not just in the leading
 # globals. The gate classifies the *stripped* argv but `exec`s the *original*
 # argv, so a host-qualified `--repo`/`-R`/`--repo=` value, a glued short
-# `-R<val>`/`-R=<val>` (pflag strips the `=`), or an `--hostname`/`--hostname=`
-# selector would otherwise reach the real gh against an agent-chosen host even on
-# an allowlisted read — whether it leads the call or trails the subcommand.
+# `-R<val>`/`-R=<val>` (pflag strips the `=`), a clustered `-cR<val>`, or an
+# `--hostname`/`--hostname=` selector would otherwise reach the real gh against
+# an agent-chosen host even on an allowlisted read — whether it leads the call or
+# trails the subcommand.
 # (`auth status`'s short `-h`/`-h<host>` is handled in auth_status_read_only?,
 # since `-h` means `--help` on other gh subcommands.)
-def host_override?(argv)
+def host_override?(argv, rest)
+  value_options = repo_cluster_value_options(rest)
   argv.each_with_index do |arg, index|
     case arg
     when "-R", "--repo"
@@ -77,6 +119,9 @@ def host_override?(argv)
     when "--hostname", /\A--hostname=/
       return true
     end
+
+    has_repo, value = short_cluster_repo_value(arg, argv[index + 1], value_options)
+    return true if has_repo && repo_value_selects_host?(value)
   end
   false
 end
@@ -436,7 +481,7 @@ end
 
 rest = stripped_global_options(argv)
 
-unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv) && !positional_host_override?(rest)
+unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv, rest) && !positional_host_override?(rest)
   log_skip(argv)
   warn "[dry-run] gh #{escaped_argv(argv)} skipped"
   exit 0

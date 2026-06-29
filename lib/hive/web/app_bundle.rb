@@ -53,11 +53,15 @@ module Hive
           raise Hive::Error, "hive web: downloaded web bundle does not contain config/application.rb"
         end
 
-        File.write(File.join(tmp, VERSION_FILE), "#{Hive::VERSION}\n")
         FileUtils.rm_rf(app_dir)
         FileUtils.mkdir_p(File.dirname(app_dir))
         FileUtils.mv(tmp, app_dir)
+        # Stamp the version ONLY after `bundle install` succeeds. If bundler
+        # fails the app dir is present but unstamped, so `installed_version`
+        # is nil and `stale?` stays true — the next `ensure!` re-bootstraps
+        # instead of treating the broken bundle as an up-to-date install.
         bundle_install!(runner: runner, output: output)
+        File.write(File.join(app_dir, VERSION_FILE), "#{Hive::VERSION}\n")
         app_dir
       ensure
         FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
@@ -79,7 +83,8 @@ module Hive
       end
 
       def github_release_url
-        "https://github.com/asterio/hive/releases/download/v#{Hive::VERSION}/hive-web-#{Hive::VERSION}.tar.gz"
+        "https://github.com/#{Hive::REPO_OWNER}/#{Hive::REPO_NAME}/releases/download/" \
+          "v#{Hive::VERSION}/hive-web-#{Hive::VERSION}.tar.gz"
       end
 
       def fetch_and_extract(bundle_url, dest)
@@ -103,6 +108,15 @@ module Hive
         target = File.expand_path(relative, dest)
         root = File.expand_path(dest)
         raise Hive::Error, "hive web: unsafe bundle path #{relative.inspect}" unless target.start_with?("#{root}/")
+
+        # Reject symlink/hardlink members outright. The expand_path guard above
+        # only validates the member's own path; a symlink pointing outside
+        # `dest` followed by a later write THROUGH it could still escape the
+        # destination. A Rails app bundle is plain files + dirs, so any link
+        # member is unexpected — refuse rather than try to validate the target.
+        if entry.symlink? || (entry.respond_to?(:header) && entry.header.typeflag == "1")
+          raise Hive::Error, "hive web: refusing link member in bundle #{relative.inspect}"
+        end
 
         if entry.directory?
           FileUtils.mkdir_p(target)

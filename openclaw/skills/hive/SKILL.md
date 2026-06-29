@@ -41,7 +41,7 @@ That listing installs the `/hive` slash command. First run should normally be:
 
 ## Common Paths
 
-- `/hive setup` installs or verifies the Hive CLI, enables the per-user daemon service, and optionally initializes the current repository.
+- `/hive setup` installs or verifies the Hive CLI, then delegates local provisioning to `hive setup`.
 - `/hive status --json` shows the task board and next actions.
 - `/hive new . "build this feature"` creates a new Hive task in the current project.
 - `/hive plan <task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>` advance a task through the main coding workflow.
@@ -81,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.s
 bash "$tmpdir/hive-install.sh"
 ```
 
-After install, run the strict `hive` / `hv` version check again. If neither command prints a bare `X.Y.Z` version, stop and report that setup failed or Apache Hive may be shadowing the command. If verification succeeds, run `"${hive_cmd}" daemon install` once. Then ask whether to initialize the current project; if yes, run `"${hive_cmd}" init . --json </dev/null`, followed by `"${hive_cmd}" doctor` non-fatally. Summarize the installed version, daemon setup result, project initialization result, and any missing runtime dependencies.
+After install, run the strict `hive` / `hv` version check again. If neither command prints a bare `X.Y.Z` version, stop and report that setup failed or Apache Hive may be shadowing the command. If verification succeeds, run `"${hive_cmd}" setup --json` from the current project. Summarize the installed version, setup phases, local web URL, and any diagnose-only fix commands such as `gh auth login`, `claude setup-token`, or `codex login`.
 
 ## Dispatch Rules
 

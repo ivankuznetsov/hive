@@ -125,6 +125,20 @@ Do not ask the user whether to initialize the daemon. Hive install includes the 
 
 The bash installer already runs the same command after installing the gem; rerunning it is idempotent when the unit matches. If the command reports a drifted/customized unit, leave it untouched and report the `"$hive_cmd" daemon install --force` recovery command instead of forcing an overwrite. If systemd-user or launchd is unavailable, keep Hive installed and report that daemon autostart could not be enabled on this host.
 
+## Local Web Setup
+
+When the user wants the browser UI, prefer the first-class local setup command:
+
+```bash
+"$hive_cmd" setup
+```
+
+It runs diagnostics, installs Hive-owned QMD/web pieces, ensures the daemon
+service, enrolls the current project, and leaves the web UI runnable with
+`"$hive_cmd" web` at `http://127.0.0.1:4567`. Use
+`"$hive_cmd" setup --service` when the user also wants a managed `hive-web`
+service.
+
 ## Initialize Project
 
 If the current directory is a git project and the user wants Hive enabled here, ask before running:

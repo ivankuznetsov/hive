@@ -1,5 +1,6 @@
 require "fileutils"
 require "json"
+require "open3"
 require "time"
 require "yaml"
 require "hive/config"
@@ -371,6 +372,7 @@ module Hive
 
         if @json
           service_state = probe_service_state
+          binary_state = daemon_binary_state(service_state)
           puts JSON.generate(
             "schema" => "hive-daemon-status",
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
@@ -383,6 +385,11 @@ module Hive
             "service_installed" => service_state["service_installed"],
             "service_enabled" => service_state["service_enabled"],
             "unit_path" => service_state["unit_path"],
+            "installed_binary" => binary_state.fetch("installed_binary"),
+            "expected_binary" => binary_state.fetch("expected_binary"),
+            "installed_binary_version" => binary_state.fetch("installed_binary_version"),
+            "cli_version" => Hive::VERSION,
+            "binary_drift" => binary_state.fetch("binary_drift"),
             # Agent-native parity with the TUI footer / bot push: expose the
             # update nudge so a programmatic caller can detect "behind" too.
             "current_version" => Hive::VERSION,
@@ -404,9 +411,49 @@ module Hive
       # out of the whole command.
       def probe_service_state
         require "hive/commands/daemon/service_installer"
-        Hive::Commands::Daemon::ServiceInstaller.new.service_state
+        installer = Hive::Commands::Daemon::ServiceInstaller.new
+        installer.service_state.merge(
+          "installed_binary" => installer.installed_exec_binary,
+          "expected_binary" => installer.expected_binary
+        )
       rescue StandardError
-        { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
+        {
+          "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil,
+          "installed_binary" => nil, "expected_binary" => nil
+        }
+      end
+
+      def daemon_binary_state(service_state)
+        installed = service_state["installed_binary"]
+        expected = service_state["expected_binary"]
+        installed_version = binary_version(installed)
+        drift =
+          if !service_state["service_installed"] || installed.to_s.empty?
+            "not_applicable"
+          elsif expected.to_s != "" && File.expand_path(installed) != File.expand_path(expected)
+            "path"
+          elsif installed_version && installed_version != Hive::VERSION
+            "version"
+          else
+            "none"
+          end
+        {
+          "installed_binary" => installed,
+          "expected_binary" => expected,
+          "installed_binary_version" => installed_version,
+          "binary_drift" => drift
+        }
+      end
+
+      def binary_version(binary)
+        return nil if binary.to_s.empty?
+
+        out, _err, status = Open3.capture3(binary, "--version")
+        return nil unless status.success?
+
+        out.strip[/\d+(?:\.\d+)+(?:\.\d+)?/] || out.strip
+      rescue SystemCallError
+        nil
       end
 
       # The daemon-written update nudge, as a plain Hash for the status

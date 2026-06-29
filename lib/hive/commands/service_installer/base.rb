@@ -81,6 +81,10 @@ module Hive
           }
         end
 
+        def expected_binary
+          resolved_binary
+        end
+
         # launchd plist Label for this service. Matches the `<key>Label</key>`
         # value in the bundled plists (local.hive-daemon / local.hive-bot).
         def launchd_label

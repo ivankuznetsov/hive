@@ -1,5 +1,6 @@
 require "cgi"
 require "shellwords"
+require "rexml/document"
 require "hive/commands/service_installer/base"
 
 module Hive
@@ -29,6 +30,15 @@ module Hive
           end
         end
 
+        def installed_exec_binary
+          return nil unless target_path && File.file?(target_path)
+
+          case platform
+          when :linux then installed_systemd_exec_binary
+          when :macos then installed_launchd_exec_binary
+          end
+        end
+
         # Surfaced before the blocking force-upgrade restart so operators
         # know it can hang while in-flight children drain under the unit's
         # TimeoutStopSec=900.
@@ -39,6 +49,27 @@ module Hive
         end
 
         private
+
+        def installed_systemd_exec_binary
+          line = File.readlines(target_path).find { |candidate| candidate.start_with?("ExecStart=") }
+          return nil unless line
+
+          Shellwords.split(line.sub(/\AExecStart=/, "").strip).first
+        rescue ArgumentError
+          nil
+        end
+
+        def installed_launchd_exec_binary
+          doc = REXML::Document.new(File.read(target_path))
+          strings = []
+          doc.elements.each("//array/string") { |el| strings << el.text.to_s }
+          idx = strings.index("exec \"$0\" \"$@\"") || strings.index { |value| value.end_with?("/hive") || File.basename(value) == "hive" }
+          return strings[idx + 1] if idx && strings[idx + 1]
+
+          strings.find { |value| File.basename(value) == "hive" }
+        rescue REXML::ParseException, SystemCallError
+          nil
+        end
 
         def render_systemd
           template = File.read(File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__))

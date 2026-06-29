@@ -17,7 +17,7 @@ module Hive
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan review open-pr artifacts finalize
-        archive markers
+        archive markers daemon
       ].freeze
 
       DIRNAME = "dispatch_requests".freeze

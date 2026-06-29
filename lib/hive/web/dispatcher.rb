@@ -169,6 +169,23 @@ module Hive
         { ok: true, request_id: request_id, argv: argv }
       end
 
+      def repair_daemon
+        request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
+        Hive::Bot::DispatchRequestWriter.write!(
+          project: "__global__",
+          slug: "daemon-repair",
+          argv: %w[hive daemon install --force],
+          trigger: "web_daemon_repair",
+          request_id: request_id
+        )
+        request_id
+      rescue ArgumentError
+        # The daemon queue is task-shaped. If a queue implementation rejects
+        # global maintenance requests, surface a typed error instead of
+        # executing repair directly from a web worker.
+        raise Hive::Error, "cannot queue daemon repair on this host; run `hive daemon install --force`"
+      end
+
       # Write an operator's steer/answer into the task's brainstorm.md via
       # the same `BrainstormAnswerWriter` the Telegram bot uses, so the
       # daemon's answers-pending gate picks it up and resumes the stage.

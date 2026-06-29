@@ -39,7 +39,7 @@ class GemPackageScriptsTest < Minitest::Test
 
   def claude_launcher_script_references
     SCRIPT_REFERENCE_FILES.flat_map do |path|
-      source = File.read(File.join(ROOT, path))
+      source = File.read(File.join(ROOT, path), encoding: "UTF-8")
       source.scan(%r{scripts/[^"')\s]+\.sh}).map { |script| "lib/hive/#{script}" }
     end.uniq.sort
   end

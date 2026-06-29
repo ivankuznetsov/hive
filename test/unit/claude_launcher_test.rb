@@ -562,6 +562,20 @@ class ClaudeLauncherTest < Minitest::Test
            "the 2.1.179 NBSP caret with separator/footer chrome must read as ready"
   end
 
+  # The caret separator can also be a narrow no-break space (U+202F), not just
+  # the regular NBSP (U+00A0). Both are covered by `\p{Zs}`; this pins the
+  # narrow variant so a future regex narrowing can't silently drop it.
+  def test_claude_ready_prompt_accepts_narrow_no_break_space_caret
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯\u{202F}\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a narrow no-break space (U+202F) after the caret must read as ready"
+  end
+
   def test_claude_ready_prompt_accepts_trailing_caret_with_unicode_separator_before_it
     pane = "Claude Code v2.1.179\n\n" \
            "╭────────────────────────────────────────────────────────────────────────╮\n" \

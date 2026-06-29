@@ -32,7 +32,7 @@ module Hive
           parts << "unknown_reason"
         end
 
-        Digest::SHA256.hexdigest(JSON.generate(parts))
+        ::Digest::SHA256.hexdigest(JSON.generate(parts))
       end
 
       def changed_or_fallback?(current_fingerprint:, last_fingerprint:, last_attempt_at:, now: Time.now,
@@ -97,7 +97,7 @@ module Hive
         normalized = Array(rows).map do |row|
           row.respond_to?(:to_h) ? row.to_h.transform_keys(&:to_s).sort.to_h : row.to_s
         end
-        Digest::SHA256.hexdigest(JSON.generate(normalized.sort_by(&:to_s)))
+        ::Digest::SHA256.hexdigest(JSON.generate(normalized.sort_by(&:to_s)))
       end
 
       def stat_for(path)

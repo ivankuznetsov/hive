@@ -2,6 +2,51 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.4.0
+
+A security-hardening release. A second wave of fixes to the `hive patrol` dry-run sandbox — where the stubbed `gh`/`git` passthrough is exposed to agent-controlled input — closes pre-guard code-execution and host-gate-bypass vectors. Alongside it, the Telegram bot gains idea-by-default capture, a `/waiting` view backed by a daily pending-answer digest, task-id slash commands, and structured JSON errors, plus pipeline, status, and TUI refinements.
+
+### Patrol security hardening
+
+- Fixed: the dry-run `gh`/`git` stubs honored caller-controlled Ruby startup hooks (`RUBYOPT`, `RUBYLIB`) and could run attacker code before the allowlist guard; the dry-run launcher now scrubs Ruby/Bundler/Gem startup env before invoking the stubs.
+- Fixed: clustered `-R`/short-flag selectors slipped the `gh` host gate, letting a dry-run read target an arbitrary host.
+- Fixed: dry-run stubs could exec a relative real-binary path resolved from the worktree.
+- Fixed: skip-log writes followed hard links and could append outside the worktree.
+- Fixed: `gh` dry-run passthrough leaked proxy-trust environment to the real binary.
+- Fixed: replay followed symlinked parent directories.
+- Fixed: invalid-UTF-8 / invalid-byte argv crashed the stub or bypassed the strict usage contract.
+- Fixed: the `gh` stub emitted a raw backtrace when the real binary was missing.
+- Fixed: detached background cleanup could signal a reused process group.
+- Fixed: a missing `--report` value could swallow `--no-judge` and run evals unintentionally.
+
+### Telegram bot
+
+- Bare text sent to the bot is now captured as an idea by default instead of erroring.
+- New `/waiting` command lists tasks awaiting your input, backed by a daily pending-answer digest so nothing stalls unseen.
+- Slash commands accept a bare task id (e.g. `/approve 42`).
+- Added log severity levels and quieted routine `bot.log` noise.
+- `--json` usage errors now return a structured `hive-bot-status` envelope instead of prose.
+- Fixed: every needs-input row now gets a working action button or is suppressed — no dead buttons.
+- Fixed: "Show details" always renders row content.
+- Fixed: stuck-task alerts are suppressed for healthy live-agent retries.
+
+### Pipeline & status
+
+- Fixed: markerless `3-plan` tasks are runnable instead of being parked behind a needs-input gate.
+- Needs-input status labels now differentiate by the reason a task paused.
+
+### Performance
+
+- TUI status polling cost now scales with the number of active tasks rather than the full archive.
+
+### Setup
+
+- Selected agent backends now persist globally, so new projects inherit your choice.
+
+### Packaging
+
+- Fixed: the published arm64 hivebox image is smoke-tested on native arm64 Linux instead of macOS/colima.
+
 ## 0.3.1
 
 Custom workflows: Hive's pipeline engine is now generic data. Author your own per-project workflow — writing, research, triage, translation, anything — in a few lines of YAML, scaffold it from a sample, and let the daemon run it the same way it runs `coding`. This release also lands a large patrol-driven security-hardening wave, a redesigned daily digest, task dependencies with stacked PRs, and device-flow agent logins in hivebox.

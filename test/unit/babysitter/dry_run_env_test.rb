@@ -1155,6 +1155,57 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_disables_lazy_fetch_before_read_only_passthrough
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      clone = File.join(dir, "clone")
+      run!("git", "init", "-b", "master", "--quiet", source)
+      run!("git", "-C", source, "config", "user.email", "test@example.com")
+      run!("git", "-C", source, "config", "user.name", "Test")
+      run!("git", "-C", source, "config", "uploadpack.allowFilter", "true")
+      File.write(File.join(source, "payload.txt"), "payload\n")
+      run!("git", "-C", source, "add", "payload.txt")
+      run!("git", "-C", source, "commit", "-m", "initial", "--quiet")
+      blob = run!("git", "-C", source, "rev-parse", "HEAD:payload.txt").strip
+      run!(
+        "git",
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        "--quiet",
+        "file://#{source}",
+        clone
+      )
+
+      _out, _err, before_status = Open3.capture3(
+        { "GIT_NO_LAZY_FETCH" => "1" },
+        "git",
+        "-C",
+        clone,
+        "cat-file",
+        "-e",
+        blob
+      )
+      skip "local git did not leave the partial-clone blob missing" if before_status.success?
+
+      out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", clone, "show", "HEAD:payload.txt")
+
+      refute status.success?, "allowlisted git show unexpectedly succeeded: stdout=#{out.inspect} stderr=#{err.inspect}"
+      _out, _err, after_status = Open3.capture3(
+        { "GIT_NO_LAZY_FETCH" => "1" },
+        "git",
+        "-C",
+        clone,
+        "cat-file",
+        "-e",
+        blob
+      )
+      refute after_status.success?, "allowlisted git show lazy-fetched the missing blob"
+    end
+  end
+
   def test_git_stub_forces_no_pager_for_tty_passthrough
     with_tmp_git_repo do |dir|
       marker = File.join(dir, "pager-ran")

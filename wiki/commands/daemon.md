@@ -77,7 +77,13 @@ step, so selected no-live-lock `error` rows may be cleared into markerless
 edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
 `2-brainstorm` / `3-plan` / `4-execute` / `7-artifacts` / `8-finalize`
 `reason=tmux_session_terminated` or `reason=agent_orphaned`, and elapsed
-`limits_reached` markers whose `retry_after` cooldown has passed. `3-plan`
+`limits_reached` markers whose `retry_after` cooldown has passed. Immediately
+after that, `Hive::Daemon::RecoverableErrorHealer` may clear the fixed v1
+recoverable dependency-outage allowlist: Codex-auth `implementer_failed`
+markers with a 401 missing bearer/basic-auth diagnostic, and
+`claude_launch_failed` markers, but only after safety checks, changed health
+signal/backoff/budget gates, and dependency probes pass. Set
+`daemon.auto_retry.enabled: false` to disable that probe-gated path. `3-plan`
 terminal-error clears also enqueue a same-stage `hive plan ... --from 3-plan`
 request with `requestor=healer`, because a markerless empty `plan.md` would
 otherwise remain an error row. Independently, `Hive::Daemon::DisplayNameBackfiller`

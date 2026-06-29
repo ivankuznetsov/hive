@@ -696,6 +696,61 @@ module Hive
       ).call
     end
 
+    desc "answer-digest", "Send a daily digest of tasks waiting on human input"
+    # wrap: false so the Examples / Exit codes blocks keep their line breaks.
+    long_desc <<~DESC, wrap: false
+      Fetches the global hive status snapshot, filters it to tasks waiting on
+      human input, and sends one Telegram message with inline buttons for each
+      listed task. Empty snapshots are silent and still exit successfully.
+
+      --date does NOT scope the waiting set (always the live snapshot) and does
+      NOT dedup sends — it is only echoed into the JSON `date` field. Scheduler
+      idempotency (once per local day) lives in the daemon's
+      answer_digest_state.json, not this command.
+
+      With --json, emits the hive-answer-digest (v1) envelope. The SuccessPayload
+      carries `sent` (true only on a real send), `reason`
+      (null=sent / "empty" / "dry_run"), `chat_id`, `button_count` (capped at the
+      10-task display cap), `count` (the true waiting total), and `tasks[]` (one
+      `{project,slug,id,title,stage,pr}` per waiting task, present even on a real
+      send). The ErrorPayload carries `error_kind`: `config` (bad --date / missing
+      chat), `status_unavailable` (status snapshot unusable — retryable),
+      `usage` (bad flags), or `internal`.
+
+      Agent read path: `--dry-run --json` is side-effect-free — it loads no .env,
+      resolves no chat/token, and sends NOTHING to Telegram — so an agent may run
+      it purely to READ the waiting set (count / tasks[]). Omitting --dry-run
+      SENDS a Telegram message as a side effect.
+
+      There is no `hive answer` verb for the brainstorm "answer" button an agent
+      sees as an answer-waiting task: to clear one, an agent fills the matching
+      `### A` slot in that task's brainstorm.md — the same edit the bot/web
+      "Answer" button performs via BrainstormAnswerWriter.
+
+      Examples:
+        hive answer-digest
+        hive answer-digest --date 2026-06-27 --json
+        hive answer-digest --dry-run --json   # side-effect-free read
+
+      Exit codes:
+        0  sent / nothing waiting (empty is silent) / dry-run
+        64 bad flags / malformed invocation (error_kind=usage)
+        69 status snapshot unavailable (error_kind=status_unavailable, retryable)
+        70 internal error (error_kind=internal)
+        78 bad --date or missing chat config (error_kind=config)
+    DESC
+    option :date, type: :string,
+                  desc: "local calendar date echoed into the JSON `date` field; does not scope data or dedup (YYYY-MM-DD)"
+    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
+    def answer_digest
+      require "hive/commands/answer_digest"
+      Hive::Commands::AnswerDigest.new(
+        date: options[:date],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered

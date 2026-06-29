@@ -326,20 +326,23 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # The `digest` verb ships a non-zero DEFAULT cap (every other verb
-        # stays at `child_timeout_sec`=0/disabled) because the digest holds
-        # the single global digest slot (can_dispatch_digest?): a child that
-        # wedges on an unbounded leg — a hung `ship_times` `git log`, or a
-        # black-holed Telegram socket — would otherwise pin that slot forever
-        # and silently disable ALL future digests until a daemon restart. A
-        # reaped child exits non-zero, so DigestScheduler retries the date on
-        # backoff. 3600s sits well above the categorizer's own agent cap
-        # (timeout_sec.digest, default 1800) so it never kills a healthy run;
-        # raise it alongside a raised timeout_sec.digest, or set it to 0 to
-        # disable.
+        # The `digest` and `answer-digest` verbs ship a non-zero DEFAULT cap
+        # (every other verb stays at `child_timeout_sec`=0/disabled) because
+        # each holds the single global digest slot (can_dispatch_digest?): a
+        # child that wedges on an unbounded leg — a hung `ship_times` `git
+        # log`, or a black-holed Telegram socket — would otherwise pin that
+        # slot forever, leave the scheduler's in-memory `@pending` marker set,
+        # and silently disable ALL future digests/answer-digests until a
+        # daemon restart. A reaped child exits non-zero, so the scheduler
+        # retries the date on backoff. 3600s sits well above the categorizer's
+        # own agent cap (timeout_sec.digest, default 1800) so it never kills a
+        # healthy run; raise it alongside a raised timeout_sec.digest, or set
+        # it to 0 to disable. `answer-digest` shares the same cap: it spawns
+        # no categorizer agent (it only fetches status + sends Telegram), so
+        # 3600s is a generous ceiling that still bounds a wedged socket.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "digest" => 3600 },
+        "child_verb_timeouts" => { "digest" => 3600, "answer-digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -446,6 +449,13 @@ module Hive
         "enabled" => false,
         "agent" => nil,
         "max_catchup_days" => 7
+      },
+      # Daily pending-answer digest. The daemon schedules one global
+      # `hive answer-digest` subprocess at/after the configured local hour;
+      # the subprocess is silent when no task is waiting on human input.
+      "answer_digest" => {
+        "enabled" => false,
+        "hour" => 9
       },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
@@ -1121,31 +1131,48 @@ module Hive
       merged
     end
 
-    # The `digest` block only (enabled / agent / max_catchup_days), merged
-    # over defaults. Used by the daemon scheduler. Distinct from
-    # `load_global_digest_config`, which returns the FULL merged config
-    # (incl. `bot`) for the digest runner.
-    def load_global_digest_block
+    # Shared loader for a single named global config block (`digest`,
+    # `answer_digest`): runs the ensure_migrated!/validate_hive_home!/path +
+    # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
+    # block's own validator, and returns the merged hash. An optional block
+    # receives (merged, data, override) for per-block derivations (e.g. the
+    # digest's telegram-default `enabled`) and returns the merged hash to validate.
+    def load_global_block(key, validator:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
 
-      override = data["digest"] || {}
+      override = data[key] || {}
       unless override.is_a?(Hash)
         raise ConfigError,
-              "digest in #{describe_source(path)} must be a Hash; got #{override.class}"
+              "#{key} in #{describe_source(path)} must be a Hash; got #{override.class}"
       end
 
-      merged = deep_merge(deep_dup(DEFAULTS["digest"]), override)
-      # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
-      # either way, default it ON for anyone who already has the Telegram bot
-      # configured with a deliverable chat. An explicit digest.enabled (true
-      # OR false) is always honored — only the unset case is derived.
-      merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
-      validate_digest!({ "digest" => merged }, path)
+      merged = deep_merge(deep_dup(DEFAULTS[key]), override)
+      merged = yield(merged, data, override) if block_given?
+      send(validator, { key => merged }, path)
       merged
+    end
+
+    # The `digest` block only (enabled / agent / max_catchup_days), merged
+    # over defaults. Used by the daemon scheduler. Distinct from
+    # `load_global_digest_config`, which returns the FULL merged config
+    # (incl. `bot`) for the digest runner.
+    def load_global_digest_block
+      load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
+        # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
+        # either way, default it ON for anyone who already has the Telegram bot
+        # configured with a deliverable chat. An explicit digest.enabled (true
+        # OR false) is always honored — only the unset case is derived.
+        merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
+        merged
+      end
+    end
+
+    def load_global_answer_digest_block
+      load_global_block("answer_digest", validator: :validate_answer_digest!)
     end
 
     # True when the global Telegram bot is enabled and has at least one
@@ -1486,6 +1513,7 @@ module Hive
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_digest!(cfg, source_path)
+      validate_answer_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1515,6 +1543,7 @@ module Hive
       babysitter
       patrol
       digest
+      answer_digest
       bot
       rebase
     ].freeze
@@ -2468,6 +2497,26 @@ module Hive
               "#{group}.digest in #{describe_source(source_path)} must be a positive number; " \
               "got #{value.inspect} (#{value.class})"
       end
+    end
+
+    def validate_answer_digest!(cfg, source_path)
+      answer_digest = cfg["answer_digest"]
+      return if answer_digest.nil?
+
+      enabled = answer_digest["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "answer_digest.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      hour = answer_digest["hour"]
+      return if hour.nil?
+      return if hour.is_a?(Integer) && hour.between?(0, 23)
+
+      raise ConfigError,
+            "answer_digest.hour in #{describe_source(source_path)} must be an integer between 0 and 23; " \
+            "got #{hour.inspect} (#{hour.class})"
     end
 
     BOT_NUMERIC_BOUNDS = [

@@ -72,8 +72,8 @@ module Hive
       end
 
       # The closed role vocabulary. Every consumer keys off these
-      # (NotificationBuilders.label_for_action, Supervisor#status_action_emoji,
-      # #next_step_hint), so validating at construction turns a typo'd or
+      # (NotificationBuilders.label_for_action, WaitingRows::ROLE_EMOJI,
+      # Supervisor#next_step_hint), so validating at construction turns a typo'd or
       # newly-added role into a clear boundary error here instead of a deep
       # Hash#fetch KeyError in one of those tables.
       ROLES = %i[

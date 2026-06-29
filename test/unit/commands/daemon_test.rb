@@ -77,11 +77,22 @@ class HiveCommandsDaemonTest < Minitest::Test
     }
   end
 
-  def with_global_start_config(config, update_config: default_update_config, digest_config: default_digest_config)
+  def default_answer_digest_config
+    {
+      "enabled" => false,
+      "hour" => Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
+    }
+  end
+
+  def with_global_start_config(config, update_config: default_update_config,
+                               digest_config: default_digest_config,
+                               answer_digest_config: default_answer_digest_config)
     with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
       with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
         with_replaced_singleton_method(Hive::Config, :load_global_digest_block, -> { digest_config }) do
-          yield
+          with_replaced_singleton_method(Hive::Config, :load_global_answer_digest_block, -> { answer_digest_config }) do
+            yield
+          end
         end
       end
     end
@@ -96,8 +107,14 @@ class HiveCommandsDaemonTest < Minitest::Test
 
     update_config = default_update_config
     digest_config = default_digest_config
+    answer_digest_config = default_answer_digest_config
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
-      with_global_start_config(config, update_config: update_config, digest_config: digest_config) do
+      with_global_start_config(
+        config,
+        update_config: update_config,
+        digest_config: digest_config,
+        answer_digest_config: answer_digest_config
+      ) do
         with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
           captured = kwargs
           dispatcher
@@ -112,13 +129,39 @@ class HiveCommandsDaemonTest < Minitest::Test
       {
         "daemon" => config,
         "update" => update_config,
-        "digest" => digest_config
+        "digest" => digest_config,
+        "answer_digest" => answer_digest_config
       },
       captured.fetch(:config)
     )
     assert_equal true, captured.fetch(:dry_run)
     assert_instance_of Hive::Daemon::DigestScheduler, captured.fetch(:digest_scheduler)
+    assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
+  end
+
+  def test_start_daemon_forwards_answer_digest_enabled_and_hour_to_scheduler
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    config = daemon_config
+    captured = nil
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_global_start_config(config, answer_digest_config: { "enabled" => true, "hour" => 14 }) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
+        end
+      end
+    end
+
+    scheduler = captured.fetch(:answer_digest_scheduler)
+    assert_equal true, scheduler.instance_variable_get(:@enabled),
+                 "answer_digest.enabled must be forwarded into the scheduler, not just instantiated"
+    assert_equal 14, scheduler.instance_variable_get(:@hour),
+                 "answer_digest.hour must be forwarded into the scheduler"
   end
 
   def test_start_daemon_invokes_reexec_when_dispatcher_signals_drift

@@ -2598,10 +2598,11 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      # The digest verb ships a non-zero default cap so a wedged digest child
-      # can't pin the single global digest slot forever; every other verb
-      # stays at the (disabled) child_timeout_sec default.
-      assert_equal({ "digest" => 3600 }, cfg.dig("daemon", "child_verb_timeouts"))
+      # The digest and answer-digest verbs ship a non-zero default cap so a
+      # wedged child can't pin the single global digest slot forever; every
+      # other verb stays at the (disabled) child_timeout_sec default.
+      assert_equal({ "digest" => 3600, "answer-digest" => 3600 },
+                   cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
 
@@ -3054,6 +3055,63 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("digest", "enabled")
       assert_nil cfg.dig("digest", "agent")
       assert_equal 7, cfg.dig("digest", "max_catchup_days")
+      assert_equal false, cfg.dig("answer_digest", "enabled")
+      assert_equal 9, cfg.dig("answer_digest", "hour")
+    end
+  end
+
+  def test_load_global_answer_digest_block_honors_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          enabled: true
+          hour: 11
+      YAML
+
+      cfg = Hive::Config.load_global_answer_digest_block
+
+      assert_equal true, cfg["enabled"]
+      assert_equal 11, cfg["hour"]
+    end
+  end
+
+  def test_load_global_answer_digest_block_rejects_bad_shapes_and_values
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest: enabled
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest.*must be a Hash/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest\.enabled.*must be a boolean/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          hour: 24
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest\.hour.*between 0 and 23/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          hour: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest\.hour.*between 0 and 23/, err.message)
     end
   end
 

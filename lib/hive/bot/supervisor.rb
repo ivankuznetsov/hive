@@ -22,6 +22,7 @@ require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
 require "hive/bot/row_actions"
+require "hive/bot/waiting_rows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/paths"
@@ -39,6 +40,7 @@ module Hive
       BOT_COMMANDS = [
         { command: "idea",    description: "Capture an idea, or just send any message" },
         { command: "status",  description: "Show active tasks" },
+        { command: "waiting", description: "Show tasks waiting on your answer" },
         { command: "queue",   description: "Show queued and waiting tasks" },
         { command: "answer",  description: "Answer brainstorm questions: /answer <id|slug>" },
         { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
@@ -976,6 +978,15 @@ module Hive
               text: render_details(rows, result.project, result.slug, stage: result.stage)
             )
           else
+            if result.respond_to?(:mode) && result.mode == :waiting
+              rows = Hive::Bot::WaitingRows.select(rows, daemon_enabled: waiting_daemon_enabled_resolver,
+                                                         logger: @logger)
+              if rows.empty?
+                safe_send_message(chat_id: update.chat_id, text: "Nothing is waiting on you.")
+                return nil
+              end
+              legacy_stage_dirs = []
+            end
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
                               parse_mode: :html,
@@ -1458,46 +1469,20 @@ module Hive
 
       # One primary action button for a row, or nil when the canonical
       # row-action resolver says the row is suppressed or has no Telegram-side
-      # action. Labels carry the task title so the operator can tell rows apart.
+      # action. Delegates to the shared `WaitingRows.button_for` so /status,
+      # /waiting, and the answer-digest render the same conceptual button
+      # through one builder; the per-row rescue (drop just this row's button on
+      # a malformed row, logging :status_button_failed) lives there now.
       def status_action_button(row)
-        nb = Hive::Bot::NotificationBuilders
-        # Capture attribution into locals before the begin so the rescue's log
-        # line can't re-raise (and re-abort the keyboard's filter_map) on a row
-        # whose own top-level readers are malformed.
-        project = row.project
-        slug = row.slug
-        marker = row.marker
-        row_action = row.action
-        begin
-          resolution = Hive::Bot::RowActions.resolve(row)
-          return nil if resolution.suppress || resolution.actions.empty?
-
-          action = resolution.primary
-          title = nb.display_title(row)
-          nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
-        rescue StandardError => e
-          # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
-          # boundary, an unmapped status_action_emoji key, or any NoMethodError/
-          # TypeError on a bad attrs/workflow value) so it drops just its own
-          # /status button instead of aborting the whole keyboard's filter_map.
-          @logger&.event(:status_button_failed, project: project, slug: slug,
-                                                 marker: marker, action: row_action,
-                                                 error_class: e.class.name, message: e.message)
-          nil
-        end
+        Hive::Bot::WaitingRows.button_for(row, logger: @logger)
       end
 
-      def status_action_emoji(role)
-        {
-          answer: "✏️",
-          approve: "✅",
-          approve_plan: "✅",
-          findings_accept: "✅",
-          findings_reject: "🚫",
-          autofix: "🔧",
-          details: "🔍",
-          rerun: "▶️"
-        }.fetch(role)
+      # Delegates to the shared WaitingRows builder so /waiting and the
+      # answer-digest resolve daemon-managed plan pauses through one
+      # memoizing, fail-open, config-error-logging implementation; only the log
+      # `source:` differs.
+      def waiting_daemon_enabled_resolver
+        Hive::Bot::WaitingRows.daemon_enabled_resolver(source: "waiting_daemon_check", logger: @logger)
       end
 
       def render_details(rows, project, slug, stage: nil)
@@ -1538,7 +1523,7 @@ module Hive
         # every other role maps to a static line below.
         return rerun_hint(action.verb) if action.role == :rerun
 
-        # Static per-role hints, mirroring status_action_emoji: a `.fetch` so a
+        # Static per-role hints, mirroring WaitingRows::ROLE_EMOJI's `.fetch` so a
         # new primary-capable role added to RowActions::ROLES without a hint
         # fails loud (KeyError) here instead of silently degrading to the laptop
         # hint. button_coverage_test sweeps every representative row's primary

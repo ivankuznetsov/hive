@@ -171,8 +171,12 @@ module Hive
 
       def repair_daemon
         request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
+        # Enqueued under the GLOBAL_MAINTENANCE_PROJECT sentinel, which the
+        # daemon consumer special-cases (process_global_maintenance_request)
+        # instead of dropping as unknown_project — so `hive daemon install
+        # --force` actually runs end-to-end (R10/AE3).
         Hive::Bot::DispatchRequestWriter.write!(
-          project: "__global__",
+          project: Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT,
           slug: "daemon-repair",
           argv: %w[hive daemon install --force],
           trigger: "web_daemon_repair",
@@ -180,8 +184,8 @@ module Hive
         )
         request_id
       rescue ArgumentError
-        # The daemon queue is task-shaped. If a queue implementation rejects
-        # global maintenance requests, surface a typed error instead of
+        # Write-time guard only: the queue's argv/slug grammar rejects a
+        # malformed request before it lands. Surface a typed error instead of
         # executing repair directly from a web worker.
         raise Hive::Error, "cannot queue daemon repair on this host; run `hive daemon install --force`"
       end

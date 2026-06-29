@@ -21,6 +21,17 @@ module Hive
       ].freeze
 
       DIRNAME = "dispatch_requests".freeze
+
+      # Sentinel project for host-global maintenance requests that aren't tied
+      # to any registered project (e.g. the web "Repair daemon" button enqueues
+      # `hive daemon install --force`). The consumer special-cases this value
+      # instead of rejecting it as unknown_project. The argv allowlist below
+      # bounds what a global request may run.
+      GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
+      GLOBAL_MAINTENANCE_ARGVS = [
+        %w[hive daemon install --force]
+      ].freeze
+
       CLAIMED_SUFFIX = ".claimed".freeze
       CLAIM_META_SUFFIX = ".claim".freeze
       SEQUENCE_SUFFIX = ".sequence".freeze

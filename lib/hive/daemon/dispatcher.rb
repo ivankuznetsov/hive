@@ -1320,6 +1320,11 @@ module Hive
           return
         end
 
+        if req.project == Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT
+          process_global_maintenance_request(req, now: now)
+          return
+        end
+
         unless Hive::Config.find_project(req.project)
           reject_request(req, reason: "unknown_project")
           return
@@ -1357,6 +1362,29 @@ module Hive
           @logger.event(:dispatch_request_blocked,
                         request_id: req.request_id, project: req.project,
                         slug: req.slug, reason: gate.to_s)
+          return
+        end
+
+        dispatch_request!(req, now: now)
+      end
+
+      # Host-global maintenance request (project == "__global__"): not tied to
+      # any registered project, so the project-scoped gates above don't apply.
+      # Constrained to the maintenance argv allowlist and de-duplicated against
+      # an in-flight repair, then dispatched directly. This is the consume-time
+      # half of the web "Repair daemon" button (`hive daemon install --force`):
+      # without it the request was enqueued and then silently dropped as
+      # unknown_project, so the repair never ran (R10/AE3).
+      def process_global_maintenance_request(req, now:)
+        unless Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_ARGVS.include?(req.argv)
+          reject_request(req, reason: "disallowed_global_request")
+          return
+        end
+
+        if @controller.running_task?(project: req.project, slug: req.slug)
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: "in_flight")
           return
         end
 

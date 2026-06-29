@@ -359,6 +359,8 @@ ENV["XDG_CONFIG_HOME"] = File::NULL
 ENV["GIT_CONFIG_NOSYSTEM"] = "1"
 ENV["GIT_CONFIG_GLOBAL"] = File::NULL
 ENV["GIT_CONFIG_SYSTEM"] = File::NULL
+# Blobless partial clones otherwise fetch missing objects during read-only commands.
+ENV["GIT_NO_LAZY_FETCH"] = "1"
 # Allowlisted reads must stay side-effect-free: `git status` (and other reads) otherwise take
 # the optional index/refs locks and rewrite `.git/index` to refresh stat data. Disable optional
 # locks so a dry-run read cannot mutate the repo on disk.

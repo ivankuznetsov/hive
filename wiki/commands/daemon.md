@@ -150,6 +150,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02). `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). The `digest` verb ships a non-zero default (3600s) because a wedged digest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable all future digests until restart; user overrides deep-merge, so setting other verbs keeps the digest default. Raise it alongside a raised `timeout_sec.digest` (default 1800), or set `{digest: 0}` to disable. |
 | `child_kill_grace_sec` | 30 | SIGTERM→SIGKILL escalation window for a timed-out child. Min 0 (0 = SIGKILL immediately after TERM). |
+| `auto_retry.enabled` | true | Global kill-switch for health-probe-gated daemon auto-retry of the fixed v1 recoverable terminal-error allowlist. Set `daemon.auto_retry.enabled: false` to leave those markers parked for manual `hive markers clear`. |
 | `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
 | `log_max_bytes` | 10485760 | 10 MB rotation threshold. |
 | `log_max_files` | 5 | 5 × 10 MB = 50 MB log budget. |

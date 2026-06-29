@@ -14,6 +14,8 @@ module Hive
       round_waiting
       round_complete
       clean_exit_auto_committed
+      auto_retry
+      auto_retry_skipped
     ].freeze
 
     STATUS_TAIL_LINES = 20

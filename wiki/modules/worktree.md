@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-27
+updated: 2026-06-29
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -80,7 +80,7 @@ only when neither the remote nor local prerequisite branch is available.
 
 ## `materialize_pr`
 
-Shared fork-agnostic PR-head materializer used by `hive review --pr` and the babysitter. It runs:
+Branch `make-the-hive-daemon-automatically-260629-223d` extracts a shared fork-agnostic PR-head materializer for `hive review --pr` and the babysitter. It runs:
 
 ```bash
 git -C <repo> fetch origin +pull/<n>/head:refs/<branch>
@@ -131,7 +131,7 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, branch `make-the-hive-daemon-automatically-260629-223d` PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
 
 ## Backlinks
 

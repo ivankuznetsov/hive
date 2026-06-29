@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-06-28
+updated: 2026-06-20
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
@@ -112,13 +112,11 @@ hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] [--
 hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] --write [--json]
 ```
 
-Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and is read-only. For a **red-recovery** row it prints the same local diagnostic payload `hive status --json` carries on that row. For any **other** row with evidence on disk it diverges deliberately (R5): where `hive status --json` reports `diagnostic: null` (the field doubles as a health signal there), `--diagnose` instead synthesizes a non-null diagnostic via `Hive::DiagnosticEvidence`. So `diagnostic == null` is **not** a health signal on this surface — a healthy/`COMPLETE` task can carry a non-null evidence diagnostic here.
-
-`Hive::DiagnosticEvidence` fills the nil-diagnostic gap in tier order: `diagnostics/red-status.md` (a prior agent verdict), then the newest meaningful `logs/*.log` line (newest by **mtime**, picked before the `LOG_GLOB_CAP` cap so a fresh-but-earlier-named log isn't dropped), then the current marker on the task state file. Logs are globbed from both the in-folder `logs/` **and** the inferred global per-task log dir `.hive-state/logs/<slug>/` (the primary run-log dir for coding tasks, derived from `Hive::Task::PATH_RE`). The result carries an explicit tier so the detail line is prefixed by source — `Diagnostics:` (red-status), `Log:` (a log), or `Marker:` (the state file) — instead of always saying "Log:". The resolver must never block and never raise: every tier gates on `File.file?` (so a FIFO / device / directory named like evidence is refused before any `open(2)`), symlinked evidence — a `*.log`/`*.md` *file* symlink **or** a `logs -> /outside` *directory* symlink — escaping the task/log roots is rejected, and the marker read is byte-capped so an oversized state file can't OOM. That fallback emits a one-line summary plus a source path instead of a bare "no diagnostic" result.
+Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and prints the same local diagnostic payload used by `hive status --json`. This is read-only.
 
 With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (`execute.agent` via `Hive::Stages::Base.stage_profile`) to produce a concise markdown diagnosis, then atomically writes `<task>/diagnostics/red-status.md`. Defaults are `timeout_sec.diagnose || 600` and `budget_usd.diagnose || 5`. The agent gets the task folder as an add-dir and runs from the task worktree when one exists, otherwise the project root. The worktree pointer is validated against the configured worktree root before it is used as cwd. Custom execute profiles are rejected for diagnose unless their `generated_by` value has first been added to `Hive::Schemas::DIAGNOSTIC_GENERATORS` and the published schemas. The command does not claim the task lock and does not write workflow markers.
 
-JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `marker_summary`, `state_file`, `diagnostic`, and `path` (set only when `--write` wrote an artifact). `marker_summary` is the current marker name plus display attrs (null on a markerless task, never `"NONE"`). `state_file` is the authoritative state file `marker_summary` was read from, threaded so the bot's evidence fallback can pin the marker tier to the same file. Both `marker_summary` and `state_file` are **optional** in the schema (not `required`) so adding them stayed a non-breaking additive change per `lib/hive.rb` — no schema-version bump.
+JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
 
 ## Read-only
 
